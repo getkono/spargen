@@ -12,6 +12,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
+use super::bundle::{local_identity, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
     classify_ref, collect_refs, enters_extension, is_http_url, resolve_ref_url, split_fragment,
@@ -143,17 +144,28 @@ struct Scanned {
     /// Every scanned document, kept because a reference into a specification extension is walked
     /// at its target (`enters_extension`), which may lie in a document scanned earlier.
     docs: Vec<ScanDoc>,
-    /// The local path each scanned local document is reached by.
+    /// The [`local_identity`] of each local path a scanned local document is reached by.
     local_docs: HashMap<Utf8PathBuf, usize>,
     /// The URL (or opaque `$self` URI) each scanned document is reached by.
     remote_docs: HashMap<String, usize>,
-    /// Every local path already read, or attempted, or named by a `$self`.
+    /// The [`local_identity`] of every local path already read, or attempted, or named by a
+    /// `$self`.
     seen_local: HashSet<Utf8PathBuf>,
     /// Every URL already fetched, or attempted, or named by a `$self`.
     seen_remote: HashSet<String>,
+    /// The working directory local identities are made absolute against, captured once as the
+    /// build captures it.
+    working_dir: Option<Utf8PathBuf>,
 }
 
 impl Scanned {
+    /// The identity the build gives the local document at `path` (#451): `lib.yaml`,
+    /// `./lib.yaml`, `sub/../lib.yaml` and its absolute path are one document, so a reference
+    /// under any of them reaches the document scanned under another instead of reading it again.
+    fn identity(&self, path: &Utf8Path) -> Utf8PathBuf {
+        local_identity(self.working_dir.as_deref(), path)
+    }
+
     /// Keep `value`, reached at `base`, and return its index. Its `$self`, if any, replaces `base`
     /// as the base its relative references resolve against and is registered as a name it is
     /// reached by, as the build registers it: a reference to that name reaches this document
@@ -169,8 +181,9 @@ impl Scanned {
             }
             Some(SelfIdentity::Local(path)) => {
                 // The build matches a document's stored path before any `$self` identity.
-                self.seen_local.insert(path.clone());
-                self.local_docs.entry(path.clone()).or_insert(index);
+                let identity = self.identity(&path);
+                self.seen_local.insert(identity.clone());
+                self.local_docs.entry(identity).or_insert(index);
                 Base::Local(path)
             }
             Some(SelfIdentity::Opaque(uri)) => {
@@ -218,9 +231,13 @@ pub(crate) fn vendor(
 
     let mut lock = Lock::default();
     let mut refs: Vec<VendoredRef> = Vec::new();
-    let mut scanned = Scanned::default();
-    scanned.seen_local.insert(spec.to_path_buf());
-    scanned.local_docs.insert(spec.to_path_buf(), 0);
+    let mut scanned = Scanned {
+        working_dir: working_dir(),
+        ..Scanned::default()
+    };
+    let spec_identity = scanned.identity(spec);
+    scanned.seen_local.insert(spec_identity.clone());
+    scanned.local_docs.insert(spec_identity, 0);
     let root = scanned.add(root_value, Base::Local(spec.to_path_buf()));
 
     // The queue holds a document index and the pointer to walk from: a document's root, or the
@@ -244,13 +261,13 @@ pub(crate) fn vendor(
                 RefTarget::LocalRelative(path) => {
                     if let Base::Local(base_path) = &base {
                         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+                        // Read at the spelling the build reads, keyed by the identity it compares.
                         let target = parent.join(&path);
-                        if scanned.seen_local.insert(target.clone()) {
+                        let identity = scanned.identity(&target);
+                        if scanned.seen_local.insert(identity.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
                                 if let Some(value) = parse_scratch(target.as_str(), &text) {
-                                    scanned
-                                        .local_docs
-                                        .insert(target.clone(), scanned.docs.len());
+                                    scanned.local_docs.insert(identity, scanned.docs.len());
                                     let loaded = scanned.add(value, Base::Local(target));
                                     queue.push_back((loaded, JsonPointer::root()));
                                 }
@@ -357,7 +374,8 @@ pub(crate) fn vendor(
                 RefTarget::LocalRelative(path) => match &base {
                     Base::Local(base_path) => {
                         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-                        scanned.local_docs.get(&parent.join(&path)).copied()
+                        let identity = scanned.identity(&parent.join(&path));
+                        scanned.local_docs.get(&identity).copied()
                     }
                     Base::Remote(_) => None,
                 },
@@ -872,6 +890,83 @@ mod tests {
                 "https://api.example.com/v1/schemas/pet.yaml",
             ]
         );
+    }
+
+    /// The lock identifies a local `$self` and a reference the way the build does, by lexically
+    /// normalized path (#451): `lib.yaml` names itself `virtual.yaml` under a spelling with `.`
+    /// or `..` segments, and the root reaches it under another. The build resolves the reference
+    /// to `lib.yaml` and never reads the file at `virtual.yaml`, so neither does the lock: its
+    /// remote reference, which the stub would fail with `E025`, is neither fetched nor pinned.
+    /// The `..` reference spelling passes through a directory that exists, so it reads
+    /// `virtual.yaml` on disk if the lock ever follows it.
+    #[test]
+    fn a_local_self_and_a_reference_spelled_differently_are_one_document() {
+        for (self_spelling, ref_spelling) in [
+            ("./virtual.yaml", "virtual.yaml"),
+            ("virtual.yaml", "./virtual.yaml"),
+            ("lib/../virtual.yaml", "virtual.yaml"),
+            ("virtual.yaml", "nowhere/../virtual.yaml"),
+        ] {
+            let urls = lock_then_load(
+                &[
+                    (
+                        "openapi.yaml",
+                        &format!(
+                            "openapi: 3.2.0\n\
+                             components:\n\
+                             \x20 schemas:\n\
+                             \x20   A: {{ $ref: \"lib.yaml#/components/schemas/L\" }}\n\
+                             \x20   B: {{ $ref: \"{ref_spelling}#/components/schemas/V\" }}\n"
+                        ),
+                    ),
+                    (
+                        "lib.yaml",
+                        &format!(
+                            "$self: {self_spelling}\n\
+                             components:\n\
+                             \x20 schemas:\n\
+                             \x20   L: {{ type: string }}\n\
+                             \x20   V: {{ type: integer }}\n"
+                        ),
+                    ),
+                    (
+                        "virtual.yaml",
+                        "components:\n\
+                         \x20 schemas:\n\
+                         \x20   V: { $ref: \"https://api.example.com/missing.yaml#/Z\" }\n",
+                    ),
+                    // `nowhere/` exists, so `nowhere/../virtual.yaml` reads `virtual.yaml` on
+                    // disk: a lock keyed by raw spelling would read and fetch through it.
+                    ("nowhere/unreferenced.yaml", "type: string\n"),
+                ],
+                &[],
+            );
+            assert!(
+                urls.is_empty(),
+                "$self {self_spelling}, $ref {ref_spelling}: {urls:?}"
+            );
+        }
+    }
+
+    /// A reference naming the root under a non-normalized spelling reaches the root, in the lock
+    /// as in the build (#451): `nowhere/../openapi.yaml` is the root lexically, though no
+    /// directory `nowhere` exists to read it through, so the extension it addresses is walked in
+    /// the root and the remote reference held there is pinned.
+    #[test]
+    fn a_non_normalized_reference_to_the_root_reaches_the_root() {
+        let urls = lock_then_load(
+            &[(
+                "openapi.yaml",
+                "openapi: 3.2.0\n\
+                 x-defs:\n\
+                 \x20 Owner: { $ref: \"https://api.example.com/owner.yaml\" }\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Owner: { $ref: \"nowhere/../openapi.yaml#/x-defs/Owner\" }\n",
+            )],
+            &[("https://api.example.com/owner.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
     }
 
     /// A local document's relative `$self` path names it (#426): `shared/tag.yaml`, reached

@@ -658,8 +658,10 @@ impl RequiredDependency {
 /// Every dependency generated output from one spec requires — what `spargen deps` prints and what
 /// the `E023` audit checks a consumer manifest against.
 ///
-/// Both read one private requirement table, so the block printed here is exactly the block that passes the
-/// audit.
+/// Both read one private requirement table, so the block [`Requirements::manifest_block`] prints
+/// passes the audit: as printed for a package that declares no opt-in feature, and with that
+/// feature's commented lines uncommented (merged into any table or key the manifest already
+/// declares) for one that does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Requirements {
     /// The dependencies, in manifest order.
@@ -687,7 +689,10 @@ impl Requirements {
     /// The `Cargo.toml` fragment to paste into the consuming package.
     ///
     /// Opt-in dependencies (currently the blocking client's `tokio`) are rendered commented out
-    /// under the feature that would require them — uncommenting is the whole opt-in.
+    /// under the feature that would require them, together with that feature's `[features]` entry
+    /// enabling them (`blocking = ["dep:tokio"]`). Uncommenting is the whole opt-in, except that an
+    /// entry whose `[features]` table, `blocking` key, or dependency table the manifest already
+    /// declares merges into it rather than being added a second time, which TOML rejects.
     pub fn manifest_block(&self) -> String {
         let mut rendered = String::new();
         let mut table: Option<&str> = None;
@@ -706,17 +711,47 @@ impl Requirements {
             rendered.push_str(&dependency.manifest_line());
             rendered.push('\n');
         }
-        for dependency in self
+        let mut features: Vec<&str> = Vec::new();
+        for feature in self
             .dependencies
             .iter()
-            .filter(|dependency| dependency.required_by_feature.is_some())
+            .filter_map(|dependency| dependency.required_by_feature)
         {
-            let feature = dependency.required_by_feature.expect("filtered above");
+            if !features.contains(&feature) {
+                features.push(feature);
+            }
+        }
+        for feature in features {
+            let gated: Vec<&RequiredDependency> = self
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.required_by_feature == Some(feature))
+                .collect();
+            // Uncommented as printed, a `[features]` table or `{feature}` key the manifest already
+            // declares would be defined twice and the manifest would no longer parse, so the
+            // header says each entry merges into what is already there.
             rendered.push_str(&format!(
-                "\n# Only if your package declares a `{feature}` Cargo feature:\n"
+                "\n# To opt in to the `{feature}` Cargo feature, uncomment the lines below, merging \
+                 each entry into a table (or `{feature}` key) your manifest already declares:\n"
             ));
-            rendered.push_str(&format!("# [{}]\n", dependency.table));
-            rendered.push_str(&format!("# {}\n", dependency.manifest_line()));
+            // The feature must enable each optional dependency it gates; the audit rejects a
+            // declared feature entry that does not.
+            let enables = gated
+                .iter()
+                .filter(|dependency| dependency.optional)
+                .map(|dependency| format!("\"dep:{}\"", dependency.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            rendered.push_str("# [features]\n");
+            rendered.push_str(&format!("# {feature} = [{enables}]\n"));
+            let mut table: Option<&str> = None;
+            for dependency in gated {
+                if table != Some(dependency.table) {
+                    rendered.push_str(&format!("# [{}]\n", dependency.table));
+                    table = Some(dependency.table);
+                }
+                rendered.push_str(&format!("# {}\n", dependency.manifest_line()));
+            }
         }
         rendered
     }
@@ -4788,14 +4823,32 @@ serde_json.workspace = true
             time: true,
         };
         let block = Requirements::new(&requirements).manifest_block();
-        // `deps` renders the blocking dependency commented out, under the feature that requires
-        // it; a consumer that opts in uncomments both, which is what this reconstructs.
+        // `deps` renders the blocking opt-in — its `[features]` entry and its dependency —
+        // commented out under the feature that requires it; a consumer that opts in uncomments
+        // every line below that header, and adds nothing else, which is what this reconstructs.
         let opted_in = block
-            .replace("# [target", "[target")
-            .replace("# tokio", "tokio");
-        let manifest = format!(
-            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n             [features]\nblocking = [\"dep:tokio\"]\n\n{opted_in}"
+            .lines()
+            .map(|line| match line.strip_prefix("# ") {
+                Some(rest) if !rest.starts_with("To opt in") => rest,
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            opted_in.contains("[features]\nblocking = [\"dep:tokio\"]\n"),
+            "the printed opt-in carries the feature wiring the audit requires:\n{block}"
         );
+        // A manifest that already has a `[features]` table (or a `blocking` key) cannot take a
+        // second one, so the header must say the entries merge rather than claim a bare
+        // uncomment always suffices.
+        assert!(
+            block.contains(
+                "# To opt in to the `blocking` Cargo feature, uncomment the lines below, merging \
+                 each entry into a table (or `blocking` key) your manifest already declares:\n"
+            ),
+            "the opt-in header tells a consumer with existing tables to merge into them:\n{block}"
+        );
+        let manifest = format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{opted_in}");
 
         let diagnostics = audit_manifest(&manifest, requirements.clone());
         assert!(

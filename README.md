@@ -194,7 +194,7 @@ Build it locally:
 
 ```bash
 mise install                # one-time: the mdBook version mise.toml pins
-mise run docs               # or: mdbook build docs/book
+mise run docs               # mdbook build docs/book, then the link check
 ```
 
 The rendered HTML lands in the git-ignored `docs/book/book/`; open `index.html` from there. CI

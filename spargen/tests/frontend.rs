@@ -1,9 +1,10 @@
 //! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
 //! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
-//! `generate`. Check/generate parity is a property over `PARITY_FIXTURES` rather than a remark
-//! about one case: every fixture there must reach the same accept/reject verdict and report the
-//! same codes through both entry points, and a companion test keeps that set spanning rejections,
-//! warnings and clean runs so it cannot pass vacuously.
+//! `generate`. Check/generate parity is a property of the harness rather than a remark about one
+//! case: every inline spec `generate` or `generate_with_code` runs is also run through `check`,
+//! which must reach the same accept/reject verdict and report the same sorted codes, and every
+//! `Generated` module must parse as Rust with no `compile_error!` fallback. `PARITY_FIXTURES` adds
+//! a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
 //! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413).
@@ -109,15 +110,12 @@ fn stated_claim(message: &str) -> Option<OutcomeClaim> {
     })
 }
 
+/// `generate` on an inline spec, holding the run to the two oracles every fixture gets for free:
+/// `check` over the same document reaches the same accept/reject verdict and reports the same
+/// sorted codes ([`assert_check_agrees`]), and a `Generated` run wrote parseable Rust that is not
+/// the `compile_error!` stub codegen falls back to ([`assert_parseable`]).
 fn generate(spec: &str) -> Report {
-    let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, spec).unwrap();
-    let out = temp.path().join("client.rs");
-    run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    ))
+    generate_with_code(spec).0
 }
 
 /// As [`generate`], but through the `check` entry point (no codegen/emit).
@@ -128,17 +126,49 @@ fn check(spec: &str) -> Report {
     run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
+/// As [`generate`], also returning the emitted module (empty when nothing was written).
 fn generate_with_code(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
+    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec_path, spec).unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-    ));
+    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
+    let report = run_generate(&build(spec_path.clone(), out.clone()));
     let code = std::fs::read_to_string(out).unwrap_or_default();
+    assert_check_agrees(&report, &run_check(&Spec::new(spec_path)));
+    if report.outcome() == Outcome::Generated {
+        assert_parseable(&code);
+    }
     (report, code)
+}
+
+/// `check` must stand in for `generate`: the same accept/reject decision and the same sorted
+/// diagnostic codes. The outcomes themselves differ by design (`Clean` against `Generated`), since
+/// only one of the two writes a module.
+fn assert_check_agrees(generated: &Report, checked: &Report) {
+    assert_eq!(
+        checked.outcome() == Outcome::Rejected,
+        generated.outcome() == Outcome::Rejected,
+        "check says {:?} but generate says {:?}: {checked:#?} {generated:#?}",
+        checked.outcome(),
+        generated.outcome()
+    );
+    assert_eq!(
+        codes(checked),
+        codes(generated),
+        "check and generate report different diagnostics"
+    );
+}
+
+/// A `Generated` run's module parses as a Rust file and is not the `compile_error!` stub codegen
+/// emits when its own tokens fail to format, which keeps the outcome `Generated`.
+fn assert_parseable(code: &str) {
+    if let Err(error) = syn::parse_file(code) {
+        panic!("a `Generated` run wrote unparseable Rust ({error}):\n{code}");
+    }
+    assert!(
+        !code.contains("compile_error!"),
+        "a `Generated` run wrote the codegen fallback stub:\n{code}"
+    );
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
@@ -173,6 +203,50 @@ fn types_module(code: &str) -> String {
     code.find("pub mod types {")
         .map(|start| code[start..].to_owned())
         .unwrap_or_default()
+}
+
+/// Fail if anything from the generated `types` module onward uses `serde_json::Value` as a type:
+/// the silent degradation of a typed schema the standing invariants forbid. The embedded runtime
+/// is stripped first, since it legitimately uses the type. The emitted file is
+/// prettyplease-formatted, so the spelling searched for is the formatted one, never the token
+/// stream's `serde_json :: Value`.
+///
+/// Two uses are not a degradation and are skipped: a path through the type
+/// (`serde_json::Value::deserialize`, `serde_json::Value::Object`), which is how a union's own
+/// `Deserialize` buffers its input, and a `let` binding inside an emitted impl body, which is how a
+/// discriminated union's `Serialize` re-inserts its tag. What remains is a field, alias, variant
+/// payload or signature type, where `serde_json::Value` would be the schema's lowered type.
+fn assert_no_untyped_value(code: &str) {
+    let types = types_module(code);
+    assert!(!types.is_empty(), "no `types` module was emitted: {code}");
+    let degraded: Vec<&str> = types
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("let "))
+        .filter(|line| {
+            line.match_indices("serde_json::Value")
+                .any(|(at, needle)| !line[at + needle.len()..].starts_with("::"))
+        })
+        .collect();
+    assert!(
+        degraded.is_empty(),
+        "a typed schema degraded to `serde_json::Value`: {degraded:#?}\n{types}"
+    );
+}
+
+/// [`assert_no_untyped_value`] can fail: a property with the empty schema, which admits any JSON
+/// value, lowers to `serde_json::Value` by design, and the oracle must see it. Without this a
+/// spelling that never matches (the token stream's `serde_json :: Value`) passes every fixture.
+#[test]
+fn the_untyped_value_oracle_sees_an_unconstrained_field() {
+    let (report, code) = generate_with_code(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    S:\n      type: object\n      properties:\n        anything: {}\n",
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let failed = std::panic::catch_unwind(|| assert_no_untyped_value(&code)).is_err();
+    assert!(
+        failed,
+        "the oracle passed a `serde_json::Value` field:\n{code}"
+    );
 }
 
 /// The name of the `pub struct` that declares the first field line starting with `field`.
@@ -229,6 +303,16 @@ fn declared_fields(code: &str, ty: &str) -> Vec<String> {
         .filter_map(|rest| rest.split_once(':'))
         .map(|(name, _)| name.to_owned())
         .collect()
+}
+
+/// The right-hand side of `pub type ty = …;`, the type an alias names, or `None` when no such alias
+/// is declared.
+fn alias_target(code: &str, ty: &str) -> Option<String> {
+    let head = format!("pub type {ty} = ");
+    code.lines()
+        .map(str::trim_start)
+        .find_map(|line| line.strip_prefix(&head))
+        .map(|rest| rest.trim_end().trim_end_matches(';').to_owned())
 }
 
 /// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
@@ -337,7 +421,7 @@ paths:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("enum ResponseBody"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -1015,6 +1099,90 @@ components:
             !variants.iter().any(|variant| variant.contains("(Option<")),
             "third `type: {third}`: no variant may accept `null`, which matches both merged \
              branches: {variants:?}"
+        );
+    }
+}
+
+/// Issue #425: an object `allOf` admits `null` exactly when every member does, as its `$ref`-sibling
+/// spelling and the all-scalar `allOf` already do. A nullable `$ref` member decides `null` for
+/// itself; an untyped inline member's object keywords bind objects only, so it admits `null`
+/// without deciding; a member typed `object` alone denies it. Untyped members alone decide nothing,
+/// so they keep the non-null struct an untyped object schema lowers to by itself. The enclosing
+/// schema's own untyped object keywords beside the `allOf` are neutral in the same way.
+#[test]
+fn an_object_all_of_admits_null_when_every_member_does() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Holder' } }
+components:
+  schemas:
+    Base:
+      type: [object, 'null']
+      properties:
+        id: { type: string }
+    Holder:
+      type: object
+      required: [viaAllOf, viaSibling, both, single, denied, untypedOnly, enclosing]
+      properties:
+        viaAllOf:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+            - properties: { extra: { type: string } }
+        viaSibling:
+          $ref: '#/components/schemas/Base'
+          properties: { extra: { type: string } }
+        both:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+            - type: [object, 'null']
+              properties: { extra: { type: string } }
+        single:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+        denied:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+            - type: object
+              properties: { extra: { type: string } }
+        untypedOnly:
+          allOf:
+            - properties: { id: { type: string } }
+            - properties: { extra: { type: string } }
+        enclosing:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+          properties: { z: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    let types = types_module(&code);
+    for (field, nullable) in [
+        ("pub via_all_of", true),
+        ("pub via_sibling", true),
+        ("pub both", true),
+        ("pub single", true),
+        ("pub denied", false),
+        ("pub untyped_only", false),
+        ("pub enclosing", true),
+    ] {
+        let ty = field_type(&types, field).unwrap_or_else(|| panic!("no `{field}` field: {types}"));
+        assert_eq!(
+            ty.starts_with("Option<"),
+            nullable,
+            "`{field}` is `{ty}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
         );
     }
 }
@@ -7126,7 +7294,7 @@ Pet:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -8327,7 +8495,7 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub id"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -10879,17 +11047,35 @@ components:
         - type: integer
         - type: number
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The typed union the name promises: both branches survive, each with its own numeric type.
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant0").as_deref(),
+        Some("i64"),
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant1").as_deref(),
+        Some("f64"),
+        "{types}"
+    );
 }
 
 #[test]
 fn overlapping_object_one_of_generates_with_typed_trial_matching() {
     // Object variants that overlap structurally use typed trial matching and exact-one semantics.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -10908,6 +11094,24 @@ components:
     );
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+
+    // Both object branches survive as typed structs, each keeping its own distinguishing field.
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "Uvariant0"),
+        ["kind", "a"],
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "Uvariant1"),
+        ["kind", "b"],
+        "{types}"
+    );
 }
 
 #[test]
@@ -10946,12 +11150,22 @@ components:
         - type: string
         - type: integer
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The sibling `type: string` intersects each branch: the integer branch admits nothing a
+    // string does, so what remains is the string branch alone, not a two-variant union.
+    let types = types_module(&code);
+    assert_eq!(
+        alias_target(&types, "StringOnly").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert!(!types.contains("pub enum StringOnly "), "{types}");
 }
 
 /// A `oneOf`/`anyOf` member written `{$ref: '#/components/schemas/Name', type: integer}` is the
@@ -11265,12 +11479,36 @@ components:
         - type: [string, "null"]
         - type: array
           items: { type: string }
+    Holder:
+      type: object
+      required: [u]
+      properties:
+        u: { $ref: "#/components/schemas/U" }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The hoist itself: a required use of the union is `Option<U>` (the nullability the variant
+    // carried), and the string variant's own type is the non-null `String`.
+    let types = types_module(&code);
+    assert_eq!(
+        field_type(&types, "pub u:").as_deref(),
+        Some("Option<U>"),
+        "{types}"
+    );
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant0").as_deref(),
+        Some("String"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -11287,12 +11525,32 @@ components:
       oneOf:
         - type: string
         - type: "null"
+    Holder:
+      type: object
+      required: [u]
+      properties:
+        u: { $ref: "#/components/schemas/U" }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The collapse: no enum, `U` names the string itself, and the stripped null reappears as the
+    // `Option` a required use of `U` carries.
+    let types = types_module(&code);
+    assert!(!types.contains("pub enum U "), "{types}");
+    assert_eq!(
+        alias_target(&types, "U").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert_eq!(
+        field_type(&types, "pub u:").as_deref(),
+        Some("Option<U>"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -11367,12 +11625,19 @@ components:
     Nothing:
       enum: [null]
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
 
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    let types = types_module(&code);
+    assert_eq!(
+        alias_target(&types, "Nothing").as_deref(),
+        Some("()"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -12375,6 +12640,65 @@ ADDITIONAL      responses:
         );
         assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{style}");
     }
+    // The same object as a `oneOf`/`anyOf` member, directly or through a nested union, holds the
+    // parameter's position (#435), so its unconstrained field is named the same way rather than as
+    // nesting; a scalar value schema makes the union generate.
+    const UNION_TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: STYLE
+          explode: true
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    let member = "{ type: object, properties: { b: { type: string } }, required: [a]ADDITIONAL }";
+    let unions = [
+        "{ oneOf: [MEMBER, { type: string }] }",
+        "{ anyOf: [{ oneOf: [MEMBER, { type: integer }] }, { type: string }] }",
+    ];
+    let union_spec = |style: &str, union: &str, additional: &str| {
+        UNION_TEMPLATE.replace("STYLE", style).replace(
+            "SCHEMA",
+            &union.replace("MEMBER", &member.replace("ADDITIONAL", additional)),
+        )
+    };
+    for style in ["deepObject", "form"] {
+        for union in unions {
+            for additional in ["", ", additionalProperties: true"] {
+                let spec = union_spec(style, union, additional);
+                for report in [generate(&spec), check(&spec)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{style} {union}: {report:#?}"
+                    );
+                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                    assert_eq!(messages.len(), 1, "{style} {union}: {report:#?}");
+                    assert!(
+                        messages[0].contains("`a`")
+                            && messages[0].contains("no schema constrains its value")
+                            && !messages[0].contains("nested arrays or objects"),
+                        "{style} {union}: {messages:?}"
+                    );
+                }
+            }
+            let spec = union_spec(style, union, ", additionalProperties: { type: integer }");
+            for report in [generate(&spec), check(&spec)] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{style} {union}: {report:#?}"
+                );
+            }
+        }
+    }
 }
 
 /// A `simple`/`form`/`deepObject` parameter whose schema, or a property or item schema at a
@@ -12484,6 +12808,108 @@ paths:
                 && !messages[0].contains("uninhabited"),
             "{messages:?}"
         );
+    }
+}
+
+/// A `oneOf`/`anyOf` parameter schema serializes as whichever member the value is, so an
+/// uninhabited property, item, or tuple position of a struct, array, or tuple member is a part of
+/// the parameter and is named as one (#435). Before, the part walk stopped at the union, and the
+/// only message was "nested arrays or objects", though nothing is nested: the same union with an
+/// inhabited part generates.
+#[test]
+fn a_parameter_union_member_with_an_uninhabited_part_is_reported_as_uninhabited() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    // (style, schema, the same schema with the part inhabited, what the message names)
+    let cases = [
+        (
+            "deepObject",
+            "{ oneOf: [{ type: object, properties: { a: false } }, { type: string }] }",
+            "{ oneOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: object, properties: { a: false } }, { type: string }] }",
+            "{ oneOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ anyOf: [{ type: object, additionalProperties: false, properties: { a: false } }, \
+             { type: integer }] }",
+            "{ anyOf: [{ type: object, additionalProperties: false, \
+             properties: { a: { type: integer } } }, { type: integer }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: array, items: false }, { type: boolean }] }",
+            "{ oneOf: [{ type: array, items: { type: string } }, { type: boolean }] }",
+            "`f[]` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: array, prefixItems: [{ type: string }, false], items: false }, \
+             { type: boolean }] }",
+            "{ oneOf: [{ type: array, prefixItems: [{ type: string }, { type: integer }], \
+             items: false }, { type: boolean }] }",
+            "`f[1]` is uninhabited",
+        ),
+        (
+            "deepObject",
+            "{ anyOf: [{ type: object, properties: { a: { oneOf: [{ type: integer }, false] } } }, \
+             { type: string }] }",
+            "{ anyOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` has a `oneOf`/`anyOf` member that is uninhabited",
+        ),
+        // A union nested directly inside a union member holds the same position, so its members'
+        // parts are searched with the same paths.
+        (
+            "deepObject",
+            "{ oneOf: [{ oneOf: [{ type: object, properties: { a: false } }, { type: integer }] }, \
+             { type: string }] }",
+            "{ oneOf: [{ oneOf: [{ type: object, properties: { a: { type: integer } } }, \
+             { type: integer }] }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+    ];
+    for (style, schema, control, named) in cases {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(named) && !messages[0].contains("nested arrays or objects"),
+                "{style} {schema}: {messages:?}"
+            );
+        }
+        // The control: the same union with the part inhabited is a supported shape.
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", control);
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {control}: {report:#?}"
+            );
+        }
     }
 }
 
@@ -12748,9 +13174,17 @@ components:
           properties:
             a: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Composed"), ["a"], "{types}");
+    assert_eq!(
+        field_owner(&types, "pub a:").as_deref(),
+        Some("Composed"),
+        "{types}"
+    );
 }
 
 /// `allOf: [{$ref: Base}, {properties: {extra}}]` flattens the referenced component's fields plus
@@ -12775,9 +13209,35 @@ components:
           properties:
             extra: { type: integer }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // `Derived` carries `Base`'s required `id` (plain) and the inline member's optional `extra`.
+    let types = types_module(&code);
+    assert_eq!(
+        declared_fields(&types, "Derived"),
+        ["id", "extra"],
+        "{types}"
+    );
+    let derived = &types[types
+        .find("pub struct Derived ")
+        .expect("Derived is a struct")..];
+    assert_eq!(
+        field_type(derived, "pub id:").as_deref(),
+        Some("Baseid"),
+        "{types}"
+    );
+    assert_eq!(
+        field_type(derived, "pub extra:").as_deref(),
+        Some("Option<DerivedMember1extra>"),
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "DerivedMember1extra").as_deref(),
+        Some("i64"),
+        "{types}"
+    );
 }
 
 /// A nested `allOf` (an `allOf` member that itself has an `allOf`) flattens recursively into one
@@ -12800,9 +13260,13 @@ components:
           properties:
             b: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // One struct carrying the inner `allOf`'s `a` beside the outer member's `b`.
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Nested"), ["a", "b"], "{types}");
 }
 
 /// `allOf` beside the enclosing schema's own sibling `properties`: both sets of fields merge.
@@ -12823,9 +13287,17 @@ components:
           properties:
             base: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // Both sets of fields land in the one struct.
+    let types = types_module(&code);
+    assert_eq!(
+        declared_fields(&types, "Sibling"),
+        ["base", "own"],
+        "{types}"
+    );
 }
 
 /// Repeated properties in an `allOf` are intersections. Compatible refinements retain the narrower
@@ -12862,7 +13334,7 @@ components:
                 properties:
                   name: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
@@ -12872,6 +13344,45 @@ components:
         !has_code(&checked, Code::AllOfIrreconcilable),
         "{checked:#?}"
     );
+
+    // Each property keeps the narrower side of its intersection, read through the merged
+    // struct's own field types rather than from a type name appearing somewhere.
+    let types = types_module(&code);
+    let refined = &types[types
+        .find("pub struct Refined ")
+        .expect("Refined is a struct")..];
+    let target = |field: &str| {
+        let ty = field_type(refined, &format!("pub {field}:"))
+            .unwrap_or_else(|| panic!("`Refined` has no `{field}` field: {types}"));
+        let inner = ty
+            .strip_prefix("Option<")
+            .and_then(|rest| rest.strip_suffix('>'))
+            .unwrap_or_else(|| panic!("optional `{field}` is `{ty}`: {types}"));
+        alias_target(&types, inner).unwrap_or_else(|| format!("enum or struct {inner}"))
+    };
+    // integer within number.
+    assert_eq!(target("run_id"), "i64", "{types}");
+    // enum within string: a two-variant enum, not a plain `String`.
+    let status = field_type(refined, "pub status:").expect("a status field");
+    let status = status.trim_start_matches("Option<").trim_end_matches('>');
+    assert_eq!(
+        enum_variants(&types, status),
+        ["Queued", "Complete"],
+        "{types}"
+    );
+    // exact null within nullable string.
+    assert_eq!(target("marker"), "()", "{types}");
+    // A non-null item struct carrying `name`, within nullable untyped items.
+    let items = target("items");
+    let item = items
+        .strip_prefix("Vec<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("`items` is `{items}`: {types}"));
+    assert!(
+        !item.starts_with("Option<"),
+        "the item stayed nullable: {types}"
+    );
+    assert_eq!(declared_fields(&types, item), ["name"], "{types}");
 }
 
 /// A property declared with different lowered types in two `allOf` members, and required by one of
@@ -15084,7 +15595,7 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 
     // The claim in the doc comment above — "lowers to the NARROWER type" — and the whole point of
     // treating `$ref` as an applicator. Outcome assertions cannot see it: they pin when the tool
@@ -15863,6 +16374,353 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
     );
 }
 
+/// Issue #453: a repeated property whose types share no value, and that no side requires, takes an
+/// uninhabited type, so no value of it is a value of the `default` one side wrote. That default is
+/// dropped like one an intersection narrows the property away from: reported at the `default`
+/// that wrote it (`W005`), naming the type whose field drops it, and documented as not applied.
+/// Both spellings of the meet are held — `allOf` members, and a `$ref` with sibling `properties`.
+const UNINHABITED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      allOf:
+        - type: object
+          properties:
+            a: { type: string, default: z }
+        - type: object
+          properties:
+            a: { type: integer }
+    Base:
+      type: object
+      properties:
+        a: { type: string, default: z }
+    Sibling:
+      $ref: '#/components/schemas/Base'
+      properties:
+        a: { type: integer }
+"##;
+
+#[test]
+fn a_default_an_uninhabited_meet_drops_is_reported_not_applied() {
+    for (entry, report) in [
+        ("generate", generate(UNINHABITED_DEFAULT_SPEC)),
+        ("check", check(UNINHABITED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/Base/properties/a/default",
+                "/components/schemas/Pet/allOf/0/properties/a/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for dropping in ["/components/schemas/Pet", "/components/schemas/Sibling"] {
+            assert!(
+                messages.iter().any(|message| message.contains(dropping)),
+                "{entry}: `{dropping}` drops `a`'s default and must say so: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(UNINHABITED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in ["Pet", "Sibling"] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("Default (not applied): `\"z\"`.") && !body.contains("default = \""),
+            "`{name}.a` documents `z` as not applied and wires no default: {body}"
+        );
+    }
+    // `Base` itself is no intersection: its `a` is still a string, and applies `z`.
+    assert_eq!(
+        code.matches("Some(\"z\".to_owned())").count(),
+        1,
+        "only `Base` applies `z`: {code}"
+    );
+}
+
+/// Issue #432: an intersection whose sides repeat a property merges the `default` either side
+/// declares, whichever side comes first. `allOf: [Narrow, Base]` wires `Base`'s default exactly as
+/// `allOf: [Base, Narrow]` does, and so does a `$ref` whose sibling `properties` declare it. Two
+/// sides that declare different defaults keep the same one in either order, and the one the merged
+/// field cannot carry is reported (`W005`) at the `default` that wrote it.
+const MERGED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Narrow:
+      type: object
+      properties:
+        p: { type: string }
+    Base:
+      type: object
+      properties:
+        p: { type: string, default: hello }
+    Other:
+      type: object
+      properties:
+        p: { type: string, default: world }
+    Combined:
+      allOf:
+        - $ref: '#/components/schemas/Narrow'
+        - $ref: '#/components/schemas/Base'
+    Reversed:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Narrow'
+    Sib:
+      $ref: '#/components/schemas/Narrow'
+      properties:
+        p: { type: string, default: hello }
+    Clash:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Other'
+    ClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/Other'
+        - $ref: '#/components/schemas/Base'
+    ClashSibling:
+      $ref: '#/components/schemas/Other'
+      properties:
+        p: { type: string, default: hello }
+"##;
+
+#[test]
+fn an_intersection_merges_a_default_either_side_declares() {
+    for (entry, report) in [
+        ("generate", generate(MERGED_DEFAULT_SPEC)),
+        ("check", check(MERGED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // Only the conflicts report, and in every order at the default they do not keep: `hello`
+        // is kept over `world`, so `Other`'s is the one reported.
+        assert_eq!(
+            pointers,
+            ["/components/schemas/Other/properties/p/default"],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for kept in [
+            "/components/schemas/Base/properties/p/default",
+            "/components/schemas/ClashSibling/properties/p/default",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(kept)),
+                "{entry}: the report names the default `{kept}` kept instead: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(MERGED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in [
+        "Base",
+        "Combined",
+        "Reversed",
+        "Sib",
+        "Clash",
+        "ClashReversed",
+        "ClashSibling",
+    ] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("Default: `hello`.") && body.contains("default = \"default_"),
+            "`{name}.p` documents and applies `hello`: {body}"
+        );
+    }
+    assert_eq!(
+        code.matches("Some(\"world\".to_owned())").count(),
+        1,
+        "only `Other` itself applies `world`: {code}"
+    );
+}
+
+/// Issue #432: of two different defaults an intersection's sides declare, the one the side can
+/// apply as a serde default is kept, whatever its value and in either order. `NullP` declares `p`
+/// nullable and `ReqP` declares it required, so neither applies its `aaa`; `PlainP` declares it
+/// optional and applies `zzz`. Were the values compared first, `aaa` would be kept. The nullable
+/// meet narrows to a plain optional `String`, so the kept `zzz` is wired; the required meet keeps
+/// the requirement, so `zzz` is only documented.
+const APPLICABLE_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    PlainP:
+      type: object
+      properties:
+        p: { type: string, default: zzz }
+    NullP:
+      type: object
+      properties:
+        p: { type: [string, 'null'], default: aaa }
+    ReqP:
+      type: object
+      required: [p]
+      properties:
+        p: { type: string, default: aaa }
+    NullClash:
+      allOf:
+        - $ref: '#/components/schemas/NullP'
+        - $ref: '#/components/schemas/PlainP'
+    NullClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/PlainP'
+        - $ref: '#/components/schemas/NullP'
+    ReqClash:
+      allOf:
+        - $ref: '#/components/schemas/ReqP'
+        - $ref: '#/components/schemas/PlainP'
+    ReqClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/PlainP'
+        - $ref: '#/components/schemas/ReqP'
+"##;
+
+#[test]
+fn a_conflicting_intersection_default_keeps_the_one_its_side_can_apply() {
+    for (entry, report) in [
+        ("generate", generate(APPLICABLE_DEFAULT_SPEC)),
+        ("check", check(APPLICABLE_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // In both orders the unapplied `aaa` is the dropped one, never `PlainP`'s `zzz`.
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/NullP/properties/p/default",
+                "/components/schemas/ReqP/properties/p/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains("/components/schemas/PlainP/properties/p/default")),
+            "{entry}: every report names `PlainP`'s default as the one kept: {messages:#?}"
+        );
+    }
+
+    let (report, code) = generate_with_code(APPLICABLE_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let body = |name: &str| {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        code[start..start + code[start..].find('}').unwrap()].to_owned()
+    };
+    for name in ["NullClash", "NullClashReversed"] {
+        let body = body(name);
+        assert!(
+            body.contains("Default: `zzz`.")
+                && !body.contains("Default: `aaa`.")
+                && body.contains("default = \"default_"),
+            "`{name}.p` documents and applies `zzz`: {body}"
+        );
+    }
+    for name in ["ReqClash", "ReqClashReversed"] {
+        let body = body(name);
+        assert!(
+            body.contains("Default: `zzz`.") && !body.contains("Default: `aaa`."),
+            "`{name}.p` documents `zzz`: {body}"
+        );
+    }
+}
+
+/// Issue #432: an `integer` default `3` and a `number` default `3` are one default, not a
+/// conflict, though the two sides classify it as an integer and as a float. The intersection keeps
+/// it without a `W005`, in either order.
+const NUMERIC_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    IntP:
+      type: object
+      properties:
+        p: { type: integer, default: 3 }
+    NumP:
+      type: object
+      properties:
+        p: { type: number, default: 3 }
+    Both:
+      allOf:
+        - $ref: '#/components/schemas/IntP'
+        - $ref: '#/components/schemas/NumP'
+    BothReversed:
+      allOf:
+        - $ref: '#/components/schemas/NumP'
+        - $ref: '#/components/schemas/IntP'
+"##;
+
+#[test]
+fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
+    for (entry, report) in [
+        ("generate", generate(NUMERIC_DEFAULT_SPEC)),
+        ("check", check(NUMERIC_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::SchemaDefaultNotApplied),
+            "{entry}: `3` and `3` do not conflict: {report:#?}"
+        );
+    }
+
+    let (report, code) = generate_with_code(NUMERIC_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in ["Both", "BothReversed"] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("default = \"default_"),
+            "`{name}.p` applies the merged default: {body}"
+        );
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
@@ -15871,10 +16729,9 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
 /// warned `W005` against the dead `string`∩`enum` struct while the two-member spelling, whose
 /// result is the same uninhabited field, was clean.
 ///
-/// This pins the two spellings agreeing, not what they say: how a default on a field an
-/// intersection empties should be reported is the two-member spelling's question. The second case
-/// keeps the fixture from passing vacuously, since there the emitted struct itself drops the
-/// default and both spellings must report it once.
+/// This pins the two spellings agreeing. In the first two cases the emitted struct itself drops
+/// the default — the field the first one empties included (#453) — and both spellings must report
+/// it once.
 #[test]
 fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
     fn spec(media: &str, members: &[&str]) -> String {
@@ -15915,7 +16772,8 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
                 "{ type: integer }",
             ],
             ["{ type: string, default: z }", "{ type: integer }"],
-            0,
+            // The emptied field drops `z`, reported once at its `default` (#453).
+            1,
         ),
         (
             json,
@@ -22139,9 +22997,10 @@ item:
 // --- check/generate parity ----------------------------------------------------------------------
 //
 // The module header calls parity a contract, and `spargen check` is sold as telling you what
-// `generate` would do. It was asserted by seven fixtures in the whole file, each written by hand;
-// the other 175 go through `generate` alone. A `check` that quietly stopped running one frontend
-// stage would keep passing.
+// `generate` would do. Every inline fixture that goes through `generate` or `generate_with_code`
+// already gets the verdict-and-codes half of it from `assert_check_agrees`. `PARITY_FIXTURES` keeps
+// ten named specs on top of that: a list a companion test holds to span rejections, warnings and
+// clean runs, and whose labelled names each hold the fixture to the code it is named for.
 
 /// The sorted diagnostic codes a report carries, duplicates kept: a stage that fires the same
 /// warning twice differs from one that fires it once.
@@ -23102,7 +23961,7 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
         );
-        assert!(!code.contains("serde_json :: Value"), "{code}");
+        assert_no_untyped_value(&code);
     }
 
     // The controls. Requiring the property on either side obliges every instance to carry a value
@@ -23223,7 +24082,7 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
             code.contains("pub a: Option<"),
             "`{what}` must keep the conflicting property optional: {code}"
         );
-        assert!(!code.contains("serde_json :: Value"), "{code}");
+        assert_no_untyped_value(&code);
     }
 
     let empty: &[(&str, &str, &str)] = &[
@@ -23966,10 +24825,7 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
         // And the outcome is the parent's reservation invariant, not a silent degradation: the
         // `serde_json::Value` #160 records is gone in both directions.
         let (_, code) = generate_with_code(&spec);
-        assert!(
-            !code.contains("serde_json :: Value"),
-            "`{what}` degraded to an untyped value: {code}"
-        );
+        assert_no_untyped_value(&code);
     }
 
     // A plain recursive `$ref` with no sibling at all still boxes and generates — the shape that
@@ -25713,6 +26569,207 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
     }
 }
 
+/// Whether `report` carries `code` at `pointer`.
+fn has_code_at(report: &Report, code: Code, pointer: &str) -> bool {
+    report
+        .diagnostics()
+        .iter()
+        .any(|d| d.code == code && d.pointer.as_str() == pointer)
+}
+
+/// #446: the audit walked only the schemas written in the root document, so a schema lowering
+/// reaches through a `$ref` into another file got no `W001` for its validation-only keywords, and
+/// a dangling reference under its `not` audited clean. The issue's reproducer: `check` printed
+/// `clean`. The audit now follows a reference it meets in a position lowering reads into the file
+/// it names, so the sub-file's schema gets the audit a root one does, through both entry points.
+#[test]
+fn a_schema_in_a_referenced_file_gets_the_audit_a_root_schema_does() {
+    let reproducer = "X:\n  type: object\n  maxProperties: 3\n  not: { $ref: '#/Missing' }\n";
+    let (generated, checked, _) = split("./lib.yaml#/X", reproducer);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code_at(&report, Code::ValidationKeywordIgnored, "/X"),
+            "{entry}: lib.yaml's /X carries `maxProperties` and `not`, so W001: {report:#?}"
+        );
+        assert!(
+            has_code_at(&report, Code::UnresolvedRef, "/X/not"),
+            "{entry}: `#/Missing` names nothing in lib.yaml, so E004 at /X/not: {report:#?}"
+        );
+    }
+
+    // Without the dangling reference the same schema generates, still warned. A target reached
+    // only through another sub-file schema's property — and a cycle back to the first — is
+    // audited too, and the walk terminates.
+    let chained = "X:\n  \
+                   type: object\n  \
+                   maxProperties: 3\n  \
+                   properties:\n    \
+                   y: { $ref: '#/Y' }\n\
+                   Y:\n  \
+                   type: object\n  \
+                   properties:\n    \
+                   s: { type: string, pattern: '^a' }\n    \
+                   back: { $ref: '#/X' }\n";
+    let (generated, checked, _) = split("./lib.yaml#/X", chained);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        for pointer in ["/X", "/Y/properties/s"] {
+            assert!(
+                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+                "{entry}: W001 must sit at lib.yaml's {pointer}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// #495: the audit walked only the Parameter, Request Body and Response Objects written in the
+/// root document, so one that is a `$ref` into another file was skipped and the schemas it holds
+/// got no `W001`. The issue's reproducer — a whole-file `'200': { $ref: './resp.yaml' }` — checked
+/// `clean`. The audit now follows each such reference, as lowering does, to the object its chain
+/// ends at: a whole file, a pointer into a file, and a root component that is itself a reference
+/// whose next hop is written in the sub-file.
+#[test]
+fn an_object_in_a_referenced_file_gets_the_audit_a_root_object_does() {
+    const ROOT: &str = "openapi: 3.1.0\n\
+                        info: { title: T, version: 1.0.0 }\n\
+                        servers: [{ url: 'https://e.com' }]\n\
+                        paths:\n  \
+                        /a:\n    \
+                        post:\n      \
+                        operationId: postA\n      \
+                        parameters: [{ $ref: './objects.yaml#/Param' }]\n      \
+                        requestBody: { $ref: './objects.yaml#/Body' }\n      \
+                        responses:\n        \
+                        '200': { $ref: './resp.yaml' }\n        \
+                        default: { $ref: '#/components/responses/Failure' }\n  \
+                        /b:\n    \
+                        get:\n      \
+                        operationId: getB\n      \
+                        responses:\n        \
+                        '200': { $ref: './resp.yaml' }\n\
+                        components:\n  \
+                        responses:\n    \
+                        Failure: { $ref: './objects.yaml#/Chained' }\n";
+    const RESP: &str = "description: ok\n\
+                        content:\n  \
+                        application/json:\n    \
+                        schema: { type: object, maxProperties: 3 }\n";
+    const OBJECTS: &str = "Param:\n  \
+                           name: q\n  \
+                           in: query\n  \
+                           schema: { type: string, maxLength: 3 }\n\
+                           Body:\n  \
+                           content:\n    \
+                           application/json:\n      \
+                           schema: { type: object, minProperties: 1 }\n\
+                           Chained: { $ref: '#/Error' }\n\
+                           Error:\n  \
+                           description: err\n  \
+                           content:\n    \
+                           application/json:\n      \
+                           schema: { type: object, maxProperties: 2 }\n";
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("resp.yaml", RESP),
+        ("objects.yaml", OBJECTS),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        for pointer in [
+            "/content/application~1json/schema",
+            "/Param/schema",
+            "/Body/content/application~1json/schema",
+            "/Error/content/application~1json/schema",
+        ] {
+            assert!(
+                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+                "{entry}: W001 must sit at the sub-file's {pointer}: {report:#?}"
+            );
+        }
+        // `/a` and `/b` both reach resp.yaml: its schema is audited once.
+        let resp_warnings = report
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/content/application~1json/schema"
+            })
+            .count();
+        assert_eq!(resp_warnings, 1, "{entry}: {report:#?}");
+    }
+
+    // A response chain that returns to itself is lowering's `E004`; the audit's walk terminates.
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("resp.yaml", "$ref: './resp.yaml'\n"),
+        ("objects.yaml", OBJECTS),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// #495, for the OpenAPI 3.2 Media Type Object that is itself a Reference Object: one naming
+/// another file is followed to the object written there, whose schema gets `W001`. And a response
+/// in another file whose `text/event-stream` envelope consumes `contentMediaType`/`contentSchema`
+/// is recognised as consumed, so the walk that now reaches it does not warn about them.
+#[test]
+fn a_media_type_in_a_referenced_file_gets_the_audit_a_root_one_does() {
+    const ROOT: &str = "openapi: 3.2.0\n\
+                        info: { title: T, version: 1.0.0 }\n\
+                        servers: [{ url: 'https://e.com' }]\n\
+                        paths:\n  \
+                        /a:\n    \
+                        get:\n      \
+                        operationId: getA\n      \
+                        responses:\n        \
+                        '200':\n          \
+                        description: ok\n          \
+                        content:\n            \
+                        application/json: { $ref: './media.yaml' }\n  \
+                        /events:\n    \
+                        get:\n      \
+                        operationId: getEvents\n      \
+                        responses:\n        \
+                        '200': { $ref: './stream.yaml' }\n";
+    const MEDIA: &str = "schema: { type: string, pattern: '^a' }\n";
+    const STREAM: &str = "description: ok\n\
+                          content:\n  \
+                          text/event-stream:\n    \
+                          itemSchema:\n      \
+                          type: object\n      \
+                          required: [data]\n      \
+                          properties:\n        \
+                          data:\n          \
+                          type: string\n          \
+                          contentMediaType: application/json\n          \
+                          contentSchema: { type: object, properties: { id: { type: string } } }\n";
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("media.yaml", MEDIA),
+        ("stream.yaml", STREAM),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let w001: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::ValidationKeywordIgnored)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            w001,
+            ["/schema"],
+            "{entry}: only media.yaml's pattern warns; the SSE annotations are consumed: {report:#?}"
+        );
+    }
+}
+
 /// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
 /// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
 /// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
@@ -25762,5 +26819,96 @@ fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
                 "{target}, {entry}: {report:#?}"
             );
         }
+    }
+}
+
+/// #450: a nullable union of two or more non-null branches, refined by untyped object keywords
+/// that every non-null branch contradicts, still admits `null`, which those keywords are
+/// vacuously satisfied by. The scoped meet an untyped `allOf` member beside the union and an
+/// untyped `$ref` sibling of the union both take rejected it with `E013`, where the inline sibling
+/// spelling of the same keywords types it as the exact JSON null type. Every spelling now agrees.
+/// A refiner that itself denies `null` (`type: object`) leaves no value at all, and still rejects.
+#[test]
+fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n    Cat:\n      \
+                        type: object\n      required: [kind]\n      properties: { kind: { type: \
+                        string } }\n    Dog:\n      type: object\n      required: [kind, bark]\n      \
+                        properties: { kind: { type: string }, bark: { type: boolean } }\n";
+    const UNION: &str = "[{ $ref: '#/components/schemas/Cat' }, { $ref: \
+                         '#/components/schemas/Dog' }, { type: 'null' }]";
+    let head = HEAD;
+    let holder =
+        "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+                  p: { $ref: '#/components/schemas/Pet' }\n";
+    let refined = "properties: { kind: { type: integer } }";
+
+    let spellings = [
+        (
+            "an untyped `allOf` member",
+            format!("    Pet:\n      allOf: [{{ {refined} }}]\n      oneOf: {UNION}\n"),
+        ),
+        (
+            "untyped `$ref` siblings",
+            format!(
+                "    U:\n      oneOf: {UNION}\n    Pet:\n      $ref: '#/components/schemas/U'\n      \
+                 {refined}\n"
+            ),
+        ),
+        (
+            "inline siblings (the control)",
+            format!("    Pet:\n      {refined}\n      oneOf: {UNION}\n"),
+        ),
+        // The scoped meet also reaches a nullable union nested as a branch of the target union
+        // (`meet_refiner`'s union arm). Its every non-null branch is excluded, so it is `null`,
+        // and the object branch beside it is excluded too: `null` is the only value left.
+        (
+            "an untyped `allOf` member beside a nested nullable union",
+            format!(
+                "    Pet:\n      allOf: [{{ {refined} }}]\n      anyOf:\n        - oneOf: \
+                 {UNION}\n        - {{ type: object, required: [kind], properties: {{ kind: {{ \
+                 type: string }} }} }}\n"
+            ),
+        ),
+    ];
+    for (spelling, pet) in &spellings {
+        let spec = format!("{head}{pet}{holder}");
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}, {entry}: a nullable union refined to only `null` rejected: \
+                 {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{spelling}, {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub type Pet = ();"),
+            "{spelling}: a nullable union refined to only `null` is not the null type:\n{types}"
+        );
+        // The use site agrees too: the exact null type is the whole value set, so the holder's
+        // field is `Pet` itself, never an `Option` over it.
+        assert!(
+            types.contains("pub p: Pet,"),
+            "{spelling}: the holder's field is not the bare null type:\n{types}"
+        );
+    }
+
+    // The rescue is `null`'s, so it needs a refiner that admits `null`. A typed `allOf` member
+    // denies it, and then no value satisfies the schema.
+    let spec = format!(
+        "{head}    Pet:\n      allOf: [{{ type: object, {refined} }}]\n      oneOf: {UNION}\n{holder}"
+    );
+    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
     }
 }

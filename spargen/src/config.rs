@@ -8,6 +8,9 @@
 //! Both types have private fields and chained setters, so a new knob is an additive change rather
 //! than a breaking one.
 //!
+//! This module is facade plumbing, not a subsystem: it carries no `layer-deps:` header, and the
+//! layering lint skips it.
+//!
 //! # `spargen.toml`
 //!
 //! The same knobs can be read from a config file, which is available to `build.rs`, the

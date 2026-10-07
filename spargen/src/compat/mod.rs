@@ -13,7 +13,9 @@
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
 //!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
 //!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
-//!   auto-carve builds from literal document text are escaped for exactly that reason. See
+//!   auto-carve builds from literal document text are escaped for exactly that reason. A
+//!   backslash escapes whatever character follows it, in exact and glob rules alike (`\b` is `b`,
+//!   `\\` is one literal backslash). See
 //!   [`glob_match`] for the semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
@@ -25,7 +27,6 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 
 use crate::diag::{
     Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Severity, Span,
@@ -58,13 +59,61 @@ impl Omit {
         diags.result(())
     }
 
-    /// Stable fingerprint used in generated provenance headers.
+    /// Stable fingerprint used in generated provenance headers: FNV-1a 64 over
+    /// the profile's canonical rule encoding (the crate-private `Omit::canonical_encoding`), not over derived [`Hash`](std::hash::Hash), whose byte
+    /// stream std documents as unstable across platforms and compiler releases. The value is
+    /// therefore the same on every host and toolchain for the same rules.
     pub fn fingerprint(&self) -> String {
-        let mut hasher = Fnv64::default();
-        for rule in &self.rules {
-            rule.hash(&mut hasher);
-        }
+        let mut hasher = Fnv64::new();
+        hasher.write(&self.canonical_encoding());
         format!("{:016x}", hasher.finish())
+    }
+
+    /// The one canonical byte encoding of the profile, shared by [`Omit::fingerprint`] and the
+    /// build cache's input fingerprint so the two cannot drift apart.
+    ///
+    /// Rules encode in declaration order. Each is a variant tag byte (`0` path, `1` operation,
+    /// `2` component, `3` pointer) followed by its fields, every string length-prefixed (`u64`,
+    /// big-endian) so no two rule sets share an encoding; methods and component kinds encode as
+    /// their OpenAPI key, and a `Pointer` rule's `file` as a presence byte (`0` absent,
+    /// `1` present) followed by the string when present.
+    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
+        fn push_str(out: &mut Vec<u8>, text: &str) {
+            out.extend_from_slice(&(text.len() as u64).to_be_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+
+        let mut out = Vec::new();
+        for rule in &self.rules {
+            match rule {
+                OmitRule::Path { path } => {
+                    out.push(0);
+                    push_str(&mut out, path);
+                }
+                OmitRule::Operation { method, path } => {
+                    out.push(1);
+                    push_str(&mut out, method.as_oas_key());
+                    push_str(&mut out, path);
+                }
+                OmitRule::Component { kind, name } => {
+                    out.push(2);
+                    push_str(&mut out, kind.as_oas_key());
+                    push_str(&mut out, name);
+                }
+                OmitRule::Pointer { file, pointer } => {
+                    out.push(3);
+                    match file {
+                        Some(file) => {
+                            out.push(1);
+                            push_str(&mut out, file);
+                        }
+                        None => out.push(0),
+                    }
+                    push_str(&mut out, pointer);
+                }
+            }
+        }
+        out
     }
 
     fn apply_rule(&self, rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
@@ -328,23 +377,18 @@ fn has_glob_meta(pattern: &str) -> bool {
 }
 
 /// Resolve the escapes in a pattern with no unescaped metacharacter, so an exact rule compares
-/// against the literal text the author meant. `\*` → `*`, `\?` → `?`, `\\` → `\`; a backslash
-/// before anything else is kept, since it is an ordinary character in a URI path.
+/// against the literal text the author meant. A backslash escapes whatever follows it — `\*` →
+/// `*`, `\?` → `?`, `\\` → `\`, and `\b` → `b` — exactly as [`compile_glob`] reads it, so an exact
+/// rule and a glob rule never disagree on what a pattern names. A trailing lone backslash escapes
+/// nothing and is kept as itself.
 fn unescape_glob(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut chars = pattern.chars();
     while let Some(ch) = chars.next() {
-        if ch != '\\' {
+        if ch == '\\' {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
             out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some(escaped @ ('*' | '?' | '\\')) => out.push(escaped),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
         }
     }
     out
@@ -1064,21 +1108,23 @@ fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     }
 }
 
-#[derive(Default)]
+/// FNV-1a 64 over explicitly written bytes. Deliberately not a [`std::hash::Hasher`], so derived
+/// `Hash` (whose byte stream is platform- and toolchain-dependent) cannot be fed into it.
 struct Fnv64(u64);
 
-impl Hasher for Fnv64 {
+impl Fnv64 {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
     fn finish(&self) -> u64 {
         self.0
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if self.0 == 0 {
-            self.0 = 0xcbf29ce484222325;
-        }
         for byte in bytes {
             self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
 }
@@ -1204,12 +1250,16 @@ macro_rules! omit {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::{
-        carve_rules, glob_match, has_glob_meta, omittable_enclosing, ComponentKind, Diagnostic,
-        JsonPointer, Omit, OmitMethod, OmitRule, Provenance,
+        carve_rules, escape_glob_meta, glob_match, has_glob_meta, omittable_enclosing,
+        unescape_glob, ComponentKind, Diagnostic, JsonPointer, Omit, OmitMethod, OmitRule,
+        Provenance,
     };
     use crate::diag::{Code, Diagnostics};
     use crate::source::InputBundle;
+    use proptest::prelude::*;
 
     #[test]
     fn glob_matcher_semantics() {
@@ -1278,6 +1328,65 @@ mod tests {
         assert!(glob_match(r"\", r"\"));
         // A pattern opening with an escape must not index before its start.
         assert!(glob_match(r"\*x", "*x"));
+    }
+
+    /// Exact and glob rules share one escaping rule: a backslash escapes whatever follows it, so
+    /// `\b` is the literal `b` in both forms. The exact form used to keep the backslash, so the
+    /// exact rule `/a\b` named the path `/a\b` while the glob `/a\b*` named `/abc`.
+    #[test]
+    fn an_escaped_ordinary_character_means_itself_in_exact_and_glob_rules() {
+        assert_eq!(unescape_glob(r"/a\b"), "/ab");
+        assert!(glob_match(r"/a\b", "/ab"));
+        assert!(!glob_match(r"/a\b", r"/a\b"));
+        assert!(glob_match(r"/a\b*", "/abc"));
+        assert!(!glob_match(r"/a\b*", r"/a\bc"));
+        // The metacharacter escapes and a trailing lone backslash are unchanged.
+        assert_eq!(unescape_glob(r"/f/\*\?\\"), r"/f/*?\");
+        assert_eq!(unescape_glob(r"/f/\"), r"/f/\");
+
+        // An exact path rule applies the same reading: `/a\b` removes `/ab`, not `/a\b`.
+        let spec = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths:
+  /ab:
+    get: { responses: { "200": { description: ok } } }
+  '/a\b':
+    get: { responses: { "200": { description: ok } } }
+"#;
+        let mut bundle = bundle_of(spec);
+        let mut diags = Diagnostics::default();
+        let omit = Omit {
+            rules: vec![OmitRule::path(r"/a\b")],
+        };
+        omit.apply(&mut bundle, &mut diags).unwrap();
+        assert_eq!(keys_under(&bundle, "paths", None), vec![r"/a\b".to_owned()]);
+    }
+
+    proptest! {
+        /// Escaping literal text yields a rule that matches exactly that text.
+        #[test]
+        fn an_escaped_text_matches_itself(text in r"[a-c/*?\\]{0,12}") {
+            let pattern = escape_glob_meta(&text);
+            prop_assert!(!has_glob_meta(&pattern), "{pattern:?}");
+            prop_assert!(glob_match(&pattern, &text), "{pattern:?} vs {text:?}");
+            prop_assert_eq!(unescape_glob(&pattern), text);
+        }
+
+        /// A pattern with no unescaped metacharacter matches as a glob exactly the text its
+        /// exact-rule reading names, so the two forms can never disagree.
+        #[test]
+        fn a_meta_free_pattern_matches_exactly_its_unescaped_text(
+            // Ordinary characters and escapes of anything, then an optional trailing backslash:
+            // every pattern with no unescaped metacharacter, built rather than filtered.
+            pattern in r"([a-c/]|\\[a-c/*?\\]){0,8}\\?",
+            text in r"[a-c/*?\\]{0,12}",
+        ) {
+            prop_assert!(!has_glob_meta(&pattern), "{pattern:?}");
+            let literal = unescape_glob(&pattern);
+            prop_assert!(glob_match(&pattern, &literal), "{pattern:?} vs {literal:?}");
+            prop_assert_eq!(glob_match(&pattern, &text), literal == text);
+        }
     }
 
     /// Load an inline YAML spec into an [`InputBundle`] via a tempfile (the loader reads from disk).
@@ -1652,6 +1761,10 @@ components:
         Omit { rules }
     }
 
+    fn pointer_rule(file: Option<&'static str>, pointer: &'static str) -> OmitRule {
+        OmitRule::pointer(file.map(Cow::Borrowed), pointer)
+    }
+
     /// The fingerprint is stamped into every generated file's provenance header, so it is how a
     /// reader tells which omit profile produced a module. The only assertion on it was that it is
     /// 16 characters long — which a constant would also satisfy.
@@ -1711,5 +1824,44 @@ components:
                 .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
             "{fingerprint}"
         );
+    }
+
+    /// The fingerprint is stamped into the provenance header, so the same rules must yield the
+    /// same value on every host and toolchain, not merely twice in one process. Pinning a literal
+    /// for a set covering every rule kind catches an encoding that drifts (derived `Hash` did, by
+    /// platform and rustc release). Changing this literal changes every header that carries an
+    /// omit profile, which is a deliberate, reviewable output change.
+    #[test]
+    fn the_fingerprint_of_a_fixed_profile_is_pinned() {
+        let omit = omit_of(vec![
+            OmitRule::path("/pets"),
+            OmitRule::operation(OmitMethod::Query, "/pets/{id}"),
+            OmitRule::component(ComponentKind::MediaTypes, "Legacy"),
+            pointer_rule(None, "/components/schemas/Old"),
+            pointer_rule(Some("shared.yaml"), "/x"),
+        ]);
+        assert_eq!(omit.fingerprint(), "e5c02d327e1ebd34");
+    }
+
+    /// `describe()` renders `pointer {file}#{pointer}`, which cannot tell a file containing `#`
+    /// from a pointer containing it, nor an absent file from an empty one. The canonical encoding
+    /// must keep each of those pairs apart.
+    #[test]
+    fn the_fingerprint_separates_pointer_rules_describe_would_conflate() {
+        let pairs = [
+            (
+                pointer_rule(Some("a#"), "/b"),
+                pointer_rule(Some("a"), "#/b"),
+            ),
+            (pointer_rule(Some(""), "/b"), pointer_rule(None, "/b")),
+            (OmitRule::path("/ab"), pointer_rule(None, "/ab")),
+        ];
+        for (left, right) in pairs {
+            assert_ne!(
+                omit_of(vec![left.clone()]).fingerprint(),
+                omit_of(vec![right.clone()]).fingerprint(),
+                "{left:?} and {right:?} share a fingerprint"
+            );
+        }
     }
 }

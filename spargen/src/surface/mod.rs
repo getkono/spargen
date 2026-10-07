@@ -21,7 +21,8 @@
 //!   concrete Rust type, not the surface identity;
 //! * a **nominal** type — a `struct`, a string `enum`, or a union (the models a consumer names,
 //!   constructs, and matches) → its generated type name;
-//! * an array → `Vec<inner>`, a tuple → `(a, b, …)`, bytes → `Bytes`, an untyped node → `Value`;
+//! * an array → `Vec<inner>`, a tuple → `(a, b, …)` (one position → `(a,)`, as Rust spells it),
+//!   bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
 //!   carrying no consumer-facing structure beyond its scalar) → that scalar;
 //! * a nullable reference wraps the above in `Option<…>`.
@@ -53,8 +54,9 @@ pub(crate) struct Surface {
 struct OpSurface {
     /// The generated Rust method identifier.
     method_name: String,
-    /// Parameters keyed by wire name (path/query/header/cookie alike).
-    params: BTreeMap<String, ParamSurface>,
+    /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
+    /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
+    params: BTreeMap<ParamKey, ParamSurface>,
     /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
     /// required `&T` argument in the generated signature (the IR does not model an optional body).
     request_body: Option<String>,
@@ -66,6 +68,9 @@ struct OpSurface {
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
 }
+
+/// A parameter's identity: its wire name and its location as the OpenAPI `in` value spells it.
+type ParamKey = (String, &'static str);
 
 /// A single parameter's surface: its canonical type and whether it is required (required params are
 /// positional method arguments; optional ones ride in the `…Params` struct).
@@ -367,7 +372,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let mut params = BTreeMap::new();
         for param in &operation.params {
             params.insert(
-                param.name.clone(),
+                (param.name.clone(), param.location.as_openapi_in()),
                 ParamSurface {
                     ty: canon_ty(param.ty, api, names),
                     required: param.required,
@@ -565,9 +570,28 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         // the rendered status types, or the single body itself), so `ErrorTypeChanged` reports it.
         _ => {}
     }
-    for name in keys(&old.params, &new.params) {
-        let location = format!("{key} param `{name}`");
-        match (old.params.get(name), new.params.get(name)) {
+    for param_key in keys(&old.params, &new.params) {
+        let (name, loc) = param_key;
+        let location = format!("{key} param `{name}` ({loc})");
+        match (old.params.get(param_key), new.params.get(param_key)) {
+            // The arrival side of a move; its departure side compares the pair.
+            (None, Some(_)) if moved_param(param_key, &new.params, &old.params).is_some() => {}
+            (Some(old_param), None) => match moved_param(param_key, &old.params, &new.params) {
+                Some(to) => diff_param(
+                    format!("{key} param `{name}` ({loc} -> {})", to.1),
+                    old_param,
+                    &new.params[to],
+                    changes,
+                ),
+                None => changes.push(Change::new(
+                    ChangeKind::ParamRemoved,
+                    location,
+                    format!("parameter removed (was `{}`)", old_param.ty),
+                )),
+            },
+            (Some(old_param), Some(new_param)) => {
+                diff_param(location, old_param, new_param, changes);
+            }
             (None, Some(param)) => {
                 let kind = if param.required {
                     ChangeKind::RequiredParamAdded
@@ -588,36 +612,60 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                     ),
                 ));
             }
-            (Some(param), None) => changes.push(Change::new(
-                ChangeKind::ParamRemoved,
-                location,
-                format!("parameter removed (was `{}`)", param.ty),
-            )),
-            (Some(old_param), Some(new_param)) => {
-                if old_param.ty != new_param.ty {
-                    changes.push(Change::new(
-                        ChangeKind::ParamTypeChanged,
-                        location.clone(),
-                        format!("parameter type `{}` -> `{}`", old_param.ty, new_param.ty),
-                    ));
-                }
-                if old_param.required != new_param.required {
-                    changes.push(Change::new(
-                        ChangeKind::ParamRequirednessChanged,
-                        location,
-                        format!(
-                            "parameter now {}",
-                            if new_param.required {
-                                "required"
-                            } else {
-                                "optional"
-                            }
-                        ),
-                    ));
-                }
-            }
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
+    }
+}
+
+/// The key a parameter moved to: `key`'s wire name is declared exactly once in `here` and exactly
+/// once in `there`, at a different location. The generated identifier is allocated from the wire
+/// name (the location only ranks two names that escape to the same spelling), so such a move keeps
+/// the argument or `…Params` field the consumer writes, and the pair is compared as one parameter. A name declared in more than one location on either side is ambiguous, and
+/// its keys stay unpaired.
+fn moved_param<'a, V>(
+    key: &ParamKey,
+    here: &BTreeMap<ParamKey, V>,
+    there: &'a BTreeMap<ParamKey, V>,
+) -> Option<&'a ParamKey> {
+    let named = |(name, _): &&ParamKey| *name == key.0;
+    let mut there_named = there.keys().filter(named);
+    match (
+        here.keys().filter(named).count(),
+        there_named.next(),
+        there_named.next(),
+    ) {
+        (1, Some(to), None) if to != key => Some(to),
+        _ => None,
+    }
+}
+
+/// The changes between two declarations of one parameter, reported at `location`.
+fn diff_param(
+    location: String,
+    old_param: &ParamSurface,
+    new_param: &ParamSurface,
+    changes: &mut Vec<Change>,
+) {
+    if old_param.ty != new_param.ty {
+        changes.push(Change::new(
+            ChangeKind::ParamTypeChanged,
+            location.clone(),
+            format!("parameter type `{}` -> `{}`", old_param.ty, new_param.ty),
+        ));
+    }
+    if old_param.required != new_param.required {
+        changes.push(Change::new(
+            ChangeKind::ParamRequirednessChanged,
+            location,
+            format!(
+                "parameter now {}",
+                if new_param.required {
+                    "required"
+                } else {
+                    "optional"
+                }
+            ),
+        ));
     }
 }
 
@@ -800,10 +848,10 @@ fn diff_union(
 }
 
 /// The sorted union of two maps' keys — the deterministic traversal spine of every diff.
-fn keys<'a, V>(
-    old: &'a BTreeMap<String, V>,
-    new: &'a BTreeMap<String, V>,
-) -> impl Iterator<Item = &'a String> {
+fn keys<'a, K: Ord, V>(
+    old: &'a BTreeMap<K, V>,
+    new: &'a BTreeMap<K, V>,
+) -> impl Iterator<Item = &'a K> {
     old.keys()
         .chain(new.keys())
         .collect::<BTreeSet<_>>()
@@ -828,17 +876,22 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
                 .iter()
                 .map(|item| canon_ty(*item, api, names))
                 .collect();
-            format!("({})", rendered.join(", "))
+            // A one-position tuple keeps its trailing comma, as codegen declares it: `(T)` would
+            // name a parenthesized `T`, not the `(T,)` the generated client has.
+            match rendered.as_slice() {
+                [only] => format!("({only},)"),
+                _ => format!("({})", rendered.join(", ")),
+            }
         }
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
         Some(TypeKind::Null) => "()".to_owned(),
         Some(TypeKind::Never) => nominal_name(ty, names),
         // A reservation has no structure to canonicalise. `spargen diff` compares two finished
         // surfaces, and `check_invariants` rejects a graph that still holds one, so this is
-        // unreachable — and says so structurally, as `ty_tokens` in `codegen::emit` does for the
-        // same variant. A rendered placeholder would be a string nothing asserts and a later hand
-        // could fold into the `Value` arm below without anything noticing, which is the silent
-        // fall-through to `Any` this variant was introduced to prevent.
+        // unreachable — and says so structurally, as `type_kind_tokens` in `codegen::emit` does for
+        // the same variant. A rendered placeholder would be a string nothing asserts and a later
+        // hand could fold into the `Value` arm below without anything noticing, which is the
+        // silent fall-through to `Any` this variant was introduced to prevent.
         Some(TypeKind::Reserved) => {
             unreachable!(
                 "a reservation reached the surface; `check_invariants` should have rejected it"
@@ -1190,5 +1243,270 @@ mod tests {
     fn a_missing_repository_file_fails_rather_than_skips() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         read_repo_file(root, "tests/no-such-suite.rs");
+    }
+
+    /// One node of a synthetic type tree: every [`crate::ir::TypeKind`] `canon_ty` renders, with
+    /// the nullability and boxing a reference to it may carry.
+    #[derive(Debug, Clone)]
+    struct Node {
+        shape: Shape,
+        nullable: bool,
+        boxed: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Shape {
+        Primitive(crate::ir::Prim),
+        /// A struct, string enum, union or uninhabited type: rendered by its allocated name.
+        Nominal(NominalKind),
+        IntEnum,
+        BoolEnum,
+        Bytes,
+        Null,
+        Any,
+        Array(Box<Node>),
+        Tuple(Vec<Node>),
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum NominalKind {
+        Struct,
+        StringEnum,
+        Union,
+        Never,
+    }
+
+    fn node() -> impl proptest::strategy::Strategy<Value = Node> {
+        use crate::ir::Prim;
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            proptest::sample::select(vec![
+                Prim::Bool,
+                Prim::String,
+                Prim::I32,
+                Prim::I64,
+                Prim::F64,
+                Prim::Uuid,
+                Prim::DateTime,
+                Prim::Date,
+            ])
+            .prop_map(Shape::Primitive),
+            proptest::sample::select(vec![
+                NominalKind::Struct,
+                NominalKind::StringEnum,
+                NominalKind::Union,
+                NominalKind::Never,
+            ])
+            .prop_map(Shape::Nominal),
+            Just(Shape::IntEnum),
+            Just(Shape::BoolEnum),
+            Just(Shape::Bytes),
+            Just(Shape::Null),
+            Just(Shape::Any),
+        ];
+        let wrap = |shape| {
+            (shape, any::<bool>(), any::<bool>()).prop_map(|(shape, nullable, boxed)| Node {
+                shape,
+                nullable,
+                boxed,
+            })
+        };
+        wrap(leaf.boxed()).prop_recursive(4, 24, 4, move |inner| {
+            wrap(
+                prop_oneof![
+                    inner.clone().prop_map(|item| Shape::Array(Box::new(item))),
+                    proptest::collection::vec(inner, 0..4).prop_map(Shape::Tuple),
+                ]
+                .boxed(),
+            )
+        })
+    }
+
+    /// Insert `node` into `api`'s type graph bottom-up, naming each nominal definition, and return
+    /// the reference to it. Definitions are made through `reserve` and filled in place, which is
+    /// how a graph is built without naming `crate::diag` (a layer this subsystem does not take).
+    fn insert(
+        node: &Node,
+        api: &mut crate::ir::Api,
+        names: &mut crate::name::Names,
+    ) -> crate::ir::Ty {
+        use crate::ir::{
+            AdditionalProps, Openness, ScalarEnum, ScalarRepr, Struct, TypeKind, Union, UnionMode,
+            UnionStrategy,
+        };
+        let scalar_enum = |repr| {
+            TypeKind::Enum(ScalarEnum {
+                repr,
+                variants: Vec::new(),
+                openness: Openness::Closed,
+            })
+        };
+        let kind = match &node.shape {
+            Shape::Primitive(prim) => TypeKind::Primitive(*prim),
+            Shape::Nominal(NominalKind::Struct) => TypeKind::Struct(Struct {
+                fields: Vec::new(),
+                additional: AdditionalProps::Allow,
+            }),
+            Shape::Nominal(NominalKind::StringEnum) => scalar_enum(ScalarRepr::String),
+            Shape::Nominal(NominalKind::Union) => TypeKind::Union(Union {
+                variants: Vec::new(),
+                strategy: UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                    priorities: Vec::new(),
+                },
+            }),
+            Shape::Nominal(NominalKind::Never) => TypeKind::Never,
+            Shape::IntEnum => scalar_enum(ScalarRepr::Int),
+            Shape::BoolEnum => scalar_enum(ScalarRepr::Bool),
+            Shape::Bytes => TypeKind::Bytes,
+            Shape::Null => TypeKind::Null,
+            Shape::Any => TypeKind::Any,
+            Shape::Array(item) => TypeKind::Array(Box::new(insert(item, api, names))),
+            Shape::Tuple(items) => {
+                TypeKind::Tuple(items.iter().map(|item| insert(item, api, names)).collect())
+            }
+        };
+        let id = api.types.reserve();
+        api.types.get_mut(id).expect("just reserved").kind = kind;
+        if let Shape::Nominal(_) = node.shape {
+            names.types.insert(
+                id,
+                crate::name::Ident::new(format!("Nominal{}", names.types.len())),
+            );
+        }
+        crate::ir::Ty {
+            id,
+            nullable: node.nullable,
+            boxed: node.boxed,
+        }
+    }
+
+    /// The single generic argument of `ty` when it is the bare path `wrapper<…>`.
+    fn generic_argument<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        let [segment] = path.path.segments.iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        if segment.ident != wrapper {
+            return None;
+        }
+        match arguments.args.iter().collect::<Vec<_>>()[..] {
+            [syn::GenericArgument::Type(inner)] => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// The bare single-identifier path `ty` names, if it is one.
+    fn bare_name(ty: &syn::Type) -> Option<String> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        match path.path.segments.iter().collect::<Vec<_>>()[..] {
+            [segment] if segment.arguments.is_empty() => Some(segment.ident.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Hold the parsed rendering of `node` to its structure: `Option<…>` exactly when nullable,
+    /// never a `Box` (boxing is not a surface distinction), a tuple of exactly N elements exactly
+    /// when the kind is `Tuple(N)` (`Null` is the one other `()`, the unit type codegen also emits
+    /// for it), `Vec<…>` around an array's item, and otherwise the scalar label or allocated name.
+    fn check(
+        node: &Node,
+        ty: crate::ir::Ty,
+        parsed: &syn::Type,
+        api: &crate::ir::Api,
+        names: &crate::name::Names,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        use crate::ir::TypeKind;
+        use proptest::{prop_assert, prop_assert_eq};
+        let parsed = if node.nullable {
+            let inner = generic_argument(parsed, "Option");
+            prop_assert!(inner.is_some(), "a nullable reference renders `Option<…>`");
+            inner.expect("checked")
+        } else {
+            prop_assert!(generic_argument(parsed, "Option").is_none());
+            parsed
+        };
+        prop_assert!(
+            generic_argument(parsed, "Box").is_none(),
+            "boxing is rendered"
+        );
+        let kind = &api.types.get(ty.id).expect("inserted").kind;
+        let tuple = match parsed {
+            syn::Type::Tuple(tuple) => Some(tuple.elems.len()),
+            _ => None,
+        };
+        let expected_tuple = match kind {
+            TypeKind::Tuple(items) => Some(items.len()),
+            TypeKind::Null => Some(0),
+            TypeKind::Reserved => unreachable!("`insert` fills every reservation it makes"),
+            _ => None,
+        };
+        prop_assert_eq!(tuple, expected_tuple, "tuple arity of {:?}", kind);
+        prop_assert!(
+            !matches!(parsed, syn::Type::Paren(_)),
+            "a parenthesized type"
+        );
+        let expected = match &node.shape {
+            Shape::Tuple(nodes) => {
+                let (syn::Type::Tuple(tuple), TypeKind::Tuple(items)) = (parsed, kind) else {
+                    unreachable!("arity checked above")
+                };
+                for ((node, item), element) in nodes.iter().zip(items).zip(&tuple.elems) {
+                    check(node, *item, element, api, names)?;
+                }
+                return Ok(());
+            }
+            Shape::Array(node) => {
+                let TypeKind::Array(item) = kind else {
+                    unreachable!("`insert` builds an array for an array node")
+                };
+                let inner = generic_argument(parsed, "Vec");
+                prop_assert!(inner.is_some(), "an array renders `Vec<…>`");
+                return check(node, **item, inner.expect("checked"), api, names);
+            }
+            // The arity check above is all there is to `()`.
+            Shape::Null => return Ok(()),
+            Shape::Primitive(prim) => super::prim_label(*prim).to_owned(),
+            Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
+            Shape::IntEnum => "i64".to_owned(),
+            Shape::BoolEnum => "bool".to_owned(),
+            Shape::Bytes => "Bytes".to_owned(),
+            Shape::Any => "Value".to_owned(),
+        };
+        prop_assert_eq!(bare_name(parsed), Some(expected));
+        Ok(())
+    }
+
+    proptest::proptest! {
+        /// `canon_ty` renders every type tree as a Rust type that parses, and whose structure is
+        /// the tree's: in particular a one-position tuple keeps the trailing comma that makes it
+        /// `(T,)` rather than a parenthesized `T` (#449), at any depth.
+        #[test]
+        fn canon_ty_parses_as_the_type_its_tree_describes(node in node()) {
+            let mut api = crate::ir::Api {
+                info: crate::ir::Info {
+                    title: "T".to_owned(),
+                    version: "1".to_owned(),
+                    description: None,
+                },
+                servers: Vec::new(),
+                operations: Vec::new(),
+                types: Default::default(),
+                security_schemes: Default::default(),
+            };
+            let mut names = crate::name::Names::default();
+            let ty = insert(&node, &mut api, &mut names);
+            let rendered = super::canon_ty(ty, &api, &names);
+            let parsed = syn::parse_str::<syn::Type>(&rendered);
+            proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
+            check(&node, ty, &parsed.expect("checked"), &api, &names)?;
+        }
     }
 }

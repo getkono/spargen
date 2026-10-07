@@ -618,6 +618,160 @@ fn an_operation_named_after_a_client_method_still_compiles() {
     );
 }
 
+/// Parameters of one operation whose names escape to the same Rust identifier (issue #455). Each
+/// operation lists the colliding pair with the later-ranked location first, so the bare spelling is
+/// shown to follow the location rank and not the listing order. `search` also names its parameters
+/// after the generated `query` and `params` bindings, which must yield to every parameter.
+const PARAMETER_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters:
+        - { name: id, in: query, required: true, schema: { type: integer } }
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: page_size, in: header, schema: { type: integer } }
+        - { name: page-size, in: query, schema: { type: integer } }
+      responses: { "204": { description: ok } }
+  /search/{query}:
+    get:
+      operationId: search
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: query, in: path, required: true, schema: { type: string } }
+        - { name: params, in: query, schema: { type: string } }
+      responses: { "204": { description: ok } }
+"#;
+
+/// Two parameters escaping to one identifier get distinct ones, so the module compiles, lints
+/// clean, and sends each parameter under its own wire name and location. Before the fix, `getItem`
+/// emitted `id: i64, id: i64` (`E0415`) and two `pub page_size` fields (`E0124`).
+#[test]
+fn parameters_whose_names_escape_alike_get_distinct_identifiers() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, PARAMETER_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "params_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    // The query `page-size` ranks before the header `page_size`, so it keeps the bare setter.
+    assert_eq!(
+        generated.matches("pub fn page_size(").count(),
+        1,
+        "{generated}"
+    );
+    let suffixed = generated
+        .split("pub fn page_size_")
+        .nth(1)
+        .and_then(|rest| rest.split('(').next())
+        .map(|suffix| format!("page_size_{suffix}"))
+        .unwrap_or_else(|| panic!("the header parameter takes a suffixed setter:\n{generated}"));
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "colliding parameter names must still generate compiling, lint-clean code"
+    );
+
+    // Positional arguments follow the listing order: the query `id` first, then the path `id`.
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/collide.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+#[test]
+fn each_colliding_parameter_reaches_its_own_location() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let read = stream.read(&mut buf).unwrap();
+            requests.push(String::from_utf8_lossy(&buf[..read]).into_owned());
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+        }
+        requests
+    });
+
+    let client = params_collide::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .get_item(
+            8,
+            7,
+            params_collide::GetItemParams::default()
+                .page_size(10)
+                .HEADER_SETTER(20),
+        )
+        .expect("get_item round-trips");
+    client
+        .search(
+            "b",
+            "a",
+            params_collide::SearchParams::default().params("c".to_owned()),
+        )
+        .expect("search round-trips");
+
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests[0].lines().next(),
+        Some("GET /items/7?id=8&page-size=10 HTTP/1.1"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("\r\npage_size: 20\r\n"),
+        "{}",
+        requests[0]
+    );
+    assert_eq!(
+        requests[1].lines().next(),
+        Some("GET /search/a?query=b&params=c HTTP/1.1"),
+        "{}",
+        requests[1]
+    );
+}
+"##
+        .replace("HEADER_SETTER", &suffixed),
+    )
+    .unwrap();
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "collide"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "each colliding parameter must reach the wire under its own name and location"
+    );
+}
+
 /// A spec whose only binary payload is one documented error body. `ErrorShape::Single` over a
 /// `TypeKind::Bytes` is the shape where generated code and the dependency contract can most easily
 /// disagree: the body never travels through serde (it is classified by `classify_error_bytes`), so
@@ -1136,6 +1290,77 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
             "the declared runtime floors must compile for wasm"
         );
     }
+}
+
+/// The module `spargen::generate` writes for [`BASIC_SPEC`] with the `Spec` passed through
+/// `configure`, with only the bytes that vary between runs and releases replaced by placeholders:
+/// the two build-cache digest lines (the input digest covers the spargen version), and the
+/// provenance header's spargen version and spec path (a temporary directory). Every byte below
+/// the header is kept, the embedded `support` runtime included.
+fn basic_spec_module(configure: impl FnOnce(Spec) -> Spec) -> String {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = temp.path().join("lib.rs");
+    let spec_path = Utf8PathBuf::from_path_buf(spec).unwrap();
+    let report = spargen::generate(
+        &configure(Spec::new(spec_path.clone()))
+            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let written = std::fs::read_to_string(&out).unwrap();
+    let mut lines = written.split_inclusive('\n');
+    let mut expect = |prefix: &str, placeholder: &str| -> String {
+        let line = lines.next().unwrap_or_default();
+        assert!(
+            line.starts_with(prefix),
+            "the generated module's header changed shape: expected a line starting {prefix:?}, \
+             got {line:?}; update `basic_spec_module`'s normalization"
+        );
+        format!("{prefix}{placeholder}\n")
+    };
+    let mut normalized = String::new();
+    normalized += &expect("// input-sha256: ", "[input digest]");
+    normalized += &expect("// content-sha256: ", "[content digest]");
+    normalized += &expect("// @generated by spargen ", "[version]");
+    let source = lines.next().unwrap_or_default();
+    assert!(
+        source.starts_with(&format!("// source: {spec_path}")),
+        "the generated module's source line changed shape: {source:?}"
+    );
+    normalized += &source.replace(spec_path.as_str(), "[spec]");
+    normalized.extend(lines);
+    normalized
+}
+
+/// The complete emitted module for [`BASIC_SPEC`] under the default generation options is a golden
+/// file, so a change to any emitted byte — a signature, a derive, a serde attribute, the embedded
+/// runtime — is a reviewable diff rather than something only `cargo check` and clippy notice.
+///
+/// The defaults have both type-mapping features on (`uuid` and `time`). The fixture crate's own
+/// cargo features need no golden file of their own: they select `cfg` branches *inside* this text
+/// (`blocking`, `wasm32`), so one module covers every feature set it is compiled under.
+#[test]
+fn basic_spec_module_is_pinned() {
+    insta::assert_snapshot!("basic_spec_module", basic_spec_module(|spec| spec));
+}
+
+/// The same golden file with both type-mapping features off: `format: uuid` and
+/// `format: date-time`/`date` fall back to `String` and the embedded runtime drops its date
+/// newtypes. `open_narrowing` is left at its default because no schema in [`BASIC_SPEC`] carries
+/// the construct it changes, so enabling it emits the default module byte for byte.
+#[test]
+fn basic_spec_module_without_type_mapping_features_is_pinned() {
+    let module = basic_spec_module(|spec| spec.uuid(false).time(false));
+    assert_ne!(
+        module,
+        basic_spec_module(|spec| spec),
+        "turning the type-mapping features off must change the emitted module, or this golden \
+         file duplicates the default one"
+    );
+    insta::assert_snapshot!("basic_spec_module_no_features", module);
 }
 
 #[test]
@@ -2359,6 +2584,21 @@ fn a_narrowing_meet_retypes_or_drops_its_members_default() {
     assert_eq!(base.valid.as_deref(), Some("a"));
     assert_eq!(base.bad.as_deref(), Some("zzz"));
     assert_eq!(base.fraction, Some(2.5));
+}
+
+#[test]
+fn a_meet_applies_a_default_only_a_later_side_declares() {
+    use basic_client::types::{MergedDefault, MergedDefaultClash, MergedDefaultSibling};
+    let merged: MergedDefault = serde_json::from_str("{}").unwrap();
+    assert_eq!(merged.p.as_deref(), Some("hello"));
+    let sibling: MergedDefaultSibling = serde_json::from_str("{}").unwrap();
+    assert_eq!(sibling.p.as_deref(), Some("hello"));
+    // `world` comes first here, yet the clash keeps `hello`, as it does in the other order.
+    let clash: MergedDefaultClash = serde_json::from_str("{}").unwrap();
+    assert_eq!(clash.p.as_deref(), Some("hello"));
+    // A present value is still the value.
+    let present: MergedDefault = serde_json::from_str(r#"{"p": "x"}"#).unwrap();
+    assert_eq!(present.p.as_deref(), Some("x"));
 }
 
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
@@ -5293,6 +5533,32 @@ components:
         bad: { enum: [a, b] }
         ratio: { type: integer }
         fraction: { type: integer }
+    # Issue #432: a meet keeps the default either side declares, whichever side comes first, and
+    # two different defaults keep the same one in either order (`hello`; `world` is `W005`).
+    MergedDefaultNarrow:
+      type: object
+      properties:
+        p: { type: string }
+    MergedDefaultBase:
+      type: object
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultOther:
+      type: object
+      properties:
+        p: { type: string, default: world }
+    MergedDefault:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultNarrow"
+        - $ref: "#/components/schemas/MergedDefaultBase"
+    MergedDefaultSibling:
+      $ref: "#/components/schemas/MergedDefaultNarrow"
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultClash:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultOther"
+        - $ref: "#/components/schemas/MergedDefaultBase"
     # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
     # only valid form, `null` included among the rejected values.
     ForbiddenProperty:
@@ -6950,14 +7216,35 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
 
     let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n");
     let block = requirements.manifest_block();
+    // Opting in is uncommenting every line under the opt-in header: the `[features]` entry and
+    // the dependency both come from the printed block, nothing is added by hand.
     let opted_in = block
-        .replace("# [target", "[target")
-        .replace("# tokio", "tokio");
+        .lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(rest) if !rest.starts_with("To opt in") => rest,
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_ne!(
         opted_in, block,
         "the blocking opt-in is rendered commented out:\n{block}"
     );
-    let blocking = "[features]\nblocking = [\"dep:tokio\"]\n";
+    assert!(
+        opted_in.contains("[features]\nblocking = [\"dep:tokio\"]\n"),
+        "the printed opt-in carries the blocking feature wiring:\n{block}"
+    );
+    // The workspace-inherited member below assembles its own dependency lines, so it takes the
+    // feature entry `deps` prints rather than restating it.
+    let blocking = format!(
+        "{}\n",
+        opted_in
+            .lines()
+            .skip_while(|line| *line != "[features]")
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     // Direct, verbatim. `[workspace]` keeps each fixture its own root, so the walk upward never
     // leaves the temporary directory.
@@ -6979,10 +7266,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
         &direct_blocking,
         &[(
             "Cargo.toml",
-            format!(
-                "{}\n{blocking}\n{opted_in}\n[workspace]\n",
-                package("direct-blocking")
-            ),
+            format!("{}\n{opted_in}\n[workspace]\n", package("direct-blocking")),
         )],
         "Cargo.toml",
         &spec,

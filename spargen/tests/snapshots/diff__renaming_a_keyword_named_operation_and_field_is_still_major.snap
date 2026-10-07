@@ -1,0 +1,8 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /pets|method renamed `r#gen` -> `generate`
+major|field-removed|Pet.r#type|field removed (was `String`)
+minor|field-added|Pet.kind|optional field added: `String`
+bump=major

@@ -52,9 +52,11 @@ pub fn build_url_on(
     // them (`%2E`, `.%2E`, ...), so percent-encoding a dot does not protect it. A rendered path
     // value forming such a segment would silently re-target the request (`/users/../keys` is
     // sent to `/keys`), so it is refused instead. A special-scheme URL also splits on `\`.
+    // The segment is `Debug`-formatted: `is_dot_segment` ignores tab, LF and CR, so a refused
+    // segment may hold them, and written raw they would hide in or break the message's line.
     if let Some(segment) = request_path.split(['/', '\\']).find(|s| is_dot_segment(s)) {
         return Err(Error::request_message(format!(
-            "request path contains the dot segment `{segment}`, which URL normalization would \
+            "request path contains the dot segment {segment:?}, which URL normalization would \
              remove and so send the request to a different resource"
         )));
     }
@@ -562,6 +564,10 @@ where
 }
 
 /// Classify a documented raw-byte error body without passing it through a structured decoder.
+///
+/// Retains at most `max_error_body` bytes either way, and drops the truncation flag: neither
+/// [`Error::Api`] nor [`Error::UnexpectedStatus`] has a field for it, so a body cut at the cap is
+/// indistinguishable from one that was exactly that long.
 pub async fn classify_error_bytes<E: From<Bytes>>(
     core: &ClientCore,
     response: Response,
@@ -658,6 +664,10 @@ async fn read_capped<E>(
 
 /// The `wasm32` counterpart. reqwest's `fetch` backend exposes no `chunk`, so the body arrives
 /// whole and only *retention* can be bounded here, not peak memory.
+// Mutation testing: replacing this body with `Ok((Default::default(), _))` survives the native
+// suite and is declared rather than killed. The function is compiled only for `wasm32`, so a
+// native test binary holds the native `read_capped` above in its place and no native test can
+// reach the mutated code; on `wasm32` the runtime is compile-checked, not tested.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
     let cap = core.config().max_error_body;
@@ -1589,6 +1599,16 @@ mod tests {
     }
 
     #[test]
+    fn build_url_does_not_join_onto_an_empty_query_on_the_base_url() {
+        // `https://example.com/?` carries a query that is present but empty: there is nothing to
+        // join onto, so no leading `&` may appear.
+        let core = core_at("https://example.com/?");
+        assert_eq!(core.base_url().query(), Some(""));
+        let url = build_url(&core, "/search", &["q=rust".to_owned()]).unwrap();
+        assert_eq!(url.query(), Some("q=rust"));
+    }
+
+    #[test]
     fn build_url_keeps_matrix_and_label_prefixes_in_the_path() {
         let core = core_at("https://example.com");
         // `set_path` must not disturb `;`, `=`, `,` or an existing percent-triple.
@@ -1639,6 +1659,61 @@ mod tests {
                 "{segment:?}: {error:?}"
             );
             build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
+        }
+    }
+
+    #[test]
+    fn the_dot_segment_refusal_escapes_the_segments_tab_lf_and_cr() {
+        // #452: the refused segment may hold the tab, LF or CR `is_dot_segment` ignores; the
+        // message must show them escaped and stay on one line.
+        let core = core_at("https://api.example.com/v1/");
+        for (segment, escaped) in [
+            (".\t.", r#"".\t.""#),
+            ("..\n", r#""..\n""#),
+            ("\r..", r#""\r..""#),
+        ] {
+            let error =
+                build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .expect("a refusal carries its message");
+            assert!(
+                cause.contains(&format!("the dot segment {escaped},")),
+                "{segment:?}: {cause:?}"
+            );
+            assert!(
+                !cause.contains(['\t', '\n', '\r']),
+                "{segment:?}: {cause:?}"
+            );
+        }
+    }
+
+    /// One path segment: never `/` or `\`, the separators the guard splits on, and drawn mostly
+    /// from dots, `%2E` in either case, near-misses of it, and the tab, LF and CR the URL parser
+    /// deletes.
+    fn segment() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::strategy::Strategy;
+        proptest::string::string_regex("(\\.|%2[eE]|%2|%|2|[eE]|\\t|\\n|\\r|a| |\\?|#|;|\\PC){0,6}")
+            .expect("a valid regex")
+            .prop_filter("a single segment", |s| !s.contains(['/', '\\']))
+    }
+
+    proptest::proptest! {
+        /// The guard agrees with `url` over the whole space of single segments, not only at the
+        /// listed spellings: `is_dot_segment(s)` holds exactly when `set_path("/a/{s}/b")` stops
+        /// being the three segments it was written as.
+        #[test]
+        fn is_dot_segment_holds_exactly_where_set_path_removes_the_segment(segment in segment()) {
+            let mut url = reqwest::Url::parse("https://example.com/").unwrap();
+            url.set_path(&format!("/a/{segment}/b"));
+            let segments = url.path_segments().map_or(0, Iterator::count);
+            proptest::prop_assert_eq!(
+                is_dot_segment(&segment),
+                segments != 3,
+                "{:?} -> {}",
+                segment,
+                url.path()
+            );
         }
     }
 
@@ -1762,6 +1837,26 @@ mod tests {
             build_url_with_query_string(&core, "/search", &["term=rust%20api".to_owned()], None)
                 .unwrap();
         assert_eq!(url.query(), Some("term=rust%20api"));
+    }
+
+    /// Both arguments at once. Generated code never passes both — lowering rejects an `in: query`
+    /// parameter beside an `in: querystring` one (the 3.2 Parameter Locations rule forbids it),
+    /// and the one `querystring` parameter fills only one of them — but the entry point is public,
+    /// so what it does with both is still its contract: the fragments come first and the
+    /// whole-query value is joined after them, with no separator where the fragments rendered to
+    /// nothing.
+    #[test]
+    fn build_url_with_query_string_joins_the_whole_query_after_any_fragments() {
+        let core = core_at("https://example.com?stale=server-value");
+        let whole = Some("b=2");
+        let joined =
+            build_url_with_query_string(&core, "/search", &["a=1".to_owned()], whole).unwrap();
+        assert_eq!(joined.query(), Some("a=1&b=2"));
+        let after_empty =
+            build_url_with_query_string(&core, "/search", &[String::new()], whole).unwrap();
+        assert_eq!(after_empty.query(), Some("b=2"));
+        let alone = build_url_with_query_string(&core, "/search", &[], whole).unwrap();
+        assert_eq!(alone.query(), Some("b=2"));
     }
 
     #[test]
@@ -1965,6 +2060,40 @@ mod tests {
             &documented,
         ));
         assert_decode(error, 429, "4");
+    }
+
+    #[test]
+    fn a_decode_message_escapes_the_servers_lf_cr_and_tab() {
+        // #457: serde quotes an unknown variant verbatim, so a server-sent `"x\ny\r\tz"` reaches
+        // the message; it must show those characters escaped and stay on one line, on both the
+        // success and the documented-error decode paths.
+        #[derive(serde::Deserialize, Debug)]
+        enum Problem {
+            #[serde(rename = "gone")]
+            Gone,
+        }
+        impl std::fmt::Display for Problem {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{self:?}")
+            }
+        }
+        let body = r#""x\ny\r\tz""#;
+        let success = poll_ready(super::decode_success::<TextChoice>(
+            &core(),
+            json_response(200, body),
+        ))
+        .unwrap_err();
+        let error = poll_ready(super::classify_error::<Problem>(
+            &core(),
+            json_response(422, body),
+            &[StatusSpec::Exact(422)],
+        ));
+        assert!(matches!(success, Error::Decode { .. }), "{success:?}");
+        assert!(matches!(error, Error::Decode { .. }), "{error:?}");
+        for message in [success.to_string(), error.to_string()] {
+            assert!(message.contains(r"x\ny\r\tz"), "{message:?}");
+            assert!(!message.contains(['\n', '\r', '\t']), "{message:?}");
+        }
     }
 
     #[test]
@@ -2535,5 +2664,114 @@ mod tests {
             )),
             200,
         );
+    }
+
+    /// Every message in `error`'s `source()` chain, outermost first.
+    fn messages(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+        std::iter::successors(Some(error), |error| error.source())
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Whether every message in `error`'s chain is free of control characters, so none can break
+    /// the line it is logged on or forge another.
+    fn single_line(error: &(dyn std::error::Error + 'static)) -> Result<(), String> {
+        match messages(error)
+            .into_iter()
+            .find(|message| message.contains(char::is_control))
+        {
+            Some(message) => Err(message),
+            None => Ok(()),
+        }
+    }
+
+    /// Text biased to control characters: the C0 set, DEL and the C1 set, beside dots, `%2E` and
+    /// ordinary characters.
+    fn control_biased() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::string::string_regex(
+            "([\\x00-\\x1f]|\\x7f|[\\u{80}-\\u{9f}]|\\.|%2[eE]|a|\"|\\PC){0,8}",
+        )
+        .expect("a valid regex")
+    }
+
+    /// A documented string enum: serde's message for a value it does not list quotes the value.
+    /// It is an error body too, so the classifiers' `Error<Listed>` has a `source()` chain.
+    #[derive(Debug, serde::Deserialize)]
+    enum Listed {
+        Listed,
+    }
+
+    impl std::fmt::Display for Listed {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Listed::Listed => formatter.write_str("listed"),
+            }
+        }
+    }
+
+    impl std::error::Error for Listed {}
+
+    proptest::proptest! {
+        /// `build_url` refuses a path value that forms a dot segment by quoting the segment, and
+        /// a server override that does not parse through `url`'s error: whatever the text holds,
+        /// every message in the refusal's chain stays on one line (#452).
+        #[test]
+        fn a_url_refusal_message_is_a_single_line(
+            segment in control_biased(),
+            server in control_biased(),
+        ) {
+            let core = core_at("https://api.example.com/v1/");
+            let path = format!("/users/{segment}/keys");
+            let refusals = [
+                build_url(&core, &path, &[]).err(),
+                build_url(&core, &segment, &[]).err(),
+                build_url_on(&core, Some(&server), &path, &[]).err(),
+                build_url_with_query_string(&core, &path, &[], Some(&segment)).err(),
+            ];
+            for error in refusals.iter().flatten() {
+                proptest::prop_assert_eq!(single_line(error), Ok(()));
+            }
+        }
+
+        /// `Error::Decode` carries serde's message, which quotes the server-supplied value it
+        /// failed on; through the per-status dispatch, the JSON and text success decoders and
+        /// both error classifiers, every message in its chain stays on one line (#457).
+        #[test]
+        fn a_decode_failure_message_is_a_single_line(text in control_biased()) {
+            let json = serde_json::Value::String(text.clone()).to_string();
+            let core = core();
+            let mut errors: Vec<Error<Listed>> = Vec::new();
+            for body in [format!(r#"{{"id":{json}}}"#), json.clone(), text.clone()] {
+                if let Err(error) = dispatch_success(json_response(200, &body)) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = dispatch_success(json_response(202, &format!(r#"{{"job":{body}}}"#))) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = poll_ready(super::decode_success::<Listed>(&core, json_response(200, &body))) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = poll_ready(decode_success_text::<Listed>(&core, json_response(200, &body))) {
+                    errors.push(error.widen());
+                }
+                errors.push(poll_ready(super::classify_error::<Listed>(
+                    &core,
+                    json_response(400, &body),
+                    &[StatusSpec::Any],
+                )));
+                errors.push(poll_ready(classify_error_text::<Listed>(
+                    &core,
+                    json_response(400, &body),
+                    &[StatusSpec::Any],
+                )));
+            }
+            proptest::prop_assert!(
+                errors.iter().any(|error| matches!(error, Error::Decode { .. })),
+                "no decode failure was produced"
+            );
+            for error in &errors {
+                proptest::prop_assert_eq!(single_line(error), Ok(()));
+            }
+        }
     }
 }

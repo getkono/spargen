@@ -75,31 +75,142 @@ fn declared_deps(source: &str, path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// The inter-subsystem edges a file actually takes. Comment lines are skipped: a rustdoc intra-doc
-/// link such as `[`crate::name`]` is prose, not a `use` edge, and counting it would make the lint
-/// fire on documentation.
-fn edges(source: &str, own: &str) -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    for line in source.lines() {
-        if line.trim_start().starts_with("//") {
-            continue;
-        }
-        let mut rest = line;
-        while let Some(at) = rest.find("crate::") {
-            rest = &rest[at + "crate::".len()..];
-            let ident: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if ident != own
-                && (SUBSYSTEMS.contains(&ident.as_str())
-                    || FACADE_PLUMBING.contains(&ident.as_str()))
-            {
-                found.insert(ident);
+/// The first path segment after every `root::` in `tokens`, at any depth. A grouped
+/// `root::{a, b::c}` yields the head of each member (`a`, `b`). Lexing with `proc_macro2` rather
+/// than scanning lines means a comment is never read (a rustdoc intra-doc link such as
+/// `[`crate::name`]` is prose, not an edge: its text becomes a `#[doc]` string literal), and a
+/// path rustfmt wraps across lines is still one path.
+///
+/// A string literal inside an attribute other than `#[doc]` is read too, because attributes such
+/// as `#[serde(with = "crate::source::f")]` name a path as a string: where it lexes as Rust, its
+/// paths are edges like any other. `in_attr` says the tokens sit inside such an attribute. A
+/// string outside every attribute (`let _ = "crate::x"`) and a `#[doc]` string stay prose.
+fn path_heads(
+    tokens: proc_macro2::TokenStream,
+    root: &str,
+    in_attr: bool,
+    out: &mut BTreeSet<String>,
+) {
+    use proc_macro2::{Delimiter, TokenTree};
+    let is_punct = |tree: Option<&TokenTree>, ch: char| matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ch);
+    let is_colon = |tree: Option<&TokenTree>| is_punct(tree, ':');
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (at, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => {
+                // `#[...]`, or `#![...]` for an inner attribute.
+                let opens_attr = group.delimiter() == Delimiter::Bracket
+                    && at > 0
+                    && (is_punct(trees.get(at - 1), '#')
+                        || (at > 1
+                            && is_punct(trees.get(at - 1), '!')
+                            && is_punct(trees.get(at - 2), '#')));
+                if opens_attr {
+                    let is_doc = matches!(
+                        group.stream().into_iter().next(),
+                        Some(TokenTree::Ident(name)) if name == "doc"
+                    );
+                    if !is_doc {
+                        path_heads(group.stream(), root, true, out);
+                    }
+                } else {
+                    path_heads(group.stream(), root, in_attr, out);
+                }
             }
+            TokenTree::Literal(literal) if in_attr => {
+                let Ok(text) =
+                    syn::parse2::<syn::LitStr>(TokenTree::Literal(literal.clone()).into())
+                else {
+                    continue;
+                };
+                if let Ok(inner) = text.value().parse::<proc_macro2::TokenStream>() {
+                    path_heads(inner, root, true, out);
+                }
+            }
+            TokenTree::Ident(ident)
+                if *ident == root && is_colon(trees.get(at + 1)) && is_colon(trees.get(at + 2)) =>
+            {
+                match trees.get(at + 3) {
+                    Some(TokenTree::Ident(head)) => {
+                        out.insert(head.to_string());
+                    }
+                    Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => {
+                        let members: Vec<TokenTree> = group.stream().into_iter().collect();
+                        for member in members.split(
+                            |tree| matches!(tree, TokenTree::Punct(punct) if punct.as_char() == ','),
+                        ) {
+                            if let Some(TokenTree::Ident(head)) = member.first() {
+                                out.insert(head.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
-    found
+}
+
+/// The first segment of every `root::` path in `source`, lexed as Rust.
+fn source_path_heads(source: &str, root: &str, path: &Path) -> BTreeSet<String> {
+    let tokens: proc_macro2::TokenStream = source
+        .parse()
+        .unwrap_or_else(|error| panic!("{path:?} must lex as Rust: {error}"));
+    let mut heads = BTreeSet::new();
+    path_heads(tokens, root, false, &mut heads);
+    heads
+}
+
+/// The inter-subsystem edges a file actually takes: every `crate::` path whose first segment is
+/// another subsystem or facade plumbing.
+fn edges(source: &str, own: &str, path: &Path) -> BTreeSet<String> {
+    source_path_heads(source, "crate", path)
+        .into_iter()
+        .filter(|ident| {
+            ident != own
+                && (SUBSYSTEMS.contains(&ident.as_str())
+                    || FACADE_PLUMBING.contains(&ident.as_str()))
+        })
+        .collect()
+}
+
+/// The edge reader's handling of the path shapes a line scan got wrong or never saw: a grouped
+/// `use`, a nested group, a path wrapped across lines, a path-valued attribute string, and prose
+/// that only cites a path.
+#[test]
+fn the_edge_reader_reads_grouped_paths_and_skips_comments() {
+    let source = r#"
+//! Cites [`crate::emit`] in prose.
+use crate::{ir, diag::{Code, Diagnostic}};
+use crate::{
+    name::Scope,
+    self as root,
+};
+// crate::compat is only mentioned here.
+/* crate::surface, in a block comment */
+/// A doc comment naming `crate::cache`.
+#[doc = "an explicit doc attribute naming crate::config"]
+struct Report {
+    #[serde(serialize_with = "crate::surface::write")]
+    path: String,
+    #[serde(rename = "not a path {")]
+    other: String,
+}
+fn wrapped() -> crate
+    ::source::Spec {
+    let _ = "crate::support";
+    pub(crate) fn inner() {}
+    crate::codegen::run()
+}
+"#;
+    assert_eq!(
+        edges(source, "codegen", Path::new("fixture.rs")),
+        BTreeSet::from(["diag", "ir", "name", "source", "surface"].map(str::to_owned)),
+        "`self` is not a subsystem, `codegen` is the file's own, comments, docs and string \
+         literals outside attributes take no edge, and a path-valued string in a non-doc \
+         attribute does"
+    );
 }
 
 /// The DAG table in the `lib.rs` module docs, as `subsystem -> allowed dependencies`. The table is
@@ -131,14 +242,17 @@ fn dag_table(lib: &str) -> BTreeMap<String, BTreeSet<String>> {
 #[test]
 fn every_subsystem_declares_the_dependencies_it_actually_takes() {
     let root = workspace_root();
+    let mut total_edges = 0;
+    let mut tracked_seen = BTreeSet::new();
     for subsystem in SUBSYSTEMS {
         let module = root.join("spargen/src").join(subsystem).join("mod.rs");
         let declared = declared_deps(&read(&module), &module);
 
         let mut taken: BTreeSet<String> = BTreeSet::new();
         for file in subsystem_files(&root, subsystem) {
-            taken.extend(edges(&read(&file), subsystem));
+            taken.extend(edges(&read(&file), subsystem, &file));
         }
+        total_edges += taken.len();
 
         let undeclared: Vec<&String> = taken.difference(&declared).collect();
         assert!(
@@ -146,6 +260,24 @@ fn every_subsystem_declares_the_dependencies_it_actually_takes() {
             "subsystem `{subsystem}` reaches {undeclared:?} but its `//! layer-deps:` header \
              declares only {declared:?} — declare the edge (and add it to the DAG table in \
              lib.rs), or stop taking it"
+        );
+        let unused: Vec<&String> = declared
+            .difference(&taken)
+            .filter(|dep| {
+                let tracked = OVER_DECLARED_TRACKED
+                    .iter()
+                    .any(|(module, edge, _)| module == subsystem && edge == dep);
+                if tracked {
+                    tracked_seen.insert((*subsystem, dep.as_str().to_owned()));
+                }
+                !tracked
+            })
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "subsystem `{subsystem}` declares {unused:?} in its `//! layer-deps:` header but takes \
+             no such edge — drop it from the header and the DAG table in lib.rs, or the header \
+             no longer describes the module"
         );
 
         for plumbing in FACADE_PLUMBING {
@@ -156,6 +288,55 @@ fn every_subsystem_declares_the_dependencies_it_actually_takes() {
             );
         }
     }
+    assert!(
+        total_edges > 0,
+        "no subsystem takes any `crate::` edge, so the edge reader has stopped reading the sources"
+    );
+    let stale: Vec<_> = OVER_DECLARED_TRACKED
+        .iter()
+        .filter(|(module, edge, _)| !tracked_seen.contains(&(*module, (*edge).to_owned())))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these tracked over-declarations are no longer declared-but-untaken; remove them: \
+         {stale:?}"
+    );
+}
+
+/// Declared `//! layer-deps:` edges a subsystem does not take, as `(subsystem, edge, issue)`, each
+/// with the issue that removes it. An entry that stops being needed fails the test, so this only
+/// shrinks.
+const OVER_DECLARED_TRACKED: &[(&str, &str, &str)] = &[];
+
+/// The subsystem directories under `spargen/src/`: each is a library subsystem in `SUBSYSTEMS`,
+/// or `cli` (header checked by `the_cli_declares_its_dependency_on_the_facade`), or `bin`, which
+/// holds the binary's entry point and is no subsystem.
+#[test]
+fn every_source_directory_is_a_declared_subsystem() {
+    let src = workspace_root().join("spargen/src");
+    let on_disk: BTreeSet<String> = std::fs::read_dir(&src)
+        .expect("spargen/src exists")
+        .map(|entry| entry.expect("readable directory entry").path())
+        .filter(|path| path.is_dir())
+        .map(|path| {
+            path.file_name()
+                .expect("a directory has a name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name != "bin")
+        .collect();
+    let declared: BTreeSet<String> = SUBSYSTEMS
+        .iter()
+        .chain(&["cli"])
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        on_disk, declared,
+        "the directories under spargen/src/ and `SUBSYSTEMS` (plus `cli`) have drifted: a \
+         subsystem missing from the list has its `//! layer-deps:` header and edges checked by \
+         nothing"
+    );
 }
 
 #[test]
@@ -181,11 +362,29 @@ fn the_declared_headers_agree_with_the_dag_table_in_lib_rs() {
 fn the_cli_declares_its_dependency_on_the_facade() {
     // `cli` has no `mod.rs`; its header rides on `run.rs`, and it depends on the facade rather
     // than on any subsystem. CLAUDE.md still lists it as a subsystem, so the header must exist.
-    let run = workspace_root().join("spargen/src/cli/run.rs");
-    let source = read(&run);
-    assert!(
-        source.contains("//! layer-deps: facade"),
-        "spargen/src/cli/run.rs must declare `//! layer-deps: facade`"
+    // Inside `cli`, `crate::` names the binary crate, so the facade edge is a `spargen::` path; a
+    // `crate::<subsystem>` path there would name a module the binary does not have.
+    let root = workspace_root();
+    let run = root.join("spargen/src/cli/run.rs");
+    let declared = declared_deps(&read(&run), &run);
+    assert_eq!(
+        declared,
+        BTreeSet::from(["facade".to_owned()]),
+        "spargen/src/cli/run.rs must declare exactly `//! layer-deps: facade`"
+    );
+
+    let mut taken = BTreeSet::new();
+    for file in subsystem_files(&root, "cli") {
+        let source = read(&file);
+        if !source_path_heads(&source, "spargen", &file).is_empty() {
+            taken.insert("facade".to_owned());
+        }
+        taken.extend(edges(&source, "cli", &file));
+    }
+    assert_eq!(
+        taken, declared,
+        "the `cli` files take {taken:?}, and run.rs declares {declared:?}: the CLI reaches the \
+         library through the `spargen::` facade and nothing else"
     );
 }
 
@@ -197,11 +396,13 @@ fn the_cli_declares_its_dependency_on_the_facade() {
 fn each_runtime_source_carries_its_test_module_last_and_only_once() {
     let root = workspace_root();
     let dir = root.join("support-runtime/src");
+    let (mut sources, mut with_tests) = (0, 0);
     for entry in std::fs::read_dir(&dir).expect("support-runtime/src exists") {
         let path = entry.expect("readable directory entry").path();
         if path.extension().is_none_or(|ext| ext != "rs") {
             continue;
         }
+        sources += 1;
         let source = read(&path);
         let occurrences = source.matches("#[cfg(test)]").count();
         assert!(
@@ -212,22 +413,69 @@ fn each_runtime_source_carries_its_test_module_last_and_only_once() {
         let Some((_, tail)) = source.split_once("#[cfg(test)]") else {
             continue;
         };
+        with_tests += 1;
         // Nothing but the test module may follow: the first item after the marker is `mod tests`,
-        // and no column-0 item may appear after that module closes.
+        // and that module is the file's last item.
         assert!(
             tail.trim_start().starts_with("mod tests"),
             "{path:?} puts something other than `mod tests` after `#[cfg(test)]`"
         );
-        let after_module = tail
-            .rfind("\n}")
-            .map(|at| &tail[at + 2..])
-            .unwrap_or_default();
-        assert!(
-            after_module.trim().is_empty(),
-            "{path:?} declares items after its `#[cfg(test)]` module: {:?}",
-            after_module.trim()
+        assert_eq!(
+            test_module_position(&source, &path),
+            Some(TestModule::Last),
+            "{path:?} declares items after its `#[cfg(test)]` module"
         );
     }
+    assert!(
+        sources > 0 && with_tests > 0,
+        "read {sources} runtime sources and {with_tests} test modules: the check has stopped \
+         reading support-runtime/src"
+    );
+}
+
+/// Where a parsed file's `#[cfg(test)] mod tests` sits among its items.
+#[derive(Debug, PartialEq)]
+enum TestModule {
+    Last,
+    NotLast,
+}
+
+/// The position of the item `#[cfg(test)] mod tests` in `source`, parsed with `syn`, or `None`
+/// when the file has no such item.
+fn test_module_position(source: &str, path: &Path) -> Option<TestModule> {
+    let file = syn::parse_file(source).unwrap_or_else(|error| panic!("{path:?} parses: {error}"));
+    let is_test_module = |item: &syn::Item| {
+        let syn::Item::Mod(module) = item else {
+            return false;
+        };
+        module.ident == "tests"
+            && module.attrs.iter().any(|attr| {
+                attr.path().is_ident("cfg")
+                    && attr
+                        .parse_args::<syn::Ident>()
+                        .is_ok_and(|arg| arg == "test")
+            })
+    };
+    let at = file.items.iter().position(is_test_module)?;
+    Some(if at + 1 == file.items.len() {
+        TestModule::Last
+    } else {
+        TestModule::NotLast
+    })
+}
+
+#[test]
+fn the_test_module_reader_finds_an_item_after_the_module() {
+    let path = Path::new("fixture.rs");
+    let last = "pub fn embedded() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    assert_eq!(test_module_position(last, path), Some(TestModule::Last));
+
+    // An item after the module that also closes at column 0: a search for the last `\n}` took
+    // its brace for the module's, and read the module as last.
+    let after = "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn stray() {\n}\n";
+    assert_eq!(test_module_position(after, path), Some(TestModule::NotLast));
+
+    assert_eq!(test_module_position("pub fn embedded() {}\n", path), None);
 }
 
 /// The sentence an embedded comment block must carry to name a test-only item. It is the one
@@ -480,6 +728,13 @@ fn the_embed_list_names_every_runtime_source() {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".rs") && name != "lib.rs")
         .collect();
+    assert!(
+        !embedded.is_empty() && !on_disk.is_empty(),
+        "read {} `include_str!(\"runtime/…\")` entries and {} runtime sources: an empty side \
+         means the scan has stopped reading it, and empty equals empty",
+        embedded.len(),
+        on_disk.len()
+    );
 
     assert_eq!(
         embedded, on_disk,

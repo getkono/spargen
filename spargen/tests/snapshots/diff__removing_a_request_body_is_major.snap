@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|request-body-removed|GET /pets|request body removed (was `Pet`)
+bump=major

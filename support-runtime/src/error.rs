@@ -69,7 +69,11 @@ pub enum Error<E> {
         status: StatusCode,
         /// The response headers.
         headers: HeaderMap,
-        /// The raw response body.
+        /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
+        /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
+        /// cap. The generated shim for an operation with more than one documented success status
+        /// reads through `read_success_body`, which does not take the cap, so on that path the
+        /// body is retained whole (see `Decode`'s `body`).
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the status and headers the response
@@ -87,7 +91,8 @@ pub enum Error<E> {
         /// The headers of the response whose body failed to decode — for `EventStream`'s
         /// per-frame decode, of the response the frame was read from, as for `status`.
         headers: HeaderMap,
-        /// The serde deserialization error path.
+        /// The serde deserialization error path, held as serde wrote it; `Display` escapes its
+        /// control characters, since the message may quote server-supplied input.
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
@@ -260,6 +265,9 @@ pub trait ApiErrorBody {
 
 impl ApiErrorBody for std::convert::Infallible {
     type Body = std::convert::Infallible;
+    // Mutation testing: replacing this body with `None` is an equivalent mutant, declared rather
+    // than killed. `Infallible` is uninhabited, so no `&self` exists to call it with and no
+    // test, or caller, can observe what it returns.
     fn body(&self) -> Option<&Self::Body> {
         match *self {}
     }
@@ -366,6 +374,9 @@ pub trait ApiErrorProblem {
 }
 
 impl ApiErrorProblem for std::convert::Infallible {
+    // Mutation testing: replacing this body with `None` or `Some(Default::default())` is an
+    // equivalent mutant, declared rather than killed. `Infallible` is uninhabited, so no `&self`
+    // exists to call it with and no test, or caller, can observe what it returns.
     fn problem(&self) -> Option<ProblemDetails> {
         match *self {}
     }
@@ -415,7 +426,18 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 write!(f, "unexpected response status {status}")
             }
             Error::Decode { status, path, .. } => {
-                write!(f, "response decode failed ({status}) at {path}")
+                // `path` is serde's message, which quotes the server-supplied input (an unknown
+                // enum variant, say) verbatim; its control characters are escaped so a value
+                // holding a LF, CR or tab cannot break or forge the message's line.
+                write!(f, "response decode failed ({status}) at ")?;
+                for c in path.chars() {
+                    if c.is_control() {
+                        write!(f, "{}", c.escape_debug())?;
+                    } else {
+                        write!(f, "{c}")?;
+                    }
+                }
+                Ok(())
             }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
         }
@@ -1439,6 +1461,35 @@ mod tests {
         );
     }
 
+    /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
+    /// above is the one permanent class, so a transient source is needed beside it. A connect
+    /// failure needs a socket and a reactor, which this suite does not run; reqwest's status-kind
+    /// error needs neither, and it reaches the same `Transport` class a failed connection does,
+    /// by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the default
+    /// classifier therefore retries it.
+    #[test]
+    fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() {
+        let status_error = || {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(503)
+                    .body(String::new())
+                    .expect("valid synthetic response"),
+            )
+            .error_for_status()
+            .expect_err("a 503 is an error status")
+        };
+        let source = status_error();
+        assert!(source.is_status() && !source.is_connect(), "{source}");
+        assert_eq!(ReqwestClass::of(&source), ReqwestClass::Transport);
+        let transport = TransportError::new(source);
+        assert!(transport.is_transient());
+        assert!(crate::RetryOutcome::Transport(&transport).is_transient());
+        let error = Error::<ApiBody>::from_reqwest(status_error());
+        assert!(matches!(error, Error::Transport(_)), "{error}");
+        assert!(error.is_transient());
+    }
+
     #[test]
     fn is_transient_classifies_every_variant() {
         for error in every_variant() {
@@ -1636,6 +1687,28 @@ mod tests {
             error.to_string(),
             "response decode failed (502 Bad Gateway) at items[0].id"
         );
+    }
+
+    /// #457: the path quotes server-supplied text; its LF, CR, tab and other control characters
+    /// are escaped so the message stays on one line, while the field keeps serde's text.
+    #[test]
+    fn a_decode_error_escapes_its_paths_control_characters() {
+        let path = "unknown variant `x\ny\r\tz\u{1b}`, expected `ready`";
+        let error = Error::<ApiBody>::Decode {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            path: path.to_owned(),
+            body: Bytes::new(),
+            truncated: false,
+        };
+        assert_eq!(
+            error.to_string(),
+            r"response decode failed (200 OK) at unknown variant `x\ny\r\tz\u{1b}`, expected `ready`"
+        );
+        let Error::Decode { path: kept, .. } = error else {
+            unreachable!()
+        };
+        assert_eq!(kept, path);
     }
 
     /// The variants that wrap a cause expose it; the three that carry only data do not. A caller

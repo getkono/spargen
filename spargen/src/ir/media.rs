@@ -1623,4 +1623,286 @@ mod tests {
         // `Vec<T>` against `Vec<Option<T>>`.
         assert!(!graph.same_generated_type(ty(1), ty(2)));
     }
+
+    /// The rules [`Responses::success`] and [`Responses::error`] follow, checked over random
+    /// status sets rather than chosen examples (issue #477). Each case draws unique exact codes
+    /// (biased toward 2xx) and ranges `1XX`..`5XX`, each bodied or bodyless and streaming or not,
+    /// plus an absent, bodied, or bodyless `default`. Every body carries its own type id — the
+    /// `by_status` position plus one, or [`DEFAULT_BODY`] — so a reduced shape says which response
+    /// each body came from. The oracles are written from the documented contract, not from the
+    /// implementation: a model of both shapes, the partition of declared statuses between the two
+    /// sides, where `default` lands, and independence from `by_status` insertion order.
+    mod partition_props {
+        use super::{resp, shape, stream_resp, Shape};
+        use crate::ir::media::{Response, Responses, StatusSpec, SuccessShape};
+        use proptest::prelude::*;
+
+        /// The body type id a bodied `default` carries, distinct from every `by_status` id.
+        const DEFAULT_BODY: u32 = 1000;
+
+        fn success_shape(success: SuccessShape) -> Shape {
+            match success {
+                SuccessShape::Unit => Shape::None,
+                SuccessShape::Plain(body) => Shape::Single(body.id.0),
+                SuccessShape::Enum(entries) => Shape::Enum(
+                    entries
+                        .into_iter()
+                        .map(|(status, body)| (status, body.map(|body| body.id.0)))
+                        .collect(),
+                ),
+            }
+        }
+
+        /// A 2xx selector, stated from RFC 9110's classes rather than through `is_success`.
+        fn is_2xx(status: StatusSpec) -> bool {
+            matches!(status, StatusSpec::Exact(200..=299) | StatusSpec::Range(2))
+        }
+
+        /// Decode precedence, built by concatenation rather than a sort key: exact codes
+        /// ascending, then ranges ascending, then `default`.
+        fn in_precedence(
+            entries: Vec<(StatusSpec, Option<u32>)>,
+        ) -> Vec<(StatusSpec, Option<u32>)> {
+            let mut exact: Vec<_> = entries
+                .iter()
+                .filter_map(|&(status, body)| match status {
+                    StatusSpec::Exact(code) => Some((code, body)),
+                    _ => None,
+                })
+                .collect();
+            exact.sort_unstable_by_key(|&(code, _)| code);
+            let mut ranges: Vec<_> = entries
+                .iter()
+                .filter_map(|&(status, body)| match status {
+                    StatusSpec::Range(prefix) => Some((prefix, body)),
+                    _ => None,
+                })
+                .collect();
+            ranges.sort_unstable_by_key(|&(prefix, _)| prefix);
+            let defaults = entries
+                .iter()
+                .filter(|(status, _)| *status == StatusSpec::Default)
+                .copied();
+            exact
+                .into_iter()
+                .map(|(code, body)| (StatusSpec::Exact(code), body))
+                .chain(
+                    ranges
+                        .into_iter()
+                        .map(|(prefix, body)| (StatusSpec::Range(prefix), body)),
+                )
+                .chain(defaults)
+                .collect()
+        }
+
+        /// The documented success shape: with no 2xx declared, `default`'s body (or `()`);
+        /// otherwise the 2xx entries by body count — none is `()`, one alone (or one streaming
+        /// body beside bodyless siblings) is plain, anything else is the sorted enum.
+        fn expected_success(responses: &Responses) -> Shape {
+            let entries: Vec<(StatusSpec, Option<u32>, bool)> = responses
+                .by_status
+                .iter()
+                .filter(|(status, _)| is_2xx(*status))
+                .map(|(status, response)| {
+                    (
+                        *status,
+                        response.body.map(|body| body.id.0),
+                        response.stream.is_some(),
+                    )
+                })
+                .collect();
+            if entries.is_empty() {
+                return match responses.default.as_ref().and_then(|default| default.body) {
+                    Some(body) => Shape::Single(body.id.0),
+                    None => Shape::None,
+                };
+            }
+            let bodied: Vec<_> = entries
+                .iter()
+                .filter(|(_, body, _)| body.is_some())
+                .collect();
+            match bodied.as_slice() {
+                [] => Shape::None,
+                [(_, Some(body), _)] if entries.len() == 1 => Shape::Single(*body),
+                [(_, Some(body), true)] => Shape::Single(*body),
+                _ => Shape::Enum(in_precedence(
+                    entries
+                        .into_iter()
+                        .map(|(status, body, _)| (status, body))
+                        .collect(),
+                )),
+            }
+        }
+
+        /// The documented error shape: the non-2xx entries plus a declared `default`, by body
+        /// count — none is `None`, one entry carrying the only body is `Single`, anything else is
+        /// the sorted enum.
+        fn expected_error(responses: &Responses) -> Shape {
+            let mut entries: Vec<(StatusSpec, Option<u32>)> = responses
+                .by_status
+                .iter()
+                .filter(|(status, _)| !is_2xx(*status))
+                .map(|(status, response)| (*status, response.body.map(|body| body.id.0)))
+                .collect();
+            if let Some(default) = &responses.default {
+                entries.push((StatusSpec::Default, default.body.map(|body| body.id.0)));
+            }
+            match entries.as_slice() {
+                [] => Shape::None,
+                [(_, Some(body))] => Shape::Single(*body),
+                _ if entries.iter().all(|(_, body)| body.is_none()) => Shape::None,
+                _ => Shape::Enum(in_precedence(entries)),
+            }
+        }
+
+        /// The body type ids a reduced shape carries.
+        fn bodies(shape: &Shape) -> Vec<u32> {
+            match shape {
+                Shape::None => Vec::new(),
+                Shape::Single(body) => vec![*body],
+                Shape::Enum(entries) => entries.iter().filter_map(|(_, body)| *body).collect(),
+            }
+        }
+
+        fn response(id: u32, bodied: bool, streaming: bool) -> Response {
+            let body = bodied.then_some(id);
+            if streaming {
+                stream_resp(body)
+            } else {
+                resp(body)
+            }
+        }
+
+        /// A case in document order, the same `by_status` entries in a shuffled order, and its
+        /// `default`.
+        fn arb_case() -> impl Strategy<Value = (Responses, Responses)> {
+            let exact =
+                proptest::collection::btree_set(prop_oneof![200u16..=206, 100u16..=599], 0..6);
+            let ranges = proptest::collection::btree_set(1u8..=5, 0..3);
+            (exact, ranges)
+                .prop_map(|(exact, ranges)| {
+                    exact
+                        .into_iter()
+                        .map(StatusSpec::Exact)
+                        .chain(ranges.into_iter().map(StatusSpec::Range))
+                        .collect::<Vec<_>>()
+                })
+                .prop_flat_map(|statuses| {
+                    let flags =
+                        proptest::collection::vec((any::<bool>(), any::<bool>()), statuses.len());
+                    (
+                        Just(statuses),
+                        flags,
+                        proptest::option::of((any::<bool>(), any::<bool>())),
+                    )
+                })
+                .prop_flat_map(|(statuses, flags, default)| {
+                    let by_status: Vec<(StatusSpec, Response)> = statuses
+                        .into_iter()
+                        .zip(flags)
+                        .zip(1u32..)
+                        .map(|((status, (bodied, streaming)), id)| {
+                            (status, response(id, bodied, streaming))
+                        })
+                        .collect();
+                    let default = default
+                        .map(|(bodied, streaming)| response(DEFAULT_BODY, bodied, streaming));
+                    (
+                        Just(by_status.clone()),
+                        Just(by_status).prop_shuffle(),
+                        Just(default),
+                    )
+                })
+                .prop_map(|(by_status, shuffled, default)| {
+                    (
+                        Responses {
+                            by_status,
+                            default: default.clone(),
+                        },
+                        Responses {
+                            by_status: shuffled,
+                            default,
+                        },
+                    )
+                })
+        }
+
+        proptest! {
+            /// The body count picks unit, single, or enum on each side, and an enum lists that
+            /// side's entries in decode precedence.
+            #[test]
+            fn the_body_count_picks_each_sides_shape((responses, _) in arb_case()) {
+                prop_assert_eq!(success_shape(responses.success()), expected_success(&responses));
+                prop_assert_eq!(shape(responses.error()), expected_error(&responses));
+            }
+
+            /// Success and error partition the declared statuses: every `by_status` body reaches
+            /// exactly one side, the success side exactly when its status is 2xx, and an enum on
+            /// either side names only that side's statuses.
+            #[test]
+            fn success_and_error_partition_the_declared_statuses((responses, _) in arb_case()) {
+                let success = success_shape(responses.success());
+                let error = shape(responses.error());
+                let (success_bodies, error_bodies) = (bodies(&success), bodies(&error));
+                for ((status, response), id) in responses.by_status.iter().zip(1u32..) {
+                    if response.body.is_none() {
+                        continue;
+                    }
+                    prop_assert_eq!(success_bodies.contains(&id), is_2xx(*status));
+                    prop_assert_eq!(error_bodies.contains(&id), !is_2xx(*status));
+                }
+                if let Shape::Enum(entries) = &success {
+                    prop_assert!(entries.iter().all(|(status, _)| is_2xx(*status)));
+                }
+                if let Shape::Enum(entries) = &error {
+                    prop_assert!(entries.iter().all(|(status, _)| !is_2xx(*status)));
+                }
+            }
+
+            /// `default` is on the success side exactly when no 2xx status is declared, and on
+            /// the error side whenever it is declared, as the last entry of an error enum.
+            #[test]
+            fn default_is_the_success_source_iff_no_2xx_is_declared((responses, _) in arb_case()) {
+                let success = success_shape(responses.success());
+                let error = shape(responses.error());
+                let no_2xx = !responses.by_status.iter().any(|(status, _)| is_2xx(*status));
+                let bodied_default = responses
+                    .default
+                    .as_ref()
+                    .is_some_and(|default| default.body.is_some());
+                prop_assert_eq!(
+                    bodies(&success).contains(&DEFAULT_BODY),
+                    bodied_default && no_2xx
+                );
+                prop_assert_eq!(bodies(&error).contains(&DEFAULT_BODY), bodied_default);
+                if let Shape::Enum(entries) = &success {
+                    prop_assert!(entries.iter().all(|(status, _)| *status != StatusSpec::Default));
+                }
+                if let Shape::Enum(entries) = &error {
+                    let defaults: Vec<usize> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (status, _))| *status == StatusSpec::Default)
+                        .map(|(index, _)| index)
+                        .collect();
+                    let expected: Vec<usize> = if responses.default.is_some() {
+                        vec![entries.len() - 1]
+                    } else {
+                        Vec::new()
+                    };
+                    prop_assert_eq!(defaults, expected);
+                }
+            }
+
+            /// Neither shape depends on the order lowering inserted `by_status` entries in.
+            #[test]
+            fn the_shapes_do_not_depend_on_insertion_order((responses, shuffled) in arb_case()) {
+                prop_assert_eq!(
+                    success_shape(responses.success()),
+                    success_shape(shuffled.success())
+                );
+                prop_assert_eq!(shape(responses.error()), shape(shuffled.error()));
+            }
+        }
+    }
 }

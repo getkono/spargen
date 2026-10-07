@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|param-removed|GET /pets param `id` (query)|parameter removed (was `String`)
+minor|optional-param-added|GET /pets param `id` (header)|optional parameter added: `String`
+bump=major

@@ -131,6 +131,19 @@ pub(crate) enum ParamLoc {
     Cookie,
 }
 
+impl ParamLoc {
+    /// This location as the OpenAPI parameter `in` value spells it.
+    pub(crate) fn as_openapi_in(self) -> &'static str {
+        match self {
+            ParamLoc::Path => "path",
+            ParamLoc::Query => "query",
+            ParamLoc::QueryString => "querystring",
+            ParamLoc::Header => "header",
+            ParamLoc::Cookie => "cookie",
+        }
+    }
+}
+
 /// The serialization style of a parameter (matrix: Parameters → S).
 ///
 /// Which `(style, in)` pairs are legal is enforced by the official document schema before

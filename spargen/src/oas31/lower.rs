@@ -2880,8 +2880,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_ref_sibling_intersection(schema);
         };
         let kind = self.graph.get(met.id)?.kind.clone();
+        // The meet carries the target's nullability, but for a meet that left only `null`: that
+        // is the exact null type, whose one value is `null` already, so it is not wrapped in an
+        // `Option` as the `allOf` and inline spellings of the same union are not (#450).
+        let nullable = referenced.nullable && !matches!(kind, TypeKind::Null);
         let mut ty = self.insert_schema_type(schema, hint, kind);
-        ty.nullable = referenced.nullable;
+        ty.nullable = nullable;
         ty.boxed = met.boxed;
         Some(ty)
     }
@@ -2911,7 +2915,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`. The meet admits `null`
     /// exactly when `target` and `refiner` both do: [`Self::intersect_union`] builds its result
     /// from the non-null branches alone, and a union's `null` branch is its outer nullability,
-    /// so it is carried across here rather than lost with the rebuilt union.
+    /// so it is carried across here rather than lost with the rebuilt union. For the same reason,
+    /// a meet that excludes every non-null branch is not empty while both still admit `null`:
+    /// `null` is then the only value left, and the meet is the exact JSON null type, as the inline
+    /// sibling spelling of the same union answers (#450).
     fn meet_scoped_refiner_with_union(
         &mut self,
         target: Ty,
@@ -2921,11 +2928,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         let enclosing = self.narrowing_opens;
-        let mut ty = self.closed_narrowing(|ctx| {
+        let accepts_null = target.nullable && self.refiner_accepts_null(refiner);
+        match self.closed_narrowing(|ctx| {
             ctx.intersect_union(target, union, refiner, hint, enclosing, reach)
-        })?;
-        ty.nullable = target.nullable && self.refiner_accepts_null(refiner);
-        Ok(ty)
+        }) {
+            Ok(mut ty) => {
+                ty.nullable = accepts_null;
+                Ok(ty)
+            }
+            Err(NoMeet::Empty) if accepts_null => {
+                Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            }
+            Err(no_meet) => Err(no_meet),
+        }
     }
 
     /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
@@ -3924,6 +3939,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if take_declaration(existing, field) {
                             continue;
                         }
+                        // Either member's `default` is a default of the merged field, whichever
+                        // member came first (see `merge_field_default`).
+                        merge_field_default(
+                            &mut existing.default,
+                            field.default.as_ref(),
+                            &field.name.wire,
+                            self.diags,
+                        );
                         // A repeated property is an intersection, not an equality assertion: retain
                         // the narrower compatible type.
                         let field_hint = format!("{hint}{}Intersection", field.name.wire);
@@ -3955,13 +3978,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             // until every member's `required` has been read — a later member may
                             // require it without declaring it — so the field takes an uninhabited
                             // type now and the requirement is settled after the loop. A member's
-                            // applied `default` goes with the old type: no value of it is a value
-                            // of the field any more (it stays documented in rustdoc).
+                            // applied `default` is left for `retype_field_defaults`, which finds
+                            // it no value of the uninhabited type and reports it (`W005`) where it
+                            // was written, documenting it as not applied (#453).
                             Err(NoMeet::Empty) => {
                                 uninhabited.insert(field.name.wire.clone());
-                                if let Some(default) = &mut existing.default {
-                                    default.applied = None;
-                                }
                                 self.insert_type(
                                     &field_hint,
                                     TypeKind::Never,
@@ -4069,7 +4090,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the field's type, so the struct refers to the last meet and not to the ones before it.
         let kind = TypeKind::Struct(Struct { fields, additional });
         self.elide_meet_intermediates(mark, &kind);
-        let ty = self.insert_schema_type(schema, hint, kind);
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
+        // it satisfies every member.
+        ty.nullable = object_all_of_admits_null(contributions);
         Some(self.with_all_of_nullability(schema, ty))
     }
 
@@ -4091,7 +4115,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: schema.required.clone(),
-                nullable: schema.types.types.contains(&JsonType::Null),
+                nullable: stated_nullability(schema),
             });
         }
         Some(())
@@ -4355,7 +4379,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields,
                     additional,
                     required,
-                    nullable: ty.nullable,
+                    nullable: Some(ty.nullable),
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -4378,7 +4402,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields,
                 additional,
                 required: schema.required.clone(),
-                nullable: schema.types.types.contains(&JsonType::Null),
+                nullable: stated_nullability(schema),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -5319,6 +5343,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if take_declaration(existing, field) {
                         continue;
                     }
+                    // Either side's `default` is a default of the merged field, whichever side is
+                    // the `$ref` (see `merge_field_default`).
+                    merge_field_default(
+                        &mut existing.default,
+                        field.default.as_ref(),
+                        &field.name.wire,
+                        self.diags,
+                    );
                     let field_hint = format!("{hint}{}", field.name.wire);
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
@@ -5330,12 +5362,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // omits it still satisfies both sides. The field takes an uninhabited
                         // type, so the instances that remain representable are exactly the valid
                         // ones. Propagating the failure would reject a document that `{}`
-                        // satisfies. An applied `default` goes with the old type, since no value
-                        // of it is a value of the field any more (it stays documented in rustdoc).
+                        // satisfies. An applied `default` is no value of the uninhabited type, and
+                        // is left for `retype_field_defaults` to report (`W005`) where it was
+                        // written and document as not applied (#453).
                         Err(NoMeet::Empty) if !required => {
-                            if let Some(default) = &mut existing.default {
-                                default.applied = None;
-                            }
                             self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
                         }
                         // Required on one side or the other: every instance must carry a value no
@@ -7940,17 +7970,38 @@ fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option
 
 /// The wire name of the first field of an object parameter whose value is unconstrained
 /// ([`TypeKind::Any`]), which [`parameter_shape_supported`] refuses because an arbitrary JSON value
-/// has no single serialized token. `None` for a parameter that is not an object, or has no such
-/// field.
+/// has no single serialized token. A `oneOf`/`anyOf` parameter schema serializes as whichever
+/// member the value is, so the fields of each object member are searched too, through nested
+/// unions, as [`uninhabited_parameter_part`] searches them (#435). `None` for a parameter that is
+/// neither an object nor a union, or has no such field.
 fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String> {
-    let TypeKind::Struct(object) = &graph.get(ty.id)?.kind else {
-        return None;
-    };
-    object
-        .fields
-        .iter()
-        .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
-        .map(|field| field.name.wire.clone())
+    unconstrained_parameter_property_inner(graph, ty, &mut HashSet::new())
+}
+
+fn unconstrained_parameter_property_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    members: &mut HashSet<TypeId>,
+) -> Option<String> {
+    match &graph.get(ty.id)?.kind {
+        TypeKind::Struct(object) => object
+            .fields
+            .iter()
+            .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
+            .map(|field| field.name.wire.clone()),
+        // `members` stops a union that reaches itself through a member from being walked again.
+        TypeKind::Union(union) if members.insert(ty.id) => {
+            let found = union.variants.iter().find_map(|variant| {
+                unconstrained_parameter_property_inner(graph, variant.ty, members)
+            });
+            members.remove(&ty.id);
+            found
+        }
+        // A reservation's shape is unknown, so it has no field to name; it is left to
+        // `parameter_shape_supported`, which refuses it.
+        TypeKind::Reserved => None,
+        _ => None,
+    }
 }
 
 /// How a parameter position fails to be inhabited, as [`uninhabited_parameter_part`] finds it.
@@ -7970,10 +8021,20 @@ enum Uninhabited {
 /// ([`TypeKind::Never`]) member, together with which of the two it is. [`parameter_shape_supported`]
 /// refuses both, because no value of the uninhabited schema has a token. The path is `""` for the
 /// parameter itself, `.name` for an object property, `.*` for its `additionalProperties`, `[]` for
-/// an array's items, and `[i]` for a tuple's. Only those positions are searched, so an uninhabited
-/// schema below a nested array or object stays reported as the nesting. `None` when there is no
-/// such schema.
+/// an array's items, and `[i]` for a tuple's. A `oneOf`/`anyOf` parameter schema serializes as
+/// whichever member the value is, so the parts of each member are searched too, with the same
+/// paths (a member adds nothing to it): `f.a` is the property `a` of an object member of `f`
+/// (#435). Only those positions are searched, so an uninhabited schema below a nested array or
+/// object stays reported as the nesting. `None` when there is no such schema.
 fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Uninhabited)> {
+    uninhabited_parameter_part_inner(graph, ty, &mut HashSet::new())
+}
+
+fn uninhabited_parameter_part_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    members: &mut HashSet<TypeId>,
+) -> Option<(String, Uninhabited)> {
     fn classify(graph: &TypeGraph, ty: Ty, visiting: &mut HashSet<TypeId>) -> Option<Uninhabited> {
         if !visiting.insert(ty.id) {
             return None;
@@ -8025,6 +8086,17 @@ fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Unin
                 AdditionalProps::Typed(value) => at(".*".to_owned(), **value),
                 AdditionalProps::Deny | AdditionalProps::Allow => None,
             }),
+        // `parameter_shape_supported` gives each member the position the union holds, so a
+        // member's parts are parts of the parameter. `members` stops a union that reaches itself
+        // through a member from being walked again.
+        TypeKind::Union(union) if members.insert(ty.id) => {
+            let found = union
+                .variants
+                .iter()
+                .find_map(|variant| uninhabited_parameter_part_inner(graph, variant.ty, members));
+            members.remove(&ty.id);
+            found
+        }
         // The parameter itself was classified above; a reservation has no parts to search.
         TypeKind::Reserved => None,
         _ => None,
@@ -9708,6 +9780,7 @@ fn parse_path_template(path: &str) -> PathTemplate {
 
 /// A `default` value classified into the scalar kinds that can back a Rust literal, or `Other` for
 /// anything (object/array/null) that cannot.
+#[derive(PartialEq)]
 enum RawDefault {
     Bool(bool),
     Int(i64),
@@ -9876,22 +9949,54 @@ enum Contribution {
         fields: Vec<Field>,
         additional: AdditionalProps,
         required: Vec<String>,
-        /// Whether the member admits `null` (a `"null"` in its type array, or a nullable `$ref`
-        /// target). Read only beside a union ([`LowerCtx::lower_all_of_beside_union`]), where it
-        /// decides whether the union's `null` survives the meet.
-        nullable: bool,
+        /// Whether the member admits `null`, where the member decides it: `Some` for a member
+        /// that states a `type` (whether it lists `"null"`) or is a `$ref` target (its lowered
+        /// nullability), `None` for an untyped one ([`stated_nullability`]). An untyped member's
+        /// object keywords constrain only objects, so it admits `null` without deciding the
+        /// merge's nullability, as an untyped `$ref` sibling leaves its target's alone.
+        nullable: Option<bool>,
     },
     Scalar(Ty),
 }
 
 impl Contribution {
-    /// Whether the member this contribution came from admits `null`.
+    /// Whether the member this contribution came from is known to admit `null`. An untyped
+    /// object member counts as not admitting it here, which is what the union-side meet
+    /// ([`LowerCtx::lower_all_of_beside_union`]) reads.
     fn admits_null(&self) -> bool {
         match self {
-            Contribution::Object { nullable, .. } => *nullable,
+            Contribution::Object { nullable, .. } => *nullable == Some(true),
             Contribution::Scalar(ty) => ty.nullable,
         }
     }
+}
+
+/// Whether an object `allOf` merge admits `null` (issue #425): every member that decides its
+/// nullability admits it, and at least one decides. An untyped member admits `null` and decides
+/// nothing, so a merge of untyped members alone keeps the non-null struct an untyped object
+/// schema lowers to on its own; one nullable `$ref` member beside them makes it nullable, as the
+/// `$ref`-sibling spelling of the same conjunction does. Only object contributions reach here.
+fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
+    let mut decided = false;
+    for contribution in contributions {
+        if let Contribution::Object {
+            nullable: Some(admits),
+            ..
+        } = contribution
+        {
+            if !admits {
+                return false;
+            }
+            decided = true;
+        }
+    }
+    decided
+}
+
+/// Whether a schema's own `type` admits `null`: `None` for an untyped schema, which states no
+/// category and so decides nothing about `null` in an `allOf` merge.
+fn stated_nullability(schema: &Schema) -> Option<bool> {
+    (!schema.types.types.is_empty()).then(|| schema.types.types.contains(&JsonType::Null))
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
@@ -9945,6 +10050,69 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
         }
     }
     true
+}
+
+/// Merge the `default` the other side of an intersection declares for a repeated property into
+/// the field kept for it (#432). `allOf` is commutative, and so is this merge: a default either
+/// side declares survives whichever side came first, and two sides that declare different
+/// defaults keep the same one in either order — an applicable default before one that cannot be
+/// applied, then the lesser rustdoc note, then the lesser `default` location — while the other is
+/// reported (`W005`) at the `default` that wrote it, since the field cannot carry it. Two defaults
+/// of one value (`3` and `3.0` alike) are one default. The kept default is then decided against
+/// the merged field as every other is: a requirement drops its application here, and
+/// [`retype_field_defaults`] re-types it against the narrowed type, which for an empty meet
+/// leaves it unapplied and reports it as `W005` (#453).
+fn merge_field_default(
+    kept: &mut Option<FieldDefault>,
+    other: Option<&FieldDefault>,
+    property: &str,
+    diags: &mut Diagnostics,
+) {
+    let Some(other) = other else {
+        return;
+    };
+    let Some(current) = kept.as_ref() else {
+        *kept = Some(other.clone());
+        return;
+    };
+    let rank = |default: &FieldDefault| {
+        (
+            default.applied.is_none(),
+            default.doc_note.clone(),
+            default.provenance.pointer.to_string(),
+            default
+                .provenance
+                .span
+                .map(|span| (span.file.0, span.start.offset, span.end.offset)),
+        )
+    };
+    let other_first = rank(other) < rank(current);
+    let (winner, loser) = if other_first {
+        (other, current)
+    } else {
+        (current, other)
+    };
+    let same_value = match (&winner.applied, &loser.applied) {
+        (Some(left), Some(right)) => reclassify_default(left) == reclassify_default(right),
+        _ => winner.doc_note == loser.doc_note,
+    };
+    if !same_value {
+        Diagnostic::warning(Code::SchemaDefaultNotApplied, loser.provenance.clone())
+            .message(format!(
+                "schema `default` of property `{property}` differs from the `default` another \
+                 intersected schema declares for it at `{}`, which the merged field keeps; this \
+                 one is neither applied nor documented there",
+                winner.provenance.pointer
+            ))
+            .remedy(
+                "declare one default for the property, or the same default on every intersected \
+                 schema that declares it",
+            )
+            .emit(diags);
+    }
+    if other_first {
+        *kept = Some(other.clone());
+    }
 }
 
 /// The category a schema's object or array applicators imply, for a schema that establishes none

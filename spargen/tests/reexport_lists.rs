@@ -354,6 +354,14 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
                 _ => None,
             })
             .collect();
+        assert!(
+            !root.is_empty() && !runtime_types.is_empty(),
+            "read {} root re-exports and {} public runtime types: an empty side means the scan \
+             has stopped reading the generated module",
+            root.len(),
+            runtime_types.len()
+        );
+        let (mut impls_examined, mut members_examined) = (0usize, 0usize);
         let mut unnameable = BTreeSet::new();
         for item in &items {
             let Item::Impl(block) = item else { continue };
@@ -366,13 +374,16 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
             if !root.contains(&self_name) {
                 continue;
             }
+            impls_examined += 1;
             let mut mentioned = BTreeSet::new();
             for member in &block.items {
                 match member {
                     syn::ImplItem::Type(assoc) => {
+                        members_examined += 1;
                         idents(quote::ToTokens::to_token_stream(&assoc.ty), &mut mentioned);
                     }
                     syn::ImplItem::Fn(method) if block.trait_.is_none() && is_pub(&method.vis) => {
+                        members_examined += 1;
                         idents(
                             quote::ToTokens::to_token_stream(&method.sig),
                             &mut mentioned,
@@ -387,6 +398,11 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
                 }
             }
         }
+        assert!(
+            impls_examined > 0 && members_examined > 0,
+            "examined {impls_examined} impls of root re-exported types and {members_examined} of \
+             their public methods and associated types: the scan has stopped reading the impls"
+        );
         unnameable.retain(|found| {
             let tracked = UNNAMEABLE_TRACKED.iter().any(|(entry, _)| entry == found);
             if tracked {

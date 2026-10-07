@@ -315,6 +315,11 @@ fn deps_prints_a_pasteable_dependency_block() {
     assert!(stdout.contains(r#"serde = { version = "#), "{stdout}");
     // The blocking client is opt-in, so it is offered commented out under its feature.
     assert!(stdout.contains("# tokio = {"), "{stdout}");
+    // ...together with the feature wiring the audit requires of a package that opts in.
+    assert!(
+        stdout.contains("# [features]\n# blocking = [\"dep:tokio\"]\n"),
+        "{stdout}"
+    );
     // This spec has no uuid/time formats, no XML, and no streams — none of those crates belong.
     for absent in ["uuid", "quick-xml", "futures-core"] {
         assert!(

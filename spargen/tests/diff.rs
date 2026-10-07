@@ -85,6 +85,18 @@ fn diff_configured(
     configure_old: impl FnOnce(Spec) -> Spec,
     configure_new: impl FnOnce(Spec) -> Spec,
 ) -> DiffReport {
+    let report = unsnapshotted_diff(old_spec, new_spec, configure_old, configure_new);
+    snapshot(&report);
+    report
+}
+
+/// [`diff_configured`] without the snapshot, for a property test that diffs generated pairs.
+fn unsnapshotted_diff(
+    old_spec: &str,
+    new_spec: &str,
+    configure_old: impl FnOnce(Spec) -> Spec,
+    configure_new: impl FnOnce(Spec) -> Spec,
+) -> DiffReport {
     let temp = tempfile::tempdir().unwrap();
     let old_path = temp.path().join("old.yaml");
     let new_path = temp.path().join("new.yaml");
@@ -93,6 +105,37 @@ fn diff_configured(
     let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
     let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
     spargen::diff(&old, &new).expect("both specs should lower")
+}
+
+std::thread_local! {
+    /// How many reports the running test has snapshotted so far. libtest runs every test on a
+    /// thread of its own, so this counts per test.
+    static SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Snapshot the whole [`fingerprint`] of a report — every change's impact, code, location and
+/// `detail` label, and the bump — so a fixture pins the labels a consumer reads, not only the
+/// kinds its assertions name. Every report a fixture diffs is snapshotted, in order: the first as
+/// `diff__<test>.snap`, the next as `diff__<test>-2.snap`, and so on.
+fn snapshot(report: &DiffReport) {
+    let thread = std::thread::current();
+    let test = thread
+        .name()
+        .expect("libtest names each test's thread after the test")
+        .rsplit("::")
+        .next()
+        .expect("a thread name has a last segment")
+        .to_owned();
+    let index = SNAPSHOTS.with(|count| {
+        count.set(count.get() + 1);
+        count.get()
+    });
+    let name = if index == 1 {
+        test
+    } else {
+        format!("{test}-{index}")
+    };
+    insta::assert_snapshot!(name, fingerprint(report).join("\n"));
 }
 
 /// The kinds present in a report, for order-independent membership assertions.
@@ -381,6 +424,55 @@ fn changing_the_success_type_is_major() {
         report.changes
     );
     assert_eq!(report.bump, Impact::Major);
+}
+
+/// The success-type detail of a report whose only change is the `listPets` success type.
+fn success_type_detail(old: &str, new: &str) -> String {
+    let report = diff(old, new);
+    let details: Vec<&str> = report
+        .changes
+        .iter()
+        .filter(|change| change.kind == ChangeKind::SuccessTypeChanged)
+        .map(|change| change.detail.as_str())
+        .collect();
+    assert_eq!(details.len(), 1, "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Major);
+    details[0].to_owned()
+}
+
+#[test]
+fn a_one_position_tuple_is_labelled_with_its_trailing_comma() {
+    // Issue #449: `(i64)` is Rust for a parenthesized `i64`; the generated type is `(i64,)`.
+    let pair_ref = "{ $ref: '#/components/schemas/Pair' }";
+    let scalar = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair: { type: integer }\n",
+    );
+    let single = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair:
+      type: array
+      prefixItems: [ { type: integer } ]
+      items: false
+",
+    );
+    assert_eq!(
+        success_type_detail(&scalar, &single),
+        "success type `i64` -> `(i64,)`"
+    );
+    // Two or more positions keep the plain comma-joined label.
+    let double = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair:
+      type: array
+      prefixItems: [ { type: integer }, { type: string } ]
+      items: false
+",
+    );
+    assert_eq!(
+        success_type_detail(&single, &double),
+        "success type `(i64,)` -> `(i64, String)`"
+    );
 }
 
 #[test]
@@ -720,6 +812,129 @@ fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
         assert_eq!(kinds(&report), vec![ChangeKind::ParamRequirednessChanged]);
         assert_eq!(report.bump, Impact::Major);
     }
+}
+
+/// A `GET /pets/{id}` operation carrying a path `id` of `path_type` beside a query `id` of
+/// `query_type`: the same wire name in two locations.
+fn same_named_params(path_type: &str, query_type: &str) -> String {
+    full(
+        &format!(
+            "  /pets/{{id}}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {{ type: {path_type} }}
+        - name: id
+          in: query
+          required: false
+          schema: {{ type: {query_type} }}
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {PET_REF}
+"
+        ),
+        PET_SCHEMA,
+    )
+}
+
+#[test]
+fn a_parameter_is_keyed_by_its_location_as_well_as_its_name() {
+    // A path `id` and a query `id` are two parameters; keyed by name alone, one overwrote the
+    // other and a breaking change to the overwritten one was reported as patch.
+    let old = same_named_params("string", "string");
+
+    for (new, changed) in [
+        (same_named_params("integer", "string"), "path"),
+        (same_named_params("string", "integer"), "query"),
+    ] {
+        let report = diff(&old, &new);
+        let changes: Vec<(ChangeKind, &str)> = report
+            .changes
+            .iter()
+            .map(|change| (change.kind, change.location.as_str()))
+            .collect();
+        let location = format!("GET /pets/{{id}} param `id` ({changed})");
+        assert_eq!(
+            changes,
+            vec![(ChangeKind::ParamTypeChanged, location.as_str())],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+
+    // Unchanged, the pair is two entries that both match: no change at all.
+    let report = diff(&old, &same_named_params("string", "string"));
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+}
+
+/// `listPets` declaring one optional parameter per `(name, in, type)` triple.
+fn optional_params(params: &[(&str, &str, &str)]) -> String {
+    let mut lines = String::from("      parameters:\n");
+    for (name, location, ty) in params {
+        lines.push_str(&format!(
+            "        - name: {name}\n          in: {location}\n          required: false\n          schema: {{ type: {ty} }}\n"
+        ));
+    }
+    spec(&lines, "id", PET_PROPS, "")
+}
+
+fn kinds_at(report: &DiffReport) -> Vec<(ChangeKind, &str)> {
+    report
+        .changes
+        .iter()
+        .map(|change| (change.kind, change.location.as_str()))
+        .collect()
+}
+
+#[test]
+fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
+    // The generated argument is named from the wire name, so a move alone leaves the signature as
+    // it was: patch, not a removal plus an addition.
+    let old = optional_params(&[("limit", "query", "integer")]);
+    let report = diff(&old, &optional_params(&[("limit", "header", "integer")]));
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+
+    // A move that also changes the type reports the type change once, naming both locations.
+    let report = diff(&old, &optional_params(&[("limit", "header", "string")]));
+    assert_eq!(
+        kinds_at(&report),
+        vec![(
+            ChangeKind::ParamTypeChanged,
+            "GET /pets param `limit` (query -> header)"
+        )],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A name declared in two locations on a side is ambiguous: its keys are not paired, so the
+    // query `id` that became a header `id` beside an unchanged cookie `id` is a removal and an
+    // addition.
+    let report = diff(
+        &optional_params(&[("id", "cookie", "string"), ("id", "query", "string")]),
+        &optional_params(&[("id", "cookie", "string"), ("id", "header", "string")]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![
+            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
+            (
+                ChangeKind::OptionalParamAdded,
+                "GET /pets param `id` (header)"
+            ),
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
 }
 
 const PET_AND_OWNER: &str = "    Pet:
@@ -1545,4 +1760,221 @@ fn an_object_all_of_emits_no_meet_a_later_member_superseded() {
         }
     }
     assert!(added.is_empty(), "types only the option adds: {added:#?}");
+}
+
+// --- Labels against the generated code ----------------------------------------------------------
+//
+// `canon_ty` renders the types `spargen diff` labels a change with, and codegen declares them;
+// nothing else ties the two. The property below generates one specification per case, reads the
+// type codegen declared for a field, and compares it with the label the diff gives that field.
+
+/// A schema tree for one field: leaves cover every rendering `canon_ty` has a rule for that a
+/// field can carry (scalars and their formats, scalar enums, nominal objects, untyped, `null`),
+/// composed by arrays, closed tuples and nullability.
+#[derive(Debug, Clone)]
+enum Schema {
+    Leaf(&'static str),
+    Array(Box<Schema>),
+    Tuple(Vec<Schema>),
+    Nullable(Box<Schema>),
+}
+
+const NULL: &str = r#"{"type":"null"}"#;
+
+impl Schema {
+    fn json(&self) -> String {
+        match self {
+            Schema::Leaf(leaf) => (*leaf).to_owned(),
+            Schema::Array(item) => format!(r#"{{"type":"array","items":{}}}"#, item.json()),
+            Schema::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(Schema::json).collect();
+                format!(
+                    r#"{{"type":"array","prefixItems":[{}],"items":false}}"#,
+                    items.join(",")
+                )
+            }
+            Schema::Nullable(inner) => format!(r#"{{"anyOf":[{},{NULL}]}}"#, inner.json()),
+        }
+    }
+}
+
+fn schema() -> impl proptest::strategy::Strategy<Value = Schema> {
+    use proptest::prelude::*;
+    let leaf = proptest::sample::select(vec![
+        r#"{"type":"string"}"#,
+        r#"{"type":"integer","format":"int32"}"#,
+        r#"{"type":"integer"}"#,
+        r#"{"type":"number"}"#,
+        r#"{"type":"boolean"}"#,
+        r#"{"type":"string","format":"uuid"}"#,
+        r#"{"type":"string","format":"date-time"}"#,
+        r#"{"type":"string","format":"date"}"#,
+        r#"{"type":"string","enum":["a","b"]}"#,
+        r#"{"type":"integer","enum":[1,2]}"#,
+        r#"{"type":"boolean","enum":[true]}"#,
+        r#"{}"#,
+        NULL,
+        r##"{"$ref":"#/components/schemas/Leaf"}"##,
+        r#"{"type":"object","properties":{"x":{"type":"string"}}}"#,
+    ])
+    .prop_map(Schema::Leaf);
+    leaf.prop_recursive(3, 16, 3, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|item| Schema::Array(Box::new(item))),
+            proptest::collection::vec(inner.clone(), 1..4).prop_map(Schema::Tuple),
+            inner
+                .prop_filter("one `null` member at a time", |schema| {
+                    !matches!(schema, Schema::Nullable(_) | Schema::Leaf(NULL))
+                })
+                .prop_map(|schema| Schema::Nullable(Box::new(schema))),
+        ]
+    })
+}
+
+/// A specification whose `Pet` has one required field, `subject`, of schema `subject`.
+fn subject_spec(subject: &str) -> String {
+    format!(
+        r##"{{"openapi":"3.1.0","info":{{"title":"T","version":"1.0.0"}},
+"paths":{{"/pets":{{"get":{{"operationId":"getPet","responses":{{"200":{{"description":"ok",
+"content":{{"application/json":{{"schema":{{"$ref":"#/components/schemas/Pet"}}}}}}}}}}}}}}}},
+"components":{{"schemas":{{
+"Pet":{{"type":"object","required":["subject"],"properties":{{"subject":{subject}}}}},
+"Marker":{{"type":"object","properties":{{"m":{{"type":"string"}}}}}},
+"Leaf":{{"type":"object","properties":{{"x":{{"type":"integer"}}}}}}}}}}}}"##
+    )
+}
+
+/// Every `type` alias the generated module declares outside the embedded runtime, by name.
+fn aliases(items: &[syn::Item], out: &mut std::collections::BTreeMap<String, syn::Type>) {
+    for item in items {
+        match item {
+            syn::Item::Type(alias) => {
+                out.insert(alias.ident.to_string(), (*alias.ty).clone());
+            }
+            syn::Item::Mod(module) if module.ident != "support" => {
+                if let Some((_, items)) = &module.content {
+                    aliases(items, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The declared type of `struct_name`'s field `field` in the generated module.
+fn field_type(items: &[syn::Item], struct_name: &str, field: &str) -> Option<syn::Type> {
+    items.iter().find_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == struct_name => item
+            .fields
+            .iter()
+            .find(|candidate| candidate.ident.as_ref().is_some_and(|ident| ident == field))
+            .map(|field| field.ty.clone()),
+        syn::Item::Mod(module) if module.ident != "support" => module
+            .content
+            .as_ref()
+            .and_then(|(_, items)| field_type(items, struct_name, field)),
+        _ => None,
+    })
+}
+
+/// Render `ty` in the label's notation, expanding every alias in `aliases`. The normalisations are
+/// the ones `canon_ty`'s documentation states: a path is named by its last segment
+/// (`types::Leaf`, `bytes::Bytes`, `serde_json::Value`), `Box` is not rendered, and a `format`
+/// scalar is labelled by its format (`Uuid`, `DateTime`, `Date`) whatever Rust type the `uuid` and
+/// `time` mappings choose for it, so both sides spell those `String` here.
+fn normalise(ty: &syn::Type, aliases: &std::collections::BTreeMap<String, syn::Type>) -> String {
+    match ty {
+        syn::Type::Tuple(tuple) => {
+            let elements: Vec<String> = tuple
+                .elems
+                .iter()
+                .map(|element| normalise(element, aliases))
+                .collect();
+            match elements.as_slice() {
+                [only] => format!("({only},)"),
+                _ => format!("({})", elements.join(", ")),
+            }
+        }
+        syn::Type::Path(path) => {
+            let segment = path.path.segments.last().expect("a path has a segment");
+            let name = segment.ident.to_string();
+            let arguments: Vec<String> = match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => arguments
+                    .args
+                    .iter()
+                    .map(|argument| match argument {
+                        syn::GenericArgument::Type(ty) => normalise(ty, aliases),
+                        other => panic!(
+                            "unexpected generic argument `{}`",
+                            quote::ToTokens::to_token_stream(other)
+                        ),
+                    })
+                    .collect(),
+                syn::PathArguments::None => Vec::new(),
+                other => panic!(
+                    "unexpected path arguments `{}`",
+                    quote::ToTokens::to_token_stream(other)
+                ),
+            };
+            match (name.as_str(), arguments.as_slice()) {
+                ("Box", [inner]) => inner.clone(),
+                ("Uuid" | "DateTime" | "Date", []) => "String".to_owned(),
+                (_, []) => match aliases.get(&name) {
+                    Some(target) => normalise(target, aliases),
+                    None => name,
+                },
+                (_, arguments) => format!("{name}<{}>", arguments.join(", ")),
+            }
+        }
+        other => format!("<unexpected {}>", quote::ToTokens::to_token_stream(other)),
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 48,
+        failure_persistence: None,
+        ..proptest::test_runner::Config::default()
+    })]
+
+    /// The type `spargen diff` labels a field with is the type codegen declares for it, once the
+    /// declared aliases are expanded and the documented normalisations applied: the same nesting,
+    /// the same tuple arity (a one-position tuple is `(T,)` on both sides, #449), and the same
+    /// nullability.
+    #[test]
+    fn a_field_type_label_is_the_type_codegen_declares(subject in schema()) {
+        let old = subject_spec(r##"{"$ref":"#/components/schemas/Marker"}"##);
+        let new = subject_spec(&subject.json());
+        let source = generated_source(&new, false);
+        let file = syn::parse_file(&source).expect("the generated module parses");
+        let mut declared = std::collections::BTreeMap::new();
+        aliases(&file.items, &mut declared);
+        let field = field_type(&file.items, "Pet", "subject").expect("`Pet.subject` is emitted");
+        let generated = normalise(&field, &declared);
+
+        let report = unsnapshotted_diff(&old, &new, |spec| spec, |spec| spec);
+        let labels: Vec<&str> = report
+            .changes
+            .iter()
+            .filter(|change| change.kind == ChangeKind::FieldTypeChanged)
+            .map(|change| change.detail.as_str())
+            .collect();
+        let [label] = labels[..] else {
+            panic!("one field-type change expected: {:?}", report.changes);
+        };
+        let canonical = label
+            .strip_prefix("field type `Marker` -> `")
+            .and_then(|rest| rest.strip_suffix('`'))
+            .unwrap_or_else(|| panic!("unexpected label {label:?}"));
+        let parsed: syn::Type = syn::parse_str(canonical)
+            .unwrap_or_else(|error| panic!("the label {canonical:?} is not a type: {error}"));
+        let labelled = normalise(&parsed, &std::collections::BTreeMap::new());
+        proptest::prop_assert_eq!(
+            labelled,
+            generated,
+            "label {:?}, schema {}",
+            canonical,
+            subject.json()
+        );
+    }
 }

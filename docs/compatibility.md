@@ -31,7 +31,9 @@ with no metacharacter is an exact rule and behaves exactly as before. The matche
 
 A backslash escapes a metacharacter, because a URI path may legitimately contain one (RFC 3986
 lists `*` as a sub-delimiter). `path = "/files/\*"` removes exactly the path named `/files/*`,
-while `path = "/files/*"` removes every path under `/files/`. Rules that [auto-carve](#auto-carve)
+while `path = "/files/*"` removes every path under `/files/`. A backslash escapes whatever
+character follows it, in exact and glob rules alike: `\b` names `b`, and a literal backslash in a
+path is written `\\`. Rules that [auto-carve](#auto-carve)
 derives from a document are escaped for you, so carving one operation never widens into its
 siblings.
 
@@ -108,7 +110,7 @@ Use omit profiles as reviewed compatibility code. Do not generate them automatic
 developer tooling may suggest rules, but committed profiles should be explicit and stale-rule
 failures should be fixed promptly.
 
-## Analysis CLI
+## `spargen.toml` and the analysis CLI
 
 `spargen check` can apply batch, carve, and omit settings from `spargen.toml` and
 repeatable flags while auditing a schema. This never generates code; keep the generation profile
@@ -123,6 +125,7 @@ time = true             # optional (default true); map `format: date-time`/`date
 carve = false           # optional; auto-carve unsupported constructs
 batch_cap = 100         # optional (default 100)
 error_body_cap = 65536  # optional (default 64 KiB)
+open_narrowing = false  # optional (default false); open a response body's string `enum`/`const` narrowings
 
 [[omit]]
 path = "/pets/{id}"                     # → OmitRule::Path (exact)

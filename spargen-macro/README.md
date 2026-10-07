@@ -29,7 +29,7 @@ spargen_macro::generate_api!(
 
 ```toml
 [dependencies]
-spargen-macro = "0.4"
+spargen-macro = "0.5"
 # ...plus the audited crates this generated client uses at runtime. No spargen crate appears at
 # runtime. See spargen's runtime dependency contract for the exact floors and conditional features.
 ```
@@ -44,7 +44,7 @@ want to see:
 
 | Mode | Generated code visible? | Setup |
 | --- | --- | --- |
-| `generate_api!` (this crate) | No (use `cargo expand`) | One dependency |
+| `generate_api!` (this crate) | No (use `cargo expand`) | No build.rs |
 | `build.rs` (`spargen::generate`) | Yes — in `OUT_DIR`, via `include!` | A few lines of build.rs |
 
 To vendor the generated module, point the `build.rs` output directly at `src/api.rs` and commit it.

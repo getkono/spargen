@@ -1,8 +1,9 @@
 //! # Subsystem: name
 //! layer-deps: ir, diag
 //!
-//! Deterministic identifier allocation: Rust-conventional casing via Unicode-XID-aware
-//! segmentation, keyword escaping, in-scope collision resolution, and `operationId` synthesis.
+//! Deterministic identifier allocation: Rust-conventional casing via ASCII segmentation (every
+//! non-ASCII-alphanumeric character is a separator), keyword escaping, in-scope collision
+//! resolution, and `operationId` synthesis.
 //! Every allocation is deterministic and injective within its scope, and always yields a
 //! valid Rust identifier — property-tested.
 
@@ -33,9 +34,15 @@ pub(crate) struct Names {
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
-    /// parameters reserve their natural Rust spellings first, so these identifiers can never
-    /// shadow caller-provided values.
+    /// parameters are allocated in the same scope first, so these identifiers can never shadow
+    /// caller-provided values.
     pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
+    /// Identifier per operation parameter, in `Operation::params` order: a method argument for a
+    /// required parameter, a `…Params` field (and setter) for an optional one. Each kind shares
+    /// one scope per operation, so two parameters whose names escape to the same spelling (a path
+    /// and a query `id`, a query `page-size` and a header `page_size`) are disambiguated instead
+    /// of emitting a duplicate argument or field.
+    pub(crate) parameters: HashMap<OperationId, Vec<Ident>>,
     /// Type name per type.
     pub(crate) types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -107,6 +114,16 @@ pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
     "Vec",
 ];
 
+/// The type-namespace names codegen's `servers` module writes bare beside the server builders and
+/// server-variable enums it declares: `String` for a free-form variable's field, setter argument and
+/// `url()`, `Into` for that setter's `impl Into<String>`, and `Default` for the derive's
+/// `<Enum as Default>` and the hand-written `impl Default`. Server and enum names are allocated
+/// after these are reserved, so a server named `string` or `default` is disambiguated instead of
+/// declaring a struct that shadows the prelude item the module refers to. `Into` is written only
+/// for a free-form variable; like the others it is reserved unconditionally, so a server's name
+/// does not change when such a variable is added.
+pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
+
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
@@ -136,10 +153,17 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     let _ = diags;
     let mut names = Names::default();
 
-    // Servers live in their own module, so they get their own scopes and can never collide with a
-    // generated model or operation name.
+    // Servers live in their own module, so they get their own scope and can never collide with a
+    // generated model or operation name. The builders and the variable enums are declared side by
+    // side in that module and share Rust's type namespace, so they are drawn from one scope: two
+    // scopes could hand a builder and an enum the same spelling. A spelling moves only where the
+    // two would have collided, so no description that compiled before is renamed. The prelude
+    // names the module itself writes are taken first, unconditionally, so a server's name does not
+    // change when it gains or loses a free-form variable.
     let mut server_scope = Scope::default();
-    let mut server_enum_scope = Scope::default();
+    for name in SERVERS_MODULE_NAMES {
+        server_scope.reserve(name, IdentRole::Type);
+    }
     for (index, server) in api.servers.iter().enumerate() {
         let hint = server
             .name
@@ -160,7 +184,7 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             }
             names.server_variable_enums.insert(
                 (index, variable_name.clone()),
-                server_enum_scope.alloc(
+                server_scope.alloc(
                     &format!("{hint} {variable_name}"),
                     IdentRole::Type,
                     &pointer,
@@ -265,18 +289,17 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             ),
         );
 
-        // Required parameters are fixed by the generated public surface. Reserve their natural
-        // spellings, then allocate every generator-owned binding in the same lexical scope so the
-        // implementation yields on collision without renaming ordinary arguments.
-        let mut binding_scope = Scope::default();
-        for parameter in operation
-            .params
-            .iter()
-            .filter(|parameter| parameter.required)
-        {
-            binding_scope.reserve(&parameter.name, IdentRole::Param);
-        }
+        // Required parameters are fixed by the generated public surface. Allocate them first, then
+        // every generator-owned binding in the same lexical scope so the implementation yields on
+        // collision without renaming ordinary arguments. Optional parameters are fields of the
+        // `…Params` struct, a scope of their own.
         let pointer = &operation.provenance.pointer;
+        let mut binding_scope = Scope::default();
+        let mut field_scope = Scope::default();
+        names.parameters.insert(
+            operation.id.clone(),
+            allocate_parameters(operation, &mut binding_scope, &mut field_scope),
+        );
         let params = operation
             .params
             .iter()
@@ -376,6 +399,68 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     names
 }
 
+/// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required
+/// parameters as method arguments in `arguments`, optional ones as `…Params` fields in `fields`.
+///
+/// Each kind is allocated as one ranked batch, so which of two parameters escaping to the same
+/// spelling keeps it depends on the parameters themselves and not on the order the spec lists
+/// them in: the earlier location (path, query, querystring, header, cookie) wins, then the
+/// lexically smaller wire name. The loser takes a suffix seeded from the operation's pointer, its
+/// location and its wire name, so it is as stable as the parameter is.
+fn allocate_parameters(
+    operation: &crate::ir::Operation,
+    arguments: &mut Scope,
+    fields: &mut Scope,
+) -> Vec<Ident> {
+    use crate::ir::ParamLoc;
+    let rank = |location: ParamLoc| match location {
+        ParamLoc::Path => 0u8,
+        ParamLoc::Query => 1,
+        ParamLoc::QueryString => 2,
+        ParamLoc::Header => 3,
+        ParamLoc::Cookie => 4,
+    };
+    let seeds: Vec<crate::diag::JsonPointer> = operation
+        .params
+        .iter()
+        .map(|parameter| {
+            operation
+                .provenance
+                .pointer
+                .push("parameters")
+                .push(parameter.location.as_openapi_in())
+                .push(&parameter.name)
+        })
+        .collect();
+    let mut allocated: Vec<Option<Ident>> = vec![None; operation.params.len()];
+    for (required, scope, role) in [
+        (true, arguments, IdentRole::Param),
+        (false, fields, IdentRole::Field),
+    ] {
+        let indices: Vec<usize> = (0..operation.params.len())
+            .filter(|&index| operation.params[index].required == required)
+            .collect();
+        let requests: Vec<_> = indices
+            .iter()
+            .map(|&index| {
+                let parameter = &operation.params[index];
+                RankedRequest {
+                    hint: parameter.name.as_str(),
+                    provenance: &seeds[index],
+                    rank: (rank(parameter.location), parameter.name.as_str(), index),
+                }
+            })
+            .collect();
+        for (index, ident) in indices.iter().zip(scope.alloc_ranked(&requests, role)) {
+            allocated[*index] = Some(ident);
+        }
+    }
+    allocated
+        .into_iter()
+        .map(|ident| ident.expect("every parameter is either required or optional"))
+        .collect()
+}
+
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
 /// its response variant always agree.
 pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
@@ -383,5 +468,786 @@ pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
         crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
         crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
         crate::ir::StatusSpec::Default => "Default".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allocate, Ident, Names};
+    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::ir::{
+        Api, BodyEncoding, Info, MediaType, Method, Operation, OperationId, ParamLoc, ParamStyle,
+        Parameter, PathSegment, PathTemplate, Prim, RequestBody, Responses, Ty, TypeDef, TypeGraph,
+        TypeKind,
+    };
+    use indexmap::IndexMap;
+
+    fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {
+        Parameter {
+            name: name.to_owned(),
+            location,
+            ty: Ty {
+                id: crate::ir::TypeId(0),
+                nullable: false,
+                boxed: false,
+            },
+            required,
+            style: match location {
+                ParamLoc::Path | ParamLoc::Header => ParamStyle::Simple,
+                ParamLoc::Query | ParamLoc::QueryString | ParamLoc::Cookie => ParamStyle::Form,
+            },
+            allow_reserved: false,
+            explode: false,
+            deprecated: false,
+            default_display: None,
+        }
+    }
+
+    /// An API with one `GET /items/{id}` operation carrying `params` and, when `body` is set, a
+    /// typed JSON request body, so the `body` binding is allocated too.
+    fn api(params: Vec<Parameter>, body: bool) -> Api {
+        let mut types = TypeGraph::default();
+        let string = types.insert(TypeDef {
+            name_hint: "Text".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        let ty = Ty {
+            id: string,
+            nullable: false,
+            boxed: false,
+        };
+        let params = params
+            .into_iter()
+            .map(|parameter| Parameter { ty, ..parameter })
+            .collect();
+        Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: vec![Operation {
+                id: OperationId("getItem".to_owned()),
+                method: Method::Get,
+                path: PathTemplate {
+                    raw: "/items/{id}".to_owned(),
+                    segments: vec![
+                        PathSegment::Literal("items".to_owned()),
+                        PathSegment::Param("id".to_owned()),
+                    ],
+                },
+                params,
+                request_body: body.then(|| RequestBody {
+                    media: MediaType::Json,
+                    content_type: "application/json".to_owned(),
+                    ty: Some(ty),
+                    required: true,
+                    encoding: BodyEncoding::default(),
+                }),
+                responses: Responses {
+                    by_status: Vec::new(),
+                    default: None,
+                },
+                security: Vec::new(),
+                deprecated: false,
+                docs: Default::default(),
+                server: None,
+                provenance: Provenance::new(
+                    JsonPointer::root()
+                        .push("paths")
+                        .push("/items/{id}")
+                        .push("get"),
+                    None,
+                ),
+            }],
+            types,
+            security_schemes: IndexMap::new(),
+        }
+    }
+
+    fn names(params: Vec<Parameter>, body: bool) -> Names {
+        allocate(&api(params, body), &mut Diagnostics::new(100))
+    }
+
+    /// The allocated identifier of every parameter, keyed by what identifies a parameter in
+    /// OpenAPI (`(in, name)`), so allocations of differently ordered lists compare directly.
+    fn by_parameter(params: &[Parameter], names: &Names) -> Vec<((u8, String), Ident)> {
+        let idents = &names.parameters[&OperationId("getItem".to_owned())];
+        assert_eq!(idents.len(), params.len(), "one identifier per parameter");
+        let mut keyed: Vec<_> = params
+            .iter()
+            .zip(idents)
+            .map(|(parameter, ident)| {
+                let location = match parameter.location {
+                    ParamLoc::Path => 0u8,
+                    ParamLoc::Query => 1,
+                    ParamLoc::QueryString => 2,
+                    ParamLoc::Header => 3,
+                    ParamLoc::Cookie => 4,
+                };
+                ((location, parameter.name.clone()), ident.clone())
+            })
+            .collect();
+        keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        keyed
+    }
+
+    /// Parameters whose names escape to the same spelling in each scope: `id` twice and `ID`
+    /// among the method arguments, `page-size`, `page_size` and `Page Size` among the fields.
+    fn colliding() -> Vec<Parameter> {
+        vec![
+            parameter("page_size", ParamLoc::Header, false),
+            parameter("id", ParamLoc::Query, true),
+            parameter("Page Size", ParamLoc::Cookie, false),
+            parameter("ID", ParamLoc::Header, true),
+            parameter("id", ParamLoc::Path, true),
+            parameter("page-size", ParamLoc::Query, false),
+        ]
+    }
+
+    fn assert_distinct_per_scope(params: &[Parameter], names: &Names) {
+        let idents = &names.parameters[&OperationId("getItem".to_owned())];
+        for required in [true, false] {
+            let scope: Vec<&str> = params
+                .iter()
+                .zip(idents)
+                .filter(|(parameter, _)| parameter.required == required)
+                .map(|(_, ident)| ident.as_str())
+                .collect();
+            let mut unique = scope.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                scope.len(),
+                "required={required} identifiers collide: {scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn colliding_parameter_identifiers_are_distinct_within_each_scope() {
+        let params = colliding();
+        let names = names(params.clone(), false);
+        assert_distinct_per_scope(&params, &names);
+
+        // The earliest location keeps the bare spelling; the others take a suffix.
+        let keyed = by_parameter(&params, &names);
+        let ident = |location: u8, name: &str| {
+            keyed
+                .iter()
+                .find(|(key, _)| *key == (location, name.to_owned()))
+                .map(|(_, ident)| ident.as_str().to_owned())
+                .expect("parameter is allocated")
+        };
+        assert_eq!(ident(0, "id"), "id");
+        assert_ne!(ident(1, "id"), "id");
+        assert_ne!(ident(3, "ID"), "id");
+        assert_eq!(ident(1, "page-size"), "page_size");
+        assert_ne!(ident(3, "page_size"), "page_size");
+        assert_ne!(ident(4, "Page Size"), "page_size");
+    }
+
+    #[test]
+    fn parameter_identifiers_do_not_depend_on_listing_order() {
+        let params = colliding();
+        let expected = by_parameter(&params, &names(params.clone(), false));
+        for rotation in 0..params.len() {
+            for reversed in [false, true] {
+                let mut reordered = params.clone();
+                reordered.rotate_left(rotation);
+                if reversed {
+                    reordered.reverse();
+                }
+                let names = names(reordered.clone(), false);
+                assert_distinct_per_scope(&reordered, &names);
+                assert_eq!(
+                    by_parameter(&reordered, &names),
+                    expected,
+                    "rotation {rotation}, reversed {reversed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generator_bindings_yield_to_every_parameter() {
+        let bindings = [
+            "params",
+            "body",
+            "path",
+            "query",
+            "raw_query",
+            "url",
+            "request",
+            "reconnect_request",
+            "cookies",
+        ];
+        let mut params: Vec<Parameter> = bindings
+            .iter()
+            .map(|name| parameter(name, ParamLoc::Query, true))
+            .collect();
+        // An optional parameter, so the `params` binding is allocated at all.
+        params.push(parameter("limit", ParamLoc::Query, false));
+        let names = names(params.clone(), true);
+        let operation = OperationId("getItem".to_owned());
+        let idents = &names.parameters[&operation];
+
+        // Every required parameter keeps its bare spelling.
+        for (parameter, ident) in params.iter().zip(idents) {
+            assert_eq!(ident.as_str(), parameter.name);
+        }
+
+        let allocated = &names.operation_bindings[&operation];
+        let generated = [
+            allocated.params.as_ref().expect("an optional parameter"),
+            allocated.body.as_ref().expect("a typed request body"),
+            &allocated.path,
+            &allocated.query,
+            &allocated.raw_query,
+            &allocated.url,
+            &allocated.request,
+            &allocated.reconnect_request,
+            &allocated.cookies,
+        ];
+        for (binding, ident) in bindings.iter().zip(generated) {
+            assert_ne!(
+                ident.as_str(),
+                *binding,
+                "`{binding}` kept its bare spelling"
+            );
+            assert!(
+                params
+                    .iter()
+                    .zip(idents)
+                    .filter(|(parameter, _)| parameter.required)
+                    .all(|(_, parameter)| parameter != ident),
+                "binding `{ident}` shadows a parameter"
+            );
+        }
+        let mut unique: Vec<&str> = generated.iter().map(|ident| ident.as_str()).collect();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            generated.len(),
+            "bindings collide: {generated:?}"
+        );
+    }
+
+    /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
+    /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
+    fn is_legal(text: &str) -> bool {
+        let Ok(stream) = text.parse::<proc_macro2::TokenStream>() else {
+            return false;
+        };
+        let mut tokens = stream.into_iter();
+        matches!(tokens.next(), Some(proc_macro2::TokenTree::Ident(ident)) if ident == text)
+            && tokens.next().is_none()
+    }
+
+    /// Assert that `idents` are pairwise distinct legal identifiers, none of them spelled as one of
+    /// `reserved`. `scope` names the scope in the failure message.
+    fn assert_scope<'a>(
+        scope: &str,
+        idents: impl IntoIterator<Item = &'a Ident>,
+        reserved: &[&str],
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for ident in idents {
+            let text = ident.as_str();
+            proptest::prop_assert!(is_legal(text), "{scope}: {text:?} is not one identifier");
+            proptest::prop_assert!(
+                !reserved.contains(&text),
+                "{scope}: {text:?} takes a reserved spelling"
+            );
+            proptest::prop_assert!(seen.insert(text), "{scope}: {text:?} is allocated twice");
+        }
+        Ok(())
+    }
+
+    /// A name hint biased to collide: two letters around an optional separator in either case, so
+    /// distinct hints often case to one spelling, plus the keywords, prelude names and generator
+    /// bindings every scope reserves or escapes.
+    fn hint() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            3 => "[a-cA-C][-_ ]?[a-cA-C]",
+            1 => proptest::sample::select(vec![
+                "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
+                "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
+                "body", "path", "query", "url", "request", "cookies", "additional", "other",
+                "Other", "1a", "-",
+            ])
+            .prop_map(str::to_owned),
+        ]
+    }
+
+    /// The shape of one synthetic definition: its member hints are unique per definition, as
+    /// lowering makes them (an object's property map and an enum's value set have no duplicates,
+    /// and union hints are made unique per union).
+    #[derive(Debug, Clone)]
+    enum Shape {
+        Struct {
+            fields: std::collections::BTreeSet<String>,
+            overflow: bool,
+        },
+        Enum {
+            values: std::collections::BTreeSet<String>,
+            open: bool,
+        },
+        Union {
+            hints: std::collections::BTreeSet<String>,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    struct Definition {
+        hint: String,
+        /// No `(document, pointer)` identity, as a synthesized type has.
+        anonymous: bool,
+        shape: Shape,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SyntheticOperation {
+        /// `(location, name)` → `required`: OpenAPI identifies a parameter by the pair.
+        params: std::collections::BTreeMap<(u8, String), bool>,
+        body: bool,
+        /// Documented header names per response status.
+        headers: std::collections::BTreeMap<u16, std::collections::BTreeSet<String>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SyntheticServer {
+        name: Option<String>,
+        variables: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    }
+
+    fn hints(
+        max: usize,
+    ) -> impl proptest::strategy::Strategy<Value = std::collections::BTreeSet<String>> {
+        proptest::collection::btree_set(hint(), 0..max)
+    }
+
+    fn definition() -> impl proptest::strategy::Strategy<Value = Definition> {
+        use proptest::prelude::*;
+        let shape = prop_oneof![
+            (hints(8), any::<bool>())
+                .prop_map(|(fields, overflow)| Shape::Struct { fields, overflow }),
+            (hints(8), any::<bool>()).prop_map(|(values, open)| Shape::Enum { values, open }),
+            hints(6).prop_map(|hints| Shape::Union { hints }),
+        ];
+        (hint(), proptest::bool::weighted(0.2), shape).prop_map(|(hint, anonymous, shape)| {
+            Definition {
+                hint,
+                anonymous,
+                shape,
+            }
+        })
+    }
+
+    fn operation() -> impl proptest::strategy::Strategy<Value = SyntheticOperation> {
+        use proptest::prelude::*;
+        (
+            proptest::collection::btree_map((0u8..5, hint()), any::<bool>(), 0..8),
+            any::<bool>(),
+            proptest::collection::btree_map(
+                proptest::sample::select(vec![200u16, 201, 404]),
+                hints(4),
+                0..3,
+            ),
+        )
+            .prop_map(|(params, body, headers)| SyntheticOperation {
+                params,
+                body,
+                headers,
+            })
+    }
+
+    fn server() -> impl proptest::strategy::Strategy<Value = SyntheticServer> {
+        use proptest::strategy::Strategy;
+        (
+            proptest::option::of(hint()),
+            proptest::collection::btree_map(hint(), hints(4), 0..4),
+        )
+            .prop_map(|(name, variables)| SyntheticServer { name, variables })
+    }
+
+    fn location(code: u8) -> ParamLoc {
+        match code {
+            0 => ParamLoc::Path,
+            1 => ParamLoc::Query,
+            2 => ParamLoc::QueryString,
+            3 => ParamLoc::Header,
+            _ => ParamLoc::Cookie,
+        }
+    }
+
+    /// Build an `Api` from the synthetic description. Operations are keyed by their (unique)
+    /// `operationId`, as lowering guarantees.
+    fn synthetic_api(
+        definitions: &[Definition],
+        operations: &std::collections::BTreeMap<String, SyntheticOperation>,
+        servers: &[SyntheticServer],
+    ) -> Api {
+        use crate::ir::{
+            AdditionalProps, Field, Openness, PropertyName, Response, ResponseHeader, ScalarEnum,
+            ScalarRepr, ScalarValue, Server, ServerVariable, StatusSpec, Struct, Union, UnionMode,
+            UnionStrategy, UnionVariant,
+        };
+        let mut api = api(Vec::new(), false);
+        let text = Ty {
+            id: api.types.iter().next().expect("the text type").0,
+            nullable: false,
+            boxed: false,
+        };
+        let template = api.operations.remove(0);
+        for (index, definition) in definitions.iter().enumerate() {
+            let kind = match &definition.shape {
+                Shape::Struct { fields, overflow } => TypeKind::Struct(Struct {
+                    fields: fields
+                        .iter()
+                        .map(|wire| Field {
+                            name: PropertyName { wire: wire.clone() },
+                            ty: text,
+                            required: false,
+                            deprecated: false,
+                            read_only: false,
+                            write_only: false,
+                            default: None,
+                            xml: Default::default(),
+                            undeclared: false,
+                        })
+                        .collect(),
+                    additional: if *overflow {
+                        AdditionalProps::Typed(Box::new(text))
+                    } else {
+                        AdditionalProps::Allow
+                    },
+                }),
+                Shape::Enum { values, open } => TypeKind::Enum(ScalarEnum {
+                    repr: ScalarRepr::String,
+                    variants: values.iter().cloned().map(ScalarValue::String).collect(),
+                    openness: if *open {
+                        Openness::Open
+                    } else {
+                        Openness::Closed
+                    },
+                }),
+                Shape::Union { hints } => TypeKind::Union(Union {
+                    variants: hints
+                        .iter()
+                        .map(|hint| UnionVariant {
+                            name_hint: hint.clone(),
+                            ty: text,
+                        })
+                        .collect(),
+                    strategy: UnionStrategy::Trial {
+                        mode: UnionMode::OneOf,
+                        priorities: vec![0; hints.len()],
+                    },
+                }),
+            };
+            let pointer = if definition.anonymous {
+                JsonPointer::root()
+            } else {
+                JsonPointer::root()
+                    .push("components")
+                    .push("schemas")
+                    .push(&index.to_string())
+            };
+            api.types.insert(TypeDef {
+                name_hint: definition.hint.clone(),
+                kind,
+                docs: Default::default(),
+                provenance: Provenance::new(pointer, None),
+                document: String::new(),
+            });
+        }
+        for (id, synthetic) in operations {
+            let mut operation = template.clone();
+            operation.id = OperationId(id.clone());
+            operation.provenance = Provenance::new(
+                JsonPointer::root()
+                    .push("paths")
+                    .push(&format!("/{id}"))
+                    .push("get"),
+                None,
+            );
+            operation.params = synthetic
+                .params
+                .iter()
+                .map(|((code, name), required)| Parameter {
+                    ty: text,
+                    ..parameter(name, location(*code), *required)
+                })
+                .collect();
+            operation.request_body = synthetic.body.then(|| RequestBody {
+                media: MediaType::Json,
+                content_type: "application/json".to_owned(),
+                ty: Some(text),
+                required: true,
+                encoding: BodyEncoding::default(),
+            });
+            operation.responses.by_status = synthetic
+                .headers
+                .iter()
+                .map(|(status, headers)| {
+                    let response = Response {
+                        body: None,
+                        media: None,
+                        stream: None,
+                        headers: headers
+                            .iter()
+                            .map(|name| ResponseHeader {
+                                name: name.clone(),
+                                ty: text,
+                                required: false,
+                                explode: false,
+                                shape: crate::ir::HeaderShape::Scalar,
+                                deprecated: false,
+                                docs: Default::default(),
+                            })
+                            .collect(),
+                    };
+                    (StatusSpec::Exact(*status), response)
+                })
+                .collect();
+            api.operations.push(operation);
+        }
+        api.servers = servers
+            .iter()
+            .map(|server| Server {
+                name: server.name.clone(),
+                url: "https://example.com".to_owned(),
+                segments: Vec::new(),
+                variables: server
+                    .variables
+                    .iter()
+                    .map(|(name, values)| {
+                        let variable = ServerVariable {
+                            default: values.iter().next().cloned().unwrap_or_default(),
+                            enum_values: values.iter().cloned().collect(),
+                            description: None,
+                        };
+                        (name.clone(), variable)
+                    })
+                    .collect(),
+                description: None,
+            })
+            .collect();
+        api
+    }
+
+    proptest::proptest! {
+        /// Every identifier `allocate` hands out, over a whole synthetic `Api` whose hints are
+        /// biased to collide, is a legal identifier and distinct within the scope it is emitted
+        /// in: the `types` module (definitions and response-header structs, beside the names
+        /// that module imports), the `…Params` structs, the client methods (beside the fixed
+        /// ones), each struct's fields with its overflow map, each enum's and union's variants
+        /// with an open enum's catch-all, each operation's method arguments with its generator
+        /// bindings and its `…Params` fields, each header struct's fields, the `servers` module
+        /// (the server builders and the server-variable enums `emit_servers` declares side by
+        /// side), and each server's setters and each server variable's values. Every member is
+        /// allocated, so the property cannot pass by allocating nothing.
+        #[test]
+        fn every_allocation_is_legal_and_distinct_within_its_scope(
+            definitions in proptest::collection::vec(definition(), 0..10),
+            operations in proptest::collection::btree_map(hint(), operation(), 0..6),
+            servers in proptest::collection::vec(server(), 0..3),
+        ) {
+            use proptest::prop_assert_eq;
+            let api = synthetic_api(&definitions, &operations, &servers);
+            let names = allocate(&api, &mut Diagnostics::new(100));
+
+            prop_assert_eq!(names.types.len(), api.types.iter().count());
+            let header_structs: usize = operations
+                .values()
+                .map(|operation| operation.headers.values().filter(|h| !h.is_empty()).count())
+                .sum();
+            prop_assert_eq!(names.response_header_structs.len(), header_structs);
+            assert_scope(
+                "types module",
+                names.types.values().chain(names.response_header_structs.values()),
+                super::TYPES_MODULE_NAMES,
+            )?;
+
+            prop_assert_eq!(names.operations.len(), operations.len());
+            assert_scope("client methods", names.operations.values(), super::CLIENT_METHODS)?;
+            prop_assert_eq!(names.params_structs.len(), operations.len());
+            assert_scope("params structs", names.params_structs.values(), &[])?;
+
+            for (id, def) in api.types.iter() {
+                match &def.kind {
+                    TypeKind::Struct(object) => {
+                        let fields: Vec<&Ident> = object
+                            .fields
+                            .iter()
+                            .map(|field| &names.fields[&(id, field.name.wire.clone())])
+                            .chain(names.struct_overflow.get(&id))
+                            .collect();
+                        let overflow =
+                            usize::from(matches!(object.additional, crate::ir::AdditionalProps::Typed(_)));
+                        prop_assert_eq!(fields.len(), object.fields.len() + overflow);
+                        assert_scope(&format!("fields of {}", def.name_hint), fields, &[])?;
+                    }
+                    TypeKind::Enum(enumeration) => {
+                        let variants: Vec<&Ident> = enumeration
+                            .variants
+                            .iter()
+                            .map(|value| match value {
+                                crate::ir::ScalarValue::String(value) => {
+                                    &names.variants[&(id, value.clone())]
+                                }
+                                other => unreachable!("only string enums are generated: {other:?}"),
+                            })
+                            .chain(names.open_variants.get(&id))
+                            .collect();
+                        prop_assert_eq!(
+                            variants.len(),
+                            enumeration.variants.len() + usize::from(enumeration.is_open())
+                        );
+                        assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
+                    }
+                    TypeKind::Union(union) => {
+                        let variants = union
+                            .variants
+                            .iter()
+                            .map(|variant| &names.variants[&(id, variant.name_hint.clone())]);
+                        assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
+                    }
+                    // `synthetic_api` builds no reservation, and `allocate` refuses one.
+                    TypeKind::Reserved => unreachable!("a synthetic API holds no reservation"),
+                    _ => {}
+                }
+            }
+
+            for operation in &api.operations {
+                let idents = &names.parameters[&operation.id];
+                prop_assert_eq!(idents.len(), operation.params.len());
+                let bindings = &names.operation_bindings[&operation.id];
+                prop_assert_eq!(
+                    bindings.params.is_some(),
+                    operation.params.iter().any(|parameter| !parameter.required)
+                );
+                prop_assert_eq!(bindings.body.is_some(), operation.request_body.is_some());
+                let arguments = operation
+                    .params
+                    .iter()
+                    .zip(idents)
+                    .filter(|(parameter, _)| parameter.required)
+                    .map(|(_, ident)| ident)
+                    .chain(bindings.params.as_ref())
+                    .chain(bindings.body.as_ref())
+                    .chain([
+                        &bindings.path,
+                        &bindings.query,
+                        &bindings.raw_query,
+                        &bindings.url,
+                        &bindings.request,
+                        &bindings.reconnect_request,
+                        &bindings.cookies,
+                    ]);
+                assert_scope(&format!("arguments of {}", operation.id.0), arguments, &[])?;
+                let fields = operation
+                    .params
+                    .iter()
+                    .zip(idents)
+                    .filter(|(parameter, _)| !parameter.required)
+                    .map(|(_, ident)| ident);
+                assert_scope(&format!("params fields of {}", operation.id.0), fields, &[])?;
+                for (status, response) in &operation.responses.by_status {
+                    if response.headers.is_empty() {
+                        continue;
+                    }
+                    let label = super::status_label(*status);
+                    let fields = response.headers.iter().map(|header| {
+                        &names.response_header_fields
+                            [&(operation.id.clone(), label.clone(), header.name.clone())]
+                    });
+                    assert_scope(&format!("{label} headers of {}", operation.id.0), fields, &[])?;
+                }
+            }
+
+            prop_assert_eq!(names.servers.len(), servers.len());
+            assert_scope(
+                "servers module",
+                names.servers.iter().chain(names.server_variable_enums.values()),
+                super::SERVERS_MODULE_NAMES,
+            )?;
+            for (index, server) in api.servers.iter().enumerate() {
+                let fields = server
+                    .variables
+                    .keys()
+                    .map(|name| &names.server_variable_fields[&(index, name.clone())]);
+                assert_scope(&format!("variables of server {index}"), fields, &[])?;
+                for (name, variable) in &server.variables {
+                    let variants = variable.enum_values.iter().map(|value| {
+                        &names.server_variable_variants[&(index, name.clone(), value.clone())]
+                    });
+                    assert_scope(&format!("values of {name}"), variants, &[])?;
+                }
+            }
+        }
+
+        /// The parameter scopes alone, over the space the parameter collisions came from: names
+        /// drawn from `[a-c][-_]?[a-c]` (so `a-b`, `a_b` and `ab` meet constantly) at random
+        /// locations, required or not. Each kind is injective and legal, the bindings never take
+        /// an argument's spelling, and each parameter's identifier does not depend on where the
+        /// spec lists it.
+        #[test]
+        fn operation_identifiers_are_injective(
+            params in proptest::collection::btree_map(
+                (0u8..5, "[a-c][-_]?[a-c]"),
+                proptest::bool::ANY,
+                1..12,
+            ),
+            body in proptest::bool::ANY,
+        ) {
+            let params: Vec<Parameter> = params
+                .iter()
+                .map(|((code, name), required)| parameter(name, location(*code), *required))
+                .collect();
+            let names = names(params.clone(), body);
+            let operation = OperationId("getItem".to_owned());
+            let idents = &names.parameters[&operation];
+            let bindings = &names.operation_bindings[&operation];
+            let arguments = params
+                .iter()
+                .zip(idents)
+                .filter(|(parameter, _)| parameter.required)
+                .map(|(_, ident)| ident)
+                .chain(bindings.params.as_ref())
+                .chain(bindings.body.as_ref())
+                .chain([
+                    &bindings.path,
+                    &bindings.query,
+                    &bindings.raw_query,
+                    &bindings.url,
+                    &bindings.request,
+                    &bindings.reconnect_request,
+                    &bindings.cookies,
+                ]);
+            assert_scope("arguments", arguments, &[])?;
+            let fields = params
+                .iter()
+                .zip(idents)
+                .filter(|(parameter, _)| !parameter.required)
+                .map(|(_, ident)| ident);
+            assert_scope("params fields", fields, &[])?;
+
+            let expected = by_parameter(&params, &names);
+            let mut reversed = params.clone();
+            reversed.reverse();
+            proptest::prop_assert_eq!(
+                by_parameter(&reversed, &self::names(reversed.clone(), body)),
+                expected
+            );
+        }
     }
 }

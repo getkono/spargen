@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
-use spargen::{Outcome, Spec};
+use spargen::{Outcome, Severity, Spec};
 
 #[derive(serde::Deserialize)]
 struct Manifest {
@@ -54,8 +54,16 @@ fn read(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("{path} must be readable: {error}"))
 }
 
+/// The parsed manifest. Every test that loops over its cases reads it here, so an empty case list
+/// fails each of them instead of letting every loop pass by checking nothing.
 fn manifest() -> Manifest {
-    toml::from_str(&read("corpus/manifest.toml")).expect("corpus/manifest.toml must parse")
+    let manifest: Manifest =
+        toml::from_str(&read("corpus/manifest.toml")).expect("corpus/manifest.toml must parse");
+    assert!(
+        !manifest.cases.is_empty(),
+        "corpus/manifest.toml declares no `[[case]]`, so every corpus check would pass vacuously"
+    );
+    manifest
 }
 
 impl Case {
@@ -159,13 +167,17 @@ fn every_case_meets_its_declared_expectation() {
                     case.id,
                     case.expect
                 );
+                // The whole set of error codes, not just the presence of the named one: a second
+                // rejection appearing beside it changes what the case pins.
                 let codes: BTreeSet<&str> = report
                     .diagnostics()
                     .iter()
+                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
                     .map(|diagnostic| diagnostic.code.as_str())
                     .collect();
-                assert!(
-                    codes.contains(expected),
+                assert_eq!(
+                    codes,
+                    BTreeSet::from([expected]),
                     "`{}` is declared `{}` but its rejection codes are {codes:?}",
                     case.id,
                     case.expect
@@ -192,20 +204,134 @@ fn names_case(haystack: &str, id: &str) -> bool {
 fn the_corpus_smoke_gate_covers_every_manifest_case() {
     // CLAUDE.md points at `mise run corpus-smoke` for the corpus row, so a manifest case the task
     // never runs is a case that gate does not actually check. The task and the CI job restate the
-    // same list, so both are held to the manifest.
-    let mise = read("mise.toml");
-    let ci = read(".github/workflows/ci.yml");
+    // same list, so both are held to the manifest: each is read as its own commands, not as the
+    // whole file a path might appear anywhere in, and each case's command must state the
+    // manifest's expectation.
+    assert_smoke_expectation_reads_the_commands_a_case_needs();
+    let mise = mise_commands(&mise_tasks(), "corpus-smoke");
+    let workflow = ci_workflow();
+    let ci: Vec<String> = workflow["jobs"]["corpus-smoke"]["steps"]
+        .as_vec()
+        .expect("ci.yml carries a `corpus-smoke` job with steps")
+        .iter()
+        .filter_map(|step| step["run"].as_str().map(str::to_owned))
+        .collect();
 
     for case in manifest().cases {
+        for (gate, commands) in [
+            ("`mise run corpus-smoke`", &mise),
+            ("the CI corpus-smoke job", &ci),
+        ] {
+            if let Err(problem) = smoke_expectation(commands, &case) {
+                panic!(
+                    "`{}` is declared `{}`, but {gate} {problem}",
+                    case.id, case.expect
+                );
+            }
+        }
+    }
+}
+
+/// Whether the smoke `commands` check `case` the way its expectation says: exactly one command
+/// runs `check` on it; for `generate` that command must succeed; for `reject:E###` it must accept
+/// exit status 1 into a `target/corpus-smoke/` report, and the next command must find the code in
+/// that report.
+fn smoke_expectation(commands: &[String], case: &Case) -> Result<(), String> {
+    const REJECTED: &str = " || test $? -eq 1";
+    let path = format!("corpus/{}", case.path);
+    let runs: Vec<usize> = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command.contains(" check ") && names_case(command, &path))
+        .map(|(at, _)| at)
+        .collect();
+    let [at] = runs.as_slice() else {
+        return Err(format!(
+            "runs `check` on `{path}` {} times, not once",
+            runs.len()
+        ));
+    };
+    let command = &commands[*at];
+    match case.rejection_code() {
+        None if command.contains(REJECTED) => Err(format!("accepts a rejection from `{command}`")),
+        None => Ok(()),
+        Some(code) => {
+            let report = command
+                .strip_suffix(REJECTED)
+                .and_then(|command| command.rsplit_once(" > "))
+                .map(|(_, report)| report)
+                .filter(|report| report.starts_with("target/corpus-smoke/"))
+                .ok_or_else(|| {
+                    format!(
+                        "does not run `{command}` as `… > target/corpus-smoke/<name>.json{REJECTED}`"
+                    )
+                })?;
+            let grep = format!("grep -q {code} {report}");
+            match commands.get(at + 1) {
+                Some(next) if *next == grep => Ok(()),
+                next => Err(format!("follows `{command}` with {next:?}, not `{grep}`")),
+            }
+        }
+    }
+}
+
+/// [`smoke_expectation`] pinned on fixtures rather than on whatever the gate says today. Called by
+/// the gate test, so the reader is proven before its verdict on the real commands is trusted.
+fn assert_smoke_expectation_reads_the_commands_a_case_needs() {
+    let case = |expect: &str| Case {
+        id: "pet".to_owned(),
+        path: "pet/openapi.yaml".to_owned(),
+        sha256: String::new(),
+        expect: expect.to_owned(),
+    };
+    let commands = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let check = "cargo run -- check corpus/pet/openapi.yaml --format json";
+    let rejected = format!("{check} > target/corpus-smoke/pet.json || test $? -eq 1");
+
+    assert_eq!(
+        smoke_expectation(&commands(&[check]), &case("generate")),
+        Ok(())
+    );
+    assert_eq!(
+        smoke_expectation(
+            &commands(&[&rejected, "grep -q E001 target/corpus-smoke/pet.json"]),
+            &case("reject:E001")
+        ),
+        Ok(())
+    );
+    for (lines, expect) in [
+        (vec![], "generate"),
+        (vec![check, check], "generate"),
+        (
+            vec!["cargo run -- check corpus/pet/openapi.yaml.bak"],
+            "generate",
+        ),
+        (vec![rejected.as_str()], "generate"),
+        (vec![check], "reject:E001"),
+        (vec![rejected.as_str()], "reject:E001"),
+        (
+            vec![
+                rejected.as_str(),
+                "grep -q E009 target/corpus-smoke/pet.json",
+            ],
+            "reject:E001",
+        ),
+        (
+            vec![
+                "cargo run -- check corpus/pet/openapi.yaml > /tmp/pet.json || test $? -eq 1",
+                "grep -q E001 /tmp/pet.json",
+            ],
+            "reject:E001",
+        ),
+    ] {
         assert!(
-            names_case(&mise, &case.path),
-            "`{}` is in the manifest but `mise run corpus-smoke` never checks it",
-            case.id
-        );
-        assert!(
-            names_case(&ci, &case.path),
-            "`{}` is in the manifest but the CI corpus-smoke job never checks it",
-            case.id
+            smoke_expectation(&commands(&lines), &case(expect)).is_err(),
+            "{lines:?} must not satisfy `{expect}`"
         );
     }
 }
@@ -844,6 +970,13 @@ fn published_binary_crates() -> BTreeSet<String> {
             binaries.insert(name.to_owned());
         }
     }
+    // `spargen` ships the `cli` binary, so a scan that misses it is not reading the workspace, and
+    // an empty set would equal an audit task that downloads nothing.
+    assert!(
+        binaries.contains("spargen"),
+        "found the published binary crates {binaries:?}, which omit `spargen` and its `cli` \
+         binary: the workspace scan has stopped reading the members"
+    );
     binaries
 }
 
@@ -1435,6 +1568,34 @@ fn workflow_files() -> BTreeSet<String> {
                 .into_owned()
         })
         .filter(|name| name.ends_with(".yml") || name.ends_with(".yaml"))
+        .collect()
+}
+
+/// Every job of `workflow` (the parsed `.github/workflows/<file>`) with its steps. A scan over
+/// steps that skipped a workflow without `jobs`, or a job without `steps`, would pass over it
+/// unseen, so each must carry at least one of each; a job of another shape (a reusable-workflow
+/// `uses:` job) fails here until the scans that read this learn to follow it.
+fn workflow_jobs<'a>(
+    file: &str,
+    workflow: &'a yaml_rust2::Yaml,
+) -> Vec<(&'a str, &'a Vec<yaml_rust2::Yaml>)> {
+    let jobs = workflow["jobs"]
+        .as_hash()
+        .unwrap_or_else(|| panic!("`{file}` carries no `jobs:` map"));
+    assert!(!jobs.is_empty(), "`{file}` declares no job");
+    jobs.iter()
+        .map(|(job, body)| {
+            let job = job
+                .as_str()
+                .unwrap_or_else(|| panic!("`{file}` names a job with a non-string key"));
+            let steps = body["steps"]
+                .as_vec()
+                .filter(|steps| !steps.is_empty())
+                .unwrap_or_else(|| {
+                    panic!("`{file}`'s `{job}` job carries no `steps:` for this suite to read")
+                });
+            (job, steps)
+        })
         .collect()
 }
 
@@ -2096,12 +2257,8 @@ fn ci_installs_the_rust_toolchain_this_file_pins() {
     let mut seen = 0usize;
     for file in workflow_files() {
         let workflow = workflow(&file);
-        let Some(jobs) = workflow["jobs"].as_hash() else {
-            continue;
-        };
-        for (job, body) in jobs {
-            let job = job.as_str().unwrap_or_default();
-            for step in body["steps"].as_vec().into_iter().flatten() {
+        for (job, steps) in workflow_jobs(&file, &workflow) {
+            for step in steps {
                 let Some(uses) = step["uses"].as_str() else {
                     continue;
                 };
@@ -2333,16 +2490,12 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
     let mut installed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in workflow_files() {
         let workflow = workflow(&file);
-        let Some(jobs) = workflow["jobs"].as_hash() else {
-            continue;
-        };
-        for (job, body) in jobs {
-            let job = job.as_str().unwrap_or_default();
+        for (job, steps) in workflow_jobs(&file, &workflow) {
             // What this job has installed so far: a tool a job runs must be installed by that
             // job, earlier, since jobs share no runner. A pin installed by some other job would
             // pass a workflow-wide check while this job ran whatever the runner image carries.
             let mut in_job = BTreeSet::new();
-            for step in body["steps"].as_vec().into_iter().flatten() {
+            for step in steps {
                 // The step's installs and runs in the order the step performs them, so a `run: |`
                 // block that runs a tool on one line and installs it on a later one is caught:
                 // only an install on an earlier command, line, or step precedes a run.
@@ -2642,25 +2795,167 @@ fn the_testing_strategy_table_names_every_test_in_its_suite() {
 fn the_snapshot_suite_covers_every_manifest_case() {
     // "Per-corpus outcome plus a sorted diagnostic histogram" — five of nine cases had one, so
     // four real-world specs could change what they produce with no reviewable diff anywhere.
-    let suite = read("spargen/tests/snapshot.rs");
-    for case in manifest().cases {
+    // Read as code, not text: a case counts only when a `#[test]` passes its path to
+    // `generate_corpus`, and that test asserts the outcome the manifest declares.
+    let tests = snapshot_tests(&read("spargen/tests/snapshot.rs"));
+    let cases = manifest().cases;
+    for case in &cases {
+        let expected = if case.rejection_code().is_some() {
+            "Rejected"
+        } else {
+            "Generated"
+        };
+        let covering: Vec<&(String, BTreeSet<String>)> = tests
+            .iter()
+            .filter(|(path, _)| *path == case.path)
+            .collect();
+        let [(_, outcomes)] = covering.as_slice() else {
+            panic!(
+                "`{}` is snapshotted by {} tests in spargen/tests/snapshot.rs, not one",
+                case.id,
+                covering.len()
+            );
+        };
+        assert_eq!(
+            outcomes,
+            &BTreeSet::from([expected.to_owned()]),
+            "`{}` is declared `{}`, so its snapshot test must assert `Outcome::{expected}` alone",
+            case.id,
+            case.expect
+        );
+    }
+    for (path, _) in &tests {
         assert!(
-            names_case(&suite, &case.path),
-            "`{}` has no snapshot in spargen/tests/snapshot.rs",
-            case.id
+            cases.iter().any(|case| case.path == *path),
+            "spargen/tests/snapshot.rs snapshots `{path}`, which is no manifest case"
         );
     }
 }
 
+/// Each `#[test]` in `source` that calls `generate_corpus("<path>", …)`, as the path and the
+/// `Outcome::` variants its body names, at any depth of the body.
+fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
+    use proc_macro2::{TokenStream, TokenTree};
+    use quote::ToTokens;
+
+    fn walk(tokens: TokenStream, paths: &mut Vec<String>, outcomes: &mut BTreeSet<String>) {
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+        for (at, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Group(group) => walk(group.stream(), paths, outcomes),
+                TokenTree::Ident(ident) if *ident == "generate_corpus" => {
+                    let Some(TokenTree::Group(arguments)) = trees.get(at + 1) else {
+                        continue;
+                    };
+                    let first = arguments.stream().into_iter().next();
+                    if let Some(path) =
+                        first.and_then(|first| syn::parse2::<syn::LitStr>(first.into()).ok())
+                    {
+                        paths.push(path.value());
+                    }
+                }
+                TokenTree::Ident(ident) if *ident == "Outcome" => {
+                    let colon = |at: usize| matches!(trees.get(at), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                    if !(colon(at + 1) && colon(at + 2)) {
+                        continue;
+                    }
+                    if let Some(TokenTree::Ident(variant)) = trees.get(at + 3) {
+                        outcomes.insert(variant.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let file = syn::parse_file(source).expect("spargen/tests/snapshot.rs parses");
+    let mut tests = Vec::new();
+    for item in &file.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if !function
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("test"))
+        {
+            continue;
+        }
+        let (mut paths, mut outcomes) = (Vec::new(), BTreeSet::new());
+        walk(function.block.to_token_stream(), &mut paths, &mut outcomes);
+        tests.extend(paths.into_iter().map(|path| (path, outcomes.clone())));
+    }
+    assert!(
+        !tests.is_empty(),
+        "no `#[test]` in spargen/tests/snapshot.rs calls `generate_corpus` with a path literal: \
+         the scan has stopped reading the suite"
+    );
+    tests
+}
+
 #[test]
 fn the_corpus_readme_mirrors_the_manifest() {
-    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`".
-    let readme = read("corpus/README.md");
-    for case in manifest().cases {
-        assert!(
-            names_case(&readme, &case.id),
-            "`{}` is in the manifest but not in corpus/README.md",
-            case.id
+    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". The table
+    // row of each case is read for its `Expected` cell, so a mirror that names the case but states
+    // another outcome fails too.
+    let rows = readme_expectations(&read("corpus/README.md"));
+    let cases = manifest().cases;
+    for case in &cases {
+        let row = rows.get(&case.id).unwrap_or_else(|| {
+            panic!(
+                "`{}` is in the manifest but not in corpus/README.md",
+                case.id
+            )
+        });
+        assert_eq!(
+            row, &case.expect,
+            "corpus/README.md says `{}` is expected to `{row}`, and the manifest says `{}`",
+            case.id, case.expect
         );
     }
+    let stale: Vec<&String> = rows
+        .keys()
+        .filter(|id| !cases.iter().any(|case| case.id == **id))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "corpus/README.md lists {stale:?}, which the manifest does not declare"
+    );
+}
+
+/// The `Expected` column of corpus/README.md's case table, by case ID, in the manifest's grammar:
+/// `Generate` reads as `generate`, and `Reject `E###` …` as `reject:E###`.
+fn readme_expectations(readme: &str) -> BTreeMap<String, String> {
+    let mut rows = BTreeMap::new();
+    for line in readme.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // `| ID | Upstream | Revision | Path | SHA-256 | Expected |`, the outer two cells empty.
+        let [_, id, _, _, _, _, expected, _] = cells.as_slice() else {
+            continue;
+        };
+        let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
+            continue;
+        };
+        let expect = if *expected == "Generate" {
+            "generate".to_owned()
+        } else {
+            let code = expected
+                .strip_prefix("Reject `")
+                .and_then(|rest| rest.split_once('`'))
+                .map(|(code, _)| code)
+                .unwrap_or_else(|| {
+                    panic!("corpus/README.md's `{id}` row expects {expected:?}, which reads as neither `Generate` nor `Reject `E###``")
+                });
+            format!("reject:{code}")
+        };
+        assert!(
+            rows.insert(id.to_owned(), expect).is_none(),
+            "corpus/README.md lists `{id}` twice"
+        );
+    }
+    assert!(
+        !rows.is_empty(),
+        "corpus/README.md has no case table row: the scan has stopped reading it"
+    );
+    rows
 }

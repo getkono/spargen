@@ -174,7 +174,7 @@ run = [
 ]
 
 [tasks.bench]
-description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
+description = "Run the generation benchmarks (criterion). CI uploads these as a workflow artifact."
 # The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
 # measures what the published artifact measured.
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
@@ -294,15 +294,25 @@ description = "Rustdoc across the workspace with warnings denied, private items 
 # `--document-private-items` is the point: every subsystem module is private, so a plain
 # `cargo doc` documents none of them and link-checks none of them. Without this flag the whole
 # internal doc surface — which is most of the crate — is unchecked, and stale links accumulate
-# invisibly. `--no-deps` keeps it to this workspace.
+# invisibly. `--no-deps` keeps it to this workspace. The `spargen` binary shares its library's
+# name, so `--workspace` skips it; the second command documents it on its own, or the CLI's doc
+# links would go unchecked.
 env = { RUSTDOCFLAGS = "-D warnings" }
-run = "cargo doc --no-deps --workspace --all-features --document-private-items"
+run = [
+  "cargo doc --no-deps --workspace --all-features --document-private-items",
+  "cargo doc --no-deps -p spargen --bin spargen --all-features --document-private-items",
+]
 
 [tasks.docs]
-description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
-# mdBook is pinned in `[tools]` above, so this uses the same version CI does. Fails on broken
-# includes/links.
-run = "mdbook build docs/book"
+description = "Build the mdBook documentation site into docs/book/book (git-ignored) and check its links"
+# mdBook is pinned in `[tools]` above, so this uses the same version CI does. `mdbook build` checks
+# no link and exits 0 on an unreadable `{{#include}}`, so the second command reads the built site
+# and fails on either: an include left unresolved, or a relative link or anchor that does not
+# resolve inside the site (`spargen/tests/docs.rs`).
+run = [
+  "mdbook build docs/book",
+  "cargo test -p spargen --test docs every_link_in_the_built_book_resolves -- --exact --ignored",
+]
 
 [tasks.commit-msg]
 description = "Validate a Conventional Commit message read from stdin (merge commits exempt)"

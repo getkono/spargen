@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
-use crate::{Build, Code, OmitRule, Spec};
+use crate::{Build, Code, Spec};
 
 const CACHE_FORMAT: u32 = 3;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -65,29 +65,9 @@ impl InputSnapshot {
         append(&mut fingerprint, &(spec.batch_cap as u64).to_be_bytes());
         append(&mut fingerprint, &[u8::from(spec.carve)]);
         append(&mut fingerprint, &[u8::from(spec.open_narrowing)]);
-        for rule in &spec.omit.rules {
-            match rule {
-                OmitRule::Path { path } => {
-                    append(&mut fingerprint, b"path");
-                    append(&mut fingerprint, path.as_bytes());
-                }
-                OmitRule::Operation { method, path } => {
-                    append(&mut fingerprint, b"operation");
-                    append(&mut fingerprint, format!("{method:?}").as_bytes());
-                    append(&mut fingerprint, path.as_bytes());
-                }
-                OmitRule::Component { kind, name } => {
-                    append(&mut fingerprint, b"component");
-                    append(&mut fingerprint, format!("{kind:?}").as_bytes());
-                    append(&mut fingerprint, name.as_bytes());
-                }
-                OmitRule::Pointer { file, pointer } => {
-                    append(&mut fingerprint, b"pointer");
-                    append(&mut fingerprint, file.as_deref().unwrap_or("").as_bytes());
-                    append(&mut fingerprint, pointer.as_bytes());
-                }
-            }
-        }
+        // The omit profile's one canonical encoding, the same bytes its provenance-header
+        // fingerprint hashes, so the two cannot drift apart.
+        append(&mut fingerprint, &spec.omit.canonical_encoding());
         for (path, bytes) in &inputs {
             append(&mut fingerprint, path.as_str().as_bytes());
             append(&mut fingerprint, bytes);
@@ -628,30 +608,91 @@ components:
         );
     }
 
-    /// CLAUDE.md calls the fingerprint "complete". `Spec` has eight fields and every one of them
-    /// changes what is generated, so every one must move the digest — otherwise a config change
-    /// leaves a stale module in place with nothing to tell the consumer. Three were covered.
+    /// CLAUDE.md calls the fingerprint "complete". Every `Spec` field changes what is generated,
+    /// so every one must move the digest — otherwise a config change leaves a stale module in place
+    /// with nothing to tell the consumer. `Spec` is destructured with no `..` rest pattern, so a new
+    /// field fails to compile here until it is given a variant below.
     #[test]
     fn every_spec_field_moves_the_input_fingerprint() {
         let (temp, config) = fixture();
         let base = config.spec.clone();
         let baseline = InputSnapshot::load(&base).unwrap().digest;
+        let Spec {
+            path,
+            uuid,
+            time,
+            omit,
+            error_body_cap,
+            batch_cap,
+            carve,
+            open_narrowing,
+        } = &base;
+
+        // Byte-identical content at a different path is still a different build input, because
+        // the provenance header records the path.
+        let moved = temp.path().join("elsewhere.yaml");
+        std::fs::copy(path, &moved).unwrap();
+        let mut more_omitted = omit.clone();
+        more_omitted.rules.push(OmitRule::Path {
+            path: "/things".into(),
+        });
 
         let variants: Vec<(&str, Spec)> = vec![
-            ("uuid", base.clone().uuid(!base.uuid)),
-            ("time", base.clone().time(!base.time)),
-            ("error_body_cap", base.clone().error_body_cap(1)),
-            ("batch_cap", base.clone().batch_cap(7)),
-            ("carve", base.clone().carve(!base.carve)),
             (
-                "open_narrowing",
-                base.clone().open_narrowing(!base.open_narrowing),
+                "path",
+                Spec {
+                    path: Utf8PathBuf::from_path_buf(moved).unwrap(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "uuid",
+                Spec {
+                    uuid: !uuid,
+                    ..base.clone()
+                },
+            ),
+            (
+                "time",
+                Spec {
+                    time: !time,
+                    ..base.clone()
+                },
             ),
             (
                 "omit",
-                base.clone().omit_rule(OmitRule::Path {
-                    path: "/things".into(),
-                }),
+                Spec {
+                    omit: more_omitted,
+                    ..base.clone()
+                },
+            ),
+            (
+                "error_body_cap",
+                Spec {
+                    error_body_cap: error_body_cap + 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "batch_cap",
+                Spec {
+                    batch_cap: batch_cap + 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "carve",
+                Spec {
+                    carve: !carve,
+                    ..base.clone()
+                },
+            ),
+            (
+                "open_narrowing",
+                Spec {
+                    open_narrowing: !open_narrowing,
+                    ..base.clone()
+                },
             ),
         ];
 
@@ -663,17 +704,6 @@ components:
                  serve the module built for the previous value"
             );
         }
-
-        // `path` is the eighth. Byte-identical content at a different path is still a different
-        // build input, because the provenance header records the path.
-        let moved = temp.path().join("elsewhere.yaml");
-        std::fs::copy(base.path(), &moved).unwrap();
-        let relocated = Spec::new(Utf8PathBuf::from_path_buf(moved).unwrap());
-        assert_ne!(
-            InputSnapshot::load(&relocated).unwrap().digest,
-            baseline,
-            "changing `path` left the input fingerprint unchanged"
-        );
     }
 
     #[test]
@@ -696,5 +726,17 @@ components:
         assert_ne!(digest(&by_path), digest(&by_other_path));
         // The rule *kind* is part of the fingerprint, not just its payload.
         assert_ne!(digest(&by_path), digest(&by_component));
+
+        // A pointer rule with no file and one naming an empty file are different rules; the
+        // shared canonical encoding keeps them apart where an `unwrap_or("")` conflated them.
+        let no_file = base.clone().omit_rule(OmitRule::Pointer {
+            file: None,
+            pointer: "/paths/~1things".into(),
+        });
+        let empty_file = base.clone().omit_rule(OmitRule::Pointer {
+            file: Some("".into()),
+            pointer: "/paths/~1things".into(),
+        });
+        assert_ne!(digest(&no_file), digest(&empty_file));
     }
 }

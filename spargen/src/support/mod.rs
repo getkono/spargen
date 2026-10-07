@@ -3,9 +3,13 @@
 //!
 //! The generator-side handle to the freestanding runtime shipped inside generated output. The
 //! runtime itself is real, standalone-compilable source in the `support-runtime` workspace member
-//! (compiled and tested in its own right); this module embeds it verbatim
-//! (`include_str!`) into a private `support` module of the generated code, and
-//! exposes the error-taxonomy metadata as data for docs cross-referencing.
+//! (compiled and tested in its own right); this module carries each file's source
+//! (`include_str!`) for codegen to embed into a private `support` module of the generated code,
+//! and exposes the error-taxonomy metadata as data for docs cross-referencing.
+//!
+//! The embed is not verbatim: `codegen::emit::emit_support` keeps each file only up to its
+//! `#[cfg(test)]` marker, rewrites every `crate::` to `super::` so the paths resolve from the
+//! file's new submodule, and re-parses the result as tokens, which drops ordinary comments.
 
 /// One runtime source file to embed into generated output.
 #[derive(Debug, Clone, Copy)]

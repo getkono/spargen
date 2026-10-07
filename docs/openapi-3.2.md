@@ -6,7 +6,7 @@ therefore validates 3.1 and 3.2 with their version-specific official document sc
 both through the same typed frontend and version-neutral IR.
 
 The client-relevant differences between the repository references
-[`3.1.2`](../references/3.1.2.md) and [`3.2.0`](../references/3.2.0.md) are deliberately small:
+[`3.1.2`](https://github.com/getkono/spargen/blob/master/references/3.1.2.md) and [`3.2.0`](https://github.com/getkono/spargen/blob/master/references/3.2.0.md) are deliberately small:
 
 | 3.2 area | Spargen disposition |
 | --- | --- |

@@ -1,0 +1,8 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|variant-removed|ResponseBodykindMember1Member1|variant removed: `y`
+minor|variant-added|ResponseBodykindMember0Member1|variant added: `y`
+minor|variant-added|ResponseBodykindMember1Member1|variant added: `Other(String)`, holding any unlisted value
+bump=major

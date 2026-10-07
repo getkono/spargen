@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|error-type-changed|GET /pets|error type `String` -> `i64`
+bump=major
