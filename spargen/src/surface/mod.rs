@@ -888,7 +888,7 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         Some(TypeKind::Never) => nominal_name(ty, names),
         // A reservation has no structure to canonicalise. `spargen diff` compares two finished
         // surfaces, and `check_invariants` rejects a graph that still holds one, so this is
-        // unreachable — and says so structurally, as `type_kind_tokens` in `codegen::emit` does for
+        // unreachable — and says so structurally, as `type_kind_tokens` in `codegen::models` does for
         // the same variant. A rendered placeholder would be a string nothing asserts and a later
         // hand could fold into the `Value` arm below without anything noticing, which is the
         // silent fall-through to `Any` this variant was introduced to prevent.
@@ -963,18 +963,10 @@ fn status_enum_sig(
                 Some(ty) => canon_ty(*ty, api, names),
                 None => "()".to_owned(),
             };
-            format!("{}:{ty}", status_label(*status))
+            format!("{}:{ty}", status.display_label())
         })
         .collect();
     format!("{tag}{{{}}}", rendered.join(", "))
-}
-
-fn status_label(status: StatusSpec) -> String {
-    match status {
-        StatusSpec::Exact(code) => code.to_string(),
-        StatusSpec::Range(prefix) => format!("{prefix}XX"),
-        StatusSpec::Default => "default".to_owned(),
-    }
 }
 
 fn scalar_value_label(value: &ScalarValue) -> String {

@@ -391,7 +391,7 @@ fn the_cli_declares_its_dependency_on_the_facade() {
 }
 
 /// The runtime sources are embedded by splitting on the literal `#[cfg(test)]` and keeping
-/// everything before it (`codegen/emit.rs`). That is only sound while each file contains the marker
+/// everything before it (`codegen/runtime.rs`). That is only sound while each file contains the marker
 /// at most once and puts nothing after the test module: a second occurrence — or the literal string
 /// in a doc comment above the tests — would silently truncate embedded runtime source.
 #[test]

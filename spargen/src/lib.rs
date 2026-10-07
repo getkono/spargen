@@ -942,7 +942,6 @@ fn build_emit_plan(
             feature_time: spec.time,
             error_body_cap: spec.error_body_cap,
         },
-        diags,
     );
 
     let emit_options = emit::EmitOptions {

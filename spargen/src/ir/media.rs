@@ -157,6 +157,17 @@ impl StatusSpec {
             StatusSpec::Default => false,
         }
     }
+
+    /// The selector as it reads in prose: `404`, `5XX`, or `default` — the spelling of its
+    /// Responses Object key. The generated error enum's `Display` and `spargen diff`'s response
+    /// labels both name a status this way.
+    pub(crate) fn display_label(self) -> String {
+        match self {
+            StatusSpec::Exact(code) => code.to_string(),
+            StatusSpec::Range(prefix) => format!("{prefix}XX"),
+            StatusSpec::Default => "default".to_owned(),
+        }
+    }
 }
 
 /// A typed response for one status selector. Documented headers get typed accessors; every header
@@ -1058,6 +1069,16 @@ mod tests {
         // `default` is never a success selector; it reaches the success side only through
         // `default_is_success_source`.
         assert!(!StatusSpec::Default.is_success());
+    }
+
+    /// The one prose spelling of a selector, which the generated error `Display` and
+    /// `spargen diff`'s labels share: the Responses Object key, `XX` upper-case.
+    #[test]
+    fn a_selector_displays_as_its_responses_object_key() {
+        assert_eq!(StatusSpec::Exact(404).display_label(), "404");
+        assert_eq!(StatusSpec::Range(5).display_label(), "5XX");
+        assert_eq!(StatusSpec::Range(0).display_label(), "0XX");
+        assert_eq!(StatusSpec::Default.display_label(), "default");
     }
 
     #[test]
