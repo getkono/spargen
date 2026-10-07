@@ -1763,18 +1763,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // nothing but `required` (#140). Emitting them as a union gives a `oneOf` whose
                 // exactly-one check fails on every value, so the position takes that one type and
                 // the ignored branch distinctions are reported, not dropped in silence.
-                Some(mut common) => {
-                    // Every branch is `common`, so either all of them accept `null` or none does,
-                    // and `intersection.nullable` says whether the union's own `null` member
-                    // survived the meet with the target. An `anyOf` needs one match, so `null` is
-                    // valid when either admits it. A `oneOf` needs exactly one: a nullable
-                    // `common` puts `null` in two or more branches, which fails it whatever the
-                    // `null` member does, so `null` is valid only through that member and only
-                    // when `common` rejects it.
+                Some((mut common, branches_accepting_null)) => {
+                    // `branches_accepting_null` counts the branches that accept `null`, and
+                    // `intersection.nullable` says whether the union's own `null` member survived
+                    // the meet with the target. An `anyOf` needs one match, so `null` is valid
+                    // when any of them admits it. A `oneOf` needs exactly one: its branches are
+                    // grouped apart from their own `null`, so they need not agree on it, and
+                    // `null` is valid only when exactly one of the branches and that member
+                    // accepts it — two put it in two branches, which fails exactly-one.
                     common.nullable = if schema.one_of.is_empty() {
-                        intersection.nullable || common.nullable
+                        intersection.nullable || branches_accepting_null > 0
                     } else {
-                        intersection.nullable && !common.nullable
+                        usize::from(intersection.nullable) + branches_accepting_null == 1
                     };
                     Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                         .message(
@@ -5448,29 +5448,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// are all the same type. No value can tell such variants apart, so the union adds nothing to
     /// its common type — and a `oneOf` of them rejects every value its common type accepts.
     /// `structural` also counts variants that are distinct definitions emitting one Rust type
-    /// ([`TypeGraph::same_generated_type`]) as the same, unless a discriminator tells them apart by
-    /// tag.
-    fn indistinguishable_union_variant(&self, ty: Ty, structural: bool) -> Option<Ty> {
+    /// ([`Self::same_type_apart_from_null`]) as the same, unless a discriminator tells them apart by
+    /// tag. Returned with the number of variants that accept `null`: after the meet with a `$ref`
+    /// target each variant keeps its own nullability, so structurally shared variants need not
+    /// agree on it.
+    fn indistinguishable_union_variant(&self, ty: Ty, structural: bool) -> Option<(Ty, usize)> {
         let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
             return None;
         };
         let structural =
             structural && !matches!(union.strategy, UnionStrategy::Discriminated { .. });
         let (first, rest) = union.variants.split_first()?;
+        let nullable = union
+            .variants
+            .iter()
+            .filter(|variant| variant.ty.nullable)
+            .count();
         (!rest.is_empty()
             && rest.iter().all(|variant| {
                 same_ty(variant.ty, first.ty)
-                    || (structural && self.graph.same_generated_type(variant.ty, first.ty))
+                    || (structural && self.same_type_apart_from_null(variant.ty, first.ty))
             }))
-        .then_some(first.ty)
+        .then_some((first.ty, nullable))
+    }
+
+    /// Whether two `oneOf` variants emit one Rust type once each one's own `null` is set aside.
+    /// No non-null value tells them apart, so they are one variant whatever their nullability; the
+    /// callers decide `null` separately, by how many of the merged branches accept it.
+    fn same_type_apart_from_null(&self, a: Ty, b: Ty) -> bool {
+        self.graph
+            .same_generated_type(non_nullable(a), non_nullable(b))
     }
 
     /// The `oneOf` union `ty` a `$ref` met its own sibling to, with the variants that lower to one
     /// generated type merged into the first of them, or `None` when no two do — the post-meet
     /// counterpart of [`Self::merge_indistinguishable_variants`] (#402). Called once
     /// [`Self::indistinguishable_union_variant`] has found that not every variant shares one type,
-    /// so two or more variants remain. A merged set whose type accepts `null` puts `null` in two or
-    /// more branches, which fails exactly-one, so `null` is then invalid everywhere in the union.
+    /// so two or more variants remain. Variants are grouped apart from their own `null`
+    /// ([`Self::same_type_apart_from_null`]); a merged set in which exactly one branch accepts
+    /// `null` keeps it, and one in which two or more do puts `null` in two branches, which fails
+    /// exactly-one, so `null` is then invalid everywhere in the union.
     fn merge_intersected_one_of(&mut self, schema: &Schema, ty: Ty, hint: &str) -> Option<Ty> {
         let TypeKind::Union(union) = &self.graph.get(ty.id)?.kind else {
             return None;
@@ -5482,8 +5499,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
             let shared = groups.iter_mut().find(|group| {
-                self.graph
-                    .same_generated_type(union.variants[group[0]].ty, variant.ty)
+                self.same_type_apart_from_null(union.variants[group[0]].ty, variant.ty)
             });
             match shared {
                 Some(group) => group.push(index),
@@ -5493,16 +5509,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if groups.len() == union.variants.len() {
             return None;
         }
-        // `same_generated_type` requires equal nullability, so a set's first variant speaks for it.
-        let null_twice = groups
-            .iter()
-            .any(|group| group.len() > 1 && union.variants[group[0]].ty.nullable);
+        // The members of a set need not agree on `null`. A set accepts it when exactly one member
+        // does; two or more put `null` in two branches, which fails exactly-one everywhere.
+        let accepting_null = |group: &Vec<usize>| {
+            group
+                .iter()
+                .filter(|index| union.variants[**index].ty.nullable)
+                .count()
+        };
+        let null_twice = groups.iter().any(|group| accepting_null(group) > 1);
         let retained: Vec<usize> = groups.iter().map(|group| group[0]).collect();
-        let variants = retained
+        let variants = groups
             .iter()
-            .map(|index| {
-                let mut variant = union.variants[*index].clone();
-                variant.ty.nullable &= !null_twice;
+            .map(|group| {
+                let mut variant = union.variants[group[0]].clone();
+                variant.ty.nullable = accepting_null(group) == 1 && !null_twice;
                 variant
             })
             .collect();
