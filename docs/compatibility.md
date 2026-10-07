@@ -108,7 +108,7 @@ Use omit profiles as reviewed compatibility code. Do not generate them automatic
 developer tooling may suggest rules, but committed profiles should be explicit and stale-rule
 failures should be fixed promptly.
 
-## Analysis CLI
+## `spargen.toml` and the analysis CLI
 
 `spargen check` can apply batch, carve, and omit settings from `spargen.toml` and
 repeatable flags while auditing a schema. This never generates code; keep the generation profile
@@ -123,6 +123,7 @@ time = true             # optional (default true); map `format: date-time`/`date
 carve = false           # optional; auto-carve unsupported constructs
 batch_cap = 100         # optional (default 100)
 error_body_cap = 65536  # optional (default 64 KiB)
+open_narrowing = false  # optional (default false); open a response body's string `enum`/`const` narrowings
 
 [[omit]]
 path = "/pets/{id}"                     # → OmitRule::Path (exact)

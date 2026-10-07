@@ -156,7 +156,7 @@ jobs:
       - run: grep -q E001 target/corpus-smoke/github-30.json
       # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json
-      # ollama now generates (union lowering, #9): check must succeed with no rejection.
+      # ollama generates: check must succeed with no rejection.
       - run: cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
       # openai is 3.1 and past the version gate, but `POST /realtime/calls` documents

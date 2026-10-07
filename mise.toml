@@ -174,7 +174,7 @@ run = [
 ]
 
 [tasks.bench]
-description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
+description = "Run the generation benchmarks (criterion). CI uploads these as a workflow artifact."
 # The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
 # measures what the published artifact measured.
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"

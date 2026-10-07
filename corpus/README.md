@@ -19,11 +19,11 @@ Included public APIs:
 | `meilisearch` | `meilisearch/open-api` | `a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c` | `open-api.json` | `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` | Reject `E011` (OpenAPI 3.1.0; invalid null `externalDocs.description`) |
 | `mastodon-openapi` | `abraham/mastodon-openapi` | `aea01d055ea82b898ff24f5004d1012bec1de25f` | `dist/schema.json` | `87d163d80860be314a86128a02b60baa5f829643a2a9b92d18b7165c7f3f2435` | Generate |
 
-The four after `openapi-boilerplate` are pinned real-world APIs added to broaden coverage: Stripe,
+The five after `openapi-boilerplate` are pinned real-world APIs added to broaden coverage: Stripe,
 Twilio and a representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so they
 pin the version gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises
 strict official document validation past the gate, rejecting its null Tag
-`externalDocs.description` fields (`E011`).
+`externalDocs.description` fields (`E011`); `mastodon-openapi`, the fifth, is described below.
 
 `mastodon-openapi` (#215) is genuine OpenAPI 3.1.0 that generates. It is the corpus's only
 real-world instance of the recursive-nullable `$ref`, the standard 3.1 spelling of "optionally
@@ -67,7 +67,7 @@ Measured by running `spargen check` over every case and recipe that reaches lowe
 mutation of `spargen/src/oas31/lower.rs` at a time:
 
 - Making every shape-bearing `$ref` sibling that reaches the intersection reject with `E013`
-  rejects `mastodon-openapi` (26 `E013`s) and adds one `E013` to the already-rejected
+  rejects `mastodon-openapi` and adds an `E013` to the already-rejected
   `openai-openapi`, at `/components/schemas/InputItem/oneOf/1`; every other case and recipe keeps
   its outcome and histogram (measured on `master@38c1154`, where `corpus_manifest` and `snapshot`
   fail and `recipes` passes). On `master@b1961a4`, before #279 was fixed, only `mastodon-openapi`
@@ -75,7 +75,7 @@ mutation of `spargen/src/oas31/lower.rs` at a time:
   on `master@16eda2e`: `corpus_manifest`, `snapshot` and `recipes` passed with no snapshot
   changed).
 - Rejecting the recursive-nullable collapse (a single real union member that closes a reference
-  cycle, without sibling keywords) with `E013` rejects `mastodon-openapi` (one `E013`); every
+  cycle, without sibling keywords) with `E013` rejects `mastodon-openapi`; every
   other case and recipe keeps its outcome (measured on `master@b1961a4`).
 
 ### Which diagnostic emission sites the corpus notices
@@ -86,8 +86,10 @@ fact: whether some pinned description reaches the site with its condition false.
 that for every emission site in `spargen/src/oas31` and `spargen/src/source` (the frontend; codes
 emitted only by `codegen`, `compat`, `name` or the facade are out of scope).
 
-Measured on `master@38c1154`. An emission site is one `Code::` construction outside a
-`#[cfg(test)]` module: 143 of them, 107 errors and 36 warnings. The mutation for a site makes it
+Measured on `master@38c1154`, and not re-measured since: no test holds this table, so a site added,
+moved, or regated after that commit may be reached differently or missing from it. Only the
+*Fired by the corpus* column is held, by the snapshot histograms. An emission site is one `Code::`
+construction outside a `#[cfg(test)]` module. The mutation for a site makes it
 fire whenever the statement that selects it is evaluated: the innermost `if` or `let … else`
 condition, or the `match` whose arm it is, with any early exit ahead of it in the same block
 skipped. For a helper that only builds a diagnostic (`reject_all_of_cycle`, `reject_unpinned`,
@@ -103,54 +105,54 @@ Which statements each description evaluates was read from source-based coverage
 (`cargo +stable llvm-cov`) of `spargen check --batch-cap 1000000` over each case and recipe on its
 own, and of the `corpus_manifest`, `snapshot` and `recipes` suites; the two agree on every site.
 Real mutations run through the three suites checked the method. Forcing seven sites marked not
-noticed, all at once, left all three green (`frontend.rs` failed 8 of 403 under the same mutations,
-so they were live). Forcing a noticed site failed exactly the tests of the descriptions listed as
+noticed, all at once, left all three green (`frontend.rs` failed under the same mutations, so they
+were live). Forcing a noticed site failed exactly the tests of the descriptions listed as
 reaching it, for each of four: `W002` for `callbacks` (five snapshots and the `aide` recipe),
 `E004` for a Path Item `$ref` hop (`openapi-boilerplate` in `corpus_manifest` and `snapshot`),
 `W011` for a second per-operation `servers` entry (the `github-api-3-1` snapshot), and the
 `$ref`-sibling `E013` above (`mastodon-openapi` and `openai-openapi`). The `E004` and `W011`
 mutations shared one run; no description reaches both.
 
-98 of the 143 sites are noticed and 45 are not (34 errors, 11 warnings). Per code:
+Per code, where `—` in the last column means every site of the code was reached at that commit:
 
-| Code | Sites | Noticed | Fired by the corpus | Sites no pinned description reaches |
-| --- | --- | --- | --- | --- |
-| `E001` | 1 | 1 | the four 3.0 cases, `poem-openapi` recipe | — |
-| `E002` | 2 | 0 | — | root `jsonSchemaDialect` not the OAS dialect; a schema `$schema` naming another dialect |
-| `E003` | 2 | 1 | — | `spargen lock` meeting an unfetchable remote scheme (`vendor.rs`) |
-| `E004` | 14 | 9 | — | remote alias cycle (`ensure_remote`); bundle alias cycle (`ensure_resolved`); both arms of `reject_unfollowable_reference`; a Security Scheme `$ref` that does not resolve |
-| `E005` | 2 | 0 | — | `patternProperties` beside `additionalProperties: false`; heterogeneous `patternProperties` value types |
-| `E006` | 1 | 1 | — | — |
-| `E007` | 3 | 3 | — | — |
-| `E008` | 2 | 2 | — | — |
-| `E009` | 28 | 20 | `openai-openapi` | a `content` parameter under a media other than JSON or text; a non-object form-urlencoded request body; `prefixEncoding`/`itemEncoding` on multipart; an Encoding Object style outside the four, delimited with `explode: true`, `deepObject` in multipart, or an object property in multipart; an XML hint on a type serialized as XML |
-| `E010` | 7 | 3 | — | all four `in: querystring` sites (no content, unsupported media, no schema, non-object form body) |
-| `E011` | 27 | 19 | `meilisearch` | an `additionalOperations` method colliding with a fixed field; a tag `parent` cycle and an unknown `parent`; `xml.nodeType` beside `attribute`/`wrapped`; a duplicate path-item parameter; a vendored remote that is not UTF-8; a malformed `spargen.lock`; `spargen lock` I/O failures |
-| `E012` | 2 | 2 | — | — |
-| `E013` | 9 | 8 | — | an all-scalar `allOf` with no common value (`reject_all_of_scalars`) |
-| `E014` | 1 | 1 | — | — |
-| `E015` | 1 | 0 | — | `prefixItems` beside a typed `items` rest |
-| `E016` | 1 | 1 | — | — |
-| `E021` | 1 | 0 | — | a vendored remote missing or drifted from its pin |
-| `E022` | 2 | 2 | — | — |
-| `E025` | 1 | 0 | — | a failed `spargen lock` fetch |
-| `W001` | 3 | 3 | `github-api-3-1`, `openai-openapi`, `ollama`, `mastodon-openapi`, `aide` recipe | — |
-| `W002` | 3 | 3 | `github-api-3-1`, `openai-openapi`, `mastodon-openapi` | — |
-| `W005` | 4 | 3 | `github-api-3-1`, `openai-openapi` | a `default` beside an annotation-only component `$ref` (`ensure_component`) |
-| `W006` | 2 | 0 | — | both `XmlHintIgnored` sites |
-| `W010` | 3 | 2 | — | `itemSchema` on a response header's `content` |
-| `W011` | 20 | 13 | `github-api-3-1`, `openai-openapi` | cases `positional-encoding-form`, `allow-reserved-multipart`, `encoding-headers-non-multipart`, `encoding-header-no-value`, and three `response-header-untyped` sites under a header's `content` |
-| `W014` | 1 | 1 | `github-api-3-1`, `openai-openapi`, `ollama` | — |
+| Code | Fired by the corpus | Sites no pinned description reaches (at `master@38c1154`) |
+| --- | --- | --- |
+| `E001` | the four 3.0 cases, `poem-openapi` recipe | — |
+| `E002` | — | root `jsonSchemaDialect` not the OAS dialect; a schema `$schema` naming another dialect |
+| `E003` | — | `spargen lock` meeting an unfetchable remote scheme (`vendor.rs`) |
+| `E004` | — | remote alias cycle (`ensure_remote`); bundle alias cycle (`ensure_resolved`); both arms of `reject_unfollowable_reference`; a Security Scheme `$ref` that does not resolve |
+| `E005` | — | `patternProperties` beside `additionalProperties: false`; heterogeneous `patternProperties` value types |
+| `E006` | — | — |
+| `E007` | — | — |
+| `E008` | — | — |
+| `E009` | `openai-openapi` | a `content` parameter under a media other than JSON or text; a non-object form-urlencoded request body; `prefixEncoding`/`itemEncoding` on multipart; an Encoding Object style outside the four, delimited with `explode: true`, `deepObject` in multipart, or an object property in multipart; an XML hint on a type serialized as XML |
+| `E010` | — | the `in: querystring` sites (no content, unsupported media, no schema, non-object form body) |
+| `E011` | `meilisearch` | an `additionalOperations` method colliding with a fixed field; a tag `parent` cycle and an unknown `parent`; `xml.nodeType` beside `attribute`/`wrapped`; a duplicate path-item parameter; a vendored remote that is not UTF-8; a malformed `spargen.lock`; `spargen lock` I/O failures |
+| `E012` | — | — |
+| `E013` | — | an all-scalar `allOf` with no common value (`reject_all_of_scalars`) |
+| `E014` | — | — |
+| `E015` | — | `prefixItems` beside a typed `items` rest |
+| `E016` | — | — |
+| `E021` | — | a vendored remote missing or drifted from its pin |
+| `E022` | — | — |
+| `E025` | — | a failed `spargen lock` fetch |
+| `W001` | `github-api-3-1`, `openai-openapi`, `ollama`, `mastodon-openapi`, `aide` recipe | — |
+| `W002` | `github-api-3-1`, `openai-openapi`, `mastodon-openapi` | — |
+| `W005` | `github-api-3-1`, `openai-openapi` | a `default` beside an annotation-only component `$ref` (`ensure_component`) |
+| `W006` | — | the `XmlHintIgnored` sites |
+| `W010` | — | `itemSchema` on a response header's `content` |
+| `W011` | `github-api-3-1`, `openai-openapi` | cases `positional-encoding-form`, `allow-reserved-multipart`, `encoding-headers-non-multipart`, `encoding-header-no-value`, and the `response-header-untyped` sites under a header's `content` |
+| `W014` | `github-api-3-1`, `openai-openapi`, `ollama` | — |
 
-A noticed site can rest on one description. These are noticed by exactly one, so removing or
-re-pinning it would leave them unguarded:
+A noticed site can rest on one description. At the same commit these were noticed by exactly one,
+so removing or re-pinning it would leave them unguarded:
 
-- `openapi-boilerplate`: six `E004` sites (the four in `resolve.rs`, `chain_component_alias`'s
-  cycle, and the Path Item `$ref` hop) and `E016`'s Path Item `$ref` siblings.
+- `openapi-boilerplate`: the `E004` sites in `resolve.rs`, `chain_component_alias`'s cycle, and the
+  Path Item `$ref` hop, and `E016`'s Path Item `$ref` siblings.
 - `openai-openapi`: the `E009` sites for a nested `encoding`, a `contentType` range, a malformed
   `contentType`, and an unsendable `contentType` parameter, and `W011`'s
   `encoding-unknown-property`.
-- `mastodon-openapi`: `E009` for a sequential response's `schema` under OpenAPI 3.2, the three
+- `mastodon-openapi`: `E009` for a sequential response's `schema` under OpenAPI 3.2, the
   `E011` server-variable checks, and `W011`'s `unused-server-variable`.
 - `github-api-3-1`: `W011`'s `extra-servers`.
 
