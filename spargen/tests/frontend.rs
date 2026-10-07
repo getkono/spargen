@@ -700,7 +700,8 @@ components:
 /// spelling and the all-scalar `allOf` already do. A nullable `$ref` member decides `null` for
 /// itself; an untyped inline member's object keywords bind objects only, so it admits `null`
 /// without deciding; a member typed `object` alone denies it. Untyped members alone decide nothing,
-/// so they keep the non-null struct an untyped object schema lowers to by itself.
+/// so they keep the non-null struct an untyped object schema lowers to by itself. The enclosing
+/// schema's own untyped object keywords beside the `allOf` are neutral in the same way.
 #[test]
 fn an_object_all_of_admits_null_when_every_member_does() {
     let spec = r##"
@@ -724,7 +725,7 @@ components:
         id: { type: string }
     Holder:
       type: object
-      required: [viaAllOf, viaSibling, both, single, denied, untypedOnly]
+      required: [viaAllOf, viaSibling, both, single, denied, untypedOnly, enclosing]
       properties:
         viaAllOf:
           allOf:
@@ -750,6 +751,10 @@ components:
           allOf:
             - properties: { id: { type: string } }
             - properties: { extra: { type: string } }
+        enclosing:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+          properties: { z: { type: string } }
 "##;
     let (report, code) = generate_with_code(spec);
     for (entry, report) in [("generate", &report), ("check", &check(spec))] {
@@ -763,6 +768,7 @@ components:
         ("pub single", true),
         ("pub denied", false),
         ("pub untyped_only", false),
+        ("pub enclosing", true),
     ] {
         let ty = field_type(&types, field).unwrap_or_else(|| panic!("no `{field}` field: {types}"));
         assert_eq!(
