@@ -34,8 +34,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
-    TypeKind,
+    Api, ApiErrorBodyImpl, ErrorShape, ParamLoc, Prim, ScalarRepr, ScalarValue, StatusSpec,
+    SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
@@ -54,8 +54,9 @@ pub(crate) struct Surface {
 struct OpSurface {
     /// The generated Rust method identifier.
     method_name: String,
-    /// Parameters keyed by wire name (path/query/header/cookie alike).
-    params: BTreeMap<String, ParamSurface>,
+    /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
+    /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
+    params: BTreeMap<(String, &'static str), ParamSurface>,
     /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
     /// required `&T` argument in the generated signature (the IR does not model an optional body).
     request_body: Option<String>,
@@ -368,7 +369,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let mut params = BTreeMap::new();
         for param in &operation.params {
             params.insert(
-                param.name.clone(),
+                (param.name.clone(), param_loc_label(param.location)),
                 ParamSurface {
                     ty: canon_ty(param.ty, api, names),
                     required: param.required,
@@ -566,9 +567,10 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         // the rendered status types, or the single body itself), so `ErrorTypeChanged` reports it.
         _ => {}
     }
-    for name in keys(&old.params, &new.params) {
-        let location = format!("{key} param `{name}`");
-        match (old.params.get(name), new.params.get(name)) {
+    for param_key in keys(&old.params, &new.params) {
+        let (name, loc) = param_key;
+        let location = format!("{key} param `{name}` ({loc})");
+        match (old.params.get(param_key), new.params.get(param_key)) {
             (None, Some(param)) => {
                 let kind = if param.required {
                     ChangeKind::RequiredParamAdded
@@ -800,11 +802,23 @@ fn diff_union(
     }
 }
 
+/// A parameter location as the OpenAPI `in` value spells it, for a parameter's surface key and its
+/// change label.
+fn param_loc_label(location: ParamLoc) -> &'static str {
+    match location {
+        ParamLoc::Path => "path",
+        ParamLoc::Query => "query",
+        ParamLoc::QueryString => "querystring",
+        ParamLoc::Header => "header",
+        ParamLoc::Cookie => "cookie",
+    }
+}
+
 /// The sorted union of two maps' keys — the deterministic traversal spine of every diff.
-fn keys<'a, V>(
-    old: &'a BTreeMap<String, V>,
-    new: &'a BTreeMap<String, V>,
-) -> impl Iterator<Item = &'a String> {
+fn keys<'a, K: Ord, V>(
+    old: &'a BTreeMap<K, V>,
+    new: &'a BTreeMap<K, V>,
+) -> impl Iterator<Item = &'a K> {
     old.keys()
         .chain(new.keys())
         .collect::<BTreeSet<_>>()

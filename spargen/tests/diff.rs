@@ -771,6 +771,66 @@ fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
     }
 }
 
+/// A `GET /pets/{id}` operation carrying a path `id` of `path_type` beside a query `id` of
+/// `query_type`: the same wire name in two locations.
+fn same_named_params(path_type: &str, query_type: &str) -> String {
+    full(
+        &format!(
+            "  /pets/{{id}}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {{ type: {path_type} }}
+        - name: id
+          in: query
+          required: false
+          schema: {{ type: {query_type} }}
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {PET_REF}
+"
+        ),
+        PET_SCHEMA,
+    )
+}
+
+#[test]
+fn a_parameter_is_keyed_by_its_location_as_well_as_its_name() {
+    // A path `id` and a query `id` are two parameters; keyed by name alone, one overwrote the
+    // other and a breaking change to the overwritten one was reported as patch.
+    let old = same_named_params("string", "string");
+
+    for (new, changed) in [
+        (same_named_params("integer", "string"), "path"),
+        (same_named_params("string", "integer"), "query"),
+    ] {
+        let report = diff(&old, &new);
+        let changes: Vec<(ChangeKind, &str)> = report
+            .changes
+            .iter()
+            .map(|change| (change.kind, change.location.as_str()))
+            .collect();
+        let location = format!("GET /pets/{{id}} param `id` ({changed})");
+        assert_eq!(
+            changes,
+            vec![(ChangeKind::ParamTypeChanged, location.as_str())],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+
+    // Unchanged, the pair is two entries that both match: no change at all.
+    let report = diff(&old, &same_named_params("string", "string"));
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+}
+
 const PET_AND_OWNER: &str = "    Pet:
       type: object
       required: [id]
