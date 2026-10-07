@@ -3949,7 +3949,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the field's type, so the struct refers to the last meet and not to the ones before it.
         let kind = TypeKind::Struct(Struct { fields, additional });
         self.elide_meet_intermediates(mark, &kind);
-        let ty = self.insert_schema_type(schema, hint, kind);
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
+        // it satisfies every member.
+        ty.nullable = object_all_of_admits_null(contributions);
         Some(self.with_all_of_nullability(schema, ty))
     }
 
@@ -3971,7 +3974,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: schema.required.clone(),
-                nullable: schema.types.types.contains(&JsonType::Null),
+                nullable: stated_nullability(schema),
             });
         }
         Some(())
@@ -4235,7 +4238,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields,
                     additional,
                     required,
-                    nullable: ty.nullable,
+                    nullable: Some(ty.nullable),
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -4258,7 +4261,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields,
                 additional,
                 required: schema.required.clone(),
-                nullable: schema.types.types.contains(&JsonType::Null),
+                nullable: stated_nullability(schema),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -9678,22 +9681,54 @@ enum Contribution {
         fields: Vec<Field>,
         additional: AdditionalProps,
         required: Vec<String>,
-        /// Whether the member admits `null` (a `"null"` in its type array, or a nullable `$ref`
-        /// target). Read only beside a union ([`LowerCtx::lower_all_of_beside_union`]), where it
-        /// decides whether the union's `null` survives the meet.
-        nullable: bool,
+        /// Whether the member admits `null`, where the member decides it: `Some` for a member
+        /// that states a `type` (whether it lists `"null"`) or is a `$ref` target (its lowered
+        /// nullability), `None` for an untyped one ([`stated_nullability`]). An untyped member's
+        /// object keywords constrain only objects, so it admits `null` without deciding the
+        /// merge's nullability, as an untyped `$ref` sibling leaves its target's alone.
+        nullable: Option<bool>,
     },
     Scalar(Ty),
 }
 
 impl Contribution {
-    /// Whether the member this contribution came from admits `null`.
+    /// Whether the member this contribution came from is known to admit `null`. An untyped
+    /// object member counts as not admitting it here, which is what the union-side meet
+    /// ([`LowerCtx::lower_all_of_beside_union`]) reads.
     fn admits_null(&self) -> bool {
         match self {
-            Contribution::Object { nullable, .. } => *nullable,
+            Contribution::Object { nullable, .. } => *nullable == Some(true),
             Contribution::Scalar(ty) => ty.nullable,
         }
     }
+}
+
+/// Whether an object `allOf` merge admits `null` (issue #425): every member that decides its
+/// nullability admits it, and at least one decides. An untyped member admits `null` and decides
+/// nothing, so a merge of untyped members alone keeps the non-null struct an untyped object
+/// schema lowers to on its own; one nullable `$ref` member beside them makes it nullable, as the
+/// `$ref`-sibling spelling of the same conjunction does. Only object contributions reach here.
+fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
+    let mut decided = false;
+    for contribution in contributions {
+        if let Contribution::Object {
+            nullable: Some(admits),
+            ..
+        } = contribution
+        {
+            if !admits {
+                return false;
+            }
+            decided = true;
+        }
+    }
+    decided
+}
+
+/// Whether a schema's own `type` admits `null`: `None` for an untyped schema, which states no
+/// category and so decides nothing about `null` in an `allOf` merge.
+fn stated_nullability(schema: &Schema) -> Option<bool> {
+    (!schema.types.types.is_empty()).then(|| schema.types.types.contains(&JsonType::Null))
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
