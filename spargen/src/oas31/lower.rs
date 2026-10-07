@@ -576,6 +576,37 @@ struct ScopeReach {
     uncategorised: bool,
 }
 
+/// The three spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
+/// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
+/// the union as its sibling, an `allOf` with the union beside it on one schema (#419), and an
+/// `allOf` with the union as one of its members (#463). Only the wording of the diagnostics they
+/// report differs.
+#[derive(Clone, Copy)]
+enum MetUnion {
+    RefSibling,
+    BesideAllOf,
+    AllOfMember,
+}
+
+impl MetUnion {
+    /// The subject of the collapse warnings: what was intersected with what. `one_of_only` names
+    /// the union `oneOf` alone, for the partial merge only a `oneOf` takes.
+    fn subject(self, one_of_only: bool) -> &'static str {
+        match (self, one_of_only) {
+            (MetUnion::RefSibling, false) => "this `$ref` and its `oneOf`/`anyOf` sibling",
+            (MetUnion::RefSibling, true) => "this `$ref` and its `oneOf` sibling",
+            (MetUnion::BesideAllOf, false) => {
+                "this schema's `allOf` and the `oneOf`/`anyOf` beside it"
+            }
+            (MetUnion::BesideAllOf, true) => "this schema's `allOf` and the `oneOf` beside it",
+            (MetUnion::AllOfMember, false) => {
+                "this `allOf`'s `oneOf`/`anyOf` member and its other members"
+            }
+            (MetUnion::AllOfMember, true) => "this `allOf`'s `oneOf` member and its other members",
+        }
+    }
+}
+
 /// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
 /// non-empty string of the characters a Components Object key may hold (`^[a-zA-Z0-9.\-_]+$`).
 /// The specification recommends reading a value that is both a valid name and a valid relative
@@ -776,9 +807,11 @@ struct LowerCtx<'a, 'doc> {
     /// where `W005` and `W006` raised against it point instead of that root (#454).
     meet_locations: HashMap<TypeId, Provenance>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
-    /// `$ref`'s target. [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged
-    /// (#402): the `$ref` arm collapses them after the meet, where the branches' `null` is still
-    /// visible, and merging untyped branches first would hide it behind `serde_json::Value`.
+    /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
+    /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the
+    /// caller collapses them after the meet ([`Self::collapse_met_union`]), where the branches'
+    /// `null` is still visible, and merging untyped branches first would hide it behind
+    /// `serde_json::Value`.
     unmerged_union: Option<Provenance>,
 }
 
@@ -1756,48 +1789,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
-            // A `oneOf` sibling's branches are compared by generated type, as the inline merge
-            // compares them (#402): two distinct `i64`-alias enums are one Rust type, so no value
-            // tells them apart. An `anyOf` keeps the identity comparison it has always had.
-            let one_of = !schema.one_of.is_empty();
-            let collapsed = has_union_sibling
-                .then(|| self.indistinguishable_union_variant(intersection, one_of))
-                .flatten();
-            let intersection = match collapsed {
-                // Every branch of the intersected union is one and the same type: the branches
-                // differ only in keywords the lowered shape does not carry, such as a branch of
-                // nothing but `required` (#140). Emitting them as a union gives a `oneOf` whose
-                // exactly-one check fails on every value, so the position takes that one type and
-                // the ignored branch distinctions are reported, not dropped in silence.
-                Some((mut common, branches_accepting_null)) => {
-                    // `branches_accepting_null` counts the branches that accept `null`, and
-                    // `intersection.nullable` says whether the union's own `null` member survived
-                    // the meet with the target. An `anyOf` needs one match, so `null` is valid
-                    // when any of them admits it. A `oneOf` needs exactly one: its branches are
-                    // grouped apart from their own `null`, so they need not agree on it, and
-                    // `null` is valid only when exactly one of the branches and that member
-                    // accepts it — two put it in two branches, which fails exactly-one.
-                    common.nullable = if schema.one_of.is_empty() {
-                        intersection.nullable || branches_accepting_null > 0
-                    } else {
-                        usize::from(intersection.nullable) + branches_accepting_null == 1
-                    };
-                    Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-                        .message(
-                            "this `$ref` and its `oneOf`/`anyOf` sibling intersect to a union whose \
-                             branches differ only in keywords the generated type does not carry, \
-                             so which branch a value matches is not enforced",
-                        )
-                        .remedy("keep producer-side validation for the union's branch constraints")
-                        .emit(self.diags);
-                    common
-                }
-                // Only some branches share a generated type: they become one variant, as the
-                // inline merge makes them, and the others stand.
-                None if one_of && has_union_sibling => self
-                    .merge_intersected_one_of(schema, intersection, hint)
-                    .unwrap_or(intersection),
-                None => intersection,
+            let intersection = if has_union_sibling {
+                self.collapse_met_union(
+                    schema,
+                    intersection,
+                    !schema.one_of.is_empty(),
+                    &format!("{hint}ReferenceIntersection"),
+                    MetUnion::RefSibling,
+                )
+            } else {
+                intersection
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             // The `null` the inferred category carries is there to leave the target's nullability
@@ -1827,6 +1828,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !schema.all_of.is_empty() {
             if schema_has_union(schema) {
                 return self.lower_all_of_beside_union(schema, hint);
+            }
+            if let Some(index) = sole_union_member(schema) {
+                return self.lower_all_of_with_union_member(schema, hint, index);
             }
             return self.lower_all_of(schema, hint);
         }
@@ -3764,6 +3768,101 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             composed.nullable = contributions.iter().all(Contribution::admits_null);
             Some(composed)
         };
+        let refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        self.meet_union_with_all_of(
+            schema,
+            hint,
+            composed,
+            refiners,
+            &union,
+            &format!("{hint}Union"),
+            MetUnion::BesideAllOf,
+        )
+    }
+
+    /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), on a
+    /// schema with no union of its own. The member applies to every instance as the others do, so
+    /// the schema is the union met branch by branch with the rest of the composition, as
+    /// `{$ref: A, oneOf: […]}` meets its union with `A` and as the same union written beside the
+    /// `allOf` is met ([`Self::lower_all_of_beside_union`]): a branch the composition excludes
+    /// drops out, a union left with no branch is `E013`, and branches the meet leaves sharing one
+    /// generated type collapse with `W001` ([`Self::collapse_met_union`]). A member whose union
+    /// lowers to a single type (one real branch beside a `null` one) is met as that type. Read
+    /// as an ordinary scalar member, the union made every object composition an object/scalar mix.
+    ///
+    /// The member's own keywords stay its union's siblings. The other members, and the
+    /// schema's own keywords, are gathered as [`Self::gather_all_of`] gathers them, under the hints
+    /// it gives them; members of untyped object or array applicators alone refine the union's
+    /// branches of their own category, as beside the `allOf`. Where no member is an object and
+    /// none refines one, the union is combined as the scalar member it always was.
+    fn lower_all_of_with_union_member(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        union_index: usize,
+    ) -> Option<Ty> {
+        let SchemaOr::Schema(union) = &schema.all_of[union_index] else {
+            return self.lower_all_of(schema, hint);
+        };
+        let union_hint = format!("{hint}Member{union_index}");
+        let mut scoped = Vec::new();
+        let mut contributions = Vec::new();
+        // Where the union's contribution goes when it is combined as a scalar member below.
+        let mut union_slot = 0;
+        for (index, member) in schema.all_of.iter().enumerate() {
+            if index == union_index {
+                union_slot = contributions.len();
+                continue;
+            }
+            if matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
+            {
+                scoped.push(member.clone());
+                continue;
+            }
+            self.gather_member(member, &format!("{hint}Member{index}"), &mut contributions)?;
+        }
+        let mut composition = schema.clone();
+        composition.all_of.clear();
+        self.gather_all_of(&composition, hint, &mut contributions)?;
+        // With no object member, the union meets the other members as the scalar it is, in its
+        // place among them, exactly as an `allOf` of scalars always met one: the scalar meet
+        // already intersects a union branch by branch, and it keeps the narrowing `open_narrowing`
+        // gives each member where it is written.
+        let has_object = contributions
+            .iter()
+            .any(|contribution| matches!(contribution, Contribution::Object { .. }));
+        if !has_object && scoped.is_empty() {
+            let ty = self.lower_schema(union, &union_hint)?;
+            contributions.insert(union_slot, Contribution::Scalar(ty));
+            return self.combine_all_of(schema, hint, &contributions);
+        }
+        let composed = if contributions.is_empty() {
+            None
+        } else {
+            Some(self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?)
+        };
+        let refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        let mut ty = self.meet_union_with_all_of(
+            schema,
+            hint,
+            composed,
+            refiners,
+            union,
+            &union_hint,
+            MetUnion::AllOfMember,
+        )?;
+        // As the other `allOf` arms apply it after their merge.
+        ty = self.with_all_of_nullability(schema, ty);
+        Some(ty)
+    }
+
+    /// Lower the `allOf` members of untyped object or array applicators alone, which refine a
+    /// union's branches of their own category ([`Self::lower_all_of_beside_union`]).
+    fn lower_all_of_refiners<'s>(
+        &mut self,
+        scoped: &'s [SchemaOr],
+        hint: &str,
+    ) -> Option<Vec<(&'s Schema, Refiner)>> {
         let mut refiners = Vec::new();
         for (index, member) in scoped.iter().enumerate() {
             let SchemaOr::Schema(member) = member else {
@@ -3773,13 +3872,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.lower_scoped_refiners(member, true, None, &format!("{hint}Member{index}"))?;
             refiners.push((member.as_ref(), Refiner::Scoped(scoped)));
         }
-        let union = self.lower_schema(&union, &format!("{hint}Union"))?;
+        Some(refiners)
+    }
+
+    /// Lower `union`, with its own merge held back, and meet it with an `allOf`'s `composed`
+    /// members and then with each of its `refiners`, collapsing what the meet leaves sharing one
+    /// generated type; the result is inserted as `schema`'s type under `hint`. The meet shared by
+    /// [`Self::lower_all_of_beside_union`] and [`Self::lower_all_of_with_union_member`].
+    #[allow(clippy::too_many_arguments)]
+    fn meet_union_with_all_of(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        composed: Option<Ty>,
+        refiners: Vec<(&Schema, Refiner)>,
+        union: &Schema,
+        union_hint: &str,
+        spelling: MetUnion,
+    ) -> Option<Ty> {
+        let (union_is, beside) = match spelling {
+            MetUnion::AllOfMember => ("the union member of this `allOf`", "the union member"),
+            MetUnion::BesideAllOf | MetUnion::RefSibling => (
+                "the union beside this `allOf`",
+                "the union beside the `allOf`",
+            ),
+        };
+        let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
+        let lowered = self.lower_schema(union, union_hint);
+        self.unmerged_union = enclosing_unmerged;
+        let lowered = lowered?;
         let mark = self.graph_mark();
-        let mut meet = union;
+        let mut meet = lowered;
         if let Some(composed) = composed {
             let Ok(met) = self.intersect_types(composed, meet, &format!("{hint}Intersection"))
             else {
-                return self.reject_all_of_beside_union(schema);
+                return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
         }
@@ -3792,27 +3919,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut reach,
             );
             if met.is_err() && reach.uncategorised {
-                return self.reject_unscoped_union_sibling(
-                    member,
-                    "a branch of the union beside this `allOf` states no JSON category, and this \
-                     member's untyped keywords are both object keywords and array keywords with \
-                     no `type` to choose between them, so no single Rust type represents what \
-                     they constrain of it",
+                let message = format!(
+                    "a branch of {union_is} states no JSON category, and this member's untyped \
+                     keywords are both object keywords and array keywords with no `type` to \
+                     choose between them, so no single Rust type represents what they constrain \
+                     of it"
                 );
+                return self.reject_unscoped_union_sibling(member, &message);
             }
             for keywords in unreached_halves(refiner, &reach) {
                 let message = format!(
                     "this `allOf` member's untyped {keywords} constrain only the instances of \
-                     their own category, and no branch of the union beside the `allOf` has that \
-                     category, so they apply to no value the union accepts"
+                     their own category, and no branch of {beside} has that category, so they \
+                     apply to no value the union accepts"
                 );
                 self.warn_unreached_union_sibling(member, message);
             }
             let Ok(met) = met else {
-                return self.reject_all_of_beside_union(schema);
+                return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
         }
+        let meet = self.collapse_met_union(
+            schema,
+            meet,
+            !union.one_of.is_empty(),
+            &format!("{hint}Intersection"),
+            spelling,
+        );
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
         let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -4598,16 +4732,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
-    /// Report that a schema's `allOf` composition and the `oneOf`/`anyOf` beside it have no single
-    /// typed intersection (see [`Self::lower_all_of_beside_union`]): no branch meets the
-    /// composition, or one does in a way no single Rust type represents.
-    fn reject_all_of_beside_union(&mut self, schema: &Schema) -> Option<Ty> {
+    /// Report that a schema's `allOf` composition and the `oneOf`/`anyOf` beside it, or among its
+    /// members, have no single typed intersection (see [`Self::meet_union_with_all_of`]): no branch
+    /// meets the composition, or one does in a way no single Rust type represents.
+    fn reject_all_of_union_meet(&mut self, schema: &Schema, spelling: MetUnion) -> Option<Ty> {
+        let message = match spelling {
+            MetUnion::AllOfMember => {
+                "this `allOf`'s `oneOf`/`anyOf` member and its other members all apply, and their \
+                 intersection is empty or unrepresentable"
+            }
+            MetUnion::BesideAllOf | MetUnion::RefSibling => {
+                "this schema's `allOf` and the `oneOf`/`anyOf` beside it both apply, and their \
+                 intersection is empty or unrepresentable"
+            }
+        };
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(
-                "this schema's `allOf` and the `oneOf`/`anyOf` beside it both apply, and their \
-                 intersection is empty or unrepresentable",
-            )
+            .message(message)
             .remedy(ALL_OF_REMEDY)
             .emit(self.diags);
         None
@@ -5516,6 +5657,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .same_generated_type(non_nullable(a), non_nullable(b))
     }
 
+    /// Collapse `met`, the meet of a `oneOf` (`one_of`) or `anyOf` with what the union is
+    /// conjoined with, as each of the [`MetUnion`] spellings must: the union is lowered with its
+    /// own merge held back ([`Self::unmerged_union`]), because its branches are compared once the
+    /// meet has made them what they are. Returns `met` itself where nothing collapses.
+    fn collapse_met_union(
+        &mut self,
+        schema: &Schema,
+        met: Ty,
+        one_of: bool,
+        hint: &str,
+        spelling: MetUnion,
+    ) -> Ty {
+        // A `oneOf`'s branches are compared by generated type, as the inline merge compares them
+        // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart.
+        // An `anyOf` keeps the identity comparison it has always had.
+        match self.indistinguishable_union_variant(met, one_of) {
+            // Every branch of the intersected union is one and the same type: the branches differ
+            // only in keywords the lowered shape does not carry, such as a branch of nothing but
+            // `required` (#140). Emitting them as a union gives a `oneOf` whose exactly-one check
+            // fails on every value, so the position takes that one type and the ignored branch
+            // distinctions are reported, not dropped in silence.
+            Some((mut common, branches_accepting_null)) => {
+                // `branches_accepting_null` counts the branches that accept `null`, and
+                // `met.nullable` says whether the union's own `null` member survived the meet. An
+                // `anyOf` needs one match, so `null` is valid when any of them admits it. A
+                // `oneOf` needs exactly one: its branches are grouped apart from their own `null`,
+                // so they need not agree on it, and `null` is valid only when exactly one of the
+                // branches and that member accepts it — two put it in two branches, which fails
+                // exactly-one.
+                common.nullable = if one_of {
+                    usize::from(met.nullable) + branches_accepting_null == 1
+                } else {
+                    met.nullable || branches_accepting_null > 0
+                };
+                Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                    .message(format!(
+                        "{} intersect to a union whose branches differ only in keywords the \
+                         generated type does not carry, so which branch a value matches is not \
+                         enforced",
+                        spelling.subject(false)
+                    ))
+                    .remedy("keep producer-side validation for the union's branch constraints")
+                    .emit(self.diags);
+                common
+            }
+            // Only some branches share a generated type: they become one variant, as the inline
+            // merge makes them, and the others stand.
+            None if one_of => self
+                .merge_intersected_one_of(schema, met, hint, spelling)
+                .unwrap_or(met),
+            None => met,
+        }
+    }
+
     /// The `oneOf` union `ty` a `$ref` met its own sibling to, with the variants that lower to one
     /// generated type merged into the first of them, or `None` when no two do — the post-meet
     /// counterpart of [`Self::merge_indistinguishable_variants`] (#402). Called once
@@ -5524,7 +5719,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::same_type_apart_from_null`]); a merged set in which exactly one branch accepts
     /// `null` keeps it, and one in which two or more do puts `null` in two branches, which fails
     /// exactly-one, so `null` is then invalid everywhere in the union.
-    fn merge_intersected_one_of(&mut self, schema: &Schema, ty: Ty, hint: &str) -> Option<Ty> {
+    fn merge_intersected_one_of(
+        &mut self,
+        schema: &Schema,
+        ty: Ty,
+        hint: &str,
+        spelling: MetUnion,
+    ) -> Option<Ty> {
         let TypeKind::Union(union) = &self.graph.get(ty.id)?.kind else {
             return None;
         };
@@ -5564,18 +5765,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             })
             .collect();
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-            .message(
-                "this `$ref` and its `oneOf` sibling intersect to a union some of whose branches \
-                 lower to the same generated type, differing only in keywords it does not carry, \
-                 so a value matching one matches all of them and would fail the exactly-one rule: \
-                 each such set is one variant of the generated enum, and which of them a value \
-                 matches is not enforced",
-            )
+            .message(format!(
+                "{} intersect to a union some of whose branches lower to the same generated type, \
+                 differing only in keywords it does not carry, so a value matching one matches all \
+                 of them and would fail the exactly-one rule: each such set is one variant of the \
+                 generated enum, and which of them a value matches is not enforced",
+                spelling.subject(true)
+            ))
             .remedy("keep producer-side validation for the union's branch constraints")
             .emit(self.diags);
         let strategy = retain_strategy(&union.strategy, &retained);
         let mut merged = self.insert_type(
-            &format!("{hint}ReferenceIntersection"),
+            hint,
             TypeKind::Union(Union { variants, strategy }),
             Docs::default(),
             None,
@@ -10079,6 +10280,18 @@ fn schema_is_object_like(schema: &Schema) -> bool {
 /// Whether a schema carries a `oneOf` or an `anyOf` of its own.
 fn schema_has_union(schema: &Schema) -> bool {
     !schema.one_of.is_empty() || !schema.any_of.is_empty()
+}
+
+/// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is
+/// ([`LowerCtx::lower_all_of_with_union_member`]). A member that is a `$ref` is its target first,
+/// and an `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
+/// members, and beside object members they are `E013`.
+fn sole_union_member(schema: &Schema) -> Option<usize> {
+    let mut unions = schema.all_of.iter().enumerate().filter(|(_, member)| {
+        matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))
+    });
+    let (index, _) = unions.next()?;
+    unions.next().is_none().then_some(index)
 }
 
 /// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
