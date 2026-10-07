@@ -12,7 +12,7 @@
 use std::hint::black_box;
 
 use camino::Utf8PathBuf;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use spargen::{CargoIntegration, Outcome, Spec};
 
 /// A minimal but non-trivial 3.1 spec: one operation, one parameter, one model. Serves as the
@@ -88,8 +88,14 @@ fn bench_check(c: &mut Criterion) {
 }
 
 /// Benchmark the full pipeline (`spargen::generate`) through codegen and emit, writing to a scratch
-/// tempdir. Reuses one output dir per case (emit overwrites deterministically), so the measured
-/// cost is generation, not directory churn.
+/// tempdir. Reuses one output dir per case, so the measured cost is generation, not directory
+/// churn.
+///
+/// `cargo bench` sets `OUT_DIR` for this package (it has a build script), so `generate` keeps its
+/// build cache there, and a second call over an unchanged spec and an intact output file is a
+/// cache hit (`Outcome::Cached`) that runs no codegen. Each iteration's untimed setup therefore
+/// removes the output file, and the routine asserts `Outcome::Generated`, so every measured
+/// iteration is a full generation rather than a cache lookup.
 fn bench_generate(c: &mut Criterion) {
     let (_tiny_dir, tiny_spec) = spec_in_tempdir(TINY_SPEC);
     let cases: [(&str, Utf8PathBuf); 3] = [
@@ -104,15 +110,24 @@ fn bench_generate(c: &mut Criterion) {
         let out_path =
             Utf8PathBuf::from_path_buf(out_dir.path().join("api.rs")).expect("utf8 out path");
         let config = Spec::new(spec.clone())
-            .build(out_path)
+            .build(out_path.clone())
             .cargo(CargoIntegration::Off);
         group.bench_function(*name, |b| {
-            b.iter(|| {
-                let report = spargen::generate(black_box(&config));
-                // `Generated` on the first iteration, `Cached` on the rest — both are success.
-                assert!(report.outcome().is_success(), "{name} must generate");
-                black_box(report);
-            });
+            b.iter_batched(
+                || match std::fs::remove_file(&out_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("remove {out_path}: {error}"),
+                },
+                |()| {
+                    let report = spargen::generate(black_box(&config));
+                    // With the output removed there is nothing for the cache to verify, so a
+                    // `Cached` here would mean the bench measured a lookup, not a generation.
+                    assert_eq!(report.outcome(), Outcome::Generated, "{name} must generate");
+                    black_box(report);
+                },
+                BatchSize::PerIteration,
+            );
         });
         // `bench_function` measures synchronously, so `out_dir` has served its purpose; hold the
         // binding to the loop-iteration end so the scratch dir outlives the measurement above.

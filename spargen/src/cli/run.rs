@@ -15,8 +15,8 @@ use super::exit::ExitStatus;
 
 /// Execute a parsed CLI invocation and return the process exit code.
 ///
-/// Delegates to the crate facade, renders diagnostics in the requested [`Format`](super::Format),
-/// and maps the outcome onto the [`ExitStatus`](super::ExitStatus) contract. Per the DAG, the CLI
+/// Delegates to the crate facade, renders diagnostics in the requested [`Format`],
+/// and maps the outcome onto the [`ExitStatus`] contract. Per the DAG, the CLI
 /// depends only on the facade.
 pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
