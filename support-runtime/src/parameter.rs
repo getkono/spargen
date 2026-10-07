@@ -873,6 +873,26 @@ mod tests {
         assert_eq!(encode("%41", PercentEncoding::Unreserved), "%2541");
     }
 
+    /// The triple look-ahead at every position relative to the end of the value: a triple cut
+    /// short by the end is a bare `%`, one that ends exactly at the end or has data after it is
+    /// passed through, and so is one that starts well into the value. Both reserved sets share it.
+    #[test]
+    fn reserved_expansion_reads_a_triple_only_where_all_three_bytes_exist() {
+        for encoding in [PercentEncoding::Reserved, PercentEncoding::ReservedPath] {
+            for (raw, expected) in [
+                ("%", "%25"),
+                ("%4", "%254"),
+                ("a%4", "a%254"),
+                ("a%41", "a%41"),
+                ("x%41y", "x%41y"),
+                ("abc%41", "abc%41"),
+                ("abcde%4", "abcde%254"),
+            ] {
+                assert_eq!(encode(raw, encoding), expected, "{encoding:?} {raw:?}");
+            }
+        }
+    }
+
     #[test]
     fn path_values_never_carry_unescaped_slash_question_or_hash() {
         for encoding in [PercentEncoding::Unreserved, PercentEncoding::ReservedPath] {
@@ -889,6 +909,154 @@ mod tests {
                 !encoded.contains('#'),
                 "{encoding:?} leaked a hash: {encoded}"
             );
+        }
+    }
+
+    /// The ASCII bytes each percent-encoding set emits literally, written out independently of
+    /// `keeps` so the properties below check the set against its documentation, not itself.
+    fn literals(encoding: PercentEncoding) -> String {
+        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+        match encoding {
+            PercentEncoding::Unreserved => unreserved.to_owned(),
+            PercentEncoding::Form => unreserved.replace('~', ""),
+            PercentEncoding::Reserved => format!("{unreserved}:/?@!$'()*,;"),
+            PercentEncoding::ReservedPath => format!("{unreserved}:@!$'()*,;&=+[]"),
+            PercentEncoding::Passthrough => unreachable!("passthrough has no alphabet"),
+        }
+    }
+
+    const ENCODING_SETS: [PercentEncoding; 4] = [
+        PercentEncoding::Unreserved,
+        PercentEncoding::Form,
+        PercentEncoding::Reserved,
+        PercentEncoding::ReservedPath,
+    ];
+
+    /// Decode `%HH` triples, refusing a `%` that does not begin one: the output of `encode` must
+    /// never contain such a `%`, so this decoder doubles as a well-formedness check.
+    fn strict_decode(encoded: &str) -> Option<Vec<u8>> {
+        let bytes = encoded.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let triple = encoded.get(index + 1..index + 3)?;
+                if !triple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return None;
+                }
+                out.push(u8::from_str_radix(triple, 16).ok()?);
+                index += 3;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        Some(out)
+    }
+
+    /// Decode exactly the triples reserved expansion passes through — a `%` followed by two hex
+    /// digits — and keep every other byte, a bare `%` included.
+    fn lenient_decode(raw: &str) -> Vec<u8> {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let triple = raw
+                .get(index + 1..index + 3)
+                .filter(|_| bytes[index] == b'%')
+                .filter(|triple| triple.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            match triple {
+                Some(triple) => {
+                    out.push(u8::from_str_radix(triple, 16).expect("two hex digits"));
+                    index += 3;
+                }
+                None => {
+                    out.push(bytes[index]);
+                    index += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Values biased toward what the encoder treats specially: `%` and hex digits (so triples,
+    /// cut-short triples and bare `%` all occur), every delimiter, and multi-byte UTF-8.
+    fn value() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::string::string_regex(
+            "([%0-9a-fA-FzZ/?#&=+~ ,;\\[\\]!$'()*:@|.\\-_]|é|🦀|\\PC){0,24}",
+        )
+        .expect("a valid regex")
+    }
+
+    proptest::proptest! {
+        /// Encoding never loses data: decoding the output gives back the value's bytes — exactly
+        /// for the opaque sets, and for reserved expansion with the triples it passed through
+        /// read as the bytes they spell, since passing a triple through is that expansion's
+        /// point.
+        #[test]
+        fn decoding_the_encoding_recovers_the_value(raw in value()) {
+            for encoding in ENCODING_SETS {
+                let encoded = encode(&raw, encoding);
+                let decoded = strict_decode(&encoded);
+                let expected = match encoding {
+                    PercentEncoding::Reserved | PercentEncoding::ReservedPath => {
+                        lenient_decode(&raw)
+                    }
+                    _ => raw.as_bytes().to_vec(),
+                };
+                proptest::prop_assert_eq!(decoded, Some(expected), "{:?} {:?}", encoding, encoded);
+            }
+            proptest::prop_assert_eq!(encode(&raw, PercentEncoding::Passthrough), raw);
+        }
+
+        /// The output alphabet is the set's literals plus `%HH` triples, and nothing else; a
+        /// triple the encoder writes itself is upper-case.
+        #[test]
+        fn the_output_alphabet_is_the_sets_literals_and_triples(raw in value()) {
+            for encoding in ENCODING_SETS {
+                let literals = literals(encoding);
+                let encoded = encode(&raw, encoding);
+                let bytes = encoded.as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    if bytes[index] == b'%' {
+                        let triple = &bytes[index + 1..index + 3];
+                        proptest::prop_assert!(
+                            triple.iter().all(u8::is_ascii_hexdigit),
+                            "{:?} {:?}", encoding, encoded
+                        );
+                        index += 3;
+                    } else {
+                        proptest::prop_assert!(
+                            literals.as_bytes().contains(&bytes[index]),
+                            "{:?} emitted {:?} literally in {:?}",
+                            encoding, bytes[index] as char, encoded
+                        );
+                        index += 1;
+                    }
+                }
+                // The opaque sets write every triple themselves; reserved expansion may also pass
+                // through a lower-case triple the value already held.
+                if matches!(encoding, PercentEncoding::Unreserved | PercentEncoding::Form) {
+                    let upper = encoded.split('%').skip(1).all(|rest| {
+                        rest.as_bytes()[..2].iter().all(|byte| !byte.is_ascii_lowercase())
+                    });
+                    proptest::prop_assert!(upper, "{:?} {:?}", encoding, encoded);
+                }
+            }
+        }
+
+        /// A path value can never re-route its request: the two path sets never emit `/`, `?`
+        /// or `#` literally, whatever the value holds.
+        #[test]
+        fn path_sets_never_emit_a_slash_question_mark_or_hash(raw in value()) {
+            for encoding in [PercentEncoding::Unreserved, PercentEncoding::ReservedPath] {
+                let encoded = encode(&raw, encoding);
+                proptest::prop_assert!(
+                    !encoded.contains(['/', '?', '#']),
+                    "{:?} {:?}", encoding, encoded
+                );
+            }
         }
     }
 
@@ -1051,5 +1219,40 @@ mod tests {
             serialize_simple(&nested, false, U),
             Err(ParameterError::NestedValue)
         ));
+    }
+
+    /// Each variant's message names the rule it broke, and only a serialization failure has a
+    /// separate cause: `source` hands back serde's own error, which `Display` also quotes.
+    #[test]
+    fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
+        let serde_error = serde_json::from_str::<u8>("x").unwrap_err();
+        let serde_message = serde_error.to_string();
+        let serialize = ParameterError::from(serde_error);
+        assert_eq!(
+            serialize.to_string(),
+            format!("parameter serialization failed: {serde_message}")
+        );
+        let source = std::error::Error::source(&serialize).expect("serialize carries its cause");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
+        assert_eq!(source.to_string(), serde_message);
+
+        for (error, expected) in [
+            (
+                ParameterError::NestedValue,
+                "nested arrays and objects are not supported by OpenAPI parameter serialization",
+            ),
+            (
+                ParameterError::ExpectedObject,
+                "`style: deepObject` requires an object parameter value",
+            ),
+            (
+                ParameterError::ExpectedComposite,
+                "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
+                 parameter value",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+            assert!(std::error::Error::source(&error).is_none(), "{error}");
+        }
     }
 }

@@ -660,6 +660,10 @@ async fn read_capped<E>(
 
 /// The `wasm32` counterpart. reqwest's `fetch` backend exposes no `chunk`, so the body arrives
 /// whole and only *retention* can be bounded here, not peak memory.
+// Mutation testing: replacing this body with `Ok((Default::default(), _))` survives the native
+// suite and is declared rather than killed. The function is compiled only for `wasm32`, so a
+// native test binary holds the native `read_capped` above in its place and no native test can
+// reach the mutated code; on `wasm32` the runtime is compile-checked, not tested.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
     let cap = core.config().max_error_body;
@@ -1591,6 +1595,16 @@ mod tests {
     }
 
     #[test]
+    fn build_url_does_not_join_onto_an_empty_query_on_the_base_url() {
+        // `https://example.com/?` carries a query that is present but empty: there is nothing to
+        // join onto, so no leading `&` may appear.
+        let core = core_at("https://example.com/?");
+        assert_eq!(core.base_url().query(), Some(""));
+        let url = build_url(&core, "/search", &["q=rust".to_owned()]).unwrap();
+        assert_eq!(url.query(), Some("q=rust"));
+    }
+
+    #[test]
     fn build_url_keeps_matrix_and_label_prefixes_in_the_path() {
         let core = core_at("https://example.com");
         // `set_path` must not disturb `;`, `=`, `,` or an existing percent-triple.
@@ -1666,6 +1680,35 @@ mod tests {
             assert!(
                 !cause.contains(['\t', '\n', '\r']),
                 "{segment:?}: {cause:?}"
+            );
+        }
+    }
+
+    /// One path segment: never `/` or `\`, the separators the guard splits on, and drawn mostly
+    /// from dots, `%2E` in either case, near-misses of it, and the tab, LF and CR the URL parser
+    /// deletes.
+    fn segment() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::strategy::Strategy;
+        proptest::string::string_regex("(\\.|%2[eE]|%2|%|2|[eE]|\\t|\\n|\\r|a| |\\?|#|;|\\PC){0,6}")
+            .expect("a valid regex")
+            .prop_filter("a single segment", |s| !s.contains(['/', '\\']))
+    }
+
+    proptest::proptest! {
+        /// The guard agrees with `url` over the whole space of single segments, not only at the
+        /// listed spellings: `is_dot_segment(s)` holds exactly when `set_path("/a/{s}/b")` stops
+        /// being the three segments it was written as.
+        #[test]
+        fn is_dot_segment_holds_exactly_where_set_path_removes_the_segment(segment in segment()) {
+            let mut url = reqwest::Url::parse("https://example.com/").unwrap();
+            url.set_path(&format!("/a/{segment}/b"));
+            let segments = url.path_segments().map_or(0, Iterator::count);
+            proptest::prop_assert_eq!(
+                is_dot_segment(&segment),
+                segments != 3,
+                "{:?} -> {}",
+                segment,
+                url.path()
             );
         }
     }
@@ -1790,6 +1833,26 @@ mod tests {
             build_url_with_query_string(&core, "/search", &["term=rust%20api".to_owned()], None)
                 .unwrap();
         assert_eq!(url.query(), Some("term=rust%20api"));
+    }
+
+    /// Both arguments at once. Generated code never passes both — lowering rejects an `in: query`
+    /// parameter beside an `in: querystring` one (the 3.2 Parameter Locations rule forbids it),
+    /// and the one `querystring` parameter fills only one of them — but the entry point is public,
+    /// so what it does with both is still its contract: the fragments come first and the
+    /// whole-query value is joined after them, with no separator where the fragments rendered to
+    /// nothing.
+    #[test]
+    fn build_url_with_query_string_joins_the_whole_query_after_any_fragments() {
+        let core = core_at("https://example.com?stale=server-value");
+        let whole = Some("b=2");
+        let joined =
+            build_url_with_query_string(&core, "/search", &["a=1".to_owned()], whole).unwrap();
+        assert_eq!(joined.query(), Some("a=1&b=2"));
+        let after_empty =
+            build_url_with_query_string(&core, "/search", &[String::new()], whole).unwrap();
+        assert_eq!(after_empty.query(), Some("b=2"));
+        let alone = build_url_with_query_string(&core, "/search", &[], whole).unwrap();
+        assert_eq!(alone.query(), Some("b=2"));
     }
 
     #[test]

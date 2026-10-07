@@ -250,4 +250,20 @@ mod tests {
             .build()
             .is_ok());
     }
+
+    /// `http` hands back the caller's client, not a default one: its configuration is what the
+    /// caller injected it for. reqwest's `Debug` is the one view of a client's configuration that
+    /// needs no I/O, and it prints a configured total timeout only when one is set.
+    #[test]
+    fn http_returns_the_injected_client_with_its_configuration() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(7))
+            .build()
+            .expect("build a configured client");
+        let core = ClientCore::with_client(client, "https://example.com").unwrap();
+        let injected = format!("{:?}", core.http());
+        assert!(injected.contains("7s"), "{injected}");
+        let default = format!("{:?}", reqwest::Client::new());
+        assert!(!default.contains("7s"), "{default}");
+    }
 }
