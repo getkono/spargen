@@ -2,8 +2,15 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
+use crate::source::SpannedValue;
 
-use super::{Document, MediaTypeObject, RefOr, Resolver, Schema, SchemaOr, ValidationKeywords};
+use super::{
+    Document, MediaTypeObject, ParameterObject, RefOr, Reference, RequestBodyObject, Resolver,
+    ResponseObject, Schema, SchemaOr, ValidationKeywords,
+};
+
+/// How a Parameter, Request Body or Response Object target is parsed, as lowering parses it.
+type ObjectParser<T> = fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>;
 
 type AnnotationKey = (Option<FileId>, JsonPointer);
 
@@ -23,6 +30,11 @@ struct Audit<'a, 'doc> {
     /// Every schema node [`Audit::audit_schema`] has audited, so a target that several references
     /// reach, or that the walk reaches as well, is audited once and a reference cycle terminates.
     audited: HashSet<SchemaKey>,
+    /// Every Parameter, Request Body, Response and Media Type Object the walk has audited or
+    /// followed a reference through, by `(file, pointer)`, so an object that several references
+    /// reach, or that the walk reaches as a root component as well, is audited once and a
+    /// reference cycle terminates (#495).
+    objects: HashSet<SchemaKey>,
     /// The references met in audited positions, followed once the root walk is done
     /// ([`Audit::follow_references`]).
     pending: Vec<(String, Provenance)>,
@@ -40,6 +52,7 @@ pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Di
         consumed_content,
         unlowered_walked: HashSet::new(),
         audited: HashSet::new(),
+        objects: HashSet::new(),
         pending: Vec::new(),
         diags,
     };
@@ -62,31 +75,19 @@ impl Audit<'_, '_> {
 
         let components_pointer = JsonPointer::root().push("components");
         for (name, parameter) in &document.components.parameters {
-            if let RefOr::Item(parameter) = parameter {
-                self.audit_parameter(parameter, components_pointer.push("parameters").push(name));
-            }
+            self.audit_parameter_ref_or(
+                parameter,
+                components_pointer.push("parameters").push(name),
+            );
         }
         for (name, body) in &document.components.request_bodies {
-            if let RefOr::Item(body) = body {
-                self.audit_content(
-                    &body.content,
-                    components_pointer
-                        .push("requestBodies")
-                        .push(name)
-                        .push("content"),
-                );
-            }
+            self.audit_request_body_ref_or(
+                body,
+                components_pointer.push("requestBodies").push(name),
+            );
         }
         for (name, response) in &document.components.responses {
-            if let RefOr::Item(response) = response {
-                self.audit_content(
-                    &response.content,
-                    components_pointer
-                        .push("responses")
-                        .push(name)
-                        .push("content"),
-                );
-            }
+            self.audit_response_ref_or(response, components_pointer.push("responses").push(name));
         }
         for (name, media) in &document.components.media_types {
             self.audit_media(media, components_pointer.push("mediaTypes").push(name));
@@ -104,35 +105,100 @@ impl Audit<'_, '_> {
                     .chain(operation.parameters.iter())
                     .enumerate()
                 {
-                    if let RefOr::Item(parameter) = parameter {
-                        self.audit_parameter(parameter, op_pointer.push("parameters").index(index));
-                    }
-                }
-                if let Some(RefOr::Item(body)) = &operation.request_body {
-                    self.audit_content(
-                        &body.content,
-                        op_pointer.push("requestBody").push("content"),
+                    self.audit_parameter_ref_or(
+                        parameter,
+                        op_pointer.push("parameters").index(index),
                     );
                 }
-                for (status, response) in &operation.responses.by_status {
-                    if let RefOr::Item(response) = response {
-                        self.audit_content(
-                            &response.content,
-                            op_pointer.push("responses").push(status).push("content"),
-                        );
-                    }
+                if let Some(body) = &operation.request_body {
+                    self.audit_request_body_ref_or(body, op_pointer.push("requestBody"));
                 }
-                if let Some(RefOr::Item(response)) = &operation.responses.default {
-                    self.audit_content(
-                        &response.content,
-                        op_pointer.push("responses").push("default").push("content"),
+                for (status, response) in &operation.responses.by_status {
+                    self.audit_response_ref_or(response, op_pointer.push("responses").push(status));
+                }
+                if let Some(response) = &operation.responses.default {
+                    self.audit_response_ref_or(
+                        response,
+                        op_pointer.push("responses").push("default"),
                     );
                 }
             }
         }
     }
 
-    fn audit_parameter(&mut self, parameter: &super::ParameterObject, pointer: JsonPointer) {
+    /// A Parameter position: an inline object is audited, and a Reference Object is followed to
+    /// the object it ends at ([`Self::follow_object`]), which is audited in turn.
+    fn audit_parameter_ref_or(&mut self, parameter: &RefOr<ParameterObject>, pointer: JsonPointer) {
+        match parameter {
+            RefOr::Item(parameter) => self.audit_parameter(parameter, pointer),
+            RefOr::Ref(reference) => {
+                if let Some(parameter) =
+                    self.follow_object(reference, super::deserialize::parse_parameter)
+                {
+                    let pointer = parameter.provenance.pointer.clone();
+                    self.audit_parameter(&parameter, pointer);
+                }
+            }
+        }
+    }
+
+    /// [`Self::audit_parameter_ref_or`] for a Request Body position.
+    fn audit_request_body_ref_or(&mut self, body: &RefOr<RequestBodyObject>, pointer: JsonPointer) {
+        match body {
+            RefOr::Item(body) => self.audit_request_body(body, pointer),
+            RefOr::Ref(reference) => {
+                if let Some(body) =
+                    self.follow_object(reference, super::deserialize::parse_request_body)
+                {
+                    let pointer = body.provenance.pointer.clone();
+                    self.audit_request_body(&body, pointer);
+                }
+            }
+        }
+    }
+
+    /// [`Self::audit_parameter_ref_or`] for a Response position.
+    fn audit_response_ref_or(&mut self, response: &RefOr<ResponseObject>, pointer: JsonPointer) {
+        match response {
+            RefOr::Item(response) => self.audit_response(response, pointer),
+            RefOr::Ref(reference) => {
+                if let Some(response) =
+                    self.follow_object(reference, super::deserialize::parse_response)
+                {
+                    let pointer = response.provenance.pointer.clone();
+                    self.audit_response(&response, pointer);
+                }
+            }
+        }
+    }
+
+    /// [`follow_object`], skipping a chain that reaches an object already audited.
+    fn follow_object<T>(&self, reference: &Reference, parse: ObjectParser<T>) -> Option<T> {
+        follow_object(self.resolver, reference, parse, &self.objects)
+    }
+
+    /// Whether the object at `provenance` is met for the first time, claiming it if so.
+    fn claim_object(&mut self, provenance: &Provenance) -> bool {
+        let key = self.schema_key(provenance);
+        self.objects.insert(key)
+    }
+
+    fn audit_request_body(&mut self, body: &RequestBodyObject, pointer: JsonPointer) {
+        if self.claim_object(&body.provenance) {
+            self.audit_content(&body.content, pointer.push("content"));
+        }
+    }
+
+    fn audit_response(&mut self, response: &ResponseObject, pointer: JsonPointer) {
+        if self.claim_object(&response.provenance) {
+            self.audit_content(&response.content, pointer.push("content"));
+        }
+    }
+
+    fn audit_parameter(&mut self, parameter: &ParameterObject, pointer: JsonPointer) {
+        if !self.claim_object(&parameter.provenance) {
+            return;
+        }
         if let Some(schema) = &parameter.schema {
             self.audit_schema_ref_or(schema, pointer.push("schema"));
         }
@@ -149,7 +215,18 @@ impl Audit<'_, '_> {
         }
     }
 
+    /// A Media Type Object: one that is itself a Reference Object (OpenAPI 3.2) is followed to the
+    /// object its chain ends at ([`follow_media`]), whose schemas are what lowering reads.
     fn audit_media(&mut self, media: &MediaTypeObject, pointer: JsonPointer) {
+        if !self.claim_object(&media.provenance) {
+            return;
+        }
+        if media.reference.is_some() {
+            if let Some(target) = follow_media(self.resolver, media, &self.objects) {
+                let pointer = target.provenance.pointer.clone();
+                self.audit_media(&target, pointer);
+            }
+        }
         if let Some(schema) = &media.schema {
             self.audit_schema_ref_or(schema, pointer.push("schema"));
         }
@@ -428,8 +505,8 @@ fn consumed_sse_content(
                 .next()
                 .is_some_and(|name| name.trim().eq_ignore_ascii_case("text/event-stream"))
             {
-                let media = resolve_media(document, media);
-                if let Some(item) = media.and_then(|media| media.item_schema.as_ref()) {
+                let media = follow_media(resolver, media, &HashSet::new());
+                if let Some(item) = media.as_ref().and_then(|media| media.item_schema.as_ref()) {
                     if let Some(json) = super::sse::json_data_schema(item, resolver, diags) {
                         consumed.insert(annotation_key(&json.annotation_site));
                     }
@@ -437,69 +514,107 @@ fn consumed_sse_content(
             }
         }
     };
-    for response in document.components.responses.values() {
-        if let RefOr::Item(response) = response {
-            inspect(&response.content);
+    // Every response lowering reads, followed as lowering follows it — into another file as well
+    // (#495), since the walk audits a response written there too.
+    let mut inspect_response = |response: &RefOr<ResponseObject>| match response {
+        RefOr::Item(response) => inspect(&response.content),
+        RefOr::Ref(reference) => {
+            if let Some(response) = follow_object(
+                resolver,
+                reference,
+                super::deserialize::parse_response,
+                &HashSet::new(),
+            ) {
+                inspect(&response.content);
+            }
         }
+    };
+    for response in document.components.responses.values() {
+        inspect_response(response);
     }
     for item in document.paths.items.values() {
         for operation in item.operations.values() {
             for response in operation.responses.by_status.values() {
-                if let Some(response) = resolve_response(document, response) {
-                    inspect(&response.content);
-                }
+                inspect_response(response);
             }
-            if let Some(response) = operation
-                .responses
-                .default
-                .as_ref()
-                .and_then(|response| resolve_response(document, response))
-            {
-                inspect(&response.content);
+            if let Some(response) = &operation.responses.default {
+                inspect_response(response);
             }
         }
     }
     consumed
 }
 
-fn resolve_media<'a>(
-    document: &'a Document,
-    media: &'a MediaTypeObject,
-) -> Option<&'a MediaTypeObject> {
-    let mut current = media;
-    let mut seen = HashSet::new();
-    while let Some(reference) = current.reference.as_ref() {
-        let name = reference
-            .reference
-            .strip_prefix("#/components/mediaTypes/")?;
-        if !seen.insert(name) {
-            return None;
-        }
-        current = document.components.media_types.get(name)?;
-    }
-    Some(current)
+/// The file a reference written at `at` is resolved from: an unspanned one sits in the root.
+fn written_in(resolver: &Resolver<'_>, at: &Provenance) -> FileId {
+    at.span.map_or_else(|| resolver.root_id(), |span| span.file)
 }
 
-fn resolve_response<'a>(
-    document: &'a Document,
-    response: &'a RefOr<super::ResponseObject>,
-) -> Option<&'a super::ResponseObject> {
-    let mut current = response;
+/// Follow a Parameter, Request Body or Response Reference Object, hop by hop, to the object its
+/// chain ends at, as lowering does (#495): through the input bundle, so a reference into another
+/// file — a whole file, or a pointer into one — reaches the object written there, and a root
+/// `#/components/<kind>/<name>` reaches the root's declaration, which is the same node.
+///
+/// `None` when a hop targets an object in `done`, the chain cycles, or a hop misses. A miss is
+/// not reported here: lowering follows the same chain and reports it in its own words, so the
+/// resolver's diagnostics are discarded, as [`Audit::follow_references`] discards them.
+fn follow_object<T>(
+    resolver: &Resolver<'_>,
+    reference: &Reference,
+    parse: ObjectParser<T>,
+    done: &HashSet<SchemaKey>,
+) -> Option<T> {
+    let mut reference = Cow::Borrowed(reference);
     let mut seen = HashSet::new();
     loop {
-        match current {
-            RefOr::Item(response) => return Some(response),
-            RefOr::Ref(reference) => {
-                let name = reference
-                    .reference
-                    .strip_prefix("#/components/responses/")?;
-                if !seen.insert(name) {
-                    return None;
-                }
-                current = document.components.responses.get(name)?;
-            }
+        let target = resolver.reference_identity(&reference.reference, &reference.provenance)?;
+        if done.contains(&target) || !seen.insert(target) {
+            return None;
+        }
+        let mut discarded = Diagnostics::new(0);
+        let next = resolver
+            .resolve_component_or_ref(
+                &reference.reference,
+                written_in(resolver, &reference.provenance),
+                parse,
+                &mut discarded,
+            )
+            .ok()?;
+        match next {
+            RefOr::Item(object) => return Some(object),
+            RefOr::Ref(next) => reference = Cow::Owned(next),
         }
     }
+}
+
+/// [`follow_object`] for a Media Type Object, which OpenAPI 3.2 allows to be a Reference Object:
+/// the object its chain ends at, or `media` itself when it is no reference.
+fn follow_media<'a>(
+    resolver: &Resolver<'_>,
+    media: &'a MediaTypeObject,
+    done: &HashSet<SchemaKey>,
+) -> Option<Cow<'a, MediaTypeObject>> {
+    let mut current = Cow::Borrowed(media);
+    let mut seen = HashSet::new();
+    while let Some(reference) = current.reference.clone() {
+        let target = resolver.reference_identity(&reference.reference, &reference.provenance)?;
+        if done.contains(&target) || !seen.insert(target) {
+            return None;
+        }
+        let mut discarded = Diagnostics::new(0);
+        let next = resolver
+            .resolve_component(
+                &reference.reference,
+                written_in(resolver, &reference.provenance),
+                |value, pointer, diags| {
+                    Some(super::deserialize::parse_media_type(value, pointer, diags))
+                },
+                &mut discarded,
+            )
+            .ok()?;
+        current = Cow::Owned(next);
+    }
+    Some(current)
 }
 
 fn annotation_key(provenance: &Provenance) -> AnnotationKey {
