@@ -771,6 +771,129 @@ fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
     }
 }
 
+/// A `GET /pets/{id}` operation carrying a path `id` of `path_type` beside a query `id` of
+/// `query_type`: the same wire name in two locations.
+fn same_named_params(path_type: &str, query_type: &str) -> String {
+    full(
+        &format!(
+            "  /pets/{{id}}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {{ type: {path_type} }}
+        - name: id
+          in: query
+          required: false
+          schema: {{ type: {query_type} }}
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {PET_REF}
+"
+        ),
+        PET_SCHEMA,
+    )
+}
+
+#[test]
+fn a_parameter_is_keyed_by_its_location_as_well_as_its_name() {
+    // A path `id` and a query `id` are two parameters; keyed by name alone, one overwrote the
+    // other and a breaking change to the overwritten one was reported as patch.
+    let old = same_named_params("string", "string");
+
+    for (new, changed) in [
+        (same_named_params("integer", "string"), "path"),
+        (same_named_params("string", "integer"), "query"),
+    ] {
+        let report = diff(&old, &new);
+        let changes: Vec<(ChangeKind, &str)> = report
+            .changes
+            .iter()
+            .map(|change| (change.kind, change.location.as_str()))
+            .collect();
+        let location = format!("GET /pets/{{id}} param `id` ({changed})");
+        assert_eq!(
+            changes,
+            vec![(ChangeKind::ParamTypeChanged, location.as_str())],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+
+    // Unchanged, the pair is two entries that both match: no change at all.
+    let report = diff(&old, &same_named_params("string", "string"));
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+}
+
+/// `listPets` declaring one optional parameter per `(name, in, type)` triple.
+fn optional_params(params: &[(&str, &str, &str)]) -> String {
+    let mut lines = String::from("      parameters:\n");
+    for (name, location, ty) in params {
+        lines.push_str(&format!(
+            "        - name: {name}\n          in: {location}\n          required: false\n          schema: {{ type: {ty} }}\n"
+        ));
+    }
+    spec(&lines, "id", PET_PROPS, "")
+}
+
+fn kinds_at(report: &DiffReport) -> Vec<(ChangeKind, &str)> {
+    report
+        .changes
+        .iter()
+        .map(|change| (change.kind, change.location.as_str()))
+        .collect()
+}
+
+#[test]
+fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
+    // The generated argument is named from the wire name, so a move alone leaves the signature as
+    // it was: patch, not a removal plus an addition.
+    let old = optional_params(&[("limit", "query", "integer")]);
+    let report = diff(&old, &optional_params(&[("limit", "header", "integer")]));
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+
+    // A move that also changes the type reports the type change once, naming both locations.
+    let report = diff(&old, &optional_params(&[("limit", "header", "string")]));
+    assert_eq!(
+        kinds_at(&report),
+        vec![(
+            ChangeKind::ParamTypeChanged,
+            "GET /pets param `limit` (query -> header)"
+        )],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A name declared in two locations on a side is ambiguous: its keys are not paired, so the
+    // query `id` that became a header `id` beside an unchanged cookie `id` is a removal and an
+    // addition.
+    let report = diff(
+        &optional_params(&[("id", "cookie", "string"), ("id", "query", "string")]),
+        &optional_params(&[("id", "cookie", "string"), ("id", "header", "string")]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![
+            (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
+            (
+                ChangeKind::OptionalParamAdded,
+                "GET /pets param `id` (header)"
+            ),
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 const PET_AND_OWNER: &str = "    Pet:
       type: object
       required: [id]

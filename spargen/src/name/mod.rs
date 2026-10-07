@@ -395,12 +395,12 @@ fn allocate_parameters(
     fields: &mut Scope,
 ) -> Vec<Ident> {
     use crate::ir::ParamLoc;
-    let location = |location: ParamLoc| match location {
-        ParamLoc::Path => (0u8, "path"),
-        ParamLoc::Query => (1, "query"),
-        ParamLoc::QueryString => (2, "querystring"),
-        ParamLoc::Header => (3, "header"),
-        ParamLoc::Cookie => (4, "cookie"),
+    let rank = |location: ParamLoc| match location {
+        ParamLoc::Path => 0u8,
+        ParamLoc::Query => 1,
+        ParamLoc::QueryString => 2,
+        ParamLoc::Header => 3,
+        ParamLoc::Cookie => 4,
     };
     let seeds: Vec<crate::diag::JsonPointer> = operation
         .params
@@ -410,7 +410,7 @@ fn allocate_parameters(
                 .provenance
                 .pointer
                 .push("parameters")
-                .push(location(parameter.location).1)
+                .push(parameter.location.as_openapi_in())
                 .push(&parameter.name)
         })
         .collect();
@@ -429,11 +429,7 @@ fn allocate_parameters(
                 RankedRequest {
                     hint: parameter.name.as_str(),
                     provenance: &seeds[index],
-                    rank: (
-                        location(parameter.location).0,
-                        parameter.name.as_str(),
-                        index,
-                    ),
+                    rank: (rank(parameter.location), parameter.name.as_str(), index),
                 }
             })
             .collect();
