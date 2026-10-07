@@ -3,7 +3,9 @@
 //! decisions are methods on the private lowering state, so they are exercised via the public
 //! frontend rather than called in isolation):
 //!
-//! * JSON-category unions always lower to a typed enum, including overlapping numeric variants;
+//! * JSON-category unions always lower to a typed enum, including overlapping numeric variants,
+//!   with repeated categories — which lower to one generated type, so a `oneOf` could decode none
+//!   of their values — merged into one variant and reported (`W001`);
 //! * closed-object unions always lower to a typed enum, whether required keys prove a fast-path
 //!   dispatch or overlapping shapes require typed trial matching;
 //! * `allOf` merge reconciles exactly — a property declared with two different types is `E013`, and
@@ -47,7 +49,7 @@ fn has_code(report: &Report, code: Code) -> bool {
 
 /// A JSON primitive category to place in a union variant. `Integer` and `Number` deliberately share
 /// the numeric wire category — the lowering must never treat them as disjoint.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Category {
     String,
     Integer,
@@ -222,7 +224,9 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
 
     /// Every JSON-category combination lowers to a typed enum. Pairwise-disjoint variants can use a
-    /// direct dispatch fast path; repeated categories and `integer | number` use typed trial matching.
+    /// direct dispatch fast path; `integer | number` uses typed trial matching. A repeated category
+    /// lowers to the same generated type twice, which no value can tell apart, so it is one variant
+    /// and the merge is reported; a union of one repeated category is that type, not an enum.
     #[test]
     fn json_category_unions_generate_typed(
         variants in proptest::collection::vec(category_strategy(), 2..=5)
@@ -230,7 +234,20 @@ proptest! {
         let (report, source) = generate_module(&category_union_spec(&variants));
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
-        prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
+        let distinct: BTreeSet<Category> = variants.iter().copied().collect();
+        prop_assert_eq!(
+            has_code(&report, Code::ValidationKeywordIgnored),
+            distinct.len() < variants.len(),
+            "{:#?}",
+            report
+        );
+        prop_assert_eq!(
+            source.contains("pub enum U"),
+            distinct.len() > 1,
+            "union of {:?} emitted as the wrong shape:\n{}",
+            variants,
+            source
+        );
     }
 
     /// Every closed-object combination lowers to a typed enum. Unique required keys select a direct
