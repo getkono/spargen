@@ -25792,6 +25792,153 @@ fn a_schema_in_a_referenced_file_gets_the_audit_a_root_schema_does() {
     }
 }
 
+/// #495: the audit walked only the Parameter, Request Body and Response Objects written in the
+/// root document, so one that is a `$ref` into another file was skipped and the schemas it holds
+/// got no `W001`. The issue's reproducer — a whole-file `'200': { $ref: './resp.yaml' }` — checked
+/// `clean`. The audit now follows each such reference, as lowering does, to the object its chain
+/// ends at: a whole file, a pointer into a file, and a root component that is itself a reference
+/// whose next hop is written in the sub-file.
+#[test]
+fn an_object_in_a_referenced_file_gets_the_audit_a_root_object_does() {
+    const ROOT: &str = "openapi: 3.1.0\n\
+                        info: { title: T, version: 1.0.0 }\n\
+                        servers: [{ url: 'https://e.com' }]\n\
+                        paths:\n  \
+                        /a:\n    \
+                        post:\n      \
+                        operationId: postA\n      \
+                        parameters: [{ $ref: './objects.yaml#/Param' }]\n      \
+                        requestBody: { $ref: './objects.yaml#/Body' }\n      \
+                        responses:\n        \
+                        '200': { $ref: './resp.yaml' }\n        \
+                        default: { $ref: '#/components/responses/Failure' }\n  \
+                        /b:\n    \
+                        get:\n      \
+                        operationId: getB\n      \
+                        responses:\n        \
+                        '200': { $ref: './resp.yaml' }\n\
+                        components:\n  \
+                        responses:\n    \
+                        Failure: { $ref: './objects.yaml#/Chained' }\n";
+    const RESP: &str = "description: ok\n\
+                        content:\n  \
+                        application/json:\n    \
+                        schema: { type: object, maxProperties: 3 }\n";
+    const OBJECTS: &str = "Param:\n  \
+                           name: q\n  \
+                           in: query\n  \
+                           schema: { type: string, maxLength: 3 }\n\
+                           Body:\n  \
+                           content:\n    \
+                           application/json:\n      \
+                           schema: { type: object, minProperties: 1 }\n\
+                           Chained: { $ref: '#/Error' }\n\
+                           Error:\n  \
+                           description: err\n  \
+                           content:\n    \
+                           application/json:\n      \
+                           schema: { type: object, maxProperties: 2 }\n";
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("resp.yaml", RESP),
+        ("objects.yaml", OBJECTS),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        for pointer in [
+            "/content/application~1json/schema",
+            "/Param/schema",
+            "/Body/content/application~1json/schema",
+            "/Error/content/application~1json/schema",
+        ] {
+            assert!(
+                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+                "{entry}: W001 must sit at the sub-file's {pointer}: {report:#?}"
+            );
+        }
+        // `/a` and `/b` both reach resp.yaml: its schema is audited once.
+        let resp_warnings = report
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/content/application~1json/schema"
+            })
+            .count();
+        assert_eq!(resp_warnings, 1, "{entry}: {report:#?}");
+    }
+
+    // A response chain that returns to itself is lowering's `E004`; the audit's walk terminates.
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("resp.yaml", "$ref: './resp.yaml'\n"),
+        ("objects.yaml", OBJECTS),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// #495, for the OpenAPI 3.2 Media Type Object that is itself a Reference Object: one naming
+/// another file is followed to the object written there, whose schema gets `W001`. And a response
+/// in another file whose `text/event-stream` envelope consumes `contentMediaType`/`contentSchema`
+/// is recognised as consumed, so the walk that now reaches it does not warn about them.
+#[test]
+fn a_media_type_in_a_referenced_file_gets_the_audit_a_root_one_does() {
+    const ROOT: &str = "openapi: 3.2.0\n\
+                        info: { title: T, version: 1.0.0 }\n\
+                        servers: [{ url: 'https://e.com' }]\n\
+                        paths:\n  \
+                        /a:\n    \
+                        get:\n      \
+                        operationId: getA\n      \
+                        responses:\n        \
+                        '200':\n          \
+                        description: ok\n          \
+                        content:\n            \
+                        application/json: { $ref: './media.yaml' }\n  \
+                        /events:\n    \
+                        get:\n      \
+                        operationId: getEvents\n      \
+                        responses:\n        \
+                        '200': { $ref: './stream.yaml' }\n";
+    const MEDIA: &str = "schema: { type: string, pattern: '^a' }\n";
+    const STREAM: &str = "description: ok\n\
+                          content:\n  \
+                          text/event-stream:\n    \
+                          itemSchema:\n      \
+                          type: object\n      \
+                          required: [data]\n      \
+                          properties:\n        \
+                          data:\n          \
+                          type: string\n          \
+                          contentMediaType: application/json\n          \
+                          contentSchema: { type: object, properties: { id: { type: string } } }\n";
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ROOT),
+        ("media.yaml", MEDIA),
+        ("stream.yaml", STREAM),
+    ]);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let w001: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::ValidationKeywordIgnored)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            w001,
+            ["/schema"],
+            "{entry}: only media.yaml's pattern warns; the SSE annotations are consumed: {report:#?}"
+        );
+    }
+}
+
 /// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
 /// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
 /// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
