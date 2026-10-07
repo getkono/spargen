@@ -1033,9 +1033,12 @@ mod tests {
         /// that module imports), the `…Params` structs, the client methods (beside the fixed
         /// ones), each struct's fields with its overflow map, each enum's and union's variants
         /// with an open enum's catch-all, each operation's method arguments with its generator
-        /// bindings and its `…Params` fields, each header struct's fields, and the server
-        /// builders, variable enums, setters and variants. Every member is allocated, so the
-        /// property cannot pass by allocating nothing.
+        /// bindings and its `…Params` fields, each header struct's fields, and each server's
+        /// setters and each server variable's values. The server builders and the variable enums
+        /// are each checked only within the scope `allocate` draws them from: `emit_servers`
+        /// declares both in one `servers` module, and checking them as that one scope fails on
+        /// the current allocator (#523). Every member is allocated, so the property cannot pass
+        /// by allocating nothing.
         #[test]
         fn every_allocation_is_legal_and_distinct_within_its_scope(
             definitions in proptest::collection::vec(definition(), 0..10),
