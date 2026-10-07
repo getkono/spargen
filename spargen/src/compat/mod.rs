@@ -57,47 +57,61 @@ impl Omit {
         diags.result(())
     }
 
-    /// Stable fingerprint used in generated provenance headers.
-    ///
-    /// It is FNV-1a 64 over an explicit canonical encoding of each rule in declaration order, not
-    /// over derived [`Hash`](std::hash::Hash), whose byte stream std documents as unstable across
-    /// platforms and compiler releases. The value is therefore the same on every host and
-    /// toolchain for the same rules. Each rule encodes as a variant tag byte followed by its
-    /// fields, every string length-prefixed (`u64`, big-endian) so no two rule sets share an
-    /// encoding; methods and component kinds encode as their OpenAPI key, and a `Pointer` rule's
-    /// `file` as a presence byte (`0` absent, `1` present) followed by the string when present.
+    /// Stable fingerprint used in generated provenance headers: FNV-1a 64 over
+    /// the profile's canonical rule encoding (the crate-private `Omit::canonical_encoding`), not over derived [`Hash`](std::hash::Hash), whose byte
+    /// stream std documents as unstable across platforms and compiler releases. The value is
+    /// therefore the same on every host and toolchain for the same rules.
     pub fn fingerprint(&self) -> String {
         let mut hasher = Fnv64::new();
+        hasher.write(&self.canonical_encoding());
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// The one canonical byte encoding of the profile, shared by [`Omit::fingerprint`] and the
+    /// build cache's input fingerprint so the two cannot drift apart.
+    ///
+    /// Rules encode in declaration order. Each is a variant tag byte (`0` path, `1` operation,
+    /// `2` component, `3` pointer) followed by its fields, every string length-prefixed (`u64`,
+    /// big-endian) so no two rule sets share an encoding; methods and component kinds encode as
+    /// their OpenAPI key, and a `Pointer` rule's `file` as a presence byte (`0` absent,
+    /// `1` present) followed by the string when present.
+    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
+        fn push_str(out: &mut Vec<u8>, text: &str) {
+            out.extend_from_slice(&(text.len() as u64).to_be_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+
+        let mut out = Vec::new();
         for rule in &self.rules {
             match rule {
                 OmitRule::Path { path } => {
-                    hasher.write(&[0]);
-                    hasher.write_str(path);
+                    out.push(0);
+                    push_str(&mut out, path);
                 }
                 OmitRule::Operation { method, path } => {
-                    hasher.write(&[1]);
-                    hasher.write_str(method.as_oas_key());
-                    hasher.write_str(path);
+                    out.push(1);
+                    push_str(&mut out, method.as_oas_key());
+                    push_str(&mut out, path);
                 }
                 OmitRule::Component { kind, name } => {
-                    hasher.write(&[2]);
-                    hasher.write_str(kind.as_oas_key());
-                    hasher.write_str(name);
+                    out.push(2);
+                    push_str(&mut out, kind.as_oas_key());
+                    push_str(&mut out, name);
                 }
                 OmitRule::Pointer { file, pointer } => {
-                    hasher.write(&[3]);
+                    out.push(3);
                     match file {
                         Some(file) => {
-                            hasher.write(&[1]);
-                            hasher.write_str(file);
+                            out.push(1);
+                            push_str(&mut out, file);
                         }
-                        None => hasher.write(&[0]),
+                        None => out.push(0),
                     }
-                    hasher.write_str(pointer);
+                    push_str(&mut out, pointer);
                 }
             }
         }
-        format!("{:016x}", hasher.finish())
+        out
     }
 
     fn apply_rule(&self, rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
@@ -1115,12 +1129,6 @@ impl Fnv64 {
             self.0 ^= u64::from(*byte);
             self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
-    }
-
-    /// Write `text` prefixed by its byte length as a big-endian `u64`.
-    fn write_str(&mut self, text: &str) {
-        self.write(&(text.len() as u64).to_be_bytes());
-        self.write(text.as_bytes());
     }
 }
 

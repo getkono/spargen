@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
-use crate::{Build, Code, OmitRule, Spec};
+use crate::{Build, Code, Spec};
 
 const CACHE_FORMAT: u32 = 3;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -65,29 +65,9 @@ impl InputSnapshot {
         append(&mut fingerprint, &(spec.batch_cap as u64).to_be_bytes());
         append(&mut fingerprint, &[u8::from(spec.carve)]);
         append(&mut fingerprint, &[u8::from(spec.open_narrowing)]);
-        for rule in &spec.omit.rules {
-            match rule {
-                OmitRule::Path { path } => {
-                    append(&mut fingerprint, b"path");
-                    append(&mut fingerprint, path.as_bytes());
-                }
-                OmitRule::Operation { method, path } => {
-                    append(&mut fingerprint, b"operation");
-                    append(&mut fingerprint, format!("{method:?}").as_bytes());
-                    append(&mut fingerprint, path.as_bytes());
-                }
-                OmitRule::Component { kind, name } => {
-                    append(&mut fingerprint, b"component");
-                    append(&mut fingerprint, format!("{kind:?}").as_bytes());
-                    append(&mut fingerprint, name.as_bytes());
-                }
-                OmitRule::Pointer { file, pointer } => {
-                    append(&mut fingerprint, b"pointer");
-                    append(&mut fingerprint, file.as_deref().unwrap_or("").as_bytes());
-                    append(&mut fingerprint, pointer.as_bytes());
-                }
-            }
-        }
+        // The omit profile's one canonical encoding, the same bytes its provenance-header
+        // fingerprint hashes, so the two cannot drift apart.
+        append(&mut fingerprint, &spec.omit.canonical_encoding());
         for (path, bytes) in &inputs {
             append(&mut fingerprint, path.as_str().as_bytes());
             append(&mut fingerprint, bytes);
@@ -696,5 +676,17 @@ components:
         assert_ne!(digest(&by_path), digest(&by_other_path));
         // The rule *kind* is part of the fingerprint, not just its payload.
         assert_ne!(digest(&by_path), digest(&by_component));
+
+        // A pointer rule with no file and one naming an empty file are different rules; the
+        // shared canonical encoding keeps them apart where an `unwrap_or("")` conflated them.
+        let no_file = base.clone().omit_rule(OmitRule::Pointer {
+            file: None,
+            pointer: "/paths/~1things".into(),
+        });
+        let empty_file = base.clone().omit_rule(OmitRule::Pointer {
+            file: Some("".into()),
+            pointer: "/paths/~1things".into(),
+        });
+        assert_ne!(digest(&no_file), digest(&empty_file));
     }
 }
