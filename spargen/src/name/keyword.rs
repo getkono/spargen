@@ -124,6 +124,60 @@ mod tests {
         tokens.next().is_none() && ident == text
     }
 
+    /// Byte-identical output requires identifier allocation to keep each input's spelling, and a
+    /// hash-ordered rewrite is the first thing that breaks it. Calling `escape` twice and comparing
+    /// cannot fail; this table does, the moment any role spells any of these differently. Columns
+    /// follow [`ROLES`]: `Type`, `Variant`, `Field`, `Method`, `Param`.
+    #[test]
+    fn escape_keeps_its_pinned_spellings() {
+        let golden: &[(&str, [&str; 5])] = &[
+            ("pet id", ["PetId", "PetId", "pet_id", "pet_id", "pet_id"]),
+            ("type", ["Type", "Type", "r#type", "r#type", "r#type"]),
+            ("self", ["Self_", "Self_", "self_", "self_", "self_"]),
+            ("crate", ["Crate", "Crate", "crate_", "crate_", "crate_"]),
+            ("gen", ["Gen", "Gen", "r#gen", "r#gen", "r#gen"]),
+            (
+                "123-name",
+                [
+                    "N123Name",
+                    "N123Name",
+                    "n_123_name",
+                    "n_123_name",
+                    "n_123_name",
+                ],
+            ),
+            (
+                "",
+                [
+                    "Generated",
+                    "Generated",
+                    "generated",
+                    "generated",
+                    "generated",
+                ],
+            ),
+            (
+                "é",
+                [
+                    "Generated",
+                    "Generated",
+                    "generated",
+                    "generated",
+                    "generated",
+                ],
+            ),
+        ];
+        for (raw, spellings) in golden {
+            for (role, expected) in ROLES.iter().zip(spellings) {
+                assert_eq!(
+                    escape(raw, *role).as_str(),
+                    *expected,
+                    "escape({raw:?}, {role:?})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn escapes_field_keywords_with_raw_identifier() {
         assert_eq!(escape("type", IdentRole::Field).as_str(), "r#type");
@@ -267,18 +321,6 @@ mod tests {
                     lexes_as_one_identifier(ident.as_str()),
                     "escape({raw:?}, {role:?}) produced {:?}",
                     ident.as_str()
-                );
-            }
-        }
-
-        /// Byte-identical output requires identifier allocation to be a pure function of its
-        /// inputs. Nothing asserted this, and it is the first thing a hash-ordered rewrite breaks.
-        #[test]
-        fn escape_is_deterministic(raw in ".{0,48}") {
-            for role in ROLES {
-                prop_assert_eq!(
-                    escape(&raw, *role).as_str().to_owned(),
-                    escape(&raw, *role).as_str().to_owned()
                 );
             }
         }

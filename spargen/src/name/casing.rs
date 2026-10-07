@@ -107,15 +107,31 @@ mod tests {
         assert_eq!(to_snake_case("v2Api"), "v2_api");
     }
 
-    proptest! {
-        /// Both conversions feed identifier allocation, so byte-identical output depends on them
-        /// being pure functions.
-        #[test]
-        fn conversions_are_deterministic(raw in ".{0,48}") {
-            prop_assert_eq!(to_pascal_case(&raw), to_pascal_case(&raw));
-            prop_assert_eq!(to_snake_case(&raw), to_snake_case(&raw));
+    /// Both conversions feed identifier allocation, so byte-identical output depends on each input
+    /// keeping its spelling. Calling a pure function twice and comparing cannot fail; a fixed table
+    /// does, the moment a rewrite (or a hash-ordered segmentation) spells any of these differently.
+    #[test]
+    fn conversions_keep_their_pinned_spellings() {
+        let golden: &[(&str, &str, &str)] = &[
+            ("petId", "PetId", "pet_id"),
+            ("pet_id", "PetId", "pet_id"),
+            ("user-name.id", "UserNameId", "user_name_id"),
+            ("  leading space", "LeadingSpace", "leading_space"),
+            ("HTTPResponse", "Httpresponse", "httpresponse"),
+            ("XMLHttpRequest", "XmlhttpRequest", "xmlhttp_request"),
+            ("v2Api", "V2Api", "v2_api"),
+            ("123abc", "123abc", "123abc"),
+            ("café", "Caf", "caf"),
+            ("a/b/c", "ABC", "a_b_c"),
+            ("", "Generated", "generated"),
+        ];
+        for (raw, pascal, snake) in golden {
+            assert_eq!(to_pascal_case(raw), *pascal, "to_pascal_case({raw:?})");
+            assert_eq!(to_snake_case(raw), *snake, "to_snake_case({raw:?})");
         }
+    }
 
+    proptest! {
         /// Segmentation keeps only ASCII alphanumerics, so a conversion can never introduce a
         /// character that `escape` would then have to strip.
         #[test]
