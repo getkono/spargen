@@ -16161,6 +16161,162 @@ fn an_intersection_merges_a_default_either_side_declares() {
     );
 }
 
+/// Issue #432: of two different defaults an intersection's sides declare, the one the side can
+/// apply as a serde default is kept, whatever its value and in either order. `NullP` declares `p`
+/// nullable and `ReqP` declares it required, so neither applies its `aaa`; `PlainP` declares it
+/// optional and applies `zzz`. Were the values compared first, `aaa` would be kept. The nullable
+/// meet narrows to a plain optional `String`, so the kept `zzz` is wired; the required meet keeps
+/// the requirement, so `zzz` is only documented.
+const APPLICABLE_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    PlainP:
+      type: object
+      properties:
+        p: { type: string, default: zzz }
+    NullP:
+      type: object
+      properties:
+        p: { type: [string, 'null'], default: aaa }
+    ReqP:
+      type: object
+      required: [p]
+      properties:
+        p: { type: string, default: aaa }
+    NullClash:
+      allOf:
+        - $ref: '#/components/schemas/NullP'
+        - $ref: '#/components/schemas/PlainP'
+    NullClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/PlainP'
+        - $ref: '#/components/schemas/NullP'
+    ReqClash:
+      allOf:
+        - $ref: '#/components/schemas/ReqP'
+        - $ref: '#/components/schemas/PlainP'
+    ReqClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/PlainP'
+        - $ref: '#/components/schemas/ReqP'
+"##;
+
+#[test]
+fn a_conflicting_intersection_default_keeps_the_one_its_side_can_apply() {
+    for (entry, report) in [
+        ("generate", generate(APPLICABLE_DEFAULT_SPEC)),
+        ("check", check(APPLICABLE_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // In both orders the unapplied `aaa` is the dropped one, never `PlainP`'s `zzz`.
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/NullP/properties/p/default",
+                "/components/schemas/ReqP/properties/p/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains("/components/schemas/PlainP/properties/p/default")),
+            "{entry}: every report names `PlainP`'s default as the one kept: {messages:#?}"
+        );
+    }
+
+    let (report, code) = generate_with_code(APPLICABLE_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let body = |name: &str| {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        code[start..start + code[start..].find('}').unwrap()].to_owned()
+    };
+    for name in ["NullClash", "NullClashReversed"] {
+        let body = body(name);
+        assert!(
+            body.contains("Default: `zzz`.")
+                && !body.contains("Default: `aaa`.")
+                && body.contains("default = \"default_"),
+            "`{name}.p` documents and applies `zzz`: {body}"
+        );
+    }
+    for name in ["ReqClash", "ReqClashReversed"] {
+        let body = body(name);
+        assert!(
+            body.contains("Default: `zzz`.") && !body.contains("Default: `aaa`."),
+            "`{name}.p` documents `zzz`: {body}"
+        );
+    }
+}
+
+/// Issue #432: an `integer` default `3` and a `number` default `3` are one default, not a
+/// conflict, though the two sides classify it as an integer and as a float. The intersection keeps
+/// it without a `W005`, in either order.
+const NUMERIC_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    IntP:
+      type: object
+      properties:
+        p: { type: integer, default: 3 }
+    NumP:
+      type: object
+      properties:
+        p: { type: number, default: 3 }
+    Both:
+      allOf:
+        - $ref: '#/components/schemas/IntP'
+        - $ref: '#/components/schemas/NumP'
+    BothReversed:
+      allOf:
+        - $ref: '#/components/schemas/NumP'
+        - $ref: '#/components/schemas/IntP'
+"##;
+
+#[test]
+fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
+    for (entry, report) in [
+        ("generate", generate(NUMERIC_DEFAULT_SPEC)),
+        ("check", check(NUMERIC_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::SchemaDefaultNotApplied),
+            "{entry}: `3` and `3` do not conflict: {report:#?}"
+        );
+    }
+
+    let (report, code) = generate_with_code(NUMERIC_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in ["Both", "BothReversed"] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("default = \"default_"),
+            "`{name}.p` applies the merged default: {body}"
+        );
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
