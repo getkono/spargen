@@ -1,9 +1,10 @@
 //! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
 //! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
-//! `generate`. Check/generate parity is a property over `PARITY_FIXTURES` rather than a remark
-//! about one case: every fixture there must reach the same accept/reject verdict and report the
-//! same codes through both entry points, and a companion test keeps that set spanning rejections,
-//! warnings and clean runs so it cannot pass vacuously.
+//! `generate`. Check/generate parity is a property of the harness rather than a remark about one
+//! case: every inline spec `generate` or `generate_with_code` runs is also run through `check`,
+//! which must reach the same accept/reject verdict and report the same sorted codes, and every
+//! `Generated` module must parse as Rust with no `compile_error!` fallback. `PARITY_FIXTURES` adds
+//! a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
 //! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413).
@@ -302,6 +303,16 @@ fn declared_fields(code: &str, ty: &str) -> Vec<String> {
         .filter_map(|rest| rest.split_once(':'))
         .map(|(name, _)| name.to_owned())
         .collect()
+}
+
+/// The right-hand side of `pub type ty = …;`, the type an alias names, or `None` when no such alias
+/// is declared.
+fn alias_target(code: &str, ty: &str) -> Option<String> {
+    let head = format!("pub type {ty} = ");
+    code.lines()
+        .map(str::trim_start)
+        .find_map(|line| line.strip_prefix(&head))
+        .map(|rest| rest.trim_end().trim_end_matches(';').to_owned())
 }
 
 /// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
@@ -10629,17 +10640,35 @@ components:
         - type: integer
         - type: number
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The typed union the name promises: both branches survive, each with its own numeric type.
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant0").as_deref(),
+        Some("i64"),
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant1").as_deref(),
+        Some("f64"),
+        "{types}"
+    );
 }
 
 #[test]
 fn overlapping_object_one_of_generates_with_typed_trial_matching() {
     // Object variants that overlap structurally use typed trial matching and exact-one semantics.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -10658,6 +10687,24 @@ components:
     );
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+
+    // Both object branches survive as typed structs, each keeping its own distinguishing field.
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "Uvariant0"),
+        ["kind", "a"],
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "Uvariant1"),
+        ["kind", "b"],
+        "{types}"
+    );
 }
 
 #[test]
@@ -10696,12 +10743,22 @@ components:
         - type: string
         - type: integer
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The sibling `type: string` intersects each branch: the integer branch admits nothing a
+    // string does, so what remains is the string branch alone, not a two-variant union.
+    let types = types_module(&code);
+    assert_eq!(
+        alias_target(&types, "StringOnly").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert!(!types.contains("pub enum StringOnly "), "{types}");
 }
 
 /// A `oneOf`/`anyOf` member written `{$ref: '#/components/schemas/Name', type: integer}` is the
@@ -11015,12 +11072,36 @@ components:
         - type: [string, "null"]
         - type: array
           items: { type: string }
+    Holder:
+      type: object
+      required: [u]
+      properties:
+        u: { $ref: "#/components/schemas/U" }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The hoist itself: a required use of the union is `Option<U>` (the nullability the variant
+    // carried), and the string variant's own type is the non-null `String`.
+    let types = types_module(&code);
+    assert_eq!(
+        field_type(&types, "pub u:").as_deref(),
+        Some("Option<U>"),
+        "{types}"
+    );
+    assert_eq!(
+        enum_variants(&types, "U"),
+        ["Uvariant0(Box<Uvariant0>)", "Uvariant1(Box<Uvariant1>)"],
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Uvariant0").as_deref(),
+        Some("String"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -11037,12 +11118,32 @@ components:
       oneOf:
         - type: string
         - type: "null"
+    Holder:
+      type: object
+      required: [u]
+      properties:
+        u: { $ref: "#/components/schemas/U" }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    // The collapse: no enum, `U` names the string itself, and the stripped null reappears as the
+    // `Option` a required use of `U` carries.
+    let types = types_module(&code);
+    assert!(!types.contains("pub enum U "), "{types}");
+    assert_eq!(
+        alias_target(&types, "U").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert_eq!(
+        field_type(&types, "pub u:").as_deref(),
+        Some("Option<U>"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -11117,12 +11218,19 @@ components:
     Nothing:
       enum: [null]
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
 
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+
+    let types = types_module(&code);
+    assert_eq!(
+        alias_target(&types, "Nothing").as_deref(),
+        Some("()"),
+        "{types}"
+    );
 }
 
 #[test]
@@ -12498,9 +12606,17 @@ components:
           properties:
             a: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Composed"), ["a"], "{types}");
+    assert_eq!(
+        field_owner(&types, "pub a:").as_deref(),
+        Some("Composed"),
+        "{types}"
+    );
 }
 
 /// `allOf: [{$ref: Base}, {properties: {extra}}]` flattens the referenced component's fields plus
@@ -12525,9 +12641,35 @@ components:
           properties:
             extra: { type: integer }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // `Derived` carries `Base`'s required `id` (plain) and the inline member's optional `extra`.
+    let types = types_module(&code);
+    assert_eq!(
+        declared_fields(&types, "Derived"),
+        ["id", "extra"],
+        "{types}"
+    );
+    let derived = &types[types
+        .find("pub struct Derived ")
+        .expect("Derived is a struct")..];
+    assert_eq!(
+        field_type(derived, "pub id:").as_deref(),
+        Some("Baseid"),
+        "{types}"
+    );
+    assert_eq!(
+        field_type(derived, "pub extra:").as_deref(),
+        Some("Option<DerivedMember1extra>"),
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "DerivedMember1extra").as_deref(),
+        Some("i64"),
+        "{types}"
+    );
 }
 
 /// A nested `allOf` (an `allOf` member that itself has an `allOf`) flattens recursively into one
@@ -12550,9 +12692,13 @@ components:
           properties:
             b: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // One struct carrying the inner `allOf`'s `a` beside the outer member's `b`.
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Nested"), ["a", "b"], "{types}");
 }
 
 /// `allOf` beside the enclosing schema's own sibling `properties`: both sets of fields merge.
@@ -12573,9 +12719,17 @@ components:
           properties:
             base: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // Both sets of fields land in the one struct.
+    let types = types_module(&code);
+    assert_eq!(
+        declared_fields(&types, "Sibling"),
+        ["base", "own"],
+        "{types}"
+    );
 }
 
 /// Repeated properties in an `allOf` are intersections. Compatible refinements retain the narrower
@@ -12612,7 +12766,7 @@ components:
                 properties:
                   name: { type: string }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
@@ -12622,6 +12776,45 @@ components:
         !has_code(&checked, Code::AllOfIrreconcilable),
         "{checked:#?}"
     );
+
+    // Each property keeps the narrower side of its intersection, read through the merged
+    // struct's own field types rather than from a type name appearing somewhere.
+    let types = types_module(&code);
+    let refined = &types[types
+        .find("pub struct Refined ")
+        .expect("Refined is a struct")..];
+    let target = |field: &str| {
+        let ty = field_type(refined, &format!("pub {field}:"))
+            .unwrap_or_else(|| panic!("`Refined` has no `{field}` field: {types}"));
+        let inner = ty
+            .strip_prefix("Option<")
+            .and_then(|rest| rest.strip_suffix('>'))
+            .unwrap_or_else(|| panic!("optional `{field}` is `{ty}`: {types}"));
+        alias_target(&types, inner).unwrap_or_else(|| format!("enum or struct {inner}"))
+    };
+    // integer within number.
+    assert_eq!(target("run_id"), "i64", "{types}");
+    // enum within string: a two-variant enum, not a plain `String`.
+    let status = field_type(refined, "pub status:").expect("a status field");
+    let status = status.trim_start_matches("Option<").trim_end_matches('>');
+    assert_eq!(
+        enum_variants(&types, status),
+        ["Queued", "Complete"],
+        "{types}"
+    );
+    // exact null within nullable string.
+    assert_eq!(target("marker"), "()", "{types}");
+    // A non-null item struct carrying `name`, within nullable untyped items.
+    let items = target("items");
+    let item = items
+        .strip_prefix("Vec<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("`items` is `{items}`: {types}"));
+    assert!(
+        !item.starts_with("Option<"),
+        "the item stayed nullable: {types}"
+    );
+    assert_eq!(declared_fields(&types, item), ["name"], "{types}");
 }
 
 /// A property declared with different lowered types in two `allOf` members, and required by one of
@@ -21889,9 +22082,10 @@ item:
 // --- check/generate parity ----------------------------------------------------------------------
 //
 // The module header calls parity a contract, and `spargen check` is sold as telling you what
-// `generate` would do. It was asserted by seven fixtures in the whole file, each written by hand;
-// the other 175 go through `generate` alone. A `check` that quietly stopped running one frontend
-// stage would keep passing.
+// `generate` would do. Every inline fixture that goes through `generate` or `generate_with_code`
+// already gets the verdict-and-codes half of it from `assert_check_agrees`. `PARITY_FIXTURES` keeps
+// ten named specs on top of that: a list a companion test holds to span rejections, warnings and
+// clean runs, and whose labelled names each hold the fixture to the code it is named for.
 
 /// The sorted diagnostic codes a report carries, duplicates kept: a stage that fires the same
 /// warning twice differs from one that fires it once.
