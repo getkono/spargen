@@ -156,7 +156,7 @@ jobs:
       - run: grep -q E001 target/corpus-smoke/github-30.json
       # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json
-      # ollama now generates (union lowering, #9): check must succeed with no rejection.
+      # ollama generates: check must succeed with no rejection.
       - run: cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
       # openai is 3.1 and past the version gate, but `POST /realtime/calls` documents
@@ -247,9 +247,12 @@ jobs:
       # picks up the newest release.
       - name: Install mdBook
         run: cargo install mdbook --version 0.5.4 --locked
-      # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
-      # (docs/book/book/) is git-ignored; only the book source is committed.
+      # The built HTML (docs/book/book/) is git-ignored; only the book source is committed.
       - run: mdbook build docs/book
+      # `mdbook build` checks no link and exits 0 on an unreadable include: this reads the built
+      # site and fails the job on an unresolved include, or a relative link or anchor that does not
+      # resolve inside it.
+      - run: cargo test -p spargen --test docs every_link_in_the_built_book_resolves -- --exact --ignored
       # Rustdoc's own link check. `--document-private-items` is load-bearing: every subsystem
       # module is private, so without it rustdoc never looks at most of the crate and broken
       # links accumulate unseen.
