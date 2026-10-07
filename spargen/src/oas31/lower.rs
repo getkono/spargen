@@ -3858,13 +3858,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             // until every member's `required` has been read — a later member may
                             // require it without declaring it — so the field takes an uninhabited
                             // type now and the requirement is settled after the loop. A member's
-                            // applied `default` goes with the old type: no value of it is a value
-                            // of the field any more (it stays documented in rustdoc).
+                            // applied `default` is left for `retype_field_defaults`, which finds
+                            // it no value of the uninhabited type and reports it (`W005`) where it
+                            // was written, documenting it as not applied (#453).
                             Err(NoMeet::Empty) => {
                                 uninhabited.insert(field.name.wire.clone());
-                                if let Some(default) = &mut existing.default {
-                                    default.applied = None;
-                                }
                                 self.insert_type(
                                     &field_hint,
                                     TypeKind::Never,
@@ -5244,12 +5242,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // omits it still satisfies both sides. The field takes an uninhabited
                         // type, so the instances that remain representable are exactly the valid
                         // ones. Propagating the failure would reject a document that `{}`
-                        // satisfies. An applied `default` goes with the old type, since no value
-                        // of it is a value of the field any more (it stays documented in rustdoc).
+                        // satisfies. An applied `default` is no value of the uninhabited type, and
+                        // is left for `retype_field_defaults` to report (`W005`) where it was
+                        // written and document as not applied (#453).
                         Err(NoMeet::Empty) if !required => {
-                            if let Some(default) = &mut existing.default {
-                                default.applied = None;
-                            }
                             self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
                         }
                         // Required on one side or the other: every instance must carry a value no
