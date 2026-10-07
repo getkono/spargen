@@ -755,6 +755,7 @@ mod tests {
             "assert!(!has_code(&report, Code::UnresolvedRef));",
             "assert!(\n    !has_code(\n        &report,\n        Code::UnresolvedRef\n    ),\n);",
             "assert!(!has_code(&check(spec), Code::UnresolvedRef));",
+            "assert!(!has_code(&report, pick(Code::UnresolvedRef)));",
             "assert!(d.code != Code::UnresolvedRef);",
             "assert!(has_code(&report, Code::UnresolvedRefTypo));",
         ] {
