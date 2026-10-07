@@ -320,7 +320,7 @@ fn operation_arg_normalizations(
 
 /// The typed method arguments and their bare forwarding names for an operation. Shared by
 /// [`emit_operation`] (the async method) and
-/// [`emit_blocking_operation`](super::blocking::emit_blocking_operation) (its synchronous shim) so
+/// `blocking::emit_blocking_operation` (its synchronous shim, private to that module) so
 /// the two signatures are constructed from one source and can never drift. The first vector holds
 /// `name: Type` argument declarations; the second holds just the `name`s, in the same order, for the
 /// shim's `self.inner.<op>(<names>)` forwarding call. Body args are already `&T`, so the forwarding
