@@ -425,6 +425,8 @@ fn each_runtime_source_carries_its_test_module_last_and_only_once() {
             Some(TestModule::Last),
             "{path:?} declares items after its `#[cfg(test)]` module"
         );
+        // An out-of-line `mod tests;` must have its file: reading it panics when it is missing.
+        runtime_test_text(&path, &source);
     }
     assert!(
         sources > 0 && with_tests > 0,
@@ -476,6 +478,45 @@ fn the_test_module_reader_finds_an_item_after_the_module() {
     assert_eq!(test_module_position(after, path), Some(TestModule::NotLast));
 
     assert_eq!(test_module_position("pub fn embedded() {}\n", path), None);
+}
+
+/// The text of the test module of the runtime source at `path`, or `None` when `source` carries no
+/// `#[cfg(test)]` marker. An inline module is the text after the marker; one declared out of line
+/// (`mod tests;`) is read from `<stem>/tests.rs` beside `path`, and a missing file panics rather
+/// than reading as an empty module, so a check over test text cannot pass by reading nothing.
+fn runtime_test_text(path: &Path, source: &str) -> Option<String> {
+    let (_, tail) = source.split_once("#[cfg(test)]")?;
+    Some(if tail.trim() == "mod tests;" {
+        read(&path.with_extension("").join("tests.rs"))
+    } else {
+        tail.to_owned()
+    })
+}
+
+#[test]
+fn the_test_text_reader_follows_an_out_of_line_module() {
+    let path = Path::new("fixture.rs");
+    let inline = "pub fn embedded() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    assert_eq!(
+        runtime_test_text(path, inline).as_deref(),
+        Some("\nmod tests {\n    fn t() {}\n}\n")
+    );
+    assert_eq!(runtime_test_text(path, "pub fn embedded() {}\n"), None);
+
+    let error = workspace_root().join("support-runtime/src/error.rs");
+    let out_of_line =
+        runtime_test_text(&error, "#[cfg(test)]\nmod tests;\n").expect("a marker yields test text");
+    assert!(
+        out_of_line.contains("const REQUEST_VARIANTS: usize"),
+        "`mod tests;` beside error.rs reads support-runtime/src/error/tests.rs"
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be readable")]
+fn the_test_text_reader_rejects_a_missing_out_of_line_module() {
+    let missing = workspace_root().join("support-runtime/src/no_such_source.rs");
+    runtime_test_text(&missing, "pub fn embedded() {}\n#[cfg(test)]\nmod tests;\n");
 }
 
 /// The sentence an embedded comment block must carry to name a test-only item. It is the one
@@ -667,11 +708,13 @@ fn embedded_comments_name_no_test_only_item_undisclosed() {
 
     let mut test_only = BTreeSet::new();
     let mut embedded_code = BTreeSet::new();
-    for (_, source) in &sources {
-        let (head, tail) = source
+    for (path, source) in &sources {
+        let head = source
             .split_once("#[cfg(test)]")
-            .unwrap_or((source.as_str(), ""));
-        test_only.extend(test_only_declarations(tail));
+            .map_or(source.as_str(), |(head, _)| head);
+        if let Some(tests) = runtime_test_text(path, source) {
+            test_only.extend(test_only_declarations(&tests));
+        }
         for line in head.lines() {
             let code = line.split_once("//").map_or(line, |(code, _)| code);
             embedded_code.extend(identifiers(code).map(str::to_owned));
@@ -801,7 +844,7 @@ fn declared_count(source: &str, name: &str) -> usize {
     let marker = format!("const {name}: usize = ");
     let at = source
         .find(&marker)
-        .unwrap_or_else(|| panic!("`{marker}` is declared in support-runtime/src/error.rs"))
+        .unwrap_or_else(|| panic!("`{marker}` is declared in support-runtime/src/error/tests.rs"))
         + marker.len();
     source[at..]
         .split(';')
@@ -818,7 +861,12 @@ fn declared_count(source: &str, name: &str) -> usize {
 /// count is taken from the declaration text here, where nothing reaches generated output.
 #[test]
 fn every_error_variant_is_counted_by_its_enumeration() {
-    let source = read(&workspace_root().join("support-runtime/src/error.rs"));
+    // The enums are embedded production code in `error.rs`; the counts and lists are in its
+    // out-of-line test module, which must be there for the counts to be read at all.
+    let path = workspace_root().join("support-runtime/src/error.rs");
+    let source = read(&path);
+    let tests = runtime_test_text(&path, &source)
+        .expect("support-runtime/src/error.rs carries a `#[cfg(test)]` test module");
     for (header, count, list) in [
         (
             "pub enum RequestError {",
@@ -828,7 +876,7 @@ fn every_error_variant_is_counted_by_its_enumeration() {
         ("pub enum Error<E> {", "ERROR_VARIANTS", "every_variant"),
     ] {
         let variants = enum_variants(&source, header);
-        let declared = declared_count(&source, count);
+        let declared = declared_count(&tests, count);
         assert_eq!(
             variants.len(),
             declared,
