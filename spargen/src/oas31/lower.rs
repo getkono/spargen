@@ -9861,8 +9861,9 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
 /// applied, then the lesser rustdoc note, then the lesser `default` location — while the other is
 /// reported (`W005`) at the `default` that wrote it, since the field cannot carry it. Two defaults
 /// of one value (`3` and `3.0` alike) are one default. The kept default is then decided against
-/// the merged field as every other is: a requirement or an empty meet drops its application here,
-/// and [`retype_field_defaults`] re-types it against the narrowed type.
+/// the merged field as every other is: a requirement drops its application here, and
+/// [`retype_field_defaults`] re-types it against the narrowed type, which for an empty meet
+/// leaves it unapplied and reports it as `W005` (#453).
 fn merge_field_default(
     kept: &mut Option<FieldDefault>,
     other: Option<&FieldDefault>,
