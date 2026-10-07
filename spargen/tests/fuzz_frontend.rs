@@ -4,7 +4,11 @@
 //! parse/validate/audit → `ir` lower → `name` allocate — must ALWAYS return a [`Report`] for ANY
 //! input, however malformed, random, or adversarial. It must never `panic!`, `unwrap` on bad input,
 //! overflow the stack, or hang. This harness feeds a wide variety of inputs to `check` and asserts
-//! exactly that: every case returns, so no case panicked or aborted.
+//! that every case returns, so no case panicked or aborted. Beyond no-panic it holds three oracles:
+//! no report carries an `IR invariant failed` diagnostic (lowering must produce a valid IR for any
+//! input), a document that is valid JSON reports the same sorted codes through the JSON and the
+//! YAML parser, and `generate` over the valid-skeleton documents writes a module that parses as
+//! Rust whenever it reports `Generated`.
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -24,11 +28,13 @@
 //! case counts / input sizes keep `mise run test` fast and non-flaky. A panic anywhere inside
 //! `check` fails the test with the (shrunk) offending input; a stack overflow or hang aborts loudly.
 
+use std::cell::Cell;
+
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
-use proptest::test_runner::{Config as PtConfig, RngAlgorithm, TestRng, TestRunner};
+use proptest::test_runner::{Config as PtConfig, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 use serde_json::{Map, Value};
-use spargen::{check, Spec};
+use spargen::{check, CargoIntegration, Code, Outcome, Report, Spec};
 use tempfile::TempDir;
 
 /// Keys the frontend interprets — biasing generated objects toward these drives the fuzzer past the
@@ -125,22 +131,60 @@ fn deterministic_runner(cases: u32) -> TestRunner {
     )
 }
 
+/// The prefix `ir::check_invariants` gives every diagnostic it emits. Lowering must produce an IR
+/// that passes them for any input, so a report carrying one is a lowering bug, not a rejection.
+const INVARIANT_FAILURE: &str = "IR invariant failed";
+
 /// Write `bytes` to `spec.<ext>` in `dir` and run `check`. Returning at all proves `check` did not
-/// panic/abort; the returned `Report` is otherwise unused (its mere existence is the invariant).
-fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) {
+/// panic/abort; the report must also carry no [`INVARIANT_FAILURE`].
+fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) -> Result<Report, TestCaseError> {
     let spec = Utf8PathBuf::from_path_buf(dir.path().join(format!("spec.{ext}"))).unwrap();
     std::fs::write(&spec, bytes).unwrap();
     let report = check(&Spec::new(spec));
-    // Touch the report so the optimizer cannot elide the call; also a cheap sanity walk.
-    std::hint::black_box(report.outcome());
-    std::hint::black_box(report.diagnostics().len());
+    let failed: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .filter(|message| message.contains(INVARIANT_FAILURE))
+        .collect();
+    prop_assert!(
+        failed.is_empty(),
+        "lowering produced an IR that fails its invariants (`.{ext}`): {failed:#?}"
+    );
+    Ok(report)
 }
 
-/// Run one generated document through both the JSON and the YAML parser (JSON ⊂ YAML), so a single
-/// case covers both frontends.
-fn exercise_both(dir: &TempDir, text: &str) {
-    exercise(dir, text.as_bytes(), "json");
-    exercise(dir, text.as_bytes(), "yaml");
+/// The sorted diagnostic codes of a report.
+fn codes(report: &Report) -> Vec<&'static str> {
+    let mut codes: Vec<&'static str> = report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    codes.sort_unstable();
+    codes
+}
+
+/// Run one document through both the JSON and the YAML parser, so a single case covers both
+/// frontends. The text need not be JSON, so the two may legitimately disagree; see
+/// [`exercise_json_both`] for the inputs where they may not.
+fn exercise_both(dir: &TempDir, text: &str) -> Result<(Report, Report), TestCaseError> {
+    Ok((
+        exercise(dir, text.as_bytes(), "json")?,
+        exercise(dir, text.as_bytes(), "yaml")?,
+    ))
+}
+
+/// [`exercise_both`] on a document that is valid JSON. JSON is a subset of YAML, so both parsers
+/// read the same document, and the frontend must report the same codes for it either way.
+fn exercise_json_both(dir: &TempDir, text: &str) -> Result<Report, TestCaseError> {
+    let (json, yaml) = exercise_both(dir, text)?;
+    prop_assert_eq!(
+        codes(&json),
+        codes(&yaml),
+        "the JSON and the YAML parse of one document report different codes"
+    );
+    Ok(json)
 }
 
 // Strategies
@@ -229,7 +273,8 @@ fn arb_skeleton_doc() -> impl Strategy<Value = String> {
 /// A chain of components `S0 -> S1 -> ... -> S{depth}` where each links to the next via a randomly
 /// chosen composition (allOf / array items / object property / oneOf). Depths straddle the lowering
 /// cap so both the accept path (below the cap) and the reject path (E014, above it) are hit — the
-/// exact stack-overflow vector this issue found.
+/// exact stack-overflow vector this issue found. `check_never_panics_on_deep_ref_chains` counts
+/// both and fails if either was never reached.
 fn arb_ref_chain() -> impl Strategy<Value = String> {
     (10usize..200, 0u8..4).prop_map(|(depth, kind)| {
         let mut schemas = String::new();
@@ -318,9 +363,9 @@ fn check_never_panics_on_arbitrary_bytes() {
     deterministic_runner(256)
         .run(&prop::collection::vec(any::<u8>(), 0..1024), |bytes| {
             // Raw bytes: invalid UTF-8, embedded NULs, truncated multibyte, control chars.
-            exercise(&dir, &bytes, "yaml");
-            exercise(&dir, &bytes, "json");
-            exercise(&dir, &bytes, "txt"); // extension-sniff fallback path
+            exercise(&dir, &bytes, "yaml")?;
+            exercise(&dir, &bytes, "json")?;
+            exercise(&dir, &bytes, "txt")?; // extension-sniff fallback path
             Ok(())
         })
         .unwrap();
@@ -331,7 +376,7 @@ fn check_never_panics_on_arbitrary_utf8() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(256)
         .run(&any::<String>(), |text| {
-            exercise_both(&dir, &text);
+            exercise_both(&dir, &text)?;
             Ok(())
         })
         .unwrap();
@@ -342,7 +387,7 @@ fn check_never_panics_on_keyword_biased_documents() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(400)
         .run(&arb_value(), |value| {
-            exercise_both(&dir, &serde_json::to_string(&value).unwrap());
+            exercise_json_both(&dir, &serde_json::to_string(&value).unwrap())?;
             Ok(())
         })
         .unwrap();
@@ -353,10 +398,52 @@ fn check_never_panics_on_skeleton_documents() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(400)
         .run(&arb_skeleton_doc(), |text| {
-            exercise_both(&dir, &text);
+            exercise_json_both(&dir, &text)?;
             Ok(())
         })
         .unwrap();
+}
+
+/// `generate` over the documents that reach lowering: a `Generated` run must have written a module
+/// that parses as Rust and is not the `compile_error!` stub codegen falls back to when its own
+/// tokens fail to format, which keeps the outcome `Generated`.
+#[test]
+fn generate_writes_parseable_rust_for_skeleton_documents() {
+    let dir = TempDir::new().unwrap();
+    let spec = Utf8PathBuf::from_path_buf(dir.path().join("spec.json")).unwrap();
+    let out = Utf8PathBuf::from_path_buf(dir.path().join("client.rs")).unwrap();
+    let generated = Cell::new(0u32);
+    // Fewer cases than `check`: each generating case renders and parses the whole module,
+    // embedded runtime included.
+    deterministic_runner(96)
+        .run(&arb_skeleton_doc(), |text| {
+            std::fs::write(&spec, &text).unwrap();
+            let _ = std::fs::remove_file(&out);
+            let report = spargen::generate(
+                &Spec::new(spec.clone())
+                    .build(out.clone())
+                    .cargo(CargoIntegration::Off),
+            );
+            if report.outcome() == Outcome::Generated {
+                generated.set(generated.get() + 1);
+                let code = std::fs::read_to_string(&out).unwrap();
+                if let Err(error) = syn::parse_file(&code) {
+                    return Err(TestCaseError::fail(format!(
+                        "a `Generated` run wrote unparseable Rust ({error})"
+                    )));
+                }
+                prop_assert!(
+                    !code.contains("compile_error!"),
+                    "a `Generated` run wrote the codegen fallback stub"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        generated.get() > 0,
+        "no skeleton document generated, so the parse oracle was never reached"
+    );
 }
 
 #[test]
@@ -364,7 +451,7 @@ fn check_never_panics_on_component_root_refs_with_siblings() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(256)
         .run(&arb_ref_sibling_components(), |text| {
-            exercise_both(&dir, &text);
+            exercise_json_both(&dir, &text)?;
             Ok(())
         })
         .unwrap();
@@ -373,11 +460,31 @@ fn check_never_panics_on_component_root_refs_with_siblings() {
 #[test]
 fn check_never_panics_on_deep_ref_chains() {
     let dir = TempDir::new().unwrap();
+    // How many chains lowered, and how many hit the depth cap: `arb_ref_chain` promises both.
+    let accepted = Cell::new(0u32);
+    let too_deep = Cell::new(0u32);
     // Fewer cases: each deep chain is comparatively heavy (it lowers up to the depth cap per link).
     deterministic_runner(48)
         .run(&arb_ref_chain(), |text| {
-            exercise_both(&dir, &text);
+            let report = exercise_json_both(&dir, &text)?;
+            if report.outcome() != Outcome::Rejected {
+                accepted.set(accepted.get() + 1);
+            } else if report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == Code::SchemaNestingTooDeep)
+            {
+                too_deep.set(too_deep.get() + 1);
+            }
             Ok(())
         })
         .unwrap();
+    assert!(
+        accepted.get() > 0,
+        "no ref chain lowered, so the accept path below the depth cap was never reached"
+    );
+    assert!(
+        too_deep.get() > 0,
+        "no ref chain reported E014, so the depth-cap reject path was never reached"
+    );
 }
