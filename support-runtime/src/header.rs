@@ -349,4 +349,29 @@ mod tests {
             "{parsed:?}"
         );
     }
+
+    /// Each variant's message names the header and says which way it failed; a `Parse` error also
+    /// carries serde's message, which is the only detail of what the value looked like.
+    #[test]
+    fn every_header_error_displays_its_name_and_cause() {
+        for (error, expected) in [
+            (
+                HeaderError::Missing { name: "x-rate" },
+                "required response header `x-rate` is absent",
+            ),
+            (
+                HeaderError::NotUtf8 { name: "x-rate" },
+                "response header `x-rate` is not valid UTF-8",
+            ),
+            (
+                HeaderError::Parse {
+                    name: "x-rate",
+                    message: "invalid digit".to_owned(),
+                },
+                "response header `x-rate` did not match its documented type: invalid digit",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
 }

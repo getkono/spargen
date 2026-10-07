@@ -873,6 +873,26 @@ mod tests {
         assert_eq!(encode("%41", PercentEncoding::Unreserved), "%2541");
     }
 
+    /// The triple look-ahead at every position relative to the end of the value: a triple cut
+    /// short by the end is a bare `%`, one that ends exactly at the end or has data after it is
+    /// passed through, and so is one that starts well into the value. Both reserved sets share it.
+    #[test]
+    fn reserved_expansion_reads_a_triple_only_where_all_three_bytes_exist() {
+        for encoding in [PercentEncoding::Reserved, PercentEncoding::ReservedPath] {
+            for (raw, expected) in [
+                ("%", "%25"),
+                ("%4", "%254"),
+                ("a%4", "a%254"),
+                ("a%41", "a%41"),
+                ("x%41y", "x%41y"),
+                ("abc%41", "abc%41"),
+                ("abcde%4", "abcde%254"),
+            ] {
+                assert_eq!(encode(raw, encoding), expected, "{encoding:?} {raw:?}");
+            }
+        }
+    }
+
     #[test]
     fn path_values_never_carry_unescaped_slash_question_or_hash() {
         for encoding in [PercentEncoding::Unreserved, PercentEncoding::ReservedPath] {
@@ -1051,5 +1071,40 @@ mod tests {
             serialize_simple(&nested, false, U),
             Err(ParameterError::NestedValue)
         ));
+    }
+
+    /// Each variant's message names the rule it broke, and only a serialization failure has a
+    /// separate cause: `source` hands back serde's own error, which `Display` also quotes.
+    #[test]
+    fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
+        let serde_error = serde_json::from_str::<u8>("x").unwrap_err();
+        let serde_message = serde_error.to_string();
+        let serialize = ParameterError::from(serde_error);
+        assert_eq!(
+            serialize.to_string(),
+            format!("parameter serialization failed: {serde_message}")
+        );
+        let source = std::error::Error::source(&serialize).expect("serialize carries its cause");
+        assert!(source.downcast_ref::<serde_json::Error>().is_some());
+        assert_eq!(source.to_string(), serde_message);
+
+        for (error, expected) in [
+            (
+                ParameterError::NestedValue,
+                "nested arrays and objects are not supported by OpenAPI parameter serialization",
+            ),
+            (
+                ParameterError::ExpectedObject,
+                "`style: deepObject` requires an object parameter value",
+            ),
+            (
+                ParameterError::ExpectedComposite,
+                "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
+                 parameter value",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+            assert!(std::error::Error::source(&error).is_none(), "{error}");
+        }
     }
 }
