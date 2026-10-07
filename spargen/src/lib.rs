@@ -1240,4 +1240,134 @@ mod tests {
             assert!(!off.fatal);
         }
     }
+
+    /// `check` with auto-carve on, over `contents` written as the root document in `dir`.
+    fn carve_check(dir: &tempfile::TempDir, contents: &str) -> Report {
+        let path = dir.path().join("openapi.yaml");
+        std::fs::write(&path, contents).unwrap();
+        check(&Spec::new(Utf8PathBuf::from_path_buf(path).unwrap()).carve(true))
+    }
+
+    /// The `(code, pointer)` of every error-severity diagnostic in `report`.
+    fn errors(report: &Report) -> Vec<(&'static str, &str)> {
+        report
+            .errors()
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.pointer.as_str()))
+            .collect()
+    }
+
+    /// How many `W009`s — constructs carve removed — `report` carries.
+    fn carved(report: &Report) -> usize {
+        report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::OmittedConstruct)
+            .count()
+    }
+
+    /// One healthy operation, then the `$ref` chain `Link0 → Link1 → … → Missing` of `links`
+    /// components. Only the last link dangles; omitting it dangles the one before, and so on, so
+    /// carve removes exactly one link per round and needs `links` rounds before a probe lowers.
+    fn dangling_chain(links: usize) -> String {
+        let mut spec = String::from(
+            "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        \"200\":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string }
+components:
+  schemas:
+",
+        );
+        for link in 0..links {
+            let next = if link + 1 == links {
+                "Missing".to_owned()
+            } else {
+                format!("Link{}", link + 1)
+            };
+            spec.push_str(&format!(
+                "    Link{link}: {{ $ref: \"#/components/schemas/{next}\" }}\n"
+            ));
+        }
+        spec
+    }
+
+    /// A round that finds no new rule ends the carve with that round's report: the residual
+    /// rejection carve cannot map to a construct, beside the `W009` for what it did carve.
+    #[test]
+    fn a_carve_that_stops_making_progress_reports_its_residual_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = carve_check(
+            &temp,
+            r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://example.com/custom-dialect
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses: { "204": { description: OK } }
+  /dynamic:
+    get:
+      operationId: getDynamic
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $dynamicRef: "#meta" }
+"##,
+        );
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        // The root-level dialect has nothing above it to carve, so it is all that is left.
+        assert_eq!(
+            errors(&report),
+            [(Code::UnsupportedDialect.as_str(), "/jsonSchemaDialect")],
+            "{report:#?}"
+        );
+        // The first round did carve the `$dynamicRef` operation, and says so.
+        assert_eq!(carved(&report), 1, "{report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == Code::OmittedConstruct
+                    && diagnostic.message.contains("get /dynamic")),
+            "{report:#?}"
+        );
+    }
+
+    /// The round cap is exact: a chain carve clears in [`compat::MAX_CARVE_ROUNDS`] rounds lowers,
+    /// and one link longer ends `Rejected` with the last round's report — the link it carved last
+    /// as `W009`s, and the one its final rule dangled as the residual `E004`.
+    #[test]
+    fn a_carve_that_exhausts_the_round_cap_reports_its_last_rejection() {
+        let cap = compat::MAX_CARVE_ROUNDS;
+        let temp = tempfile::tempdir().unwrap();
+
+        let within = carve_check(&temp, &dangling_chain(cap - 1));
+        assert!(within.succeeded(), "{within:#?}");
+        assert_eq!(carved(&within), cap - 1, "{within:#?}");
+
+        let beyond = carve_check(&temp, &dangling_chain(cap));
+        assert_eq!(beyond.outcome(), Outcome::Rejected, "{beyond:#?}");
+        // The last round ran with `cap - 1` links carved and rejected the next one; the rule it
+        // derived for that link was never tried, because the cap ended the loop first.
+        assert_eq!(
+            errors(&beyond),
+            [(Code::UnresolvedRef.as_str(), "/components/schemas/Link0")],
+            "{beyond:#?}"
+        );
+        assert_eq!(carved(&beyond), cap - 1, "{beyond:#?}");
+    }
 }
