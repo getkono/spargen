@@ -3819,6 +3819,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if take_declaration(existing, field) {
                             continue;
                         }
+                        // Either member's `default` is a default of the merged field, whichever
+                        // member came first (see `merge_field_default`).
+                        merge_field_default(
+                            &mut existing.default,
+                            field.default.as_ref(),
+                            &field.name.wire,
+                            self.diags,
+                        );
                         // A repeated property is an intersection, not an equality assertion: retain
                         // the narrower compatible type.
                         let field_hint = format!("{hint}{}Intersection", field.name.wire);
@@ -5217,6 +5225,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if take_declaration(existing, field) {
                         continue;
                     }
+                    // Either side's `default` is a default of the merged field, whichever side is
+                    // the `$ref` (see `merge_field_default`).
+                    merge_field_default(
+                        &mut existing.default,
+                        field.default.as_ref(),
+                        &field.name.wire,
+                        self.diags,
+                    );
                     let field_hint = format!("{hint}{}", field.name.wire);
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
@@ -9570,6 +9586,7 @@ fn parse_path_template(path: &str) -> PathTemplate {
 
 /// A `default` value classified into the scalar kinds that can back a Rust literal, or `Other` for
 /// anything (object/array/null) that cannot.
+#[derive(PartialEq)]
 enum RawDefault {
     Bool(bool),
     Int(i64),
@@ -9839,6 +9856,68 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
         }
     }
     true
+}
+
+/// Merge the `default` the other side of an intersection declares for a repeated property into
+/// the field kept for it (#432). `allOf` is commutative, and so is this merge: a default either
+/// side declares survives whichever side came first, and two sides that declare different
+/// defaults keep the same one in either order — an applicable default before one that cannot be
+/// applied, then the lesser rustdoc note, then the lesser `default` location — while the other is
+/// reported (`W005`) at the `default` that wrote it, since the field cannot carry it. Two defaults
+/// of one value (`3` and `3.0` alike) are one default. The kept default is then decided against
+/// the merged field as every other is: a requirement or an empty meet drops its application here,
+/// and [`retype_field_defaults`] re-types it against the narrowed type.
+fn merge_field_default(
+    kept: &mut Option<FieldDefault>,
+    other: Option<&FieldDefault>,
+    property: &str,
+    diags: &mut Diagnostics,
+) {
+    let Some(other) = other else {
+        return;
+    };
+    let Some(current) = kept.as_ref() else {
+        *kept = Some(other.clone());
+        return;
+    };
+    let rank = |default: &FieldDefault| {
+        (
+            default.applied.is_none(),
+            default.doc_note.clone(),
+            default.provenance.pointer.to_string(),
+            default
+                .provenance
+                .span
+                .map(|span| (span.file.0, span.start.offset, span.end.offset)),
+        )
+    };
+    let other_first = rank(other) < rank(current);
+    let (winner, loser) = if other_first {
+        (other, current)
+    } else {
+        (current, other)
+    };
+    let same_value = match (&winner.applied, &loser.applied) {
+        (Some(left), Some(right)) => reclassify_default(left) == reclassify_default(right),
+        _ => winner.doc_note == loser.doc_note,
+    };
+    if !same_value {
+        Diagnostic::warning(Code::SchemaDefaultNotApplied, loser.provenance.clone())
+            .message(format!(
+                "schema `default` of property `{property}` differs from the `default` another \
+                 intersected schema declares for it at `{}`, which the merged field keeps; this \
+                 one is neither applied nor documented there",
+                winner.provenance.pointer
+            ))
+            .remedy(
+                "declare one default for the property, or the same default on every intersected \
+                 schema that declares it",
+            )
+            .emit(diags);
+    }
+    if other_first {
+        *kept = Some(other.clone());
+    }
 }
 
 /// The category a schema's object or array applicators imply, for a schema that establishes none

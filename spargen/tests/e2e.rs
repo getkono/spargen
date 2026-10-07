@@ -2586,6 +2586,21 @@ fn a_narrowing_meet_retypes_or_drops_its_members_default() {
     assert_eq!(base.fraction, Some(2.5));
 }
 
+#[test]
+fn a_meet_applies_a_default_only_a_later_side_declares() {
+    use basic_client::types::{MergedDefault, MergedDefaultClash, MergedDefaultSibling};
+    let merged: MergedDefault = serde_json::from_str("{}").unwrap();
+    assert_eq!(merged.p.as_deref(), Some("hello"));
+    let sibling: MergedDefaultSibling = serde_json::from_str("{}").unwrap();
+    assert_eq!(sibling.p.as_deref(), Some("hello"));
+    // `world` comes first here, yet the clash keeps `hello`, as it does in the other order.
+    let clash: MergedDefaultClash = serde_json::from_str("{}").unwrap();
+    assert_eq!(clash.p.as_deref(), Some("hello"));
+    // A present value is still the value.
+    let present: MergedDefault = serde_json::from_str(r#"{"p": "x"}"#).unwrap();
+    assert_eq!(present.p.as_deref(), Some("x"));
+}
+
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
 // `None` without ever calling `T::deserialize` — so without a field-level deserializer the
 // uninhabited type is never consulted and `{"x": null}`, which no schema here admits, decodes and
@@ -5518,6 +5533,32 @@ components:
         bad: { enum: [a, b] }
         ratio: { type: integer }
         fraction: { type: integer }
+    # Issue #432: a meet keeps the default either side declares, whichever side comes first, and
+    # two different defaults keep the same one in either order (`hello`; `world` is `W005`).
+    MergedDefaultNarrow:
+      type: object
+      properties:
+        p: { type: string }
+    MergedDefaultBase:
+      type: object
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultOther:
+      type: object
+      properties:
+        p: { type: string, default: world }
+    MergedDefault:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultNarrow"
+        - $ref: "#/components/schemas/MergedDefaultBase"
+    MergedDefaultSibling:
+      $ref: "#/components/schemas/MergedDefaultNarrow"
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultClash:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultOther"
+        - $ref: "#/components/schemas/MergedDefaultBase"
     # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
     # only valid form, `null` included among the rejected values.
     ForbiddenProperty:
