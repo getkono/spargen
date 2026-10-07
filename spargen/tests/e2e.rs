@@ -7104,14 +7104,35 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
 
     let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n");
     let block = requirements.manifest_block();
+    // Opting in is uncommenting every line under the opt-in header: the `[features]` entry and
+    // the dependency both come from the printed block, nothing is added by hand.
     let opted_in = block
-        .replace("# [target", "[target")
-        .replace("# tokio", "tokio");
+        .lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(rest) if !rest.starts_with("Only if") => rest,
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_ne!(
         opted_in, block,
         "the blocking opt-in is rendered commented out:\n{block}"
     );
-    let blocking = "[features]\nblocking = [\"dep:tokio\"]\n";
+    assert!(
+        opted_in.contains("[features]\nblocking = [\"dep:tokio\"]\n"),
+        "the printed opt-in carries the blocking feature wiring:\n{block}"
+    );
+    // The workspace-inherited member below assembles its own dependency lines, so it takes the
+    // feature entry `deps` prints rather than restating it.
+    let blocking = format!(
+        "{}\n",
+        opted_in
+            .lines()
+            .skip_while(|line| *line != "[features]")
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     // Direct, verbatim. `[workspace]` keeps each fixture its own root, so the walk upward never
     // leaves the temporary directory.
@@ -7133,10 +7154,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
         &direct_blocking,
         &[(
             "Cargo.toml",
-            format!(
-                "{}\n{blocking}\n{opted_in}\n[workspace]\n",
-                package("direct-blocking")
-            ),
+            format!("{}\n{opted_in}\n[workspace]\n", package("direct-blocking")),
         )],
         "Cargo.toml",
         &spec,
