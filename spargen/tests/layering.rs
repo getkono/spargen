@@ -80,13 +80,53 @@ fn declared_deps(source: &str, path: &Path) -> BTreeSet<String> {
 /// than scanning lines means a comment is never read (a rustdoc intra-doc link such as
 /// `[`crate::name`]` is prose, not an edge: its text becomes a `#[doc]` string literal), and a
 /// path rustfmt wraps across lines is still one path.
-fn path_heads(tokens: proc_macro2::TokenStream, root: &str, out: &mut BTreeSet<String>) {
+///
+/// A string literal inside an attribute other than `#[doc]` is read too, because attributes such
+/// as `#[serde(with = "crate::source::f")]` name a path as a string: where it lexes as Rust, its
+/// paths are edges like any other. `in_attr` says the tokens sit inside such an attribute. A
+/// string outside every attribute (`let _ = "crate::x"`) and a `#[doc]` string stay prose.
+fn path_heads(
+    tokens: proc_macro2::TokenStream,
+    root: &str,
+    in_attr: bool,
+    out: &mut BTreeSet<String>,
+) {
     use proc_macro2::{Delimiter, TokenTree};
-    let is_colon = |tree: Option<&TokenTree>| matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ':');
+    let is_punct = |tree: Option<&TokenTree>, ch: char| matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ch);
+    let is_colon = |tree: Option<&TokenTree>| is_punct(tree, ':');
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     for (at, tree) in trees.iter().enumerate() {
         match tree {
-            TokenTree::Group(group) => path_heads(group.stream(), root, out),
+            TokenTree::Group(group) => {
+                // `#[...]`, or `#![...]` for an inner attribute.
+                let opens_attr = group.delimiter() == Delimiter::Bracket
+                    && at > 0
+                    && (is_punct(trees.get(at - 1), '#')
+                        || (at > 1
+                            && is_punct(trees.get(at - 1), '!')
+                            && is_punct(trees.get(at - 2), '#')));
+                if opens_attr {
+                    let is_doc = matches!(
+                        group.stream().into_iter().next(),
+                        Some(TokenTree::Ident(name)) if name == "doc"
+                    );
+                    if !is_doc {
+                        path_heads(group.stream(), root, true, out);
+                    }
+                } else {
+                    path_heads(group.stream(), root, in_attr, out);
+                }
+            }
+            TokenTree::Literal(literal) if in_attr => {
+                let Ok(text) =
+                    syn::parse2::<syn::LitStr>(TokenTree::Literal(literal.clone()).into())
+                else {
+                    continue;
+                };
+                if let Ok(inner) = text.value().parse::<proc_macro2::TokenStream>() {
+                    path_heads(inner, root, true, out);
+                }
+            }
             TokenTree::Ident(ident)
                 if *ident == root && is_colon(trees.get(at + 1)) && is_colon(trees.get(at + 2)) =>
             {
@@ -118,7 +158,7 @@ fn source_path_heads(source: &str, root: &str, path: &Path) -> BTreeSet<String> 
         .parse()
         .unwrap_or_else(|error| panic!("{path:?} must lex as Rust: {error}"));
     let mut heads = BTreeSet::new();
-    path_heads(tokens, root, &mut heads);
+    path_heads(tokens, root, false, &mut heads);
     heads
 }
 
@@ -136,7 +176,8 @@ fn edges(source: &str, own: &str, path: &Path) -> BTreeSet<String> {
 }
 
 /// The edge reader's handling of the path shapes a line scan got wrong or never saw: a grouped
-/// `use`, a nested group, a path wrapped across lines, and prose that only cites a path.
+/// `use`, a nested group, a path wrapped across lines, a path-valued attribute string, and prose
+/// that only cites a path.
 #[test]
 fn the_edge_reader_reads_grouped_paths_and_skips_comments() {
     let source = r#"
@@ -149,6 +190,13 @@ use crate::{
 // crate::compat is only mentioned here.
 /* crate::surface, in a block comment */
 /// A doc comment naming `crate::cache`.
+#[doc = "an explicit doc attribute naming crate::config"]
+struct Report {
+    #[serde(serialize_with = "crate::surface::write")]
+    path: String,
+    #[serde(rename = "not a path {")]
+    other: String,
+}
 fn wrapped() -> crate
     ::source::Spec {
     let _ = "crate::support";
@@ -158,9 +206,10 @@ fn wrapped() -> crate
 "#;
     assert_eq!(
         edges(source, "codegen", Path::new("fixture.rs")),
-        BTreeSet::from(["diag", "ir", "name", "source"].map(str::to_owned)),
-        "`self` is not a subsystem, `codegen` is the file's own, and comments, docs and string \
-         literals take no edge"
+        BTreeSet::from(["diag", "ir", "name", "source", "surface"].map(str::to_owned)),
+        "`self` is not a subsystem, `codegen` is the file's own, comments, docs and string \
+         literals outside attributes take no edge, and a path-valued string in a non-doc \
+         attribute does"
     );
 }
 
