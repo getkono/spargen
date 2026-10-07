@@ -285,15 +285,16 @@ pub(crate) enum TypeKind {
     /// earlier revision published a hand count here and got its breakdown wrong.
     ///
     /// The answers fall into three kinds. Sites that run only on a checked `Api` — codegen,
-    /// `name`, `surface`, `runtime_contract` — refuse with `unreachable!`, as `check_invariants`
-    /// rejects a surviving reservation before any of them runs. Sites in `oas31::lower`, where a
-    /// reservation really is live, answer "not proven": not the same type, not string-like, no
-    /// `simple` shape, no representable default, no required-key discriminator — each routing
-    /// to the refusal or warning that answer already had. And `push_ref_member`, the historical
-    /// origin of the defect class, refuses an in-progress member itself (`E013`'s `allOf` unit
-    /// rejection) rather than trusting each caller to have guarded it, so a new caller inherits
-    /// the refusal. `intersect_non_null` likewise answers `Err(NoMeet::Unrepresentable)` for a
-    /// reservation in its own first arm instead of relying on `intersect_types`' guard alone.
+    /// `name`, `surface`, `Api::uses_bytes_serde` — refuse with `unreachable!`, as
+    /// `check_invariants` rejects a surviving reservation before any of them runs. Sites in
+    /// `oas31::lower`, where a reservation really is live, answer "not proven": not the same type,
+    /// not string-like, no `simple` shape, no representable default, no required-key
+    /// discriminator — each routing to the refusal or warning that answer already had. And
+    /// `push_ref_member`, the historical origin of the defect class, refuses an in-progress member
+    /// itself (`E013`'s `allOf` unit rejection) rather than trusting each caller to have guarded
+    /// it, so a new caller inherits the refusal. `intersect_non_null` likewise answers
+    /// `Err(NoMeet::Unrepresentable)` for a reservation in its own first arm instead of relying
+    /// on `intersect_types`' guard alone.
     ///
     /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
     /// said "two" where it should have said what follows. Making the placeholder unreadable did not

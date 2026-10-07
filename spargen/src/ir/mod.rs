@@ -12,6 +12,8 @@ mod media;
 mod operation;
 mod types;
 
+use std::collections::BTreeSet;
+
 use indexmap::IndexMap;
 
 pub(crate) use auth::{
@@ -90,6 +92,119 @@ impl Api {
             .iter()
             .any(|operation| operation.responses.stream_success().is_some())
     }
+
+    /// Whether generated code serializes or deserializes a `bytes` value through serde: a model
+    /// field, additional-properties value or union variant containing one, a JSON `content`
+    /// parameter containing one, or a serde-encoded body (JSON, form, XML or a sequential stream)
+    /// containing one other than a whole non-streaming `bytes` body, which is sent and read raw.
+    /// Drives the `serde` feature of the `bytes` requirement.
+    pub(crate) fn uses_bytes_serde(&self) -> bool {
+        let model_needs_serde =
+            self.types
+                .iter()
+                .any(|(_, definition)| match &definition.kind {
+                    TypeKind::Struct(object) => {
+                        object.fields.iter().any(|field| {
+                            contains_bytes(&self.types, field.ty.id, &mut BTreeSet::new())
+                        }) || match &object.additional {
+                            AdditionalProps::Typed(ty) => {
+                                contains_bytes(&self.types, ty.id, &mut BTreeSet::new())
+                            }
+                            AdditionalProps::Allow | AdditionalProps::Deny => false,
+                        }
+                    }
+                    TypeKind::Union(union) => union.variants.iter().any(|variant| {
+                        contains_bytes(&self.types, variant.ty.id, &mut BTreeSet::new())
+                    }),
+                    // Requirements are derived only from an `Api` that passed `check_invariants`,
+                    // which rejects a surviving reservation. Answering `false` would under-declare
+                    // a runtime dependency for a shape nobody computed.
+                    TypeKind::Reserved => unreachable!(
+                        "a reservation reached the runtime contract; `check_invariants` should \
+                         have rejected it"
+                    ),
+                    _ => false,
+                });
+        model_needs_serde
+            || self.operations.iter().any(|operation| {
+                operation.params.iter().any(|parameter| {
+                    matches!(&parameter.style, ParamStyle::Content(MediaType::Json))
+                        && contains_bytes(&self.types, parameter.ty.id, &mut BTreeSet::new())
+                }) || operation.request_body.as_ref().is_some_and(|body| {
+                    body.ty
+                        .is_some_and(|ty| self.typed_body_needs_bytes_serde(body.media, ty.id))
+                }) || operation
+                    .responses
+                    .by_status
+                    .iter()
+                    .map(|(_, response)| response)
+                    .chain(operation.responses.default.iter())
+                    .any(|response| {
+                        response.body.is_some_and(|ty| {
+                            response.media.is_some_and(|media| {
+                                self.typed_body_needs_bytes_serde(media, ty.id)
+                            })
+                        })
+                    })
+            })
+    }
+
+    fn typed_body_needs_bytes_serde(&self, media: MediaType, id: TypeId) -> bool {
+        serde_body_media(media)
+            && (media.stream_framing().is_some()
+                || !matches!(
+                    self.types.get(id).map(|definition| &definition.kind),
+                    Some(TypeKind::Bytes)
+                ))
+            && contains_bytes(&self.types, id, &mut BTreeSet::new())
+    }
+}
+
+fn serde_body_media(media: MediaType) -> bool {
+    matches!(
+        media,
+        MediaType::Json
+            | MediaType::FormUrlEncoded
+            | MediaType::Xml
+            | MediaType::EventStream
+            | MediaType::Ndjson
+            | MediaType::JsonSequence
+    )
+}
+
+fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
+    if !visiting.insert(id) {
+        return false;
+    }
+    let contains = match types.get(id).map(|definition| &definition.kind) {
+        Some(TypeKind::Bytes) => true,
+        Some(TypeKind::Struct(object)) => {
+            object
+                .fields
+                .iter()
+                .any(|field| contains_bytes(types, field.ty.id, visiting))
+                || match &object.additional {
+                    AdditionalProps::Typed(ty) => contains_bytes(types, ty.id, visiting),
+                    AdditionalProps::Allow | AdditionalProps::Deny => false,
+                }
+        }
+        Some(TypeKind::Array(item)) => contains_bytes(types, item.id, visiting),
+        Some(TypeKind::Tuple(items)) => items
+            .iter()
+            .any(|item| contains_bytes(types, item.id, visiting)),
+        Some(TypeKind::Union(union)) => union
+            .variants
+            .iter()
+            .any(|variant| contains_bytes(types, variant.ty.id, visiting)),
+        // Unreachable for the reason `Api::uses_bytes_serde` states: only a checked `Api` gets
+        // here.
+        Some(TypeKind::Reserved) => unreachable!(
+            "a reservation reached the runtime contract; `check_invariants` should have rejected it"
+        ),
+        _ => false,
+    };
+    visiting.remove(&id);
+    contains
 }
 
 /// API identity, lowered from `info`.

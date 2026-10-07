@@ -309,8 +309,9 @@ fn every_subsystem_declares_the_dependencies_it_actually_takes() {
 const OVER_DECLARED_TRACKED: &[(&str, &str, &str)] = &[];
 
 /// The subsystem directories under `spargen/src/`: each is a library subsystem in `SUBSYSTEMS`,
-/// or `cli` (header checked by `the_cli_declares_its_dependency_on_the_facade`), or `bin`, which
-/// holds the binary's entry point and is no subsystem.
+/// or `cli` (header checked by `the_cli_declares_its_dependency_on_the_facade`), or
+/// `runtime_contract`, facade plumbing (in `FACADE_PLUMBING`) split into a directory module, or
+/// `bin`, which holds the binary's entry point and is no subsystem.
 #[test]
 fn every_source_directory_is_a_declared_subsystem() {
     let src = workspace_root().join("spargen/src");
@@ -328,12 +329,13 @@ fn every_source_directory_is_a_declared_subsystem() {
         .collect();
     let declared: BTreeSet<String> = SUBSYSTEMS
         .iter()
-        .chain(&["cli"])
+        .chain(&["cli", "runtime_contract"])
         .map(|name| (*name).to_owned())
         .collect();
     assert_eq!(
         on_disk, declared,
-        "the directories under spargen/src/ and `SUBSYSTEMS` (plus `cli`) have drifted: a \
+        "the directories under spargen/src/ and `SUBSYSTEMS` (plus `cli` and \
+         `runtime_contract`) have drifted: a \
          subsystem missing from the list has its `//! layer-deps:` header and edges checked by \
          nothing"
     );
