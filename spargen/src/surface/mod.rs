@@ -34,8 +34,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ApiErrorBodyImpl, ErrorShape, ParamLoc, Prim, ScalarRepr, ScalarValue, StatusSpec,
-    SuccessShape, Ty, TypeKind,
+    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -369,7 +369,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let mut params = BTreeMap::new();
         for param in &operation.params {
             params.insert(
-                (param.name.clone(), param_loc_label(param.location)),
+                (param.name.clone(), param.location.as_openapi_in()),
                 ParamSurface {
                     ty: canon_ty(param.ty, api, names),
                     required: param.required,
@@ -799,18 +799,6 @@ fn diff_union(
             )),
             _ => {}
         }
-    }
-}
-
-/// A parameter location as the OpenAPI `in` value spells it, for a parameter's surface key and its
-/// change label.
-fn param_loc_label(location: ParamLoc) -> &'static str {
-    match location {
-        ParamLoc::Path => "path",
-        ParamLoc::Query => "query",
-        ParamLoc::QueryString => "querystring",
-        ParamLoc::Header => "header",
-        ParamLoc::Cookie => "cookie",
     }
 }
 
