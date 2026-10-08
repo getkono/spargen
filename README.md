@@ -214,40 +214,20 @@ builds the book on every push so doc-site breakage is caught.
 ```bash
 mise install          # provision every tool mise.toml's [tools] pins, at those versions
 mise run hooks        # install git hooks
+mise tasks            # list every task with its description
 ```
 
-| Command | Description |
-| --- | --- |
-| `mise run check` | Type-check the workspace |
-| `mise run fmt` | Format the workspace |
-| `mise run fmt-check` | Verify the workspace is formatted |
-| `mise run lint` | Clippy with warnings denied |
-| `mise run test` | Full suite: unit, property, frontend-fixture, cache, determinism, and generated-code E2E tests |
-| `mise run powerset` | Every feature combination via cargo-hack, not just `--all-features` |
-| `mise run corpus-smoke` | Fast checks against pinned real-world specs |
-| `mise run bench` | Criterion benchmarks over the generation pipeline |
-| `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
-| `mise run example` | Run the end-to-end petstore example |
-| `mise run deny` | Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile |
-| `mise run deny-published` | Advisory audit of the `Cargo.lock` the latest `spargen` release ships on crates.io |
-| `mise run release-preview` | Preview the version bumps and `CHANGELOG` section the next release pull request writes |
-| `mise run docs` | Build the mdBook site (fails on broken links or includes) |
-| `mise run doc-links` | Rustdoc over the workspace, warnings denied, private items included |
-
-The validation strategy is documented per subsystem in
-[`AGENTS.md`](AGENTS.md#testing-strategy-by-subsystem).
+[`AGENTS.md`](AGENTS.md#quality) lists every task with the command it runs and which of them the
+git hooks and CI run, and documents the validation strategy
+[per subsystem](AGENTS.md#testing-strategy-by-subsystem).
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), enforced by
 `convco` at commit time, pre-push, and in CI.
 
 ## Architecture
 
-The primary published crate is internally partitioned into subsystems with a declared dependency DAG —
-`diag`, `source`, `ir`, `oas31`, `name`, `support`, `codegen`, `emit`, `compat`, `surface`, `cli`,
-and the `lib.rs` facade. Everything that knows OpenAPI 3.1/3.2 syntax lives in the `oas31` frontend, which
-lowers into a version-agnostic IR; codegen never sees a spec document. A future incompatible spec
-version can become a sibling frontend that lowers into the same IR and touches nothing downstream. The
-emitted runtime is real, standalone-compilable source in the `support-runtime` workspace member
-(`publish = false`), tested in its own right and embedded verbatim into output.
+`spargen` is partitioned into subsystems with a declared dependency DAG, which the crate root
+([`spargen/src/lib.rs`](spargen/src/lib.rs)) lays out; the runtime embedded into generated output
+is the standalone `support-runtime` workspace member.
 
 ## Releases
 
