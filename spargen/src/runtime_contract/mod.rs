@@ -36,6 +36,12 @@ pub(crate) fn under_build_script() -> bool {
     std::env::var_os("OUT_DIR").is_some() && std::env::var_os("CARGO_CFG_TARGET_ARCH").is_some()
 }
 
+/// The consuming package's manifest when this process is a build script, and `None` otherwise:
+/// [`manifest_from_env`] read only where [`under_build_script`] holds.
+pub(crate) fn build_script_manifest() -> Option<Utf8PathBuf> {
+    under_build_script().then(manifest_from_env).flatten()
+}
+
 /// The consuming package's manifest, as a build script's environment names it:
 /// `CARGO_MANIFEST_PATH` when set, otherwise `Cargo.toml` inside `CARGO_MANIFEST_DIR`, otherwise
 /// `None`.
@@ -48,7 +54,7 @@ pub(crate) fn under_build_script() -> bool {
 /// - An empty value is taken as given: an empty `CARGO_MANIFEST_PATH` names the empty path, which
 ///   the audit then fails to read, and an empty `CARGO_MANIFEST_DIR` names `Cargo.toml` relative
 ///   to the working directory. The macro's locator treats an empty value as unset.
-pub(crate) fn manifest_from_env() -> Option<Utf8PathBuf> {
+fn manifest_from_env() -> Option<Utf8PathBuf> {
     std::env::var("CARGO_MANIFEST_PATH")
         .ok()
         .map(Utf8PathBuf::from)

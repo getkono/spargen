@@ -426,9 +426,7 @@ struct CargoEnvironment {
 /// Resolve the Cargo integration policy against the actual process environment.
 fn cargo_environment(build: &Build) -> CargoEnvironment {
     let under_build_script = runtime_contract::under_build_script();
-    let manifest = under_build_script
-        .then(runtime_contract::manifest_from_env)
-        .flatten();
+    let manifest = runtime_contract::build_script_manifest();
     resolve_cargo_environment(build.cargo, under_build_script, manifest)
 }
 
@@ -520,17 +518,9 @@ fn cargo_diagnostic(severity: Severity, code: Code, message: &str) -> Diagnostic
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
 /// package to audit — `spargen deps` prints the required `[dependencies]` block instead.
 pub fn check(spec: &Spec) -> Report {
-    let result = run_on_frontend_stack(|| {
-        if spec.carve {
-            run_carve(spec, PipelineMode::Requirements)
-        } else {
-            run_pipeline(spec, PipelineMode::Requirements)
-        }
-    });
+    let result = run_mode(spec, PipelineMode::Requirements);
     let mut report = result.report;
-    let manifest = runtime_contract::under_build_script()
-        .then(runtime_contract::manifest_from_env)
-        .flatten();
+    let manifest = runtime_contract::build_script_manifest();
     if let (Some(manifest), Some(requirements)) = (manifest, result.requirements) {
         let audit = runtime_contract::audit(&manifest, &requirements);
         if !audit.diagnostics.is_empty() {
@@ -549,13 +539,7 @@ struct PipelinePreview {
 }
 
 fn preview_inner(spec: &Spec) -> PipelinePreview {
-    let result = run_on_frontend_stack(|| {
-        if spec.carve {
-            run_carve(spec, PipelineMode::Preview)
-        } else {
-            run_pipeline(spec, PipelineMode::Preview)
-        }
-    });
+    let result = run_mode(spec, PipelineMode::Preview);
     let files = result
         .plan
         .map(|plan| plan.files.into_iter().map(|file| file.contents).collect())
@@ -801,13 +785,7 @@ pub mod __private {
 ///
 /// The spec must lower — a rejection is returned as the [`Report`] that explains why.
 pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {
-    let result = run_on_frontend_stack(|| {
-        if spec.carve {
-            run_carve(spec, PipelineMode::Requirements)
-        } else {
-            run_pipeline(spec, PipelineMode::Requirements)
-        }
-    });
+    let result = run_mode(spec, PipelineMode::Requirements);
     match result.requirements {
         Some(requirements) => Ok(Requirements::new(&requirements)),
         None => Err(result.report),
@@ -963,6 +941,19 @@ fn build_emit_plan(
 
     emit::plan(&code, &emit_options).map_err(|error| {
         emit_pipeline_error(diags, error.to_string());
+    })
+}
+
+/// Run `mode` over `spec` on the dedicated frontend stack, through the auto-carve driver when
+/// `spec.carve` asks for it and the plain pipeline otherwise. Every public entry point that runs
+/// the pipeline dispatches here, so the carve decision is made in one place.
+fn run_mode(spec: &Spec, mode: PipelineMode) -> PipelineResult {
+    run_on_frontend_stack(|| {
+        if spec.carve {
+            run_carve(spec, mode)
+        } else {
+            run_pipeline(spec, mode)
+        }
     })
 }
 
