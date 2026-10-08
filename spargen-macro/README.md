@@ -58,14 +58,10 @@ Warnings are not surfaced through the macro (stable proc-macro APIs can't emit t
 The generated code gates the synchronous `BlockingClient` behind a `blocking` feature (as it does
 in every mode). When the client is inlined by the macro, that gate resolves against *your* crate's
 features. A crate that does not declare it compiles the blocking client out cleanly, including
-under `-D warnings`. To opt in, declare it in your `Cargo.toml`:
-
-```toml
-[features]
-blocking = ["dep:tokio"]
-
-[dependencies]
-tokio = { version = "1.53.1", features = ["rt"], optional = true }
-```
+under `-D warnings`. To opt in, declare the feature as `blocking = ["dep:tokio"]` together with a
+native-only optional `tokio`: `spargen deps <spec>` prints both, commented out, at the tested
+floor. Uncommenting them is the whole opt-in, except that an entry whose `[features]` table,
+`blocking` key, or dependency table your manifest already declares merges into it rather than
+being added a second time, which TOML rejects.
 
 Licensed under MIT OR Apache-2.0.

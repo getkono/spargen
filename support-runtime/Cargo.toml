@@ -11,19 +11,10 @@ publish = false
 
 # The runtime is embedded verbatim into generated output. Its dependency
 # surface is the audited set used by generated clients — no spargen crate, and nothing
-# project-specific. The generator embeds stream.rs and requires futures-core only for sequential
-# APIs. Generated models may additionally reference the separately audited
-# `uuid` dependency; this crate holds only the embedded runtime, not those models. `time` is the
-# exception: the RFC 3339 newtypes a model uses for `format: date-time`/`date` are runtime code, so
-# they live here behind the `time` feature.
-# The `xml` feature adds an XML request/response body codec backed by `quick-xml`. It is OFF by
-# default; a generated client turns it on only when its spec uses an `application/xml` / `text/xml`
-# body.
-# The `blocking` feature adds a synchronous client facade backed by a current-thread `tokio`
-# runtime. It is OFF by default (tokio is already in the graph transitively via reqwest, but stays
-# an *optional direct* dependency here); a consumer opts in to get the `BlockingClient`.
-# The `time` feature adds the RFC 3339 `DateTime`/`Date` newtypes backed by `time`. It is OFF by
-# default; the generator embeds that module only when the API has a `format: date-time`/`date`.
+# project-specific. Generated models may additionally reference the separately audited `uuid`
+# dependency; this crate holds only the embedded runtime, not those models. Each feature below is
+# off by default and gates one conditionally embedded module; the comment on that module's `mod`
+# in src/lib.rs says what it adds and when a generated client carries it.
 [features]
 xml = ["dep:quick-xml"]
 blocking = ["dep:tokio"]

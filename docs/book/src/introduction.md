@@ -3,61 +3,24 @@
 **spargen** is a compile-time-correct Rust client generator for OpenAPI **3.1.x and 3.2.x**.
 Nothing older.
 
-The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
-board, carrying the entire span in flight with nothing propping it up. That is the product:
-everything structural is decided at generation time; nothing is interpreted at runtime. Spec in,
-spar out.
+{{#include ../../../README.md:name}}
 
-## The thesis
+## Why
 
-Three commitments define spargen and separate it from the existing generator ecosystem.
+{{#include ../../../README.md:why}}
 
-### Compile-time correctness
+The [OpenAPI 3.2 scope](./openapi-3.2.md) summarizes the 3.2 delta; the 3.0.x rejection is
+`E001`.
 
-Spargen consumes an OpenAPI document at generation time and produces idiomatic, deterministic
-Rust: typed models, a `Client`, one method per operation, and typed errors. **Generated code
-compiles, or generation fails** — with a diagnostic that names the exact spec construct, its JSON
-Pointer, and a remedy. Every spec construct has a disposition: it is supported, warned about, or
-rejected. There is never a fourth, silent behavior, and a typed schema is never silently degraded
-to `serde_json::Value`. The [feature support matrix](./support-matrix.md) and the
-[diagnostic index](./errors.md) are the operational contract; `spargen explain E013` prints the
-same text the docs carry.
+## What it guarantees
 
-### OpenAPI 3.1 and 3.2, natively
-
-Most of the modern Rust server ecosystem emits OpenAPI **3.1** (utoipa, aide, poem-openapi —
-everything downstream of JSON Schema 2020-12), but the ecosystem's client generators target
-3.0.x. 3.1 is not a patch over 3.0: it replaces OpenAPI's bespoke schema dialect with real JSON
-Schema 2020-12 (`nullable` → type arrays, numeric `exclusiveMinimum`, `$defs`, `prefixItems`,
-`const`, …). The workaround in the wild — `sed`ing `openapi: 3.1.0` down to `3.0.0` before
-generating — "works" only by accident and silently miscompiles any schema that uses 3.1
-semantics.
-
-Spargen speaks 3.1 and its focused 3.2 extension natively and fails loudly and precisely on what
-it does not support. The [OpenAPI 3.2 scope](./openapi-3.2.md) summarizes that small delta. 3.0.x
-input is **rejected** with a diagnostic (`E001`), never converted.
-
-### A freestanding runtime
-
-The runtime support code is embedded into the generated module; **no spargen crate ever appears
-in a consumer's runtime dependency tree**. The default runtime dependencies are exactly
-`reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`. XML codecs, format
-mappings, request-builder features, and blocking support are required only when the compiled API
-uses them. Spargen audits the consumer manifest against its tested
-[dependency contract](./getting-started.md#runtime-dependency-contract) during compilation.
-
-## Design guarantees
-
-- **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
-  test. Item ordering never depends on input map ordering.
-- **No `serde(untagged)`.** First-match-wins deserialization can silently misparse;
-  undiscriminated unions are rejected instead.
-- **Safe by construction.** Unsafe-forbidding attributes ride on every generated item,
-  `Debug`-redacted secrets (via [`secrecy`](https://docs.rs/secrecy)), and a configurable 64 KiB
-  cap on error-body retention — bounding reading too, for bodies read as errors on native targets.
-  Two paths are not yet capped; the emitted `ClientConfig::max_error_body` doc names them.
-- **`include!`-friendly output.** Generated code carries no crate-level inner attributes, so it
-  drops into a module or an `OUT_DIR` file consumed with `include!`.
+Generated code compiles, or generation fails with a diagnostic that names the construct, its JSON
+Pointer, and a remedy. Every construct is supported, warned about, or rejected; the
+[feature support matrix](./support-matrix.md) and the [diagnostic index](./errors.md) are that
+operational contract. The rest of the design guarantees (freestanding output, determinism,
+edition-independent output, `include!`-friendly output, no `serde(untagged)`, and a cap on retained error bodies) are listed
+once, in the README's
+[Design guarantees](https://github.com/getkono/spargen#design-guarantees).
 
 ## Where to next
 

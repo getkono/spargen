@@ -66,23 +66,13 @@ is a copyable template.
 
 ### Runtime dependency contract
 
-Use these tested caret floors. You may choose a higher compatible floor; spargen rejects a
-requirement that could resolve below these versions or beyond the next semver breaking line.
+`spargen deps <spec>` prints the exact `[dependencies]` block a spec's generated client needs:
+each crate's tested caret floor and the features the compiled API uses, from the same table the
+audit reads (see the [CLI reference](./cli.md#spargen-deps)). You may choose a higher compatible
+floor; spargen rejects a requirement that could resolve below a floor or beyond the next semver
+breaking line, and `reqwest` must have its default features off.
 
-| Dependency | Required features | When required |
-| --- | --- | --- |
-| `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
-| `reqwest = "0.12.28"` | `default-features = false` (in `[workspace.dependencies]` when inherited, see below); `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
-| `secrecy = "0.10.3"` | - | Always |
-| `serde = "1.0.229"` | `derive` | Always |
-| `serde_json = "1.0.151"` | - | Always |
-| `futures-core = "0.3.32"` | - | Only for an API with sequential responses |
-| `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
-| `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
-| `time = "0.3.55"` | `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
-| `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
-
-`tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
+The blocking client's `tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
 `build.rs` audit evaluates those tables for the target being built, as Cargo does (a wasm32 build
 needs none), while `generate_api!`, which cannot see the target, requires them to jointly cover
 every non-wasm target.
@@ -182,23 +172,11 @@ Key points of the surface:
   alternative never falls through to a later one; `Client::without_credential(scheme)`
   unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
   selects the next fully registered alternative.
-- A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
-  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
-  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
-  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
-  preserved), decode failure (`Error::Decode`), interrupted body (`Error::InterruptedBody`).
-  Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
-  with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
-  retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
-  [retry adapter](./runtime.md). An error enum whose bodied statuses carry the same body type
-  (one schema, or schemas that generate the same Rust type) gets `body()`, and it, the
-  single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
-  hands that body back whichever status carried it (`Error::status()` reports that status, the
-  same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
-  variant instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the
-  RFC 9457 members of whichever error body a failure carried, across every operation — see
-  [problem details](./runtime.md#problem-details).
+- A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
+  type is a `std::error::Error`. The README's
+  [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant
+  and the accessors over them; [problem details](./runtime.md#problem-details) and the
+  [retry adapter](./runtime.md#retry) build on it.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

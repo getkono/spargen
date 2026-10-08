@@ -155,17 +155,12 @@ for a document the description reaches by an absolute-path `$ref`, which lies ou
 document's directory and is named by that absolute path instead. The description itself fixes that
 location, so moving the checkout already breaks such a `$ref`.
 
-`error_body_cap` bounds what a generated client retains on an error. For bodies read as errors on
-native targets it bounds *reading* too: one that exceeds the cap is abandoned partway rather than
-buffered whole, so an oversized error body cannot force an arbitrarily large allocation. Abandoning
-it forgoes reuse of that connection, so a cap set far below the error bodies an API actually returns
-trades connection reuse for a smaller retained prefix. On `wasm32` the `fetch` backend offers no
-incremental read, so there the cap bounds only what is retained — see the **Targets** row of
-[the support matrix](support-matrix.md).
-
-A *success* body that fails to decode is capped on retention only, on every target: deserialization
-needs the whole body, so it is always read whole. The emitted `ClientConfig::max_error_body` doc
-carries the full disposition, including the two paths that are not capped at all.
+`error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
+([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
+one statement of what it bounds on each target and which paths it does not cap. On native targets
+an over-cap error body is abandoned partway, which forgoes reuse of that connection, so a cap set
+far below the error bodies an API actually returns trades connection reuse for a smaller retained
+prefix.
 
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 

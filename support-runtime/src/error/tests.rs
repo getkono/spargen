@@ -429,13 +429,13 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
 
 /// The documents that describe the error taxonomy to a consumer as a whole, so each must name
 /// every variant of both enums. `README.md` is also `spargen`'s declared `readme`, shipped in
-/// the published crate.
-const TAXONOMY_DOCUMENTS: [&str; 2] = ["README.md", "docs/book/src/getting-started.md"];
+/// the published crate, and the one account the book's Getting Started page points to.
+const TAXONOMY_DOCUMENTS: [&str; 1] = ["README.md"];
 
 /// Documents that cite individual variants without describing the whole taxonomy. They are
 /// held only to citing variants that exist, which every scanned document is; listing them here
 /// makes the scan prove it reached them.
-const CITING_DOCUMENTS: [&str; 1] = ["docs/support-matrix.md"];
+const CITING_DOCUMENTS: [&str; 2] = ["docs/support-matrix.md", "docs/book/src/getting-started.md"];
 
 /// The variant a derived `Debug` names: the identifier the rendering opens with.
 fn variant_name(debug: String) -> String {

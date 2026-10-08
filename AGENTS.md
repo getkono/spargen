@@ -11,9 +11,10 @@ changes.
   into subsystems with a declared dependency DAG: `diag`, `source`, `ir`, `oas31`, `name`,
   `support`, `codegen`, `emit`, `compat`, `surface`, `cli`, and the `lib.rs` facade
   (`cache`, `config`, and `runtime_contract` are facade plumbing, not subsystems). Every subsystem
-  `mod.rs` declares its allowed dependencies in a `//! layer-deps:` header — keep those honest.
-- `spargen-macro/` — the second published crate: a thin `proc-macro` shim exposing
-  `generate_api!`, a shim over spargen's private in-memory renderer. It depends on `spargen` (host-only); `spargen`
+  declares its allowed dependencies in a `//! layer-deps:` header — keep those honest. The header
+  is on its `mod.rs`, except for `cli`, which is no library module and carries it on `cli/run.rs`.
+- `spargen-macro/` — the second published crate: a thin `proc-macro` crate exposing
+  `generate_api!` over spargen's private in-memory renderer. It depends on `spargen` (host-only); `spargen`
   must **never** depend back on it (that would cycle). A proc-macro crate and everything it reaches
   are host/build-time only, so neither crate enters a consumer's runtime graph — the invariant
   below is unchanged. `examples/petstore-macro` is its end-to-end guard.
@@ -51,7 +52,9 @@ mise run check      # cargo check --workspace --all-features
 mise run fmt        # cargo fmt --all
 mise run fmt-check  # cargo fmt --all --check
 mise run lint       # cargo clippy --workspace --all-targets --all-features -- -D warnings
+mise run lint-fix   # cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged
 mise run test       # cargo test --workspace --all-features
+mise run bench      # criterion benchmarks over the generation pipeline (not a gate)
 mise run bench-build  # cargo bench --no-run --workspace
 mise run msrv       # the declared rust-version floor (+1.88.0): workspace + petstore example
 mise run package    # cargo publish --dry-run: the published crates stay self-contained
@@ -65,62 +68,57 @@ mise run deny-published  # advisory audit of the Cargo.lock the latest release s
 mise run release-preview  # release-plz update in a scratch clone: the next release's CHANGELOG
 mise run docs       # build the mdBook site (fails on broken links/includes)
 mise run doc-links  # rustdoc over the workspace, warnings denied, private items included
+mise run commit-msg    # Conventional Commits check of one message, read from stdin
+mise run commit-range  # Conventional Commits check of origin/master..HEAD
+mise run hooks      # install the git hooks hk.pkl declares
 ```
 
-`hk.pkl` wires these into git hooks, and every step delegates to a `mise` task rather than
-keeping a second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit;
-`fmt-check`, `lint`, `test`, and `commit-range` (Conventional Commits over the outgoing range)
-gate pre-push, and so does `deny` when the outgoing range changes a `Cargo.lock` or `Cargo.toml`
-anywhere, `deny.toml`, or `mise.toml` — globbed, unlike the others, because the audit is not
-hermetic (below), so an unglobbed step would let a new advisory block every push; `commit-msg`
-validates each message as it is written. CI runs the same gates but spells the commands out
-itself rather than calling `mise`. The policy is that a `mise` task and its CI counterpart are **identical** — the same commands with the same flags, in the same order,
-under the same environment — and neither may be stricter or narrower than the other; change both
-sides together. `spargen/tests/corpus_manifest.rs` enforces it:
-`every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
-them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds every tool CI
-installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
-to being installed by CI, and every job that runs a pinned tool to installing it itself) — so
-`deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared commands to
-`--all-features` and a bare `check`, the root audit to `--locked`, and every example workspace to
-an audit of its own under `--config deny.toml`. "Every CI job" is every job of every workflow
-under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
-listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
-unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
-literally and its other top-level keys allow-listed, so a trigger filter cannot narrow CI unseen.
-The test pins every other step of each job (checkout, toolchain, cache, tool install) as literal
-YAML, and rejects task keys such as `dir` and mise config files beside `mise.toml` that would
-change what a task runs without appearing in its command. `the_msrv_gate_runs_on_the_declared_rust_version`
-holds both sides of `msrv` to the workspace `rust-version` (`cargo +1.88.0 …` and
-`dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select its own
-release. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
-`benchmarks.yml`, and `deny` to `deny.yml`, which runs it on `ci.yml`'s triggers plus a daily
-schedule, and `deny-published` to the same file's job of that name, which runs only on the
-schedule and on `workflow_dispatch` (its pinned `if:` is a named exception; see "Lockfiles and
-advisories" below). The only differences are named exceptions in that test's `PAIRINGS` table, each
-pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
-`commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
-`package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
-`benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
-CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook`, `convco` and `release-plz` itself where mise's `[tools]` does, at
-the same versions (`release-plz.yml`'s action is held to the same `release-plz` pin through its
-`version:` input, so the preview runs the binary that writes the published CHANGELOG). The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel`
-is a concrete release (not `stable`), it selects the toolchain for every local `cargo` call and so
-for every `mise run` gate, and every `dtolnay/rust-toolchain@` step in every workflow installs that
-same release — `ci_installs_the_rust_toolchain_this_file_pins` holds them equal. Two named
-exceptions sit in its `TOOLCHAIN_EXCEPTIONS`: `msrv`'s `rust-version` toolchain, and the
+`hk.pkl` wires these into git hooks, each step delegating to a `mise` task rather than keeping a
+second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit; `fmt-check`, `lint`,
+`test`, and `commit-range` gate pre-push, and so does `deny` when the outgoing range changes a
+`Cargo.lock` or `Cargo.toml` anywhere, `deny.toml`, or `mise.toml` (`hk.pkl` says why that step
+alone is globbed); `commit-msg` validates each message as it is written. Run `mise run hooks` once
+to install them. The rest — `check`, `bench-build`, `msrv`, `package`, `runtime-dependencies`,
+`powerset`, `corpus-smoke`, `example`, `github-api`, `deny-published`, `release-preview`, `docs`,
+and `doc-links` (a step inside the `docs` CI job, not a job of its own) — never run in a hook;
+they are too slow, so a green pre-push is not a green CI. `msrv` needs
+`rustup toolchain install 1.88.0`, and `package` a clean tree.
+
+CI spells the commands out itself rather than calling `mise`, and a `mise` task and its CI job are
+**identical**: the same commands with the same flags, in the same order, under the same
+environment, and neither stricter nor narrower than the other. Change both sides together.
+`spargen/tests/corpus_manifest.rs` enforces this and the pins below; the "repository gates" row of
+the testing-strategy table names each of its tests. Every job of every workflow under
+`.github/workflows/` is paired with a task, except in `release-plz.yml`, the one listed non-gate
+workflow (it publishes); an unclassified workflow fails. Each gate workflow's `on:`,
+`concurrency:` and `permissions:`, and every other step of each job (checkout, toolchain, cache,
+tool install), are pinned literally, and task keys such as `dir` or a mise config file beside
+`mise.toml`, which would change what a task runs without appearing in its command, are rejected.
+CI's `test` job runs the same two commands as `mise run test` and `mise run bench-build`; `bench`
+pairs with `benchmarks.yml`, and `deny` and `deny-published` with `deny.yml`'s jobs of those
+names. The only differences are named exceptions in that test's `PAIRINGS` table, each pinned
+literally on both sides:
+
+- `commits` checks the pull request's `base.sha..head.sha` where `commit-range` checks
+  `origin/master..HEAD` (only the range is rewritten; the rest must match).
+- The `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only.
+- `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact.
+- The `deny-published` job's pinned `if:` runs it only on the schedule and on `workflow_dispatch`.
+- CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook`, `convco` and `release-plz`
+  itself, at the versions mise's `[tools]` pins; `release-plz.yml`'s action is held to the
+  `release-plz` pin through its `version:` input. Every pin but `hk`, which CI never runs, is
+  installed by each job that runs it.
+
+The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel` is a concrete release
+(not `stable`), which selects the toolchain for every local `cargo` call and so for every
+`mise run` gate, and every `dtolnay/rust-toolchain@` step in every workflow installs that release.
+Two named exceptions sit in `TOOLCHAIN_EXCEPTIONS`: `msrv`, which runs on the workspace
+`rust-version` on both sides (`cargo +1.88.0 …` and `dtolnay/rust-toolchain@1.88.0`), and the
 `runtime-dependencies` job's `@nightly`, which stays **floating** (its `-Z
-direct-minimal-versions` lockfile resolution needs a nightly cargo; nothing else runs on it). The
-pin is bumped by hand, in a PR of its own that changes `rust-toolchain.toml`'s `channel`, every
+direct-minimal-versions` lockfile resolution needs a nightly cargo; nothing else runs on it). Bump
+the pin by hand, in a pull request of its own that changes `rust-toolchain.toml`'s `channel`, every
 `dtolnay/rust-toolchain@<version>` step, and the matching literals in `corpus_manifest.rs`'s
-`PAIRINGS` together (this test and the pairing test fail on any one changed alone), and that
-passes clippy and fmt on the new release; locally, `rustup` installs the new release on the first
-`cargo` call in the checkout. The rest — `check`, `bench-build`,
-`msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
-`deny-published`, `release-preview`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
-job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
-`msrv` needs `rustup toolchain install 1.88.0`, and `package` a clean tree. Run `mise run hooks`
-once to install them.
+`PAIRINGS` together, and that passes clippy and fmt on the new release.
 
 CI additionally gates what no local task can: `commits` checks exactly the pull request's range.
 
@@ -129,53 +127,28 @@ CI additionally gates what no local task can: `commits` checks exactly the pull 
 Four lockfiles are committed: the workspace `Cargo.lock` and one per example workspace. The
 supply-chain audit is **not hermetic** — cargo-deny fetches the RustSec database on every run and
 `yanked = "deny"` reads the registry as it is now — so an advisory can turn every open pull request
-red with nothing committed. Four things hold the audit to the committed artefact:
+red with nothing committed. The comments on `[tasks.deny]` and `[tasks.deny-published]` in
+`mise.toml` explain each command and the incidents behind it; the rules they implement:
 
-- `deny` audits the root workspace with `--locked`, so a lockfile that does not match the
-  manifests fails the audit instead of being silently rewritten and the rewrite audited. It also
-  audits each example workspace, under the same `deny.toml`, but unlocked, like every gate that
-  compiles them (their `spargen` stamp goes stale on each release, below): an example audit covers
-  exactly the graph those gates compile, and like `mise run example` it rewrites that stamp
-  locally.
-- cargo-deny audits the graph it activates, not the lockfile: an entry no feature activates is
-  filtered out at every feature scope. Cargo locks the target of a weak `dep?/feature` without
-  enabling it — reqwest's `quinn?/ring` put quinn, `rand 0.10` and a yanked `chacha20` into
-  `Cargo.lock`, 17 of its 278 entries that cargo-deny never checked (#187). So `deny` also runs
-  `cargo audit --deny warnings` over **every entry** of each lockfile — the root one as
-  committed, each example's after the unlocked `cargo fetch` below re-resolves it (rewriting at
-  least its stale `spargen` stamp), so as the example gates resolve it (and `deny-published`
-  over the shipped one), with `--ignore` exactly `deny.toml`'s `[advisories]
-  ignore`; `the_lockfile_audit_reads_every_committed_lockfile` holds that shape. A yank or advisory
-  on such an entry is fixed as "anywhere else" below: nothing compiles it.
-- Each run records the advisory-database revision it judged against: `cargo deny fetch db` clones
-  RustSec into `deny.toml`'s `db-path` (`target/advisory-dbs/`), the next command logs that
-  checkout's commit, and every `cargo audit` reads it with `--no-fetch`. A past green is read
-  against that logged revision, not against today's database. (The `cargo deny check`s after it
-  fetch again, so theirs is that revision or a later one.) `--no-fetch` also stops cargo-audit
-  updating the crates.io index, so its yank check reads only Cargo's local index cache, which is
-  empty on a fresh runner: it printed "couldn't check if the package is yanked" for every entry
-  and exited 0 (#414). So each `cargo audit` follows a `cargo fetch` of its workspace, which
-  refreshes that cache for every entry, and ends in a guard (`AUDIT_GUARD` in
-  `corpus_manifest.rs`) that fails an audit which exited 0 but printed an error or warning.
-- `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
-  advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
-  to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
+- `deny` audits the root workspace `--locked`, and each example workspace under the same
+  `deny.toml` but unlocked, like every gate that compiles them.
+- It also runs `cargo audit` over **every entry** of each lockfile, with `--ignore` exactly
+  `deny.toml`'s `[advisories] ignore`, because cargo-deny skips entries no feature activates. A
+  yank or advisory on such an entry is fixed as "anywhere else" below: nothing compiles it.
+- Each run logs the advisory-database revision it judged against, so a past green is read against
+  that revision, and an audit that exited 0 but printed an error or warning fails (`AUDIT_GUARD` in
+  `corpus_manifest.rs`).
+- `deny.yml` runs it daily on `master` and on `workflow_dispatch`. GitHub sends a failed scheduled
+  run to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
   repository activity; re-enable it from the Actions tab.
-- The `example` gate's first step asserts that no example lockfile holds a TLS crate (`rustls`,
-  `native-tls`, `openssl`, `webpki`, or any `*-tls`), which is the premise `deny.toml` reasons
-  about TLS advisories on: generated output carries its own default-features-off `reqwest`.
-
-The committed lockfile is not the only one users install from. `spargen` has a `[[bin]]`, so its
-`.crate` ships a `Cargo.lock`, and `cargo install spargen --features cli --locked` installs that
-lockfile's pins; a fix on `master` reaches it only when a release carries it. `mise run
-deny-published` downloads the latest stable `spargen` release from crates.io and runs `cargo deny
-check advisories` over the `Cargo.lock` inside it (`--locked`, `--all-features`, under this
-`deny.toml`), and `cargo audit` over every entry of it. `deny.yml`'s `deny-published` job runs it on the daily schedule and on
-`workflow_dispatch`, never on a pull request or push: no diff changes a published artefact.
-`the_published_lockfile_audit_covers_every_shipped_binary` holds it to every published crate that
-ships a binary (a library's shipped lockfile is never resolved against). A red `deny-published`
-is fixed the same way as a red `deny` below, and then by a release: merge release-plz's pull
-request once the fix is on `master`, or yank the affected version where no fix exists.
+- The `example` gate's first step asserts that no example lockfile holds a TLS crate, the premise
+  `deny.toml` reasons about TLS advisories on: generated output carries its own
+  default-features-off `reqwest`.
+- `deny-published` audits the `Cargo.lock` the latest stable `spargen` release ships, which
+  `cargo install spargen --features cli --locked` installs, on the schedule only. A red
+  `deny-published` is fixed the same way as a red `deny` below, and then by a release: merge
+  release-plz's pull request once the fix is on `master`, or yank the affected version where no fix
+  exists.
 
 A red `deny` for an advisory or yank the diff did not introduce is the **maintainers'** to fix, not
 the author's of whichever pull request showed it first. It is fixed the day it is seen, in a
@@ -220,13 +193,10 @@ Standing invariants:
   spec construct is supported, warned, or rejected — no fourth, silent behavior. New warnings
   and rejections get a stable code in `diag`, an entry in `docs/errors.md`, a cell in
   `docs/support-matrix.md`, and a fixture in `spargen/tests/frontend.rs`, in the same commit.
-  The last three are enforced by tests keyed on the **code**, not on the construct, so they
-  fire only for a change that mints one: a rejection or warning added under a code that already
-  exists moves none of those three gates, and its matrix cell and its `frontend.rs` fixture are
-  on the author and the reviewer. (A new emission site of a code in `code.rs`'s
-  `ENUMERATED_CASES`, such as `E004`, still fails
-  `every_emission_site_falls_into_a_case_its_explain_text_lists` until it carries a case
-  marker; that decides which explain case the site is, not its matrix cell or fixture.)
+  The last three are enforced by tests keyed on the **code**, so a rejection or warning added
+  under an existing code moves none of them: its matrix cell and its `frontend.rs` fixture are on
+  the author and the reviewer. (A new emission site of a code in `code.rs`'s `ENUMERATED_CASES`
+  must still carry a case marker naming its explain case.)
 - Generated output must stay consumable via `include!` — no crate-level inner attributes;
   attributes ride on emitted items.
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
@@ -236,19 +206,14 @@ Standing invariants:
 - A doc comment may say that something **does not exist** — no such operation, no nameable
   type, no such variant, not among these entries — only while a test fails as soon as that
   stops being true. Otherwise say what does exist in the present tense ("`set_credential` is the
-  only writer"), or leave the sentence out. Behavioural claims such as "never sent" do not count;
-  their tests are the ordinary ones. An absence claim is true on the day it is written, and the
-  change that makes it false is a feature landing correctly, which rewrites no prose. The rule
-  was written from two such claims (#201). `attach_auth`'s insert-only paragraph, embedded into
-  every generated client, was held by a test that also checked for its sentence; when
-  `ClientCore::remove_credential` landed (#142) the paragraph was rewritten and that test retired
-  with it, as below. `Responses::success`'s "`default` is never among them" is held by its doctest.
-  That doctest does not check for the sentence, so it would outlive it. When such a test fails, rewrite the
-  sentence and retire the test with it; do not widen the test. Review enforces this rule, not a
-  gate. There is deliberately no compile-fail (`trybuild`) harness. It could prove that a
-  consumer's crate cannot name a type. It could not prove that an operation is missing at every
-  layer, which a test reading the source can check. A claim that a type cannot be named is
-  better written as the present-tense fact behind it, for example "boxed behind a private type".
+  only writer"), or leave the sentence out: the change that makes an absence claim false is a
+  feature landing correctly, which rewrites no prose. Behavioural claims such as "never sent" do
+  not count; their tests are the ordinary ones. When such a test fails, rewrite the sentence and
+  retire the test with it; do not widen the test. Review enforces this rule, not a gate. There is
+  deliberately no compile-fail (`trybuild`) harness: it could prove that a consumer's crate cannot
+  name a type, not that an operation is missing at every layer, which a test reading the source
+  can check. Write a claim that a type cannot be named as the present-tense fact behind it, for
+  example "boxed behind a private type".
 
 ## Testing strategy (by subsystem)
 
@@ -257,8 +222,8 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | Subsystem | Suite | What to cover |
 | --- | --- | --- |
 | `oas31` (+ `source`) | `spargen/tests/frontend.rs` | One minimal inline-spec fixture per diagnostic code (rejections assert `Outcome::Rejected` + code; warnings assert the code fires and generation still succeeds). `check`/`generate` must stay in parity. |
-| `ir` (response shapes) | `spargen/src/ir/media.rs` in-module + `spargen/tests/e2e.rs` + `spargen/tests/frontend.rs` + `spargen/tests/diff.rs` | `Responses::success`/`error`: the body count that picks unit, single, or enum, and a single non-streaming success body beside a documented bodyless success status taking the enum; precedence order (exact, then range, then `default` last on the error side); `default` as the success body only when `by_status` declares no 2xx status (empty, or only non-2xx such as `404`); `default` beside a declared success status never entering the success side. On the error side: `StatusSpec::is_success` admitting exactly 2xx, checked for every exact code 100..=599 and every range prefix, so a documented `304` or `3XX` is an error entry and never turns a lone success body into an enum (#342); a single error body beside a bodyless error entry (an exact status, a range, or `default`) taking the error enum with that entry as a unit variant, while a lone bodied error entry stays the newtype (#348), over the grid of bodied error counts against `default`'s presence and body; and `ErrorShape::api_error_body` giving one shared `Body` type exactly when every error body names the same Rust type, whatever per-status nullability or bodyless siblings sit beside it, and always on the single and uninhabited shapes. In `e2e.rs`, the generated dispatch for those shapes driven over a mock (`getMulti`, `getMultiDefault`, `getNoSuccess`, `getMaybeEmpty`, `getXmlMaybeEmpty`, `getRanged`, `getErrorRanged`, `getBodylessDefault`, `getBodylessDefaultMulti`, `getBodylessSibling`, `getXmlBodylessSibling`, `getConditional`), including an undocumented 2xx, a documented bodyless `204`, a status only a range arm matches on each side, an exact arm beating an overlapping range on each side, a bodyless `403`, `304`, or `default` arriving as its own unit error variant with its empty body never decoded, and a parse failure as `Decode`. In `frontend.rs`, `a_bodyless_error_status_beside_one_error_body_is_its_own_variant` holds the #348 shapes to generating with no diagnostic and `check` to staying clean on them; in `diff.rs`, `documenting_a_bodyless_error_status_beside_the_one_error_body_is_major` holds that newtype-to-enum change to `ErrorTypeChanged` / major. The hand-written `dispatch_success`/`dispatch_error` in `support-runtime/src/dispatch.rs` pin only the runtime primitives, not this emitted dispatch. Doc prose in `ir` carries **no general pinning obligation**: no gate reads it (`doc-links` proves only that links resolve). The exception is `Responses::success`'s two `default` claims (never a success entry beside a declared success status; the success source exactly when `by_status` declares no success status), which its doctest pins through `spargen::generate` — `cargo test` runs doctests on private items, so `mise run test` gates it. A change that narrows or restates a claim about the generated shape pins it the same way; a doctest catches a claim turned false, not one deleted, since deleting it deletes its gate. |
-| `ir` (invariants) | `spargen/src/ir/invariant.rs` in-module + `spargen/src/ir/types.rs` in-module | `check_invariants`, run after every lowering, reporting a violation as `E011` (a frontend bug, not a spec problem): a resolvable response-header type accepted and a dangling one caught; a `TypeKind::Reserved` that survived lowering caught; an octet-stream request body accepted only over a non-nullable `TypeKind::Bytes`, a non-byte or nullable one caught, an untyped one left to the frontend, a dangling one reported once as a missing type rather than also as an octet violation, and a non-octet body over a string not an octet violation. In `types.rs`, `every_type_kind_match_states_its_answer_for_a_reservation` parses every `.rs` file under `spargen/src` and holds each `match` that classifies a `TypeKind` and has a catch-all arm to naming `TypeKind::Reserved` in an unguarded arm above it, so no read site absorbs a reservation through a wildcard; it fails if it finds fewer than 20 sites, so a broken scanner cannot pass vacuously. |
+| `ir` (response shapes) | `spargen/src/ir/media.rs` in-module + `spargen/tests/e2e.rs` + `spargen/tests/frontend.rs` + `spargen/tests/diff.rs` | `Responses::success`/`error`: the body count that picks unit, single, or enum, and a single non-streaming success body beside a documented bodyless success status taking the enum; precedence order (exact, then range, then `default` last on the error side); `default` as the success body only when `by_status` declares no 2xx status (empty, or only non-2xx such as `404`); `default` beside a declared success status never entering the success side. On the error side, `StatusSpec::is_success` admitting exactly 2xx, a single error body beside a bodyless error entry taking the error enum with that entry as a unit variant, and `ErrorShape::api_error_body` giving one shared `Body` type exactly when every error body names the same Rust type. In `e2e.rs`, the generated dispatch for those shapes driven over a mock, one operation per shape, including undocumented, range-only and bodyless statuses on each side and a parse failure as `Decode`; in `frontend.rs` and `diff.rs`, a bodyless error status beside one error body generating cleanly and classifying as a major change. The hand-written `dispatch_success`/`dispatch_error` in `support-runtime/src/dispatch.rs` pin only the runtime primitives, not this emitted dispatch. Doc prose in `ir` carries no general pinning obligation, except `Responses::success`'s two `default` claims, which its doctest pins through `spargen::generate`; a change that narrows or restates a claim about the generated shape pins it the same way. |
+| `ir` (invariants) | `spargen/src/ir/invariant.rs` in-module + `spargen/src/ir/types.rs` in-module | `check_invariants`, run after every lowering, reporting a violation as `E011` (a frontend bug, not a spec problem): dangling response-header types, a `TypeKind::Reserved` that survived lowering, and an octet-stream request body over anything but a non-nullable `TypeKind::Bytes`. In `types.rs`, a scan of `spargen/src` holding every `match` over `TypeKind` with a catch-all arm to naming `TypeKind::Reserved` above it, so no read site absorbs a reservation through a wildcard. |
 | `codegen` / `emit` | `spargen/tests/e2e.rs` | Generate a module into an application-owned fixture crate and require `cargo check` + `cargo clippy -D warnings` on it; extend the inline spec when emitting new constructs so they are compile-verified. |
 | `codegen` (determinism) | `spargen/tests/determinism.rs` | Byte-identical double generation. |
 | build cache | `spargen/src/cache.rs` | Complete input fingerprints plus missing, stale, and manually edited output invalidation. |
@@ -268,7 +233,7 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | `support-runtime` | in-file `#[cfg(test)]` mods | URL building, auth attachment (all schemes + alternatives + failure modes), status classification, error taxonomy semantics. No async runtime: poll-once with `Waker::noop`. |
 | whole tool | `examples/petstore` + `examples/petstore-macro` (`mise run example`) | The generated client driven over real HTTP against a local mock server (params, bodies, auth, typed errors, undocumented statuses), via both the `build.rs` and macro paths; the macro run also asserts spargen stays out of the runtime graph (`cargo tree -e no-proc-macro`). |
 | corpus | `spargen/tests/corpus_manifest.rs` / `mise run corpus-smoke` | `corpus/manifest.toml` is the single source of expectations (`expect = "generate"` / `"reject:E###"`); update them only with a reviewed reason. The suite checks the `expect` grammar (`every_declared_expectation_is_a_shape_the_suite_understands`), drives every case (`every_case_meets_its_declared_expectation`), verifies each file is fetched content matching its pinned `sha256` (`every_pinned_spec_is_present_and_is_not_an_unfetched_lfs_pointer`, `every_pinned_spec_matches_the_hash_the_manifest_declares`), and holds the smoke task and the CI job (`the_corpus_smoke_gate_covers_every_manifest_case`), `snapshot.rs` (`the_snapshot_suite_covers_every_manifest_case`), and `corpus/README.md` (`the_corpus_readme_mirrors_the_manifest`) to the manifest — adding a case means adding it everywhere. |
-| repository gates | `spargen/tests/corpus_manifest.rs` | Assertions over this repository's own gate configuration — `mise.toml`, `.github/workflows/`, `rust-toolchain.toml`, `deny.toml`, and this file's Quality list — which live beside the corpus tests; a new one goes here. They hold (the Quality and "Lockfiles and advisories" sections give the detail of the pairing, pin, and audit ones): every mise task identical to its CI job (`every_mise_task_runs_exactly_what_its_ci_job_runs`); the tool and toolchain pins (`ci_installs_exactly_the_tool_versions_mise_pins`, `ci_installs_the_rust_toolchain_this_file_pins`, `the_msrv_gate_runs_on_the_declared_rust_version`); the supply-chain audit's scope (`the_deny_gate_states_the_feature_scope_it_audits`, `the_lockfile_audit_reads_every_committed_lockfile`, `the_published_lockfile_audit_covers_every_shipped_binary`, `advisory_floors_are_manifest_requirements`), with every flag those audits pass held to an allow-list rather than checked against a list of known narrowing flags (its reader held to rejecting what the list does not name by `the_audit_flag_allow_lists_admit_only_what_they_name`), and `deny.toml` to the four checks' tables, so no `[graph]` narrows the graph from outside the commands; `mise.toml` and `ci.yml` naming no fixed `/tmp/` path, which a sticky shared `/tmp` makes another user's file (`the_corpus_smoke_gate_writes_only_inside_the_checkout`); the release preview never smudging LFS content (`the_release_preview_never_smudges_lfs_content`); and each command gloss in the Quality list being its task's command (`the_quality_list_quotes_its_tasks_verbatim`). This row and the corpus row together name every test in the file, and only tests it defines (`the_testing_strategy_table_names_every_test_in_its_suite`), where a span citing a defined test counts whatever its name is shaped like (`a_cited_test_counts_whatever_its_name_is_shaped_like`). |
+| repository gates | `spargen/tests/corpus_manifest.rs` | Assertions over this repository's own gate configuration (`mise.toml`, `.github/workflows/`, `rust-toolchain.toml`, `deny.toml`, and this file); a new one goes here. Task/CI pairing (`every_mise_task_runs_exactly_what_its_ci_job_runs`); tool and toolchain pins (`ci_installs_exactly_the_tool_versions_mise_pins`, `ci_installs_the_rust_toolchain_this_file_pins`, `the_msrv_gate_runs_on_the_declared_rust_version`); the supply-chain audit's scope, every flag held to an allow-list (`the_deny_gate_states_the_feature_scope_it_audits`, `the_lockfile_audit_reads_every_committed_lockfile`, `the_published_lockfile_audit_covers_every_shipped_binary`, `advisory_floors_are_manifest_requirements`, `the_audit_flag_allow_lists_admit_only_what_they_name`); no fixed `/tmp/` path (`the_corpus_smoke_gate_writes_only_inside_the_checkout`); no LFS smudge in the release preview (`the_release_preview_never_smudges_lfs_content`); and this file's Quality list and table (`the_quality_list_quotes_its_tasks_verbatim`, `the_testing_strategy_table_names_every_test_in_its_suite`, `a_cited_test_counts_whatever_its_name_is_shaped_like`). This row and the corpus row together name every test in the file, and only tests it defines. |
 | `compat` (carve) | `spargen/tests/carve.rs` | Omit-profile globbing and auto-carve: rules match what they say, carve reaches a fixpoint, and it stays deterministic. |
 | `surface` | `spargen/tests/diff.rs` + in-module | `spargen diff` semver classification per change kind, and stability of the same pair twice. Every `ChangeKind` needs a fixture in `diff.rs`; the in-module tests enforce that, and pin the impact policy and the kebab-case codes (`ChangeKind` is `#[non_exhaustive]`, so only an in-crate test can notice a new variant). |
 | `config` / CLI | `spargen/tests/config.rs`, `spargen/tests/cli.rs` | Config discovery and precedence, `spargen deps` output, the Cargo-integration policy, and the subcommand set (`generate` is deliberately absent). |
@@ -278,9 +243,11 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | generated runtime surface | `spargen/tests/reexport_lists.rs` | Reads the emitted module: the embedded `support` module's `pub use` list equals `support-runtime/src/lib.rs`'s, module by module; every root re-export names something `support` re-exports; no operation error type shadows a root re-export, for operation IDs derived to collide with each; and the root `pub use` surface is the golden file `snapshots/reexport_lists__root_surface.snap`, so a change to the generated public runtime surface is a reviewable diff. |
 | framework round-trip | `spargen/tests/recipes.rs` | The OpenAPI documents utoipa / aide / poem-openapi actually emit. |
 | `emit` | in-module | The provenance header's format and version stamp, that it precedes the module verbatim and is comments-only (generated output is `include!`d, so an inner attribute here breaks every consumer), the one-file rule, and `EmitError`'s display/source chain. |
-| `support` + layering | `spargen/tests/layering.rs` | Each subsystem's `//! layer-deps:` header matches the `crate::` edges it actually takes and the DAG table in `lib.rs`; each runtime source carries `#[cfg(test)]` at most once with nothing after it (the embed splits on that literal); generated output carries no test module; no comment above the marker names a test-only item (in a code span, or bare with an underscore) or "the test module" unless its comment block carries the literal disclosure that the test module is stripped when the file is embedded, since it ships into every generated client where neither exists; `runtime_files()` and the `src/support/runtime/` symlinks equal the `support-runtime/src` file set; every file an `include_str!`/`include_bytes!` under `spargen/src` names is in `cargo package --list -p spargen`. A test fixture may live under `src/` and ship (as `runtime_contract_e023_explain.txt` does, so `cargo test` still compiles in the published crate); `cargo publish --dry-run` builds only the library and so does not need a test-only include, which is why this check holds them; every `spargen/tests/**/*.rs` that invokes `env!("CARGO_BIN_EXE_spargen")` (or `option_env!`) compiles only under `cli` — its `[[test]]` target carries `required-features = ["cli"]` in `spargen/Cargo.toml`, the file carries `#![cfg(feature = "cli")]`, or each top-level item containing a spawn carries exactly `#[cfg(feature = "cli")]` (a gate on a nested item or a compound predicate is reported; gate the outer item), since `env!` expands to a path even when the binary is not built; `REQUEST_VARIANTS` and `ERROR_VARIANTS` in `support-runtime/src/error.rs` equal the variant counts of `RequestError` and `Error<E>`, so a variant added without raising its count fails (the in-crate array-length and bijection tests then force it into the enumeration). |
-| docs ↔ code | `spargen/src/diag/code.rs` tests | `docs/errors.md` lists exactly `Code::all()` with matching titles; every code a support document cites is real, every declared code appears in `docs/support-matrix.md`, and it sits in the column matching its severity. Inside the repository an absent document fails these tests; only a packaged `.crate`, which has no `docs/`, skips them. The matrix's **prose is held to nothing** — only its code tokens and their columns are checked — so it is human-reviewed, with one exception: every clause of `E023`'s row that mentions `workspace`, `inherit` or `default-features` must be a verbatim excerpt of `E023`'s explain body (`the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`); and a row defers to `spargen explain` wherever a test pins that body byte for byte (as `E023`'s row does) instead of restating it; a body pinned only to contain phrases (`E004`'s `ENUMERATED_CASES`) does not qualify, and its rows still describe their cases. `Code::all()` is checked against the enum, and every code must be asserted by `frontend.rs` or by the suite named in that test's `OWNED_ELSEWHERE` table. |
+| `support` + layering | `spargen/tests/layering.rs` | Each subsystem's `//! layer-deps:` header matches the `crate::` edges it actually takes and the DAG table in `lib.rs`; each runtime source carries `#[cfg(test)]` at most once with nothing after it (the embed splits on that literal); generated output carries no test module; no comment above the marker names a test-only item or "the test module" unless its comment block discloses that the test module is stripped when the file is embedded; `runtime_files()` and the `src/support/runtime/` symlinks equal the `support-runtime/src` file set; every file an `include_str!`/`include_bytes!` under `spargen/src` names ships in the package, test fixtures included; every test that spawns the `spargen` binary compiles only under `cli`; and `REQUEST_VARIANTS` / `ERROR_VARIANTS` in `support-runtime/src/error.rs` equal the variant counts of `RequestError` and `Error<E>`. |
+| docs ↔ code | `spargen/src/diag/code.rs` tests | `docs/errors.md` lists exactly `Code::all()` with matching titles; every code a support document cites is real, and every declared code appears in `docs/support-matrix.md` in the column matching its severity (an absent document fails inside the repository; only a packaged `.crate` skips). The matrix's prose is human-reviewed, with one exception: every clause of `E023`'s row that mentions workspace inheritance must be a verbatim excerpt of `E023`'s explain body, which is pinned byte for byte, and the row defers to `spargen explain E023` for the rest. `Code::all()` is checked against the enum, and every code must be asserted by `frontend.rs` or by the suite named in that test's `OWNED_ELSEWHERE` table. |
 | docs ↔ repository | `spargen/tests/docs.rs` | Every `spargen`/`spargen-macro` install line in a Markdown file (changelogs excepted) requires the workspace `Cargo.toml`'s current minor, so a minor bump fails until they follow it. The ignored `every_link_in_the_built_book_resolves` is the link check `mise run docs` and the `docs` CI job run after `mdbook build`, which checks no link and exits 0 on an unreadable include: it fails on an `{{#include}}` left unresolved, and on a relative link or anchor that does not resolve inside the built site. A standalone `docs/*.md` page is included into the book, so it links outside `docs/` by repository URL, not by a relative path. |
+| `source` (remote fetch) | `spargen/tests/vendor_remote.rs` | `spargen lock`'s real reqwest fetcher, through `spargen::vendor` and (under `cli`) the binary, against a local plain-HTTP server: requests, an error status or refused connection as `E025`, redirects and the URL a redirected document's relative `$ref`s and `$self` resolve against, and offline generation from what was pinned. Gated on `remote-fetch`. |
+| TLS strictness | `spargen/tests/tls_strictness.rs` | The same fetcher against a deliberately non-conformant TLS 1.3 peer, which it must refuse as `E025` (the RUSTSEC-2026-0285 record the `rustls` floor fixed), plus a control scenario proving that peer's message well-formed. The one rustls strictness change spargen pins; TLS conformance is rustls's. Gated on `remote-fetch`. |
 
 Bug-fix discipline: every bug becomes a fixture (usually in `frontend.rs` or the runtime test
 mods) *before* its fix, so regressions cannot reappear silently.

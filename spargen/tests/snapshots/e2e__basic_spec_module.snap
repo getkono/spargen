@@ -1009,8 +1009,7 @@ mod support {
         /// variant in `every_variant`, both in the test module of `support-runtime/src/error.rs`, for the
         /// reasons `request_variant_index` there sets out. That test module is stripped when this file is
         /// embedded into a generated client, so none of those three names exist in the copy a consumer
-        /// reads. Name the new variant, too, in the error-taxonomy passages of spargen's `README.md` and
-        /// `docs/book/src/getting-started.md`.
+        /// reads.
         #[derive(Debug)]
         #[non_exhaustive]
         pub enum Error<E> {
@@ -1472,8 +1471,7 @@ mod support {
         /// The compiler will demand the classification arms on its own, but it cannot demand the value —
         /// `request_variant_index` there documents precisely why, and which ways of getting this wrong are
         /// caught. That test module is stripped when this file is embedded into a generated client, so
-        /// none of those three names exist in the copy a consumer reads. Name the new variant, too, in the
-        /// error-taxonomy passages of spargen's `README.md` and `docs/book/src/getting-started.md`.
+        /// none of those three names exist in the copy a consumer reads.
         #[derive(Debug)]
         #[non_exhaustive]
         pub enum RequestError {
@@ -3008,18 +3006,13 @@ mod support {
         //! ```ignore
         //! use std::sync::Arc;
         //! use std::time::Duration;
-        //! use std::pin::Pin;
-        //! use std::future::Future;
         //!
         //! // A policy that retries transient failures up to five times with exponential backoff,
-        //! // using the caller's tokio timer for the wait — no timer lives in the runtime.
+        //! // using the caller's tokio timer for the wait — no timer lives in the runtime. The wait is a
+        //! // `RetryWait`, which is `Send` on native and not on `wasm32`, so the policy compiles on both.
         //! struct Backoff;
         //! impl RetryPolicy for Backoff {
-        //!     fn retry<'a>(
-        //!         &'a self,
-        //!         attempt: u32,
-        //!         outcome: &RetryOutcome<'_>,
-        //!     ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+        //!     fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
         //!         if attempt < 5 && outcome.is_transient() {
         //!             let wait = exponential_backoff(attempt, Duration::from_millis(100), Duration::from_secs(5));
         //!             Some(Box::pin(tokio::time::sleep(wait)))

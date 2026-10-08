@@ -13,7 +13,9 @@ that contract from the lowered API and audits it during compilation; optional co
 dependencies are required only when the emitted API references them.
 
 The capabilities are layered around a single seam so the generated `Client` stays non-generic and
-each capability is opt-in.
+each capability is opt-in. Several sections below summarize one module of the embedded runtime and
+link to its source; that module's own documentation, which every generated client carries and
+`cargo doc` renders, is the full account.
 
 ## The transport seam
 
@@ -31,33 +33,14 @@ compose by nesting.
 ## Retry
 
 `RetryBackend` wraps any inner `HttpBackend` and re-executes a request per a caller-supplied
-`RetryPolicy`, returning the last outcome once the policy stops or the request can no longer be
-replayed.
-
-- **Bring-your-own timing.** The runtime has no async timer and never pulls in `tokio`. The
-  *wait* between attempts is a boxed `Future` the caller builds with their own runtime's timer
-  (e.g. `tokio::time::sleep`); `RetryBackend` just `.await`s it. The pure `exponential_backoff`
-  helper computes the delay `Duration`.
-- **Safe replay.** A retry re-sends the same request, so it must be cloned first. A one-shot
-  stream body that cannot be rewound (`reqwest::Request::try_clone` returns `None`) is executed
-  **exactly once** and its outcome returned unretried — replaying half a consumed stream would
-  send a corrupt body.
-
-`Error::is_transient()` on the generated error type classifies retry-worthy failures, so a policy
-that retries only transient outcomes is a few lines. `Error::status()` returns the HTTP status of a
-documented error response (`Api`), of an undocumented status (`UnexpectedStatus`, which includes
-an undocumented 2xx), and of a response whose body failed to decode (`Decode`, whether the status
-was a success or a documented error), and `None` for every class that produced no response, so a
-log line can report which status failed without matching variants. `is_transient()` reads that same
-status for `Decode`: a `429` or `5xx` whose body did not match its schema is still transient.
-`Decode` also keeps the response's headers, so a documented `429` whose body a proxy in front of
-the server replaced with an HTML page still exposes its `Retry-After`. A
-`RetryPolicy` is handed a `RetryOutcome`, not an `Error`, and reads the status with
-`RetryOutcome::status()`.
-`RetryWait` is re-exported by the generated client, so a policy names it rather than spelling out
-`Pin<Box<dyn Future<Output = ()> + Send + 'a>>`. The
+`RetryPolicy`, which is handed each attempt's `RetryOutcome` and returns the wait before the next
+one as a `RetryWait`, built on the caller's own timer: the runtime has none. A request whose body
+cannot be cloned is sent exactly once. `Error::is_transient()` and `RetryOutcome::is_transient()`
+classify retry-worthy failures, and `Error::status()` reports the status of every failure that
+produced a response. The [`retry` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/retry.rs)
+states the timing and replay contracts and carries an example policy; the
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
-complete `RetryPolicy` driven by a tokio timer.
+complete one driven by a tokio timer.
 
 ## Problem details
 
@@ -102,31 +85,21 @@ states exactly which positions it opens.
 
 ## Middleware
 
-`MiddlewareBackend` wraps an inner backend with an ordered chain of `Middleware`. Each middleware
-receives the request plus a `Next` continuation: it may inspect/modify the request before calling
-`Next::run`, inspect the response after, short-circuit by returning a response without calling
-`run`, or do async work around the call. This is the classic tower-like "onion" shape, expressed
-with std's `Future`/`Pin`/`Box` — no `tower`, no `futures`, no `async-trait`. `Next` holds only
-borrows, so advancing the chain never clones or reallocates.
+`MiddlewareBackend` wraps an inner backend with an ordered chain of `Middleware`, each handed the
+request and a `Next` continuation: it may modify the request, read the response, short-circuit
+without calling `Next::run`, or do async work around the call. The first middleware runs
+outermost, and nesting the chain inside or outside a `RetryBackend` decides whether it runs per
+attempt or once. The [`middleware` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/middleware.rs)
+states the ordering and lifetime contracts.
 
 ## Pagination
 
-OpenAPI has no standard machine-readable pagination declaration, so per-operation auto-paginators
-cannot be synthesized from a spec. The runtime instead ships *generic* helpers a caller drives
-explicitly. `LinkPaginator<T>` follows the common `Link: <url>; rel="next"` scheme
-(RFC 5988 / RFC 8288, the GitHub convention), detectable purely at runtime:
-
-```rust,ignore
-let first = reqwest::Url::parse("https://api.example.com/items?page=1")?;
-let mut pages = client.core().paginate_links::<Vec<Item>>(first);
-while let Some(page) = pages.next_page().await {
-    let items = page?.into_inner(); // a decoded Vec<Item> for this page
-}
-```
-
-The generic paginator issues a plain `GET` per page and does not attach per-operation security —
-it has no operation context. To authenticate follow-up pages, inject a preconfigured
-`reqwest::Client` (with the appropriate default headers) via `Client::with_client`.
+OpenAPI declares no machine-readable pagination, so the runtime ships a generic helper a caller
+drives explicitly: `client.core().paginate_links::<T>(first_url)` returns a `LinkPaginator<T>`
+that follows `Link: <url>; rel="next"` headers one `next_page().await` at a time, issuing a plain
+`GET` that attaches no per-operation credentials. Cursor and offset schemes are a loop over the
+generated operation. The [`paginate` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/paginate.rs)
+shows both, and how to authenticate follow-up pages.
 
 ## Streaming
 
@@ -150,35 +123,29 @@ body internally; the stream API and framing remain the same.
 
 ## Blocking (feature `blocking`)
 
-A synchronous facade for callers without an async runtime. reqwest's async client needs a running
-reactor, so `BlockingRuntime` owns a real current-thread `tokio` runtime and drives the generated
-async operation futures to completion on it — the blocking client reuses every line of the async
-dispatch. Enabled by the `blocking` cargo feature, which pulls in `tokio` with just the `rt`
-feature; a client built without it carries no blocking client and no direct tokio dependency.
-For `include!`/build.rs and macro output, the feature resolves against the consumer crate: leaving
-it undeclared cleanly compiles the facade out, while opting in requires the consumer to declare
-`blocking = ["dep:tokio"]` and its native-only optional Tokio dependency.
-
-> A `BlockingRuntime` must not be constructed from inside another async runtime (tokio's
-> `block_on` panics within a runtime context). Drive one on a plain thread, or via
-> `spawn_blocking` when already inside an async context.
+A synchronous `BlockingClient` for callers without an async runtime: `BlockingRuntime` drives the
+async operation futures on a current-thread `tokio` runtime, so it adds only tokio's `rt` feature.
+The feature resolves against the consumer crate: leaving `blocking` undeclared compiles the facade
+out, and opting in means declaring `blocking = ["dep:tokio"]` and a native-only optional `tokio`,
+as `spargen deps` prints them. A `BlockingRuntime` must not be built inside another async runtime;
+the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
+says where to drive one instead.
 
 ## WebAssembly
 
-A generated client compiles on both native targets and `wasm32-unknown-unknown` (the browser, via
-reqwest's `fetch` backend). On native, reqwest's futures are `Send` and the client is shared
-across threads; on wasm the browser is single-threaded and those futures are `!Send`. The
-`MaybeSend` / `MaybeSync` marker traits bridge the two: on every non-wasm target they are exactly
-`Send` / `Sync` (so native bounds and trait-object auto-traits are unchanged), and on wasm they
-are vacuous. One set of source compiles on both.
+A generated client compiles for native targets and for `wasm32-unknown-unknown` (the browser, via
+reqwest's `fetch` backend): the `MaybeSend` / `MaybeSync` bounds are exactly `Send` / `Sync` off
+wasm and vacuous on it. The [`wasm` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/wasm.rs)
+explains the mechanism, and the [support matrix](./support-matrix.md)'s Targets row lists what wasm
+lacks.
 
 ## XML bodies
 
-An XML request/response body codec backed by `quick-xml`, mirroring the JSON paths. It is embedded
-only when the spec actually uses an `application/xml` / `text/xml` body, and only then does the
-dependency contract require `quick-xml` of the consumer — so an API without XML carries neither the
-module nor the dependency. There is no consumer-side Cargo feature to turn it on or off: whether a
-generated client speaks XML is a property of its spec, decided at generation time.
+An XML request/response body codec backed by `quick-xml`, mirroring the JSON paths. It is embedded,
+and `quick-xml` required of the consumer, only when the spec uses an `application/xml` /
+`text/xml` body; no consumer-side Cargo feature turns it on or off. The
+[`xml` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/xml.rs) is the
+codec.
 
 ## Format mappings
 
@@ -205,27 +172,10 @@ the macro's `no_uuid` / `no_time`, or `uuid = false` / `time = false` in `sparge
 back to `String`. The corresponding dependency is
 required only when that mapping is enabled and actually occurs in the compiled API.
 
-Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than `time`'s own types,
-because JSON Schema 2020-12 — and so OpenAPI 3.1/3.2 — defines these formats as RFC 3339, which is
-not what `time`'s `Serialize` or `Display` produce: without its `serde-human-readable` feature an
-`OffsetDateTime` serializes as a nine-element integer sequence, and with it as
-`2023-11-14 22:13:20.0 +00:00:00` — a space separator where RFC 3339 requires `T`. The newtypes
-carry a hand-written RFC 3339 codec, so only `time`'s `formatting` and `parsing` features are
-needed, never `serde`.
-
-They are transparent wrappers: `DateTime(pub time::OffsetDateTime)` and `Date(pub time::Date)`,
-both `Deref`ing to the inner type and converting with `From` in both directions, so the whole `time`
-API stays one deref away.
-
-```rust
-let at = DateTime(time::OffsetDateTime::now_utc());
-let year = at.year();                  // through `Deref`
-let inner: time::OffsetDateTime = at.into();
-```
-
-Both also parse their RFC 3339 text with `FromStr`, failing with `DateParseError`, which the
-generated root re-exports beside them:
-
-```rust
-let day: Result<Date, DateParseError> = "2024-01-01".parse();
-```
+Dates are emitted as the embedded `DateTime(pub time::OffsetDateTime)` and `Date(pub time::Date)`
+newtypes rather than `time`'s own types, because `time`'s serde output is not the RFC 3339 text
+these formats are defined as. They carry a hand-written RFC 3339 codec, so only `time`'s
+`formatting` and `parsing` features are needed; they `Deref` to and convert with `From` from the
+inner type, and parse with `FromStr`, failing with `DateParseError`, which the generated root
+re-exports beside them. The [`datetime` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/datetime.rs)
+sets out why `time`'s own representation is not RFC 3339.
