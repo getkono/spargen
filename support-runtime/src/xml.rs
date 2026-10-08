@@ -34,28 +34,13 @@ pub async fn decode_success_xml<T>(
 where
     T: DeserializeOwned,
 {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    match decode_xml_body::<T>(&body) {
-        Ok(value) => Ok(ResponseValue::new(status, headers, value)),
-        Err(path) => {
-            let (body, truncated) = crate::dispatch::cap_body(body, core.config().max_error_body);
-            Err(Error::Decode {
-                status,
-                headers,
-                path,
-                body,
-                truncated,
-            })
-        }
-    }
+    crate::dispatch::decode_success_with(core, response, decode_xml_body::<T>).await
 }
 
 /// Classify a non-success XML response into the operation's typed error body `E`. A documented
 /// status parses into `E` ([`Error::Api`], falling back to [`Error::Decode`] on a parse failure); an
 /// undocumented status is [`Error::UnexpectedStatus`]. The XML analogue of
-/// [`crate::classify_error`], reusing [`crate::read_error_body`] so the error-body cap is identical.
+/// [`crate::classify_error`], sharing its classification body so the error-body cap is identical.
 pub async fn classify_error_xml<E>(
     core: &ClientCore,
     response: Response,
@@ -64,29 +49,7 @@ pub async fn classify_error_xml<E>(
 where
     E: DeserializeOwned,
 {
-    let (status, headers, body, truncated) = match crate::read_error_body::<E>(core, response).await
-    {
-        Ok(parts) => parts,
-        Err(error) => return error,
-    };
-    if documented.iter().any(|spec| spec.matches(status)) {
-        match decode_xml_body::<E>(&body) {
-            Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
-            Err(path) => Error::Decode {
-                status,
-                headers,
-                path,
-                body,
-                truncated,
-            },
-        }
-    } else {
-        Error::UnexpectedStatus {
-            status,
-            headers,
-            body,
-        }
-    }
+    crate::dispatch::classify_with(core, response, documented, decode_xml_body::<E>).await
 }
 
 /// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
