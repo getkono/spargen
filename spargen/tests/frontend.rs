@@ -8404,6 +8404,69 @@ mod remote {
         }
     }
 
+    /// A URL cited from several sites is reported once per site, each at its own `$ref` (#534):
+    /// the sites' locations differ, so `Diagnostics::emit` no longer merges them into one report
+    /// per referring file, as it did while every report sat at the root. Unpinned (`E003`) and
+    /// drifted (`E021`) alike, through `check` and `generate`.
+    #[test]
+    fn a_remote_url_cited_from_two_sites_is_reported_at_each() {
+        let spec = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /a:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{GIZMO_URL}\" }}\n\
+             \x20 /b:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{GIZMO_URL}\" }}\n"
+        );
+        let drifted = lock(&"0".repeat(64));
+        for (code, lock, vendor) in [
+            (Code::AbsoluteRefUnsupported, None, &[][..]),
+            (
+                Code::VendoredRefDrift,
+                Some(drifted.as_str()),
+                &[(GIZMO_VENDOR_PATH, GIZMO_YAML)][..],
+            ),
+        ] {
+            for check_only in [true, false] {
+                let (report, _temp, _out) = run_layout(&spec, lock, vendor, check_only);
+                let located: Vec<(Code, &str, Option<u32>)> = report
+                    .diagnostics()
+                    .iter()
+                    .map(|d| (d.code, d.pointer.as_str(), d.span.map(|s| s.start.line)))
+                    .collect();
+                assert_eq!(
+                    located,
+                    [
+                        (
+                            code,
+                            "/paths/~1a/get/responses/200/content/application~1json/schema/$ref",
+                            Some(11)
+                        ),
+                        (
+                            code,
+                            "/paths/~1b/get/responses/200/content/application~1json/schema/$ref",
+                            Some(19)
+                        ),
+                    ],
+                    "check only: {check_only}: {report:#?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn pinned_remote_ref_resolves_hermetically_to_typed_schema() {
         // Lock pins the correct sha256 and the vendored bytes match ⇒ the remote ref resolves with
