@@ -3269,6 +3269,28 @@ fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
             admits,
         ));
     }
+    // Nothing in these compositions admits `null` by a `type`: the conjuncts are untyped objects
+    // alone, or the untyped `U`, so every spelling keeps the non-null struct an untyped object
+    // lowers to, and the held-back union's untyped branches take no `null` from the meet.
+    let c = "{ properties: { c: { type: string } } }";
+    let u = "$ref: '#/components/schemas/U'";
+    for site in [
+        format!("{{ allOf: [ {c} ], anyOf: {branches} }}"),
+        format!("{{ allOf: [ {c}, {{ anyOf: {branches} }} ] }}"),
+        format!("{{ properties: {{ c: {{ type: string }} }}, anyOf: {branches} }}"),
+        format!("{{ {u}, anyOf: {branches} }}"),
+        format!("{{ allOf: [ {{ {u} }} ], anyOf: {branches} }}"),
+        format!("{{ allOf: [ {{ {u} }}, {{ anyOf: {branches} }} ] }}"),
+    ] {
+        rows.push(("U", site, false));
+    }
+    // Here the `null` branch admits `null` itself, and the untyped branch beside it is counted as
+    // accepting it too (#563), so `null` is in two branches and fails exactly-one.
+    rows.push((
+        "U",
+        format!("{{ allOf: [ {c} ], oneOf: {beside_null} }}"),
+        false,
+    ));
     let mut mismatches = Vec::new();
     for (target, site, admits) in rows {
         let target_body = if target == "N" {
