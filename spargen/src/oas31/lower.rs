@@ -5230,8 +5230,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// it: no value satisfies such a schema. Its own `type`, `enum` or `const` that is not an
     /// object keyword ([`schema_is_object_like`]) is no contribution, yet constrains every value
     /// all the same, so one that excludes `null` leaves nothing either. So does such a keyword on
-    /// a nested `allOf` member [`Self::gather_member`] flattens into this meet, which equally
-    /// contributes nothing of its own ([`flattened_keywords_admit_null`], #569). `None` where `null` is excluded, so the caller reports the empty composition.
+    /// a nested `allOf` member [`Self::gather_member`] flattens into this meet, inline or as a
+    /// non-component `$ref`'s resolved target, which equally contributes nothing of its own
+    /// ([`Self::flattened_keywords_admit_null`], #569). `None` where `null` is excluded, so the
+    /// caller reports the empty composition.
     ///
     /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
     /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
@@ -5245,11 +5247,88 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: &[Contribution],
         mark: u32,
     ) -> Option<Ty> {
-        if !object_all_of_admits_null(contributions) || !flattened_keywords_admit_null(schema) {
+        if !object_all_of_admits_null(contributions) || !self.flattened_keywords_admit_null(schema)
+        {
             return None;
         }
         self.discard_meet_intermediates(mark, &TypeKind::Null);
         Some(self.insert_schema_type(schema, hint, TypeKind::Null))
+    }
+
+    /// [`own_keywords_admit_null`] over an object `allOf` schema and every schema
+    /// [`Self::gather_member`] flattens into its meet: a member with an `allOf` and no union beside
+    /// it, whether inline, as a `$ref`'s siblings, or as the resolved target of a non-component
+    /// `$ref` member, which [`Self::gather_ref_target`] expands in place rather than lowering.
+    /// Flattening gathers only such a schema's members and object keywords, so its own `type`,
+    /// `enum` or `const` reaches no contribution, yet still constrains every value of the meet
+    /// (#569). Any other member is lowered or read as a contribution of its own, which carries its
+    /// nullability already: a component or remote `$ref` lowers to a type, and a plain body is
+    /// read by its keywords.
+    fn flattened_keywords_admit_null(&self, schema: &Schema) -> bool {
+        own_keywords_admit_null(schema)
+            && self.flattened_members_admit_null(schema, &mut HashSet::new(), 0)
+    }
+
+    /// Whether every schema `schema`'s `allOf` members flatten into its meet admits `null` by its
+    /// own keywords: [`Self::flattened_keywords_admit_null`] below the schema itself.
+    fn flattened_members_admit_null(
+        &self,
+        schema: &Schema,
+        visited: &mut HashSet<String>,
+        depth: u32,
+    ) -> bool {
+        schema.all_of.iter().all(|member| match member {
+            SchemaOr::Schema(member) => self.flattened_member_admits_null(member, visited, depth),
+            SchemaOr::Bool(_) => true,
+        })
+    }
+
+    /// [`Self::flattened_keywords_admit_null`] of one `allOf` member, read the way
+    /// [`Self::gather_member`] gathers it. The answer is the conjunction of every flattened
+    /// schema's own keywords, so a resolved target already in `visited` adds nothing a second
+    /// time: skipping it keeps a target shared along many paths linear. Gathering already refused
+    /// a cycle and an over-deep chain, and resolved every target this reaches, so the depth bound
+    /// only keeps this total and a target that cannot be read is no constraint here.
+    fn flattened_member_admits_null(
+        &self,
+        member: &Schema,
+        visited: &mut HashSet<String>,
+        depth: u32,
+    ) -> bool {
+        if depth >= MAX_SCHEMA_DEPTH {
+            return true;
+        }
+        if let Some(reference) = &member.reference {
+            let target_admits = reference.starts_with("#/components/schemas/")
+                || is_remote_ref(reference)
+                || match self.resolver.resolve(
+                    reference,
+                    &member.provenance,
+                    &mut Diagnostics::default(),
+                ) {
+                    Ok(resolved) => {
+                        let fresh = resolved_identity(&resolved.schema.provenance)
+                            .is_none_or(|key| visited.insert(key));
+                        !fresh
+                            || self.flattened_member_admits_null(
+                                &resolved.schema,
+                                visited,
+                                depth + 1,
+                            )
+                    }
+                    Err(_) => true,
+                };
+            let mut sibling = member.clone();
+            sibling.reference = None;
+            return target_admits
+                && (!schema_has_shape_constraint(&sibling)
+                    || self.flattened_member_admits_null(&sibling, visited, depth + 1));
+        }
+        if member.all_of.is_empty() || schema_has_union(member) {
+            return true;
+        }
+        own_keywords_admit_null(member)
+            && self.flattened_members_admit_null(member, visited, depth + 1)
     }
 
     /// An `allOf` that mixes object and scalar members, which no single type can be.
@@ -11374,22 +11453,6 @@ fn own_keywords_admit_null(schema: &Schema) -> bool {
         .as_ref()
         .is_none_or(|value| matches!(value.node, Node::Null));
     type_admits && enum_admits && const_admits
-}
-
-/// [`own_keywords_admit_null`] over an object `allOf` schema and every nested `allOf` member
-/// [`LowerCtx::gather_member`] flattens into its meet: a member with an `allOf` and no union
-/// beside it, whether inline or as a `$ref`'s siblings. Flattening gathers only such a member's
-/// members and object keywords, so its own `type`, `enum` or `const` reaches no contribution, yet
-/// still constrains every value of the meet (#569). Any other member is lowered or read as a
-/// contribution of its own, which carries its nullability already.
-fn flattened_keywords_admit_null(schema: &Schema) -> bool {
-    own_keywords_admit_null(schema)
-        && schema.all_of.iter().all(|member| match member {
-            SchemaOr::Schema(member) if !member.all_of.is_empty() && !schema_has_union(member) => {
-                flattened_keywords_admit_null(member)
-            }
-            _ => true,
-        })
 }
 
 fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {

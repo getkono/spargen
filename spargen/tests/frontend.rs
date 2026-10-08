@@ -30127,4 +30127,63 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
             "{what}: only `null` is left, so `Holder.p` is the null type: {code}"
         );
     }
+
+    // A non-component `$ref` member is expanded in place, so a target that is itself a nested
+    // `allOf` is flattened into the outer meet, and its own `type` constrains every value just as
+    // an inline member's does. The bare `$ref` and the `allOf` holding it are one conjunction, so
+    // both stay `E013`, in `generate` and `check` alike; a target whose `type` admits `null`
+    // leaves the null type in both spellings.
+    for (target_type, null_only) in [("string", false), ("[string, 'null']", true)] {
+        for (what, p) in [
+            ("a bare `$ref`", "{ $ref: '#/x-defs/Q' }"),
+            (
+                "an `allOf` of the `$ref`",
+                "{ allOf: [{ $ref: '#/x-defs/Q' }] }",
+            ),
+            (
+                "an `allOf` of an alias of the `$ref`",
+                "{ allOf: [{ $ref: '#/x-defs/R' }] }",
+            ),
+        ] {
+            let what = format!("{what} to a nested `allOf` of `type: {target_type}`");
+            let spec = format!(
+                "{}x-defs:\n  Q:\n    type: {target_type}\n    allOf: [{members}]\n  R:\n    \
+                 $ref: '#/x-defs/Q'\n",
+                document("[object, 'null']", p)
+            );
+            let (report, code) = generate_with_code(&spec);
+            let checked = check(&spec);
+            if !null_only {
+                for (entry, report) in [("generate", &report), ("check", &checked)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{what} ({entry}): {report:#?}"
+                    );
+                    assert!(
+                        has_code(report, Code::AllOfIrreconcilable),
+                        "{what} ({entry}): {report:#?}"
+                    );
+                }
+                continue;
+            }
+            for (entry, report) in [("generate", &report), ("check", &checked)] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what} ({entry}): {report:#?}"
+                );
+                assert!(
+                    !has_code(report, Code::AllOfIrreconcilable),
+                    "{what} ({entry}): {report:#?}"
+                );
+            }
+            let ty = field_type(&types_module(&code), "pub p:")
+                .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
+            assert!(
+                code.contains(&format!("pub type {ty} = ();")),
+                "{what}: only `null` is left, so `Holder.p` is the null type: {code}"
+            );
+        }
+    }
 }
