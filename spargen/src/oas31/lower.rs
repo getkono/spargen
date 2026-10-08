@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
@@ -41,6 +42,27 @@ const MAX_SCHEMA_DEPTH: u32 = 128;
 fn resolved_identity(provenance: &Provenance) -> Option<String> {
     let file = provenance.span?.file;
     Some(format!("{}#{}", file.0, provenance.pointer.as_str()))
+}
+
+/// `decide` of `target`, read once per [`resolved_identity`] in `memo` and replayed at every later
+/// use. `true` (deciding) is recorded before `decide` runs, so a walk that loops back to `target`
+/// ends there. A target with no span has no identity to key on and is decided un-memoised; the
+/// caller's depth bound still bounds it.
+fn memoised_decision(
+    memo: &RefCell<HashMap<String, bool>>,
+    target: &Schema,
+    decide: impl FnOnce() -> bool,
+) -> bool {
+    let Some(key) = resolved_identity(&target.provenance) else {
+        return decide();
+    };
+    if let Some(&decides) = memo.borrow().get(&key) {
+        return decides;
+    }
+    memo.borrow_mut().insert(key.clone(), true);
+    let decides = decide();
+    memo.borrow_mut().insert(key, decides);
+    decides
 }
 
 /// The name hint a resolved target should carry: its own final pointer token, so the generated type
@@ -148,6 +170,8 @@ fn lower_pass(
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
+        target_decides_null_memo: RefCell::new(HashMap::new()),
+        resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
@@ -786,6 +810,18 @@ struct LowerCtx<'a, 'doc> {
     /// reservation, and a target reached through one sits on the stack of the type it was
     /// reached from only.
     resolved_member_stack: Vec<(String, bool)>,
+    /// [`Self::ref_target_decides_null_within`]'s answer for each `$ref` target `allOf` body it
+    /// has read, keyed by the body's own `file#pointer` ([`resolved_identity`]). That read and
+    /// [`Self::all_of_decides_null`] call each other through every `$ref` an `allOf` names, so
+    /// without this a reuse graph that branches (`C<i>: allOf [$ref C<i+1>, $ref C<i+1>]`) is
+    /// re-read once per path, in time exponential in its depth. A body being read records `true`
+    /// (deciding) before its members are ([`memoised_decision`]), so a loop through it ends there,
+    /// with the answer the depth bound gave it before. The document is fixed for the pass, so an
+    /// answer never goes stale.
+    target_decides_null_memo: RefCell<HashMap<String, bool>>,
+    /// The same memo for [`Self::all_of_decides_null`]'s read of a bundle-`$ref` member's resolved
+    /// target, which it reads as a whole schema rather than as a `$ref` target body.
+    resolved_all_of_decides_null_memo: RefCell<HashMap<String, bool>>,
     /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
     /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
     settled: &'a HashMap<Reservation, bool>,
@@ -4140,7 +4176,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::ref_target_decides_null`]; a bundle target expanded in place is read as its own
     /// members are), and the members of a nested `allOf` or of a `$ref` member's siblings. A
     /// member this cannot read as an object (`enum`, `const`, a union) is taken as deciding, which
-    /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides.
+    /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides. Each `$ref`
+    /// target is read once per pass and its answer replayed
+    /// ([`Self::target_decides_null_memo`], [`Self::resolved_all_of_decides_null_memo`]).
     fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH
             || stated_nullability(schema).is_some()
@@ -4160,7 +4198,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         &schema.provenance,
                         &mut Diagnostics::default(),
                     ) {
-                        Ok(resolved) => self.all_of_decides_null(&resolved.schema, depth + 1),
+                        Ok(resolved) => memoised_decision(
+                            &self.resolved_all_of_decides_null_memo,
+                            &resolved.schema,
+                            || self.all_of_decides_null(&resolved.schema, depth + 1),
+                        ),
                         Err(_) => true,
                     }
                 };
@@ -4937,7 +4979,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if target.all_of.is_empty() {
                 target_decides_null(target)
             } else {
-                self.all_of_decides_null(target, depth + 1)
+                memoised_decision(&self.target_decides_null_memo, target, || {
+                    self.all_of_decides_null(target, depth + 1)
+                })
             }
         };
         let mut reference = reference.to_owned();

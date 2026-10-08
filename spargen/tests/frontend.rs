@@ -2485,6 +2485,12 @@ components:
 /// A composition some member decides keeps its answer: `D` denies `null` (`viaDecided`) and `E`
 /// admits it (`viaDecidedNull`). `C` alone, and met only with an untyped member, still lowers to a
 /// non-null struct.
+///
+/// The same reading reaches three more spellings, each of which also generated the plain struct
+/// before: a `$ref` whose `allOf` sibling names `C` (`siblingNamesComposed`, through
+/// `lower_ref_sibling`), a nested inline `allOf` naming `C` (`nestedNamesComposed`), and a member
+/// `$ref` to `RS`, a `$ref` to an untyped component with an untyped `allOf` sibling
+/// (`viaRefWithAllOfSibling`).
 #[test]
 fn a_ref_to_an_untyped_all_of_component_admits_null_in_an_object_meet() {
     let spec = r##"
@@ -2509,10 +2515,14 @@ components:
     R: { allOf: [{ $ref: '#/components/schemas/U' }, { $ref: '#/components/schemas/V' }] }
     D: { allOf: [{ type: object, properties: { d: { type: string } } }] }
     E: { allOf: [{ $ref: '#/components/schemas/N' }, { properties: { e: { type: string } } }] }
+    RS: { $ref: '#/components/schemas/U', allOf: [{ properties: { w: { type: string } } }] }
     Holder:
       type: object
-      required: [viaComposed, viaComposedRefs, composedSibling, inline, viaDecided, viaDecidedNull, composedOnly, alone]
+      required: [viaComposed, viaComposedRefs, composedSibling, inline, viaDecided, viaDecidedNull, composedOnly, alone, siblingNamesComposed, nestedNamesComposed, viaRefWithAllOfSibling]
       properties:
+        siblingNamesComposed: { $ref: '#/components/schemas/N', allOf: [{ $ref: '#/components/schemas/C' }] }
+        nestedNamesComposed: { allOf: [{ $ref: '#/components/schemas/N' }, { allOf: [{ $ref: '#/components/schemas/C' }] }] }
+        viaRefWithAllOfSibling: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/RS' }] }
         viaComposed: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/C' }] }
         viaComposedRefs: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/R' }] }
         composedSibling: { $ref: '#/components/schemas/C', type: [object, 'null'], properties: { n: { type: string } } }
@@ -2535,6 +2545,9 @@ components:
         ("pub via_decided_null:", true),
         ("pub composed_only:", false),
         ("pub alone:", false),
+        ("pub sibling_names_composed:", true),
+        ("pub nested_names_composed:", true),
+        ("pub via_ref_with_all_of_sibling:", true),
     ] {
         let ty = field_type(&code, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
         assert_eq!(
@@ -2543,6 +2556,63 @@ components:
             "`{field}` is `{ty}`, but `null` is {} here: {code}",
             if nullable { "valid" } else { "invalid" }
         );
+    }
+}
+
+/// Issue #565's reading of a `$ref` target's `allOf` body is done once per target, not once per
+/// path. `C<i>` is `allOf: [$ref C<i+1>, $ref C<i+1>]`, so the paths to the leaf number 2^30;
+/// re-reading the body at each `$ref` (as the walk briefly did) would not finish at this depth,
+/// where lowering the same components shares each one's type and stays linear. The answer is
+/// still the leaf's, replayed: an untyped leaf (`C`) decides nothing, so `N`'s `null` survives; a
+/// leaf typed `object` (`T`) denies it.
+#[test]
+fn a_ref_to_a_branching_untyped_all_of_graph_reads_each_target_once() {
+    let mut defs = String::new();
+    for (chain, depth, leaf) in [
+        ("C", 30, "properties: { c: { type: string } }"),
+        ("T", 30, "type: object"),
+    ] {
+        for level in 0..depth {
+            let next = level + 1;
+            defs.push_str(&format!(
+                "    {chain}{level}: {{ allOf: [{{ $ref: '#/components/schemas/{chain}{next}' }}, \
+                 {{ $ref: '#/components/schemas/{chain}{next}' }}] }}\n"
+            ));
+        }
+        defs.push_str(&format!("    {chain}{depth}: {{ {leaf} }}\n"));
+    }
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    N: {{ type: [object, 'null'], properties: {{ n: {{ type: string }} }} }}
+    Holder:
+      type: object
+      required: [untypedLeaf, typedLeaf]
+      properties:
+        untypedLeaf: {{ allOf: [{{ $ref: '#/components/schemas/N' }}, {{ $ref: '#/components/schemas/C0' }}] }}
+        typedLeaf: {{ allOf: [{{ $ref: '#/components/schemas/N' }}, {{ $ref: '#/components/schemas/T0' }}] }}
+{defs}"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for (field, nullable) in [("pub untyped_leaf:", true), ("pub typed_leaf:", false)] {
+        let ty = field_type(&code, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
+        assert_eq!(ty.starts_with("Option<"), nullable, "`{field}` is `{ty}`");
     }
 }
 
