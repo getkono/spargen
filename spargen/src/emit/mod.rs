@@ -33,14 +33,10 @@ pub(crate) struct EmitPlan {
     pub(crate) files: Vec<GeneratedFile>,
 }
 
-/// An emission failure.
+/// An emission failure. [`plan`] renders in memory and writes no file, so a layout inconsistency
+/// is the only way it can fail.
 #[derive(Debug)]
 pub(crate) enum EmitError {
-    /// An I/O error. Nothing in emit constructs it: [`plan`] renders in memory and writes no file,
-    /// so it can fail only with [`EmitError::Layout`]. The variant and its
-    /// `From<std::io::Error>` impl are kept until their removal lands separately; only the
-    /// `From` impl's own test builds one.
-    Io(std::io::Error),
     /// The requested layout is inconsistent with the generated code.
     Layout(String),
 }
@@ -48,26 +44,12 @@ pub(crate) enum EmitError {
 impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmitError::Io(e) => write!(f, "emit I/O error: {e}"),
             EmitError::Layout(msg) => write!(f, "emit layout error: {msg}"),
         }
     }
 }
 
-impl std::error::Error for EmitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            EmitError::Io(e) => Some(e),
-            EmitError::Layout(_) => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for EmitError {
-    fn from(e: std::io::Error) -> Self {
-        EmitError::Io(e)
-    }
-}
+impl std::error::Error for EmitError {}
 
 /// Build the on-disk emission plan from generated code and options: stamp the provenance header
 /// onto the single generated module. Spargen writes one `include!`-safe file and nothing else —
@@ -183,19 +165,5 @@ mod tests {
             "emit layout error: codegen produced no files"
         );
         assert!(std::error::Error::source(&error).is_none());
-    }
-
-    #[test]
-    fn an_io_error_keeps_its_cause_in_the_chain() {
-        let error = EmitError::from(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "denied",
-        ));
-        assert!(matches!(error, EmitError::Io(_)));
-        assert!(error.to_string().starts_with("emit I/O error: "));
-        assert!(
-            std::error::Error::source(&error).is_some(),
-            "an I/O failure must keep the underlying error reachable"
-        );
     }
 }
