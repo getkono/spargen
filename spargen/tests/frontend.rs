@@ -1241,7 +1241,11 @@ components:
 /// (#492): two inline objects with the same fields, `required` flags, and `additionalProperties`
 /// policy, nested ones included, or two string enums listing one value set in any order. Each is
 /// its own nominal item, but no value tells them apart, so they become one variant with `W001`.
-/// Branches that differ in a `required` flag or a value stay distinct variants, unwarned.
+/// Branches that differ in a `required` flag, a value, the `additionalProperties` policy (`false`,
+/// `true`, or a schema, or two schemas that decode different values), or a field's XML hint in an
+/// XML body (`xml.name`, `xml.attribute`) decode different values, so they stay distinct variants,
+/// unwarned. (String-enum openness is pinned in `ir/types.rs`'s tests: every `oneOf` branch is
+/// lowered closed, so no document puts an open and a closed set of one value set side by side.)
 #[test]
 fn one_of_branches_of_one_structure_merge_and_warn() {
     let object = "{ type: object, additionalProperties: false, required: [a], properties: { a: { \
@@ -1250,39 +1254,112 @@ fn one_of_branches_of_one_structure_merge_and_warn() {
                   a: { type: string } } } } }";
     let optional = "{ type: object, additionalProperties: false, properties: { a: { type: string \
                     } } }";
-    for (shape, members, merged, variants) in [
+    let additional = |policy: &str| {
+        format!(
+            "{{ type: object, additionalProperties: {policy}, required: [a], properties: {{ a: {{ \
+             type: string }} }} }}"
+        )
+    };
+    let hinted = |xml: &str| {
+        format!(
+            "{{ type: object, required: [a], properties: {{ a: {{ type: string, xml: {xml} }} }} }}"
+        )
+    };
+    let plain = "{ type: object, required: [a], properties: { a: { type: string } } }";
+    let (json, xml) = ("application/json", "application/xml");
+    for (shape, members, media, merged, variants) in [
         (
             "identical objects",
             format!("{object}, {object}"),
+            json,
             true,
             None,
         ),
         (
             "identical nested objects",
             format!("{nested}, {nested}"),
+            json,
             true,
             None,
         ),
         (
             "string enums of one value set",
             "{ enum: [x, y] }, { enum: [y, x] }, { type: integer }".to_owned(),
+            json,
             true,
             Some(2),
         ),
         (
             "a different required flag",
             format!("{object}, {optional}"),
+            json,
             false,
             Some(2),
         ),
         (
             "different enum values",
             "{ enum: [x, y] }, { enum: [x, z] }".to_owned(),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties false beside true",
+            format!("{}, {}", additional("false"), additional("true")),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties false beside a schema",
+            format!(
+                "{}, {}",
+                additional("false"),
+                additional("{ type: integer }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties true beside a schema",
+            format!(
+                "{}, {}",
+                additional("true"),
+                additional("{ type: integer }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties schemas of different types",
+            format!(
+                "{}, {}",
+                additional("{ type: integer }"),
+                additional("{ type: boolean }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "an xml.name hint",
+            format!("{}, {plain}", hinted("{ name: b }")),
+            xml,
+            false,
+            Some(2),
+        ),
+        (
+            "an xml.attribute hint",
+            format!("{}, {plain}", hinted("{ attribute: true }")),
+            xml,
             false,
             Some(2),
         ),
     ] {
-        let spec = single_component_document(&format!("      oneOf: [ {members} ]\n"));
+        let spec = single_component_document(&format!("      oneOf: [ {members} ]\n"))
+            .replace("application/json", media);
         let (report, code) = generate_with_code(&spec);
         for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
             assert_ne!(

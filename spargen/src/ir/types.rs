@@ -981,4 +981,44 @@ mod tests {
         assert!(!graph.is_elided(reused));
         assert_eq!(graph.emitted().count(), 2);
     }
+
+    /// Two string enums listing one value set decode the same values only when they agree on
+    /// openness (#492): an open set also decodes every unlisted string, so it never merges with a
+    /// closed one, while `Locked` is closed and merges with `Closed`. Pinned here rather than in
+    /// `frontend.rs` because every `oneOf` branch is lowered closed, so no document reaches a
+    /// union with an open and a closed branch.
+    #[test]
+    fn string_enums_of_one_value_set_decode_the_same_values_only_at_one_openness() {
+        use super::{Openness, ScalarEnum, ScalarRepr, ScalarValue, Ty, TypeKind};
+        let mut graph = super::TypeGraph::default();
+        let mut set = |openness: Openness, values: [&str; 2]| {
+            let mut def = primitive("E");
+            def.kind = TypeKind::Enum(ScalarEnum {
+                repr: ScalarRepr::String,
+                variants: values
+                    .into_iter()
+                    .map(|value| ScalarValue::String(value.to_owned()))
+                    .collect(),
+                openness,
+            });
+            Ty {
+                id: graph.insert(def),
+                nullable: false,
+                boxed: false,
+            }
+        };
+        let closed = set(Openness::Closed, ["x", "y"]);
+        let reordered = set(Openness::Closed, ["y", "x"]);
+        let locked = set(Openness::Locked, ["x", "y"]);
+        let open = set(Openness::Open, ["x", "y"]);
+        let open_reordered = set(Openness::Open, ["y", "x"]);
+        assert!(graph.same_decoded_values(closed, reordered));
+        assert!(graph.same_decoded_values(closed, locked));
+        assert!(graph.same_decoded_values(open, open_reordered));
+        assert!(!graph.same_decoded_values(closed, open));
+        assert!(!graph.same_decoded_values(open, closed));
+        assert!(!graph.same_decoded_values(locked, open));
+        // Two distinct string enums are never one generated type, whatever their values.
+        assert!(!graph.same_generated_type(closed, reordered));
+    }
 }
