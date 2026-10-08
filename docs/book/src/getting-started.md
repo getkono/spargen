@@ -182,23 +182,11 @@ Key points of the surface:
   alternative never falls through to a later one; `Client::without_credential(scheme)`
   unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
   selects the next fully registered alternative.
-- A closed error taxonomy, identical across all spargen output: request-construction
-  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
-  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
-  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
-  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
-  preserved), decode failure (`Error::Decode`), interrupted body (`Error::InterruptedBody`).
-  Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
-  with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
-  retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
-  [retry adapter](./runtime.md). An error enum whose bodied statuses carry the same body type
-  (one schema, or schemas that generate the same Rust type) gets `body()`, and it, the
-  single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
-  hands that body back whichever status carried it (`Error::status()` reports that status, the
-  same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
-  variant instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the
-  RFC 9457 members of whichever error body a failure carried, across every operation — see
-  [problem details](./runtime.md#problem-details).
+- A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
+  type is a `std::error::Error`. The README's
+  [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant
+  and the accessors over them; [problem details](./runtime.md#problem-details) and the
+  [retry adapter](./runtime.md#retry) build on it.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

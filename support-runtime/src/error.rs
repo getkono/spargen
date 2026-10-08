@@ -15,8 +15,7 @@ use crate::{AuthError, ResponseValue};
 /// variant in `every_variant`, both in the test module of `support-runtime/src/error.rs`, for the
 /// reasons `request_variant_index` there sets out. That test module is stripped when this file is
 /// embedded into a generated client, so none of those three names exist in the copy a consumer
-/// reads. Name the new variant, too, in the error-taxonomy passages of spargen's `README.md` and
-/// `docs/book/src/getting-started.md`.
+/// reads.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
@@ -489,8 +488,7 @@ impl std::error::Error for MessageError {}
 /// The compiler will demand the classification arms on its own, but it cannot demand the value —
 /// `request_variant_index` there documents precisely why, and which ways of getting this wrong are
 /// caught. That test module is stripped when this file is embedded into a generated client, so
-/// none of those three names exist in the copy a consumer reads. Name the new variant, too, in the
-/// error-taxonomy passages of spargen's `README.md` and `docs/book/src/getting-started.md`.
+/// none of those three names exist in the copy a consumer reads.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RequestError {
