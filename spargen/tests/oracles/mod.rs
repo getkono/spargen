@@ -34,7 +34,6 @@ pub struct Violation {
 /// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
 /// their empty pointer as known; every other rule still applies to them, each checked on its own.
 pub const KNOWN_ROOT_POINTERS: &[(Code, u32)] = &[
-    (Code::DuplicateObjectKey, ISSUE_DUPLICATE_KEY_POINTER),
     (Code::AbsoluteRefUnsupported, ISSUE_REMOTE_REF_POINTER),
     (Code::VendoredRefDrift, ISSUE_REMOTE_REF_POINTER),
 ];
@@ -54,10 +53,6 @@ fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
         .find(|(known, _)| *known == code)
         .map(|(_, issue)| *issue)
 }
-
-/// The issue (#533) tracking `E022`'s root pointer: the YAML and JSON parsers raise it before any
-/// pointer is tracked, with only the duplicate key's span.
-pub const ISSUE_DUPLICATE_KEY_POINTER: u32 = 533;
 
 /// The issue (#534) tracking `E003`'s and `E021`'s root pointer and whole-document span: the
 /// bundle raises them against the referring file's root value rather than the `$ref` that names

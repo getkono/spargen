@@ -394,24 +394,46 @@ fn the_location_oracle_sees_each_lost_location() {
     assert!(reasons(located(Code::InvalidInput, "", 0, (1, 0, 29), "m")).is_empty());
     // A known gap is still reported, with the issue that tracks it.
     let known = oracles::location_violations(
-        &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
+        &[located(
+            Code::AbsoluteRefUnsupported,
+            "",
+            0,
+            (2, 15, 28),
+            "m",
+        )],
         root,
     );
-    assert_eq!(known[0].known, Some(oracles::ISSUE_DUPLICATE_KEY_POINTER));
-    // Each rule is checked on its own: a known empty pointer does not hide a whole-root span,
-    // which no issue tracks for `E022`.
-    let both: Vec<Option<u32>> = oracles::location_violations(
-        &[located(Code::DuplicateObjectKey, "", 0, (1, 0, 29), "m")],
+    assert_eq!(known[0].known, Some(oracles::ISSUE_REMOTE_REF_POINTER));
+    // Each rule is checked on its own: a known empty pointer and a known whole-root span do not
+    // hide an empty name, which no issue tracks for `E003`.
+    let all: Vec<Option<u32>> = oracles::location_violations(
+        &[located(
+            Code::AbsoluteRefUnsupported,
+            "",
+            0,
+            (1, 0, 29),
+            "in ``",
+        )],
         root,
     )
     .into_iter()
     .map(|violation| violation.known)
     .collect();
     assert_eq!(
-        both,
-        [Some(oracles::ISSUE_DUPLICATE_KEY_POINTER), None],
-        "{both:?}"
+        all,
+        [
+            None,
+            Some(oracles::ISSUE_REMOTE_REF_POINTER),
+            Some(oracles::ISSUE_REMOTE_REF_POINTER)
+        ],
+        "{all:?}"
     );
+    // `E022` is no longer a known gap (#533): its empty pointer is a violation of its own.
+    let duplicate = oracles::location_violations(
+        &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
+        root,
+    );
+    assert_eq!(duplicate[0].known, None, "{:?}", duplicate[0].reason);
     let unlocated = reasons(located(
         Code::SchemaDefaultNotApplied,
         "",
@@ -426,23 +448,36 @@ fn the_location_oracle_sees_each_lost_location() {
     );
 }
 
-/// `E022` still reports the document root as its pointer (#533), so
-/// [`oracles::KNOWN_ROOT_POINTERS`] still needs its entry. Once #533 is fixed this fails: remove the
-/// entry and this fixture together, so the known gaps only shrink.
+/// `E022` points at the duplicate key itself (#533), in YAML and in JSON, through `check` and
+/// `generate` alike, so the location oracle finds nothing to report.
 #[test]
-fn e022_still_reports_the_root_pointer_tracked_by_533() {
-    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      type: object\n      type: string\n";
-    let report = check(spec);
-    let known: Vec<Option<u32>> =
-        oracles::location_violations(report.diagnostics(), spec.as_bytes())
-            .into_iter()
-            .map(|violation| violation.known)
-            .collect();
-    assert_eq!(
-        known,
-        [Some(oracles::ISSUE_DUPLICATE_KEY_POINTER)],
-        "{report:#?}"
-    );
+fn e022_points_at_the_duplicate_key() {
+    let yaml = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      type: object\n      type: string\n";
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}, "components": {"schemas": {"Foo": {"type": "object", "type": "string"}}}}"#;
+    // The parser is chosen by extension, and the shared helpers write `openapi.yaml`, so the JSON
+    // document is written as `openapi.json` here to reach the JSON parser.
+    for (name, spec) in [("openapi.yaml", yaml), ("openapi.json", json)] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join(name), spec).unwrap();
+        let generated = run_generate(&build(dir.join(name), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join(name)));
+        for report in [checked, generated] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            let duplicate = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::DuplicateObjectKey)
+                .expect("duplicate-key diagnostic");
+            assert_eq!(
+                duplicate.pointer.as_str(),
+                "/components/schemas/Foo/type",
+                "{duplicate:#?}"
+            );
+            let violations = oracles::location_violations(report.diagnostics(), spec.as_bytes());
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
 }
 
 /// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
