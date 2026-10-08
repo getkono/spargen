@@ -6025,10 +6025,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(value) => value,
                 None => {
                     Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
-                        .message(
-                            "enum/const values must be scalars (object/array members are not \
-                             representable as enum variants)",
-                        )
+                        .message(non_scalar_enum_message(value))
                         .emit(self.diags);
                     return None;
                 }
@@ -10534,6 +10531,27 @@ fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
         Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarValue::Int),
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
+    }
+}
+
+/// The `E008` message for an enum/const member `scalar_value` rejected, naming the reason that
+/// member is not representable: an object/array member, a float, and an integer above `i64::MAX`
+/// fail for different reasons, and a message blaming the wrong one misdirects the fix.
+fn non_scalar_enum_message(value: &SpannedValue) -> String {
+    match &value.node {
+        Node::Number(Number::Float(float)) => format!(
+            // `Debug`, so `1.0` reads as the float it is rather than `Display`'s `1`.
+            "enum/const value {float:?} is a floating-point number, which has no Rust enum \
+             discriminant (only string, integer, and boolean members are representable as enum \
+             variants)"
+        ),
+        Node::Number(Number::UInt(uint)) => format!(
+            "enum/const value {uint} exceeds i64::MAX, so it is not representable as an integer \
+             enum variant"
+        ),
+        _ => "enum/const values must be scalars (object/array members are not representable as \
+              enum variants)"
+            .to_owned(),
     }
 }
 

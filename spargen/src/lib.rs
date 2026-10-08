@@ -454,12 +454,15 @@ fn resolve_cargo_environment(
                 (None, CargoIntegration::Required) => vec![cargo_diagnostic(
                     Severity::Error,
                     Code::CargoIntegrationRequired,
-                    "cargo integration is required, but no consumer manifest was found;                      set CARGO_MANIFEST_DIR or use `CargoIntegration::Auto`",
+                    "cargo integration is required, but no consumer manifest was found; \
+                     set CARGO_MANIFEST_DIR or use `CargoIntegration::Auto`",
                 )],
                 (None, _) => vec![cargo_diagnostic(
                     Severity::Warning,
                     Code::RuntimeAuditSkipped,
-                    "no consumer manifest was found, so the runtime-dependency audit was                      skipped; run `spargen deps <spec>` for the dependencies generated output                      requires",
+                    "no consumer manifest was found, so the runtime-dependency audit was \
+                     skipped; run `spargen deps <spec>` for the dependencies generated output \
+                     requires",
                 )],
                 (Some(_), _) => Vec::new(),
             };
@@ -479,7 +482,8 @@ fn resolve_cargo_environment(
             diagnostics: vec![cargo_diagnostic(
                 Severity::Error,
                 Code::CargoIntegrationRequired,
-                "cargo integration is required, but this is not a build-script process;                  call `generate` from a `build.rs`, or relax to `CargoIntegration::Auto`",
+                "cargo integration is required, but this is not a build-script process; \
+                 call `generate` from a `build.rs`, or relax to `CargoIntegration::Auto`",
             )],
             fatal: true,
         },
@@ -489,7 +493,9 @@ fn resolve_cargo_environment(
             diagnostics: vec![cargo_diagnostic(
                 Severity::Warning,
                 Code::CargoIntegrationDegraded,
-                "not a build-script process: no rebuild triggers were emitted and the                  runtime-dependency audit was skipped; call `generate` from a `build.rs`, or                  silence this with `CargoIntegration::Off`",
+                "not a build-script process: no rebuild triggers were emitted and the \
+                 runtime-dependency audit was skipped; call `generate` from a `build.rs`, or \
+                 silence this with `CargoIntegration::Off`",
             )],
             fatal: false,
         },
@@ -1238,6 +1244,32 @@ mod tests {
             assert!(codes(&off).is_empty());
             assert!(!off.fatal);
         }
+    }
+
+    /// Each Cargo-integration message reads as one single-spaced sentence: a lost `\` line
+    /// continuation in a wrapped literal leaves its indentation mid-sentence instead.
+    #[test]
+    fn cargo_integration_messages_are_single_spaced() {
+        let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
+        let environments = [
+            resolve_cargo_environment(CargoIntegration::Auto, true, None),
+            resolve_cargo_environment(CargoIntegration::Auto, false, manifest.clone()),
+            resolve_cargo_environment(CargoIntegration::Required, false, manifest),
+            resolve_cargo_environment(CargoIntegration::Required, true, None),
+        ];
+        let mut seen = Vec::new();
+        for environment in &environments {
+            for diagnostic in &environment.diagnostics {
+                seen.push(diagnostic.code.as_str());
+                let message = &diagnostic.message;
+                assert!(
+                    !message.contains("  ") && message.trim() == message,
+                    "{}: {message:?}",
+                    diagnostic.code.as_str()
+                );
+            }
+        }
+        assert_eq!(seen, ["W012", "W013", "E024", "E024"]);
     }
 
     /// `check` with auto-carve on, over `contents` written as the root document in `dir`.
