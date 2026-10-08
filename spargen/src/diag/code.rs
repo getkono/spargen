@@ -68,11 +68,12 @@ pub enum Code {
     /// scalar matching the field's type); it is documented in rustdoc but not wired (matrix: Schema
     /// shape → W).
     SchemaDefaultNotApplied,
-    /// An XML representation hint was not applied because it cannot change the XML wire: an
-    /// unsupported hint (`xml.namespace`, `xml.prefix`, `xml.wrapped`, or an unsupported
-    /// `xml.nodeType`) on a type never serialized as XML, or `xml.name`/`xml.attribute` on a schema
-    /// not used exclusively as an XML body. An unsupported hint on a type that *is* serialized as
-    /// XML is `E009` instead (matrix: Media → W).
+    /// An XML representation hint was not applied, in one of two cases: `xml.name`/`xml.attribute`
+    /// on a schema not used exclusively as an XML body, withheld because a serde rename would also
+    /// rewrite the non-XML wire (on a schema an XML body also reaches, withholding it changes the
+    /// XML wire); or an unsupported hint (`xml.namespace`, `xml.prefix`, `xml.wrapped`, or an
+    /// unsupported `xml.nodeType`) on a type never serialized as XML, where it changes no wire. An
+    /// unsupported hint on a type that *is* serialized as XML is `E009` instead (matrix: Media → W).
     XmlHintIgnored,
     /// OpenAPI 3.2 `itemSchema` appeared on non-sequential media, where it has no wire meaning.
     Oas32ConstructIgnored,
@@ -312,7 +313,7 @@ impl Code {
                 "The caller set `CargoIntegration::Required`, declaring that this generation must be wired into Cargo — rebuild triggers emitted, consumer manifest audited — and it is not: either the process is not a build script, or no consumer manifest could be found. This is an error rather than a warning purely because the caller asked for it: `Required` exists for builds where a missed rebuild trigger would ship a client generated from a stale spec. Move the call into a `build.rs`, or relax to `CargoIntegration::Auto` (degrade with `W013`/`W012`) or `CargoIntegration::Off` (degrade silently)."
             }
             Code::XmlHintIgnored => {
-                "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention, also spelled OpenAPI 3.2 `xml.nodeType: attribute`) hints on a property, but only on a schema used *exclusively* as an XML body. This warning reports a hint that is not applied because it cannot change the XML wire, in two cases. First, `xml.name`/`xml.attribute` on a schema that is not used exclusively as an XML body: a serde `rename` is format-agnostic and would also rewrite the JSON wire name, so on a schema that is also reachable from a non-XML request or response body or from a parameter, or that no XML body reaches at all, the hint is not applied and the property keeps its normal wire name in every format, the XML body included. The message says which of the two it is. Second, a hint quick-xml serde has no faithful mapping for — `xml.namespace`, `xml.prefix`, `xml.wrapped`, or an `xml.nodeType` other than `attribute` that departs from the node's default (`element` on an array, which is `wrapped: true`; `none` on a node that does not default to it; `text`, `cdata`, or any other token) — on a type that is never serialized as XML, where it has no effect on any wire. The same unsupported hint on a type that *is* serialized as XML is rejected with `E009` instead, because ignoring it would put structurally different XML on the wire. Declaring `xml.attribute` or `xml.wrapped` beside `xml.nodeType` is `E011`."
+                "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention, also spelled OpenAPI 3.2 `xml.nodeType: attribute`) hints on a property, but only on a schema used *exclusively* as an XML body. This warning reports a hint that is not applied, in two cases. First, `xml.name`/`xml.attribute` on a schema that is not used exclusively as an XML body: the hint is withheld because a serde `rename` is format-agnostic and would also rewrite the non-XML wire name, so on a schema that is also reachable from a non-XML request or response body or from a parameter, or that no XML body reaches at all, the property keeps its normal wire name in every format, the XML body included. On a schema no XML body reaches, nothing on any wire moves; on one shared between an XML body and a non-XML use, withholding the hint does change the XML wire, which then carries the property's normal name rather than the hinted one. The message says which of the two it is. Second, a hint quick-xml serde has no faithful mapping for — `xml.namespace`, `xml.prefix`, `xml.wrapped`, or an `xml.nodeType` other than `attribute` that departs from the node's default (`element` on an array, which is `wrapped: true`; `none` on a node that does not default to it; `text`, `cdata`, or any other token) — on a type that is never serialized as XML, where it has no effect on any wire. The same unsupported hint on a type that *is* serialized as XML is rejected with `E009` instead, because ignoring it would put structurally different XML on the wire. Declaring `xml.attribute` or `xml.wrapped` beside `xml.nodeType` is `E011`."
             }
         }
     }
