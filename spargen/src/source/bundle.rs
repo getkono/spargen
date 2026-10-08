@@ -8,7 +8,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, P
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, RefTarget,
+    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, CollectedRef,
+    RefTarget,
 };
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
@@ -91,9 +92,9 @@ impl InputBundle {
             let Some(value) = bundle.value_at(file).pointer(&pointer) else {
                 continue;
             };
-            let refs = collect_refs(value);
-            for reference in &refs {
-                match classify_ref(reference, remote_base.as_deref()) {
+            let refs = collect_refs(value, &pointer);
+            for collected in &refs {
+                match classify_ref(&collected.reference, remote_base.as_deref()) {
                     RefTarget::InDocument => {}
                     RefTarget::LocalRelative(path) => {
                         // Only a *local* document produces a local-relative target: a relative ref
@@ -105,20 +106,26 @@ impl InputBundle {
                         }
                     }
                     RefTarget::UnsupportedRemote(url) if bundle.url_to_file.contains_key(&url) => {}
-                    RefTarget::UnsupportedRemote(url) => bundle.reject_unpinned(&url, file, diags),
+                    RefTarget::UnsupportedRemote(url) => {
+                        reject_unpinned(&url, referring_site(collected), diags)
+                    }
                     RefTarget::Remote(url) => {
                         if bundle.url_to_file.contains_key(&url) {
                             continue;
                         }
-                        if let Some(loaded) = bundle.load_remote(&url, file, diags)? {
+                        let site = referring_site(collected);
+                        if let Some(loaded) = bundle.load_remote(&url, site, diags)? {
                             queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
                 }
             }
             // Every document a reference names is loaded by now, so its target can be found.
-            for reference in refs.iter().filter(|reference| enters_extension(reference)) {
-                if let Some(target) = bundle.reference_target(reference, file) {
+            for collected in refs
+                .iter()
+                .filter(|collected| enters_extension(&collected.reference))
+            {
+                if let Some(target) = bundle.reference_target(&collected.reference, file) {
                     if walked_targets.insert(target.clone()) {
                         queue.push_back(target);
                     }
@@ -301,24 +308,24 @@ impl InputBundle {
 
     /// Resolve a remote `$ref` base `url` from its vendored, hash-pinned copy. Returns the loaded
     /// file id, or `None` when the ref is unpinned (`E003`) or the vendored bytes drift from the
-    /// lock (`E021`) — in either case a diagnostic is emitted and the load ultimately aborts. Never
-    /// performs network I/O.
+    /// lock (`E021`) — in either case a diagnostic is emitted at `site`, the reference that named
+    /// `url`, and the load ultimately aborts. Never performs network I/O.
     fn load_remote(
         &mut self,
         url: &str,
-        referrer: FileId,
+        site: Provenance,
         diags: &mut Diagnostics,
     ) -> Result<Option<FileId>, Aborted> {
         let Some(entry) = self.lock.as_ref().and_then(|lock| lock.get(url)).cloned() else {
-            self.reject_unpinned(url, referrer, diags);
+            reject_unpinned(url, site, diags);
             return Ok(None);
         };
         let vendored = self.vendor_dir.join(&entry.path);
         let bytes = match std::fs::read(&vendored) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.reject_drift(
-                    referrer,
+                reject_drift(
+                    site,
                     format!("vendored file for `{url}` is missing or unreadable at `{vendored}`: {error}"),
                     diags,
                 );
@@ -327,8 +334,8 @@ impl InputBundle {
         };
         let actual = sha256_hex(&bytes);
         if actual != entry.sha256 {
-            self.reject_drift(
-                referrer,
+            reject_drift(
+                site,
                 format!(
                     "vendored content for `{url}` does not match the pinned sha256 \
                      (lock `{}`, on-disk `{actual}`)",
@@ -370,32 +377,6 @@ impl InputBundle {
         self.url_to_file.entry(base.to_owned()).or_insert(id);
         self.register_self_identity(id, Some(base));
         Ok(Some(id))
-    }
-
-    fn reject_unpinned(&self, url: &str, referrer: FileId, diags: &mut Diagnostics) {
-        Diagnostic::error(
-            Code::AbsoluteRefUnsupported,
-            Provenance::new(JsonPointer::root(), Some(self.value_at(referrer).span())),
-        )
-        .message(format!(
-            "remote $ref `{url}` is not pinned in {LOCK_FILE_NAME}"
-        ))
-        .remedy(format!(
-            "run `spargen lock <spec>` to fetch, vendor, and pin `{url}`"
-        ))
-        .emit(diags);
-    }
-
-    fn reject_drift(&self, referrer: FileId, message: String, diags: &mut Diagnostics) {
-        Diagnostic::error(
-            Code::VendoredRefDrift,
-            Provenance::new(JsonPointer::root(), Some(self.value_at(referrer).span())),
-        )
-        .message(message)
-        .remedy(format!(
-            "re-run `spargen lock <spec>` to re-vendor, or restore the vendored file under {VENDOR_DIR}"
-        ))
-        .emit(diags);
     }
 
     /// The loaded local document `path` denotes, compared by [`Self::local_identity`] rather than
@@ -463,6 +444,34 @@ impl InputBundle {
             self.url_to_file.insert(base.to_owned(), file);
         }
     }
+}
+
+/// Where a diagnostic about `collected`'s target is raised: at the reference that names it, in
+/// the document holding it, rather than at that document's root (#534).
+fn referring_site(collected: &CollectedRef) -> Provenance {
+    Provenance::new(collected.pointer.clone(), Some(collected.span))
+}
+
+/// Reject a remote reference to `url` that `spargen.lock` does not pin (`E003`), at `site`.
+fn reject_unpinned(url: &str, site: Provenance, diags: &mut Diagnostics) {
+    Diagnostic::error(Code::AbsoluteRefUnsupported, site)
+        .message(format!(
+            "remote $ref `{url}` is not pinned in {LOCK_FILE_NAME}"
+        ))
+        .remedy(format!(
+            "run `spargen lock <spec>` to fetch, vendor, and pin `{url}`"
+        ))
+        .emit(diags);
+}
+
+/// Reject a pinned remote reference whose vendored copy is missing or drifted (`E021`), at `site`.
+fn reject_drift(site: Provenance, message: String, diags: &mut Diagnostics) {
+    Diagnostic::error(Code::VendoredRefDrift, site)
+        .message(message)
+        .remedy(format!(
+            "re-run `spargen lock <spec>` to re-vendor, or restore the vendored file under {VENDOR_DIR}"
+        ))
+        .emit(diags);
 }
 
 /// Parse `text` into a value tree, choosing the format from `name`'s `.json`/`.yaml`/`.yml`

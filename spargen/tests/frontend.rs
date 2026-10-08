@@ -392,42 +392,16 @@ fn the_location_oracle_sees_each_lost_location() {
     ))
     .is_empty());
     assert!(reasons(located(Code::InvalidInput, "", 0, (1, 0, 29), "m")).is_empty());
-    // A known gap is still reported, with the issue that tracks it.
-    let known = oracles::location_violations(
-        &[located(
-            Code::AbsoluteRefUnsupported,
-            "",
-            0,
-            (2, 15, 28),
-            "m",
-        )],
-        root,
-    );
-    assert_eq!(known[0].known, Some(oracles::ISSUE_REMOTE_REF_POINTER));
-    // Each rule is checked on its own: a known empty pointer and a known whole-root span do not
-    // hide an empty name, which no issue tracks for `E003`.
-    let all: Vec<Option<u32>> = oracles::location_violations(
-        &[located(
-            Code::AbsoluteRefUnsupported,
-            "",
-            0,
-            (1, 0, 29),
-            "in ``",
-        )],
-        root,
-    )
-    .into_iter()
-    .map(|violation| violation.known)
-    .collect();
-    assert_eq!(
-        all,
-        [
-            None,
-            Some(oracles::ISSUE_REMOTE_REF_POINTER),
-            Some(oracles::ISSUE_REMOTE_REF_POINTER)
-        ],
-        "{all:?}"
-    );
+    // `E003` and `E021` are no longer known gaps (#534): each rule they break is a violation of
+    // its own, the empty pointer and the whole-root span as much as an empty name.
+    for code in [Code::AbsoluteRefUnsupported, Code::VendoredRefDrift] {
+        let all: Vec<Option<u32>> =
+            oracles::location_violations(&[located(code, "", 0, (1, 0, 29), "in ``")], root)
+                .into_iter()
+                .map(|violation| violation.known)
+                .collect();
+        assert_eq!(all, [None, None, None], "{code:?}: {all:?}");
+    }
     // `E022` is no longer a known gap (#533): its empty pointer is a violation of its own.
     let duplicate = oracles::location_violations(
         &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
@@ -8399,39 +8373,169 @@ mod remote {
         assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
-    /// `E003` and `E021` still report the document root as their pointer, with a span over the
-    /// whole document (#534), so [`oracles::KNOWN_ROOT_POINTERS`] and
-    /// [`oracles::KNOWN_WHOLE_ROOT_SPANS`] still need their entries. Once #534 is fixed this fails:
-    /// remove the entries and this fixture together, so the known gaps only shrink.
+    /// The one diagnostic `report` carries, which must be `code`, with its pointer and the line its
+    /// span starts on, after the location oracle has found nothing to report about it.
+    fn located_at(report: &Report, root: &[u8], code: Code) -> (String, u32) {
+        let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
+        assert_eq!(reported, [code], "{report:#?}");
+        let violations: Vec<String> = oracles::location_violations(report.diagnostics(), root)
+            .into_iter()
+            .map(|violation| violation.reason)
+            .collect();
+        assert!(violations.is_empty(), "{violations:#?}");
+        let diag = &report.diagnostics()[0];
+        let span = diag.span.expect("located at a span");
+        assert_eq!(span.file.0, 0, "{diag:?}");
+        (diag.pointer.as_str().to_owned(), span.start.line)
+    }
+
+    /// `E003` and `E021` are raised at the `$ref` that names the remote document, with that
+    /// value's span, not at the referring document's root (#534), through
+    /// `check` and `generate` alike: unpinned, pinned with the vendored file missing, and pinned
+    /// with drifted vendored bytes.
     #[test]
-    fn e003_and_e021_still_report_the_root_pointer_tracked_by_534() {
-        for (code, lock) in [
-            (Code::AbsoluteRefUnsupported, None),
-            (Code::VendoredRefDrift, Some(lock(GIZMO_SHA256))),
+    fn e003_and_e021_point_at_the_remote_ref() {
+        let wrong_sha = "0".repeat(64);
+        for (code, lock, vendored) in [
+            (Code::AbsoluteRefUnsupported, None, None),
+            (Code::VendoredRefDrift, Some(lock(GIZMO_SHA256)), None),
+            (
+                Code::VendoredRefDrift,
+                Some(lock(&wrong_sha)),
+                Some(GIZMO_YAML),
+            ),
         ] {
-            let (report, temp, _) = run(lock, None, true);
-            let root = std::fs::read(temp.path().join("openapi.yaml")).unwrap();
-            let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
-            assert_eq!(reported, [code], "{report:#?}");
-            let known: Vec<(bool, Option<u32>)> =
-                oracles::location_violations(report.diagnostics(), &root)
-                    .into_iter()
-                    .map(|violation| {
-                        (
-                            violation.reason.contains("whole root document"),
-                            violation.known,
-                        )
-                    })
-                    .collect();
-            // Both the root pointer and the whole-document span are #534's, each reported.
+            for check_only in [true, false] {
+                let (report, temp, _) = run(lock.clone(), vendored, check_only);
+                let root = std::fs::read(temp.path().join("openapi.yaml")).unwrap();
+                assert_eq!(
+                    located_at(&report, &root, code),
+                    (
+                        "/paths/~1gizmo/get/responses/200/content/application~1json/schema/$ref"
+                            .to_owned(),
+                        13
+                    ),
+                    "{code:?}, check only: {check_only}"
+                );
+            }
+        }
+    }
+
+    /// A remote reference that only a reference into a specification extension reaches is located
+    /// at its place inside the extension, and one a Security Requirement key spells is located at
+    /// that key (#534). A `$ref` at the root document's top level is located at its member, so
+    /// even that one is not reported at the root.
+    #[test]
+    fn e003_points_at_a_remote_ref_inside_an_extension_target_and_at_a_requirement_key() {
+        let extension = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /gizmo:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: '#/x-defs/Gizmo' }}\n\
+             x-defs:\n\
+             \x20 Gizmo:\n\
+             \x20   $ref: \"{GIZMO_URL}\"\n"
+        );
+        let requirement = "openapi: 3.1.0\n\
+             info: { title: T, version: 1.0.0 }\n\
+             security:\n\
+             \x20 - https://api.example.com/schemes/key.yaml: []\n\
+             paths: {}\n";
+        let top_level = format!(
+            "$ref: \"{GIZMO_URL}\"\n\
+             openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n"
+        );
+        for (spec, pointer, line) in [
+            (extension.as_str(), "/x-defs/Gizmo/$ref", 14),
+            (top_level.as_str(), "/$ref", 1),
+            (
+                requirement,
+                "/security/0/https:~1~1api.example.com~1schemes~1key.yaml",
+                4,
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path =
+                camino::Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+            std::fs::write(&path, spec).unwrap();
+            let report = run_check(&Spec::new(path));
             assert_eq!(
-                known,
-                [
-                    (false, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
-                    (true, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
-                ],
-                "{report:#?}"
+                located_at(&report, spec.as_bytes(), Code::AbsoluteRefUnsupported),
+                (pointer.to_owned(), line),
+                "{spec}"
             );
+        }
+    }
+
+    /// A URL cited from several sites is reported once per site, each at its own `$ref` (#534):
+    /// the sites' locations differ, so `Diagnostics::emit` no longer merges them into one report
+    /// per referring file, as it did while every report sat at the root. Unpinned (`E003`) and
+    /// drifted (`E021`) alike, through `check` and `generate`.
+    #[test]
+    fn a_remote_url_cited_from_two_sites_is_reported_at_each() {
+        let spec = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /a:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{GIZMO_URL}\" }}\n\
+             \x20 /b:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{GIZMO_URL}\" }}\n"
+        );
+        let drifted = lock(&"0".repeat(64));
+        for (code, lock, vendor) in [
+            (Code::AbsoluteRefUnsupported, None, &[][..]),
+            (
+                Code::VendoredRefDrift,
+                Some(drifted.as_str()),
+                &[(GIZMO_VENDOR_PATH, GIZMO_YAML)][..],
+            ),
+        ] {
+            for check_only in [true, false] {
+                let (report, _temp, _out) = run_layout(&spec, lock, vendor, check_only);
+                let located: Vec<(Code, &str, Option<u32>)> = report
+                    .diagnostics()
+                    .iter()
+                    .map(|d| (d.code, d.pointer.as_str(), d.span.map(|s| s.start.line)))
+                    .collect();
+                assert_eq!(
+                    located,
+                    [
+                        (
+                            code,
+                            "/paths/~1a/get/responses/200/content/application~1json/schema/$ref",
+                            Some(11)
+                        ),
+                        (
+                            code,
+                            "/paths/~1b/get/responses/200/content/application~1json/schema/$ref",
+                            Some(19)
+                        ),
+                    ],
+                    "check only: {check_only}: {report:#?}"
+                );
+            }
         }
     }
 
