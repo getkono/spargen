@@ -7,7 +7,7 @@
 //! (`include_str!`) for codegen to embed into a private `support` module of the generated code,
 //! and exposes the error-taxonomy metadata as data for docs cross-referencing.
 //!
-//! The embed is not verbatim: `codegen::emit::emit_support` keeps each file only up to its
+//! The embed is not verbatim: `codegen::runtime::emit_support` keeps each file only up to its
 //! `#[cfg(test)]` marker, rewrites every `crate::` to `super::` so the paths resolve from the
 //! file's new submodule, and re-parses the result as tokens, which drops ordinary comments.
 

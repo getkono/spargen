@@ -4,16 +4,34 @@
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
 //! deterministic item ordering and `prettyplease` formatting. Codegen never
 //! sees a spec document — it consumes only the IR and the [`crate::name::Names`] table.
+//!
+//! One module per emitted construct, each producing a deterministically-ordered token fragment
+//! that [`generate`] assembles and formats: [`models`] (the `types` module) and [`union`] (its
+//! union enums), [`client`] (the `Client`, its servers, and the per-operation items beside it),
+//! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
+//! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
+//! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
+//! module and the root re-exports), and the shared [`docs`] and [`ty`] renderers.
 
-mod emit;
+mod blocking;
+mod body;
+mod client;
+mod dispatch;
+mod docs;
 mod format;
+mod models;
+mod operation;
+mod params;
+mod responses;
+mod runtime;
+mod ty;
+mod union;
 
-use crate::diag::Diagnostics;
 use crate::ir::Api;
 use crate::name::Names;
 use quote::{format_ident, quote};
 
-pub(crate) use format::format_tokens;
+use format::format_tokens;
 
 /// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
 /// features: when off, the corresponding `format` mappings fall back to `String`.
@@ -55,30 +73,24 @@ pub(crate) struct GeneratedCode {
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
-/// produces stable diffs. `diags` is retained for any future codegen-time diagnostic; codegen emits
-/// none today (every spec construct is decided during lowering).
-pub(crate) fn generate(
-    api: &Api,
-    names: &Names,
-    options: &CodegenOptions,
-    diags: &mut Diagnostics,
-) -> GeneratedCode {
-    // Codegen emits no diagnostics of its own: multi-status responses are now lowered to typed
-    // per-operation response enums rather than degraded (the retired W003).
-    let _ = diags;
+/// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
+/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
+/// `W003`, lower to typed per-operation response enums).
+pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> GeneratedCode {
     let uses_streams = api.uses_streams();
     // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
     // and the newtypes would be dead weight.
     let uses_time = options.feature_time && api.uses_time();
-    let support = emit::emit_support(api.uses_xml(), uses_streams, uses_time);
-    let models = emit::emit_models(api, names, options);
-    let client = emit::emit_client(api, names, options);
+    let support = runtime::emit_support(api.uses_xml(), uses_streams, uses_time);
+    let models = models::emit_models(api, names, options, uses_time);
+    let client = client::emit_client(api, names, options);
     // The synchronous facade is always emitted, gated on the user-opt-in `blocking` feature; a
     // default build compiles it out entirely (no tokio reference, no `BlockingClient`).
-    let blocking = emit::emit_blocking_client(api, names, options);
+    let blocking = blocking::emit_blocking_client(api, names);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
-    // The root surface is emitted from the lists `emit` owns, which `error_type_ident` also reads.
+    // The root surface is emitted from the lists `runtime` owns, which `error_type_ident` also
+    // reads.
     let root_reexport = |names: &[&str]| {
         let idents = names.iter().map(|name| format_ident!("{}", name));
         quote! {
@@ -86,9 +98,9 @@ pub(crate) fn generate(
             pub use support::{ #(#idents),* };
         }
     };
-    let root_exports = root_reexport(emit::ROOT_REEXPORTS);
-    let stream_exports = uses_streams.then(|| root_reexport(emit::STREAM_ROOT_REEXPORTS));
-    let datetime_exports = uses_time.then(|| root_reexport(emit::DATETIME_ROOT_REEXPORTS));
+    let root_exports = root_reexport(runtime::ROOT_REEXPORTS);
+    let stream_exports = uses_streams.then(|| root_reexport(runtime::STREAM_ROOT_REEXPORTS));
+    let datetime_exports = uses_time.then(|| root_reexport(runtime::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
         #root_exports
         #stream_exports
