@@ -209,7 +209,7 @@ spargen::generate(&build).expect_success();
 paths/operations/components by name (an exact or glob rule) instead of letting carve decide, use the
 [compatibility omit mode](compatibility.md). The vendored
 [`corpus/recipes/utoipa-untagged-overlap.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/utoipa-untagged-overlap.json)
-demonstrates that overlapping `integer | number` unions no longer need this escape hatch: they
+demonstrates that overlapping `integer | number` unions do not need this escape hatch: they
 generate as typed trial-matching enums. The carve integration suite separately pins the
 reject-then-carve flow for genuinely unsupported constructs.
 

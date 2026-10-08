@@ -4,8 +4,10 @@
 //! The generator-side handle to the freestanding runtime shipped inside generated output. The
 //! runtime itself is real, standalone-compilable source in the `support-runtime` workspace member
 //! (compiled and tested in its own right); this module carries each file's source
-//! (`include_str!`) for codegen to embed into a private `support` module of the generated code,
-//! and exposes the error-taxonomy metadata as data for docs cross-referencing.
+//! (`include_str!`) for codegen to embed into a private `support` module of the generated code:
+//! [`runtime_files`] for the files every client embeds as they are, and one accessor for each file
+//! embedded on its own terms: streams, XML, and the RFC 3339 date types only for an API that uses
+//! them, and the blocking client behind its `blocking` feature.
 //!
 //! The embed is not verbatim: `codegen::runtime::emit_support` keeps each file only up to its
 //! `#[cfg(test)]` marker, rewrites every `crate::` to `super::` so the paths resolve from the
@@ -21,7 +23,7 @@ pub(crate) struct SupportFile {
 }
 
 /// The runtime source files, embedded from the `support-runtime` crate via `include_str!`. Emitted
-/// as a private `support` module carrying `#![forbid(unsafe_code)]`.
+/// as a private `support` module carrying an outer `#[forbid(unsafe_code)]`.
 ///
 /// The `include_str!` paths resolve through `src/support/runtime/`, whose entries are symlinks to
 /// the canonical `support-runtime/src/*.rs` sources. That indirection keeps a single source of

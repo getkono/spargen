@@ -2,12 +2,16 @@
 //!
 //! The freestanding runtime support code shipped *inside* every spargen-generated client: the
 //! dispatch routines, the error taxonomy, [`ResponseValue<T>`], and auth plumbing. It is real,
-//! standalone-compilable source (compiled and linted here in its own right) that the
-//! `codegen` subsystem embeds verbatim via `include_str!`.
+//! standalone-compilable source (compiled and linted here in its own right) that spargen embeds
+//! into generated output: its `support` subsystem carries each file via `include_str!`, and
+//! `codegen` emits the text above each file's test module, with `crate::` rewritten to
+//! `super::`.
 //!
-//! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`
-//! and its only dependencies are the near-universal `reqwest` / `serde` / `serde_json` / `bytes`
-//! / `secrecy` set plus `futures-core` for APIs that emit streaming operations.
+//! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`.
+//! Its unconditional dependencies are `reqwest` / `serde` / `serde_json` / `bytes` / `secrecy` /
+//! `futures-core`; the `stream` module, the only user of `futures-core`, is embedded only for APIs
+//! with sequential responses. Three optional dependencies sit behind the features that gate the
+//! conditionally embedded modules: `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`).
 //!
 //! ## Fault-tolerance guarantees
 //!

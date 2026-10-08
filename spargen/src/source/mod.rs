@@ -7,8 +7,9 @@
 //! Parsing preserves file/line/column per node so downstream diagnostics can point at exact
 //! source locations. serde is deliberately *not* used for the document tree: it discards
 //! spans, and precise diagnostics are non-negotiable — hence the in-house [`SpannedValue`].
-//! The eventual YAML path uses an event-level parser over the JSON-compatible subset
-//! OAS prescribes.
+//! YAML is parsed through `yaml_rust2`'s event-level parser into the same tree, over the
+//! JSON-compatible subset OAS prescribes: aliases expand to their anchored values, and non-string
+//! keys and multi-document streams are diagnosed rather than accepted.
 
 mod bundle;
 mod lock;

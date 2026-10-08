@@ -3,8 +3,9 @@
 //!
 //! The version-agnostic API model: operation set, type graph, auth requirements, media map;
 //! provenance (pointer + span) on every node; well-formedness invariants. The IR is the coupling
-//! firewall and primary extension seam — it never sees a spec document or Rust tokens, so a new
-//! spec-version frontend (`oas32`) lowers into it and touches nothing downstream.
+//! firewall and primary extension seam — it never sees a spec document or Rust tokens. One
+//! frontend, `oas31`, lowers both OpenAPI 3.1 and 3.2 into it, and a frontend for another spec
+//! version would lower into it too, touching nothing downstream.
 
 mod auth;
 mod invariant;
