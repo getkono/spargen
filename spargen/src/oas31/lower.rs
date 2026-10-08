@@ -5660,8 +5660,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
     /// are all the same type. No value can tell such variants apart, so the union adds nothing to
     /// its common type — and a `oneOf` of them rejects every value its common type accepts.
-    /// `structural` also counts variants that are distinct definitions emitting one Rust type
-    /// ([`Self::same_type_apart_from_null`]) as the same, unless a discriminator tells them apart by
+    /// `structural` also counts variants that are distinct definitions decoding the same values —
+    /// one Rust type, or distinct items of one structure (#492) — as the same
+    /// ([`Self::same_type_apart_from_null`]), unless a discriminator tells them apart by
     /// tag. Returned with the number of variants that accept `null`: after the meet with a `$ref`
     /// target each variant keeps its own nullability, so structurally shared variants need not
     /// agree on it.
@@ -5810,8 +5811,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .collect();
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(format!(
-                "{} intersect to a union some of whose branches lower to the same generated type, \
-                 differing only in keywords it does not carry, so a value matching one matches all \
+                "{} intersect to a union some of whose branches lower to the same generated type \
+                 or to identically structured ones, differing only in keywords it does not carry, \
+                 so a value matching one matches all \
                  of them and would fail the exactly-one rule: each such set is one variant of the \
                  generated enum, and which of them a value matches is not enforced",
                 spelling.subject(true)
