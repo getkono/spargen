@@ -157,6 +157,7 @@ fn lower_pass(
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
         unmerged_union: None,
+        untyped_beside_null_member: None,
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -822,6 +823,12 @@ struct LowerCtx<'a, 'doc> {
     /// `null` is still visible, and merging untyped branches first would hide it behind
     /// `serde_json::Value`.
     unmerged_union: Option<Provenance>,
+    /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
+    /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
+    /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
+    /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
+    /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
+    untyped_beside_null_member: Option<Provenance>,
 }
 
 /// The options that change what lowering produces.
@@ -1811,6 +1818,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let sibling =
                 self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
+            let untyped_beside_null_member =
+                self.untyped_beside_null_member.take() == Some(schema.provenance.clone());
             let sibling = sibling?;
             let mark = self.graph_mark();
             let Ok(intersection) =
@@ -1838,6 +1847,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Nothing meets the union after the collapse here.
                 if untyped_check {
                     self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
+                }
+                // The meet gave the untyped member `null` exactly where it kept the `null`
+                // member's, so `null` is in two branches or none.
+                let mut collapsed = collapsed;
+                if untyped_beside_null_member {
+                    collapsed.nullable = false;
                 }
                 collapsed
             } else {
@@ -2198,6 +2213,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The member's OWN nullability, before the intersection overwrites `inner`. Needed
             // below when the sibling is not entitled to decide.
             let member_nullable = inner.nullable;
+            // Whether `null` is in the member's branch, for the `oneOf` count below: its own
+            // nullability, which a sibling meet can only take away, or — once a sibling meets it —
+            // the meet's answer for an untyped member, which takes `null` from a sibling that
+            // accepts it (`Value` met with `type: [object, 'null']` is a nullable object), as each
+            // variant of the multi-member path below is counted after its own meet. Without a
+            // meet an untyped member is not counted, as that path does not count one either.
+            let mut member_takes_null = member_nullable;
+            let member_untyped = self
+                .graph
+                .get(inner.id)
+                .is_some_and(|def| matches!(def.kind, TypeKind::Any));
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -2326,6 +2352,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     member_nullable || null_from_member
                 };
+                // The `null` member was folded into `inner` before the meet, but an untyped member
+                // accepts `null` already, so folding it changed nothing the meet saw: the meet's
+                // nullability is the member's own after the meet.
+                member_takes_null = member_nullable || (member_untyped && constrained.nullable);
                 inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
@@ -2335,10 +2365,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             // A `null` member beside a member that accepts `null` itself puts `null` in two
-            // branches, which fails a `oneOf`'s exactly-one rule (#563). A sibling meet only ever
-            // removes `null`, so counting the member's own nullability before it is sound.
+            // branches, which fails a `oneOf`'s exactly-one rule (#563), counted after the meet
+            // like the multi-member path's variants.
             let null_twice =
-                mode == UnionMode::OneOf && null_members + usize::from(member_nullable) > 1;
+                mode == UnionMode::OneOf && null_members + usize::from(member_takes_null) > 1;
+            // Held back for a meet with no sibling here, an untyped member's `null` is not settled
+            // yet: the caller counts it after the meet.
+            if mode == UnionMode::OneOf
+                && null_members > 0
+                && member_untyped
+                && sibling.is_none()
+                && self.unmerged_union.as_ref() == Some(&schema.provenance)
+            {
+                self.untyped_beside_null_member = Some(schema.provenance.clone());
+            }
             ty.nullable = (inner.nullable || nullable) && !null_twice;
             ty.boxed = inner.boxed;
             return Some(ty);
@@ -2495,7 +2535,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // of the variants merge below, since two put `null` in two branches, which fails
         // exactly-one (#563). Decided here, before a meet the union is held back for
         // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
-        // them, and a meet only ever removes `null` from a branch.
+        // them. That meet removes `null` from a typed branch only; an untyped branch it gives
+        // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
         if mode == UnionMode::OneOf && null_members + nullable_variants > 1 {
             nullable = false;
         }
@@ -4217,6 +4258,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let union_mark = self.graph_mark();
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
+        let untyped_beside_null_member =
+            self.untyped_beside_null_member.take() == Some(union.provenance.clone());
         let lowered = lowered?;
         let mark = self.graph_mark();
         let mut meet = lowered;
@@ -4270,7 +4313,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
         let mut ty = self.insert_schema_type(schema, hint, kind);
-        ty.nullable = meet.nullable;
+        // The meets gave the untyped member `null` exactly where they kept the `null` member's, so
+        // `null` is in two branches or none.
+        ty.nullable = meet.nullable && !untyped_beside_null_member;
         ty.boxed = meet.boxed;
         self.elide_unused_union_lowering(union_mark..mark);
         Some(ty)

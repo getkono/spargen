@@ -1800,6 +1800,9 @@ fn a_one_of_whose_null_matches_two_unmerged_branches_rejects_null() {
     let nullable_objects =
         "\n            - { type: [object, 'null'], required: [a] }\n            \
                             - { type: [object, 'null'], required: [b] }";
+    let nullable_refs = "\n            - $ref: '#/components/schemas/NA'\n            \
+                         - $ref: '#/components/schemas/NC'";
+    let discriminator = "discriminator: { propertyName: kind }";
     for (shape, schema, nullable) in [
         (
             "allOf member",
@@ -1839,6 +1842,50 @@ fn a_one_of_whose_null_matches_two_unmerged_branches_rejects_null() {
             "oneOf: [ { type: 'null' }, { type: [string, 'null'] } ]".to_owned(),
             false,
         ),
+        // The untyped member takes `null` from the sibling in the meet, as the multi-member path's
+        // untyped variants do, so `null` is in its branch and the `null` member's.
+        (
+            "null member beside an untyped branch met with a nullable type, its only nullable \
+             branch",
+            "type: [object, 'null']\n          oneOf: [ { type: 'null' }, { required: [a] } ]"
+                .to_owned(),
+            false,
+        ),
+        (
+            "null member beside an untyped branch met with `NB`, its only nullable branch",
+            "$ref: '#/components/schemas/NB'\n          \
+             oneOf: [ { type: 'null' }, { required: [a] } ]"
+                .to_owned(),
+            false,
+        ),
+        (
+            "allOf member, null member beside an untyped branch, its only nullable branch",
+            "allOf:\n          - $ref: '#/components/schemas/NB'\n          \
+             - oneOf: [ { type: 'null' }, { required: [a] } ]"
+                .to_owned(),
+            false,
+        ),
+        // Without a meet the untyped member is not counted, so `null` matches the `null` member
+        // alone.
+        (
+            "inline null member beside an untyped branch",
+            "oneOf: [ { type: 'null' }, { required: [a] } ]".to_owned(),
+            true,
+        ),
+        // `null` carries no tag, so a discriminator does not exempt the count.
+        (
+            "discriminated nullable $refs",
+            format!("oneOf:{nullable_refs}\n          {discriminator}"),
+            false,
+        ),
+        (
+            "allOf member, discriminated nullable $refs",
+            format!(
+                "allOf:\n          - $ref: '#/components/schemas/NB'\n          - oneOf:\
+                 {nullable_refs}\n            {discriminator}"
+            ),
+            false,
+        ),
         (
             "inline single nullable branch",
             "oneOf: [ { type: [string, 'null'] }, { type: integer } ]".to_owned(),
@@ -1876,6 +1923,18 @@ components:
       properties:
         a: {{ type: string }}
         b: {{ type: string }}
+    NA:
+      type: [object, 'null']
+      properties:
+        kind: {{ type: string }}
+        a: {{ type: string }}
+      required: [kind]
+    NC:
+      type: [object, 'null']
+      properties:
+        kind: {{ type: string }}
+        c: {{ type: string }}
+      required: [kind]
     Holder:
       type: object
       properties:
