@@ -2130,6 +2130,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            // Everything the sibling meet below inserts has an id at or above this mark; the
+            // member and the sibling were lowered before it.
+            let mark = self.graph_mark();
             // The member's OWN nullability, before the intersection overwrites `inner`. Needed
             // below when the sibling is not entitled to decide.
             let member_nullable = inner.nullable;
@@ -2264,6 +2267,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+            // The meet's result is re-emitted under this schema's name, so the meet's own inserts
+            // (`…Constrained`, and whatever it built on the way) are unused unless `kind` reaches
+            // them (#462). Without a sibling nothing was inserted since `mark`.
+            self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = inner.nullable || nullable;
             ty.boxed = inner.boxed;
@@ -2281,6 +2288,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut variant_nullable: Vec<bool> = Vec::new();
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
+        // The ids each member's sibling meet inserted. They interleave with the members' own
+        // lowered types, which stay, so a re-emit below elides the unused ones rather than popping.
+        let mut meet_inserts: Vec<std::ops::Range<u32>> = Vec::new();
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
@@ -2317,12 +2327,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                ty = match self.meet_refiner(
+                let mark = self.graph_mark();
+                let met = self.meet_refiner(
                     ty,
                     sibling.refiner,
                     &mut reach,
                     &format!("{hint}Variant{index}Constrained"),
-                ) {
+                );
+                meet_inserts.push(mark..self.graph_mark());
+                ty = match met {
                     Ok(intersection) => intersection,
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
@@ -2436,6 +2449,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if variants.len() == 1 {
             let inner = variants[0].ty;
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+            // The sole variant is re-emitted under this schema's name, so the meets' inserts —
+            // the surviving variant's `…Constrained` def, and whatever an excluded member's meet
+            // left — are unused unless `kind` reaches them (#462).
+            let reached = reachable_types(&self.graph, &kind_edges(&kind));
+            for id in meet_inserts.into_iter().flatten().map(TypeId) {
+                if !reached.contains(&id) {
+                    self.graph.elide(id);
+                }
+            }
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = inner.nullable || nullable;
             ty.boxed = inner.boxed;
@@ -2863,6 +2885,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
         let refiner = Refiner::Scoped(scoped);
         let mut reach = ScopeReach::default();
+        let mark = self.graph_mark();
         let met = self.meet_scoped_refiner_with_union(
             referenced,
             union,
@@ -2894,6 +2917,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // is the exact null type, whose one value is `null` already, so it is not wrapped in an
         // `Option` as the `allOf` and inline spellings of the same union are not (#450).
         let nullable = referenced.nullable && !matches!(kind, TypeKind::Null);
+        // The met union is re-emitted under this schema's name, so its own def
+        // (`…ReferenceIntersection`) is unused; the branches it met stay where `kind` reaches
+        // them (#462).
+        self.discard_meet_intermediates(mark, &kind);
         let mut ty = self.insert_schema_type(schema, hint, kind);
         ty.nullable = nullable;
         ty.boxed = met.boxed;
