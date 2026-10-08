@@ -162,9 +162,8 @@ the version it emits, and the idioms spargen handles.
 - **No `serde(untagged)`.** First-match-wins deserialization can silently misparse; undiscriminated
   unions are rejected instead.
 - **`#![forbid(unsafe_code)]`-equivalent attributes on all generated items**, `Debug`-redacted
-  secrets, and a 64 KiB (configurable) cap on error-body retention — bounding reading too, for
-  bodies read as errors on native targets. Two paths are not yet capped; the emitted
-  `ClientConfig::max_error_body` doc names them.
+  secrets, and a 64 KiB (configurable) cap on error-body retention, whose reach the emitted
+  `ClientConfig::max_error_body` doc states.
 
 ## Status
 

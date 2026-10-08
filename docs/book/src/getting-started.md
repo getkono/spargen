@@ -66,23 +66,13 @@ is a copyable template.
 
 ### Runtime dependency contract
 
-Use these tested caret floors. You may choose a higher compatible floor; spargen rejects a
-requirement that could resolve below these versions or beyond the next semver breaking line.
+`spargen deps <spec>` prints the exact `[dependencies]` block a spec's generated client needs:
+each crate's tested caret floor and the features the compiled API uses, from the same table the
+audit reads (see the [CLI reference](./cli.md#spargen-deps)). You may choose a higher compatible
+floor; spargen rejects a requirement that could resolve below a floor or beyond the next semver
+breaking line, and `reqwest` must have its default features off.
 
-| Dependency | Required features | When required |
-| --- | --- | --- |
-| `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
-| `reqwest = "0.12.28"` | `default-features = false` (in `[workspace.dependencies]` when inherited, see below); `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
-| `secrecy = "0.10.3"` | - | Always |
-| `serde = "1.0.229"` | `derive` | Always |
-| `serde_json = "1.0.151"` | - | Always |
-| `futures-core = "0.3.32"` | - | Only for an API with sequential responses |
-| `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
-| `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
-| `time = "0.3.55"` | `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
-| `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
-
-`tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
+The blocking client's `tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
 `build.rs` audit evaluates those tables for the target being built, as Cargo does (a wasm32 build
 needs none), while `generate_api!`, which cannot see the target, requires them to jointly cover
 every non-wasm target.
