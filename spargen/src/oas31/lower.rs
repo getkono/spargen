@@ -4441,6 +4441,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut additional = AdditionalProps::Allow;
         // Repeated properties whose types have no common value, in first-seen order.
         let mut uninhabited: IndexSet<String> = IndexSet::new();
+        // Every `default` a member writes for each property, as that member wrote it. Which one the
+        // merged field keeps is decided once over all of them after the loop (see
+        // `merge_field_default`), never pair by pair as members arrive (#577).
+        let mut written: IndexMap<String, Vec<FieldDefault>> = IndexMap::new();
         // Every member is lowered already, so what the merge inserts from here on is its meets'.
         let mark = self.graph_mark();
         for contribution in contributions {
@@ -4487,6 +4491,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             for field in member_fields {
+                if let Some(default) = &field.default {
+                    written
+                        .entry(field.name.wire.clone())
+                        .or_default()
+                        .push(default.clone());
+                }
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
                         // A field one side carries only because it requires the name is not a
@@ -4496,14 +4506,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if take_declaration(existing, field) {
                             continue;
                         }
-                        // Either member's `default` is a default of the merged field, whichever
-                        // member came first (see `merge_field_default`).
-                        merge_field_default(
-                            &mut existing.default,
-                            field.default.as_ref(),
-                            &field.name.wire,
-                            self.diags,
-                        );
                         // A repeated property is an intersection, not an equality assertion: retain
                         // the narrower compatible type.
                         let field_hint = format!("{hint}{}Intersection", field.name.wire);
@@ -4564,6 +4566,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                 }
             }
+        }
+
+        // Every member's `default` is a default of the merged field, whichever member came first
+        // (see `merge_field_default`). This is decided before any verdict below, so the `default`s
+        // the merge drops are reported beside it (#545).
+        for field in fields.values_mut() {
+            let defaults = written.shift_remove(&field.name.wire).unwrap_or_default();
+            field.default = merge_field_default(defaults, &field.name.wire, self.diags);
         }
 
         // A field no member declares is an undeclared key of every member, so each member's
@@ -6032,12 +6042,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     // Either side's `default` is a default of the merged field, whichever side is
                     // the `$ref` (see `merge_field_default`).
-                    merge_field_default(
-                        &mut existing.default,
-                        field.default.as_ref(),
-                        &field.name.wire,
-                        self.diags,
-                    );
+                    let defaults = existing
+                        .default
+                        .take()
+                        .into_iter()
+                        .chain(field.default.clone())
+                        .collect();
+                    existing.default = merge_field_default(defaults, &field.name.wire, self.diags);
                     let field_hint = format!("{hint}{}", field.name.wire);
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
@@ -10969,31 +10980,25 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     true
 }
 
-/// Merge the `default` the other side of an intersection declares for a repeated property into
-/// the field kept for it (#432). `allOf` is commutative, and so is this merge: a default either
-/// side declares survives whichever side came first, and two sides that declare different
-/// defaults keep the same one in either order — an applicable default before one that cannot be
-/// applied, then the lesser rustdoc note, then the lesser `default` location — while the other is
-/// reported (`W005`) at the `default` that wrote it, since the field cannot carry it. Two defaults
-/// of one value (`3` and `3.0` alike) are one default for choosing what to keep, but not for
-/// accounting: the kept one carries the other's pointers in [`FieldDefault::also_written`], and
-/// whichever drop reports it reports every pointer that wrote the value (#543). The kept default
-/// is then decided against the merged field as every other is: a requirement drops its
-/// application here, and [`retype_field_defaults`] re-types it against the narrowed type, which
-/// for an empty meet leaves it unapplied and reports it as `W005` (#453).
+/// The `default` the merged field of an intersection keeps for a repeated property, given every
+/// `default` its sides write for it (#432). `allOf` is commutative, and so is this merge: the
+/// choice is made once over all of them — an applicable default before one that cannot be
+/// applied, then the lesser rustdoc note, then the lesser `default` location — so it is the same
+/// in every order of the sides, and every other different value is reported (`W005`) at the
+/// `default` that wrote it, since the field cannot carry it. Nothing is reported before every
+/// side is read: a pairwise fold would report a value one pair ranked lower even where a later
+/// side's equal value is the one kept (#577). Two defaults of one value (`3` and `3.0` alike) are
+/// one default for choosing what to keep, but not for accounting: the kept one carries the
+/// others' pointers in [`FieldDefault::also_written`], and whichever drop reports it reports
+/// every pointer that wrote the value (#543). The kept default is then decided against the merged
+/// field as every other is: a requirement drops its application at the caller, and
+/// [`retype_field_defaults`] re-types it against the narrowed type, which for an empty meet leaves
+/// it unapplied and reports it as `W005` (#453).
 fn merge_field_default(
-    kept: &mut Option<FieldDefault>,
-    other: Option<&FieldDefault>,
+    written: Vec<FieldDefault>,
     property: &str,
     diags: &mut Diagnostics,
-) {
-    let Some(other) = other else {
-        return;
-    };
-    let Some(current) = kept.as_ref() else {
-        *kept = Some(other.clone());
-        return;
-    };
+) -> Option<FieldDefault> {
     let rank = |default: &FieldDefault| {
         (
             default.applied.is_none(),
@@ -11001,47 +11006,45 @@ fn merge_field_default(
             provenance_rank(&default.provenance),
         )
     };
-    let other_first = rank(other) < rank(current);
-    let (winner, loser) = if other_first {
-        (other, current)
-    } else {
-        (current, other)
-    };
-    let same_value = match (&winner.applied, &loser.applied) {
-        (Some(left), Some(right)) => reclassify_default(left) == reclassify_default(right),
-        _ => winner.doc_note == loser.doc_note,
-    };
-    if same_value {
-        // The equal value the loser wrote is merged, not forgotten: its pointers ride on the kept
-        // default, so a later drop reports each of them (#543).
-        let mut merged = winner.clone();
-        merged.also_written.push(loser.provenance.clone());
-        merged
-            .also_written
-            .extend(loser.also_written.iter().cloned());
-        merged.also_written.sort_by_key(provenance_rank);
-        *kept = Some(merged);
-        return;
+    let mut written = written;
+    written.sort_by_cached_key(rank);
+    let mut written = written.into_iter();
+    let mut kept = written.next()?;
+    let mut dropped: Vec<FieldDefault> = Vec::new();
+    for other in written {
+        let same_value = match (&kept.applied, &other.applied) {
+            (Some(left), Some(right)) => reclassify_default(left) == reclassify_default(right),
+            _ => kept.doc_note == other.doc_note,
+        };
+        if same_value {
+            // The equal value another side wrote is merged, not forgotten: its pointers ride on
+            // the kept default, so a later drop reports each of them (#543).
+            kept.also_written.push(other.provenance);
+            kept.also_written.extend(other.also_written);
+        } else {
+            dropped.push(other);
+        }
     }
-    // Every pointer that wrote the dropped value is reported, not only the one the merge reached
-    // first, so which `default`s are reported does not depend on the members' order (#543).
-    for at in std::iter::once(&loser.provenance).chain(&loser.also_written) {
-        Diagnostic::warning(Code::SchemaDefaultNotApplied, at.clone())
-            .message(format!(
-                "schema `default` of property `{property}` differs from the `default` another \
-                 intersected schema declares for it at `{}`, which the merged field keeps; this \
-                 one is neither applied nor documented there",
-                winner.provenance.pointer
-            ))
-            .remedy(
-                "declare one default for the property, or the same default on every intersected \
-                 schema that declares it",
-            )
-            .emit(diags);
+    kept.also_written.sort_by_key(provenance_rank);
+    // Every pointer that wrote a dropped value is reported, not only the one the merge reached
+    // first, so which `default`s are reported does not depend on the sides' order (#543).
+    for loser in &dropped {
+        for at in std::iter::once(&loser.provenance).chain(&loser.also_written) {
+            Diagnostic::warning(Code::SchemaDefaultNotApplied, at.clone())
+                .message(format!(
+                    "schema `default` of property `{property}` differs from the `default` another \
+                     intersected schema declares for it at `{}`, which the merged field keeps; \
+                     this one is neither applied nor documented there",
+                    kept.provenance.pointer
+                ))
+                .remedy(
+                    "declare one default for the property, or the same default on every \
+                     intersected schema that declares it",
+                )
+                .emit(diags);
+        }
     }
-    if other_first {
-        *kept = Some(other.clone());
-    }
+    Some(kept)
 }
 
 /// The total order [`merge_field_default`] breaks ties by and keeps [`FieldDefault::also_written`]
