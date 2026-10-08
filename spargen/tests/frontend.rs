@@ -3189,6 +3189,172 @@ components:
     );
 }
 
+/// Issue #567: a `$ref` whose siblings are a `type` that admits `null` and a `oneOf`/`anyOf` of
+/// untyped object branches admits `null` as JSON Schema does. The split
+/// (`split_union_sibling`) leaves the `type` with the keywords beside the union, so the union's
+/// untyped branches lowered as non-null structs and the meet denied the `null` the target, the
+/// `type` and every branch accept, where the `allOf`-member and inline spellings admit it. A union
+/// held back for a meet now counts such a branch as accepting `null` wherever the meet admits it:
+/// an `anyOf` keeps `null`, a `oneOf` two such branches share rejects it, and so does one beside a
+/// `null` branch. Each row is written over a typed nullable target (`N`) and an untyped one (`U`,
+/// which admits `null` beside a sibling `type` naming `object`, #566); a sibling `type: object`
+/// keeps `null` out. The same count reaches a `$ref`, or an `allOf`, whose union has no `type`
+/// beside it at all, over the nullable `N`, and a plain union's sole untyped branch beside a `null`
+/// branch, which takes the nullable `type`'s `null` as an untyped `Value` branch does (#563).
+///
+/// Not pinned here: a `oneOf` written with the nullable `type` in the union's own schema (the
+/// `allOf`-member and inline spellings) still admits the `null` its two branches share, as a plain
+/// `{type: [object, 'null'], oneOf: [...]}` does (#579).
+#[test]
+fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
+    let branches =
+        "[ { properties: { a: { type: string } } }, { properties: { b: { type: string } \
+                    } } ]";
+    let beside_null = "[ { type: 'null' }, { properties: { a: { type: string } } } ]";
+    let nullable = "[object, 'null']";
+    let mut rows: Vec<(&str, String, bool)> = Vec::new();
+    for target in ["N", "U"] {
+        let target_ref = format!("$ref: '#/components/schemas/{target}'");
+        for (ty, admits) in [(nullable, true), ("object", false)] {
+            rows.push((
+                target,
+                format!("{{ {target_ref}, type: {ty}, anyOf: {branches} }}"),
+                admits,
+            ));
+            rows.push((
+                target,
+                format!("{{ allOf: [ {{ {target_ref} }}, {{ type: {ty}, anyOf: {branches} }} ] }}"),
+                admits,
+            ));
+            rows.push((
+                target,
+                format!(
+                    "{{ type: {ty}, properties: {{ u: {{ type: string }} }}, anyOf: {branches} }}"
+                ),
+                admits,
+            ));
+            rows.push((
+                target,
+                format!("{{ {target_ref}, type: {ty}, oneOf: {branches} }}"),
+                false,
+            ));
+            rows.push((
+                target,
+                format!("{{ {target_ref}, type: {ty}, anyOf: {beside_null} }}"),
+                admits,
+            ));
+            rows.push((
+                target,
+                format!("{{ {target_ref}, type: {ty}, oneOf: {beside_null} }}"),
+                false,
+            ));
+        }
+        rows.push((
+            target,
+            format!("{{ allOf: [ {{ {target_ref} }}, {{ type: object, oneOf: {branches} }} ] }}"),
+            false,
+        ));
+    }
+    let n = "$ref: '#/components/schemas/N'";
+    for (keyword, admits) in [("anyOf", true), ("oneOf", false)] {
+        rows.push((
+            "N",
+            format!("{{ type: {nullable}, {keyword}: {beside_null} }}"),
+            admits,
+        ));
+        rows.push(("N", format!("{{ {n}, {keyword}: {branches} }}"), admits));
+        rows.push((
+            "N",
+            format!("{{ allOf: [ {{ {n} }}, {{ {keyword}: {branches} }} ] }}"),
+            admits,
+        ));
+    }
+    // A `oneOf` of one untyped branch beside a branch that denies `null`, over the nullable `N`:
+    // `null` is in the untyped branch alone, so exactly one branch takes it.
+    for other in ["{ type: object }", "{ type: string }"] {
+        let one_untyped = format!("[ {{ properties: {{ a: {{ type: string }} }} }}, {other} ]");
+        rows.push(("N", format!("{{ {n}, oneOf: {one_untyped} }}"), true));
+        rows.push((
+            "N",
+            format!("{{ allOf: [ {{ {n} }}, {{ oneOf: {one_untyped} }} ] }}"),
+            true,
+        ));
+    }
+    // Nothing in these compositions admits `null` by a `type`: the conjuncts are untyped objects
+    // alone, or the untyped `U`, so every spelling keeps the non-null struct an untyped object
+    // lowers to, and the held-back union's untyped branches take no `null` from the meet.
+    let c = "{ properties: { c: { type: string } } }";
+    let u = "$ref: '#/components/schemas/U'";
+    for site in [
+        format!("{{ allOf: [ {c} ], anyOf: {branches} }}"),
+        format!("{{ allOf: [ {c}, {{ anyOf: {branches} }} ] }}"),
+        format!("{{ properties: {{ c: {{ type: string }} }}, anyOf: {branches} }}"),
+        format!("{{ {u}, anyOf: {branches} }}"),
+        format!("{{ allOf: [ {{ {u} }} ], anyOf: {branches} }}"),
+        format!("{{ allOf: [ {{ {u} }}, {{ anyOf: {branches} }} ] }}"),
+    ] {
+        rows.push(("U", site, false));
+    }
+    // Here the `null` branch admits `null` itself, and the untyped branch beside it is counted as
+    // accepting it too (#563), so `null` is in two branches and fails exactly-one.
+    rows.push((
+        "U",
+        format!("{{ allOf: [ {c} ], oneOf: {beside_null} }}"),
+        false,
+    ));
+    let mut mismatches = Vec::new();
+    for (target, site, admits) in rows {
+        let target_body = if target == "N" {
+            "{ type: [object, 'null'], properties: { u: { type: string } } }"
+        } else {
+            "{ properties: { u: { type: string } } }"
+        };
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    {target}: {target_body}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target}: {site}, via {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{target}: {site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{target}: {site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
 /// nest one union in another's branches, so the composition is rejected with the stable `E013` it
 /// has always drawn rather than emitting a union of identical variants (#463).

@@ -181,6 +181,7 @@ fn lower_pass(
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
         unmerged_union: None,
+        unmerged_union_meets_null: false,
         untyped_beside_null_member: None,
     };
 
@@ -859,6 +860,11 @@ struct LowerCtx<'a, 'doc> {
     /// `null` is still visible, and merging untyped branches first would hide it behind
     /// `serde_json::Value`.
     unmerged_union: Option<Provenance>,
+    /// Whether a conjunct [`Self::unmerged_union`] is met with admits `null`: the `$ref` target,
+    /// or the composition beside it. Only then does an untyped object branch of that union take
+    /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
+    /// spelling keeps the non-null struct an untyped object lowers to.
+    unmerged_union_meets_null: bool,
     /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
     /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
     /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
@@ -1850,10 +1856,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut self.unmerged_union,
                 has_union_sibling.then(|| schema.provenance.clone()),
             );
+            let enclosing_meets_null =
+                std::mem::replace(&mut self.unmerged_union_meets_null, referenced.nullable);
             let sibling_mark = self.graph_mark();
             let sibling =
                 self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
+            self.unmerged_union_meets_null = enclosing_meets_null;
             let untyped_beside_null_member =
                 self.untyped_beside_null_member.take() == Some(schema.provenance.clone());
             let sibling = sibling?;
@@ -2256,10 +2265,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // variant of the multi-member path below is counted after its own meet. Without a
             // meet an untyped member is not counted, as that path does not count one either.
             let mut member_takes_null = member_nullable;
+            // An untyped object member's non-null struct decides nothing about `null` either
+            // (#567), so it takes `null` from a sibling or a meet as `Value` does.
             let member_untyped = self
                 .graph
                 .get(inner.id)
-                .is_some_and(|def| matches!(def.kind, TypeKind::Any));
+                .is_some_and(|def| matches!(def.kind, TypeKind::Any))
+                || self.branch_leaves_null_undecided(real_members[0], inner);
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -2468,6 +2480,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      encloses it, so the enclosing schema's own sibling keywords would have to be \
                      intersected with a target whose definition depends on the result",
                 );
+            }
+            // Held back for a meet with nothing of its own to meet first, an untyped object branch
+            // accepts `null` wherever what it is met with does (#567), as an untyped `allOf` member
+            // does (#541): its non-null struct decides nothing. Counted as accepting it here, so
+            // the meet keeps `null` in that branch exactly where the other conjuncts admit it, and
+            // a `oneOf` two such branches share rejects it below. Only where a conjunct it is met
+            // with admits `null` ([`Self::unmerged_union_meets_null`]): met with untyped objects
+            // alone, nothing does, and the branch stays the non-null struct every other spelling
+            // of that composition gives it.
+            if sibling.is_none()
+                && self.unmerged_union.as_ref() == Some(&schema.provenance)
+                && self.unmerged_union_meets_null
+                && self.branch_leaves_null_undecided(member, ty)
+            {
+                ty.nullable = true;
             }
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
@@ -4218,6 +4245,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
+    /// Whether `member`, a union branch lowered to `ty`, is an object whose lowered non-null
+    /// struct decides nothing about `null`: no `type`, and nothing else
+    /// [`Self::all_of_decides_null`] reads as deciding, so `null` satisfies it wherever the
+    /// conjuncts the union is met with admit it.
+    fn branch_leaves_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        !ty.nullable
+            && matches!(
+                self.graph.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            )
+            && !self.all_of_decides_null(member, 0)
+    }
+
     /// Lower `{$ref: T, <keywords>, oneOf|anyOf: […]}`, a `$ref` whose siblings are a union and
     /// shape-bearing `keywords` beside it ([`split_union_sibling`]), as the two `allOf` spellings of
     /// the same conjunction are lowered (#538): `keywords` meet the target, the union is met with
@@ -4297,9 +4340,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
+        let enclosing_meets_null = std::mem::replace(
+            &mut self.unmerged_union_meets_null,
+            composed.is_some_and(|composed| composed.nullable),
+        );
         let union_mark = self.graph_mark();
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
+        self.unmerged_union_meets_null = enclosing_meets_null;
         let untyped_beside_null_member =
             self.untyped_beside_null_member.take() == Some(union.provenance.clone());
         let lowered = lowered?;
