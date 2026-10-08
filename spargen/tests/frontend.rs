@@ -2036,7 +2036,9 @@ components:
 /// itself; an untyped inline member's object keywords bind objects only, so it admits `null`
 /// without deciding; a member typed `object` alone denies it. Untyped members alone decide nothing,
 /// so they keep the non-null struct an untyped object schema lowers to by itself. The enclosing
-/// schema's own untyped object keywords beside the `allOf` are neutral in the same way.
+/// schema's own untyped object keywords beside the `allOf` are neutral in the same way, and so is
+/// an `allOf` of untyped members written beside a `$ref` (#562): it used to lower on its own to
+/// that non-null struct and deny the nullable target's `null`.
 #[test]
 fn an_object_all_of_admits_null_when_every_member_does() {
     let spec = r##"
@@ -2058,9 +2060,22 @@ components:
       type: [object, 'null']
       properties:
         id: { type: string }
+    Untyped:
+      properties:
+        extra: { type: string }
     Holder:
       type: object
-      required: [viaAllOf, viaSibling, both, single, denied, untypedOnly, enclosing]
+      required:
+        - viaAllOf
+        - viaSibling
+        - both
+        - single
+        - denied
+        - untypedOnly
+        - enclosing
+        - siblingAllOf
+        - siblingAllOfRef
+        - siblingAllOfDenied
       properties:
         viaAllOf:
           allOf:
@@ -2090,6 +2105,19 @@ components:
           allOf:
             - $ref: '#/components/schemas/Base'
           properties: { z: { type: string } }
+        siblingAllOf:
+          $ref: '#/components/schemas/Base'
+          allOf:
+            - properties: { extra: { type: string } }
+        siblingAllOfRef:
+          $ref: '#/components/schemas/Base'
+          allOf:
+            - $ref: '#/components/schemas/Untyped'
+        siblingAllOfDenied:
+          $ref: '#/components/schemas/Base'
+          allOf:
+            - type: object
+              properties: { extra: { type: string } }
 "##;
     let (report, code) = generate_with_code(spec);
     for (entry, report) in [("generate", &report), ("check", &check(spec))] {
@@ -2104,6 +2132,9 @@ components:
         ("pub denied", false),
         ("pub untyped_only", false),
         ("pub enclosing", true),
+        ("pub sibling_all_of", true),
+        ("pub sibling_all_of_ref", true),
+        ("pub sibling_all_of_denied", false),
     ] {
         let ty = field_type(&types, field).unwrap_or_else(|| panic!("no `{field}` field: {types}"));
         assert_eq!(
@@ -2563,8 +2594,8 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     // combined with the target). `null` satisfies the target, the conjunct and both branches, so
     // the `anyOf` admits it and the `oneOf`, which it matches twice, does not. The `$ref` spelling
     // writes the conjunct's keywords beside the `$ref`, `{$ref: NB, required: [a], oneOf|anyOf:
-    // […]}` (#538). Its nested-`allOf` form, `{$ref: NB, allOf: [{required: [a]}], …}`, denies
-    // the target's `null` (#562), so that row drives the two `allOf` spellings alone.
+    // […]}` (#538), and its nested-`allOf` form `{$ref: NB, allOf: [{required: [a]}], …}`, whose
+    // untyped `allOf` admits the target's `null` without deciding it (#562).
     let mut conjunct_cases = Vec::new();
     //
     // A typed conjunct, a nullable object with a further property `c`, meets the target before the
@@ -2574,19 +2605,22 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     for (form, conjunct, fields) in [
         (
             "refiner member",
-            ("{ required: [a] }", Some(", required: [a]")),
+            ("{ required: [a] }", ", required: [a]"),
             ab,
         ),
         (
             "nested allOf member",
-            ("{ allOf: [ { required: [a] } ] }", None),
+            (
+                "{ allOf: [ { required: [a] } ] }",
+                ", allOf: [ { required: [a] } ]",
+            ),
             ab,
         ),
         (
             "typed member",
             (
                 "{ type: [object, 'null'], properties: { c: { type: integer } } }",
-                Some(", type: [object, 'null'], properties: { c: { type: integer } }"),
+                ", type: [object, 'null'], properties: { c: { type: integer } }",
             ),
             abc,
         ),
@@ -2620,16 +2654,13 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     for (case, target, keyword, branches, codes, shape, conjunct) in cases {
         let target_ref = format!("'#/components/schemas/{target}'");
         let member = conjunct.map_or_else(String::new, |(member, _)| format!(", {member}"));
-        // The conjunct's keywords written beside the `$ref`, as further siblings; `None` where
-        // that spelling is not driven.
-        let keywords = conjunct.map_or(Some(""), |(_, keywords)| keywords);
-        let ref_sibling = keywords.map(|keywords| {
+        // The conjunct's keywords written beside the `$ref`, as further siblings.
+        let keywords = conjunct.map_or("", |(_, keywords)| keywords);
+        for (spelling, site) in [
             (
                 "$ref sibling",
                 format!("{{ $ref: {target_ref}{keywords}, {keyword}: {branches} }}"),
-            )
-        });
-        for (spelling, site) in ref_sibling.into_iter().chain([
+            ),
             (
                 "allOf member",
                 format!(
@@ -2641,7 +2672,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
                 "beside allOf",
                 format!("{{ allOf: [ {{ $ref: {target_ref} }}{member} ], {keyword}: {branches} }}"),
             ),
-        ]) {
+        ] {
             let spec = format!(
                 r##"
 openapi: 3.1.0
@@ -2705,7 +2736,7 @@ components:
 /// keywords the target or the union cannot meet are `E013` with the `$ref`-sibling remedy, untyped
 /// keywords of a category no branch has are `W011` naming the `$ref`'s siblings, and object and
 /// array keywords together beside a branch of no category are `E013` naming them too. A sibling
-/// `allOf` keeps the one-schema lowering, so the target's `null` survives an `anyOf` there.
+/// `allOf` of untyped members leaves the target's `null` to it (#562), so it survives an `anyOf`.
 #[test]
 fn a_ref_union_sibling_beside_other_keywords_reports_in_the_ref_spelling() {
     let spec = |site: &str| {
@@ -2816,19 +2847,24 @@ components:
         "{types}"
     );
 
-    // A sibling `allOf` stays on the one-schema lowering, whose `anyOf` keeps the target's `null`
-    // in every branch rather than denying it (#562).
+    // A sibling `allOf` of untyped members meets the target as the other keywords do, admitting
+    // its `null` without deciding it (#562), so the `anyOf`, whose branches all accept `null`,
+    // keeps it once its branches collapse.
     let spec_text = spec(&format!(
         "{{ {nb}, allOf: [ {{ required: [a] }} ], anyOf: [ {{ required: [a] }}, {{ required: [b] \
          }} ] }}"
     ));
     let (report, code) = generate_with_code(&spec_text);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    let types = types_module(&code);
-    let variants = enum_variants(&types, "Pick");
-    assert_eq!(variants.len(), 2, "{types}");
     assert!(
-        variants.iter().all(|variant| variant.contains("(Option<")),
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Pick"), ["a", "b"], "{types}");
+    assert_eq!(
+        field_type(&types, "pub pick").as_deref(),
+        Some("Option<Pick>"),
         "a nested `allOf` beside a `$ref`'s `anyOf` denied the target's `null`: {types}"
     );
 }

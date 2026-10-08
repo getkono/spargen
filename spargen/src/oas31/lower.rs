@@ -1797,11 +1797,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
             if has_union_sibling {
-                // Keywords carrying an `allOf` of their own stay on the one-schema path: lowered
-                // as a conjunct, that nested `allOf` denies the target's `null` (#562), which
-                // would turn a union that admits `null` into one that rejects it.
                 let (keywords, union) = split_union_sibling(&sibling);
-                if keywords.all_of.is_empty() && schema_has_shape_constraint(&keywords) {
+                if schema_has_shape_constraint(&keywords) {
                     return self
                         .meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
                 }
@@ -1811,7 +1808,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 has_union_sibling.then(|| schema.provenance.clone()),
             );
             let sibling_mark = self.graph_mark();
-            let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"));
+            let sibling =
+                self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             let sibling = sibling?;
             let mark = self.graph_mark();
@@ -4061,6 +4059,78 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(refiners)
     }
 
+    /// Lower a `$ref`'s shape-bearing `sibling` keywords (the reference stripped) to be met with
+    /// its `referenced` target. An `allOf` there that no member decides `null` for — untyped
+    /// object keywords alone, or `$ref`s to untyped object components
+    /// ([`Self::all_of_decides_null`]) — lowers on its own to the non-null struct
+    /// [`object_all_of_admits_null`] gives it, and that struct, met with a nullable object target,
+    /// denied the target's `null`. Its members constrain only objects, so it admits `null` without
+    /// deciding it, as the same keywords written beside the `$ref` and the same `allOf` nested in
+    /// an `allOf` beside the target do (#562): the target's answer about `null` is the meet's.
+    /// Only beside an object target: beside one of another category the two meet in nothing but
+    /// `null`, which the `allOf` spelling reports as an object/scalar mix, so that keeps the
+    /// verdict it had.
+    fn lower_ref_sibling(&mut self, referenced: Ty, sibling: &Schema, hint: &str) -> Option<Ty> {
+        let mut ty = self.lower_schema(sibling, hint)?;
+        let is_struct = |ctx: &Self, id| {
+            matches!(
+                ctx.graph.get(id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            )
+        };
+        if !sibling.all_of.is_empty()
+            && !schema_has_union(sibling)
+            && is_struct(self, ty.id)
+            && is_struct(self, referenced.id)
+            && !self.all_of_decides_null(sibling, 0)
+        {
+            ty.nullable = true;
+        }
+        Some(ty)
+    }
+
+    /// Whether some member of `schema`'s object `allOf` decides the merge's nullability, as
+    /// [`Self::gather_all_of`] records it in each [`Contribution::Object`]: the schema's own
+    /// `type`, a member that states one, a `$ref` member whose target decides it
+    /// ([`Self::ref_target_decides_null`]; a bundle target expanded in place is read as its own
+    /// members are), and the members of a nested `allOf` or of a `$ref` member's siblings. A
+    /// member this cannot read as an object (`enum`, `const`, a union) is taken as deciding, which
+    /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides.
+    fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
+        if depth >= MAX_SCHEMA_DEPTH
+            || stated_nullability(schema).is_some()
+            || schema.enum_values.is_some()
+            || schema.const_value.is_some()
+            || schema_has_union(schema)
+        {
+            return true;
+        }
+        if let Some(reference) = &schema.reference {
+            let target_decides =
+                if reference.starts_with("#/components/schemas/") || is_remote_ref(reference) {
+                    self.ref_target_decides_null(reference, &schema.provenance)
+                } else {
+                    match self.resolver.resolve(
+                        reference,
+                        &schema.provenance,
+                        &mut Diagnostics::default(),
+                    ) {
+                        Ok(resolved) => self.all_of_decides_null(&resolved.schema, depth + 1),
+                        Err(_) => true,
+                    }
+                };
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            return target_decides
+                || (schema_has_shape_constraint(&sibling)
+                    && self.all_of_decides_null(&sibling, depth + 1));
+        }
+        schema.all_of.iter().any(|member| match member {
+            SchemaOr::Schema(member) => self.all_of_decides_null(member, depth + 1),
+            SchemaOr::Bool(_) => false,
+        })
+    }
+
     /// Lower `{$ref: T, <keywords>, oneOf|anyOf: […]}`, a `$ref` whose siblings are a union and
     /// shape-bearing `keywords` beside it ([`split_union_sibling`]), as the two `allOf` spellings of
     /// the same conjunction are lowered (#538): `keywords` meet the target, the union is met with
@@ -4084,7 +4154,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let scoped = self.lower_scoped_refiners(keywords, true, None, &keywords_hint)?;
             (referenced, vec![(keywords, Refiner::Scoped(scoped))])
         } else {
-            let keywords = self.lower_schema(keywords, &keywords_hint)?;
+            let keywords = self.lower_ref_sibling(referenced, keywords, &keywords_hint)?;
             let Ok(composed) =
                 self.intersect_types(referenced, keywords, &format!("{hint}ReferenceComposition"))
             else {
