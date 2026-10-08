@@ -16,7 +16,7 @@
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
 //!   `null` is the null type, #450), and every written `default` is kept or reported at its
 //!   pointer. Where today's output still splits a law, the gap is held exactly and names the open
-//!   issue that tracks it (#541, #542, #543, #545), so the law tightens when the issue's fix lands.
+//!   issue that tracks it (#541, #542, #545), so the law tightens when the issue's fix lands.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a warning says why or an
@@ -703,11 +703,9 @@ fn member_normalised(pointer: &str, order: &[usize], spelling: Spelling) -> Stri
     best.map_or_else(|| pointer.to_owned(), |(_, normalised)| normalised)
 }
 
-/// The deduplicated `(code, member-normalised pointer)` set of a report, each `W005` pointer passed
-/// through [`one_default_pointer`].
+/// The deduplicated `(code, member-normalised pointer)` set of a report.
 fn normalised_diagnostics(
     report: &Report,
-    members: &[Obj],
     order: &[usize],
     spelling: Spelling,
 ) -> BTreeSet<(&'static str, String)> {
@@ -715,13 +713,10 @@ fn normalised_diagnostics(
         .diagnostics()
         .iter()
         .map(|d| {
-            let pointer = member_normalised(d.pointer.as_str(), order, spelling);
-            let pointer = if d.code == Code::SchemaDefaultNotApplied {
-                one_default_pointer(members, &pointer)
-            } else {
-                pointer
-            };
-            (d.code.as_str(), pointer)
+            (
+                d.code.as_str(),
+                member_normalised(d.pointer.as_str(), order, spelling),
+            )
         })
         .collect()
 }
@@ -741,42 +736,6 @@ const ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS: u32 = 545;
 /// (`Clean` against `Generated`), so this is the verdict they must agree on.
 fn rejected(report: &Report) -> bool {
     report.outcome() == Outcome::Rejected
-}
-
-/// The issue tracking a dropped `default` that several members write with one value: the meet
-/// takes the equal values as one `default` (#432) and reports it (`W005`) at only the pointer the
-/// merge reached first, so the others are neither applied nor reported, and which one is reported
-/// depends on the members' order.
-const ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE: u32 = 543;
-
-/// The member-normalised `default` pointer `M{id}/properties/{key}/default` as the pointer of the
-/// least member id that writes the same value on `key`, so equal values several members write
-/// compare as the one `default` [`ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE`] reports. Any other
-/// pointer is returned unchanged.
-fn one_default_pointer(members: &[Obj], pointer: &str) -> String {
-    let parsed = pointer.strip_prefix('M').and_then(|rest| {
-        let (id, rest) = rest.split_once("/properties/")?;
-        let key = rest.strip_suffix("/default")?;
-        Some((
-            id.parse::<usize>().ok()?,
-            KEYS.iter().position(|k| *k == key)?,
-        ))
-    });
-    let Some((id, key)) = parsed else {
-        return pointer.to_owned();
-    };
-    let value = |member: &Obj| {
-        let prop = member.props.get(&key)?;
-        Some(DefaultValue::of(prop.ty, prop.default?))
-    };
-    let Some(written) = members.get(id).and_then(value) else {
-        return pointer.to_owned();
-    };
-    let first = members
-        .iter()
-        .position(|member| value(member) == Some(written))
-        .unwrap_or(id);
-    format!("M{first}/properties/{}/default", KEYS[key])
 }
 
 /// The property keys some member requires with types the members disagree on: no value is both,
@@ -1321,8 +1280,8 @@ proptest! {
                 shuffled
             );
             prop_assert_eq!(
-                normalised_diagnostics(&moved, &members, &order, spelling),
-                normalised_diagnostics(&report, &members, &identity, spelling),
+                normalised_diagnostics(&moved, &order, spelling),
+                normalised_diagnostics(&report, &identity, spelling),
                 "{:?}:\n{}\n{}",
                 spelling,
                 in_order,
@@ -1454,7 +1413,7 @@ proptest! {
                 Lowered::Object { .. } => {}
             }
 
-            let reported: BTreeSet<String> = normalised_diagnostics(&report, &members, &order, spelling)
+            let reported: BTreeSet<String> = normalised_diagnostics(&report, &order, spelling)
                 .into_iter()
                 .filter(|(code, _)| *code == Code::SchemaDefaultNotApplied.as_str())
                 .map(|(_, pointer)| pointer)
@@ -1472,7 +1431,7 @@ proptest! {
                 let (kept, fates) = default_oracle(&members, key, uninhabited);
                 for (&id, fate) in &fates {
                     if *fate != DefaultFate::Kept {
-                        expected_reported.insert(one_default_pointer(&members, &format!("M{id}/properties/{}/default", KEYS[key])));
+                        expected_reported.insert(format!("M{id}/properties/{}/default", KEYS[key]));
                     }
                 }
                 let field = fields
@@ -1514,8 +1473,8 @@ proptest! {
             prop_assert_eq!(
                 reported,
                 expected_reported,
-                "{:?}: the reported `default`s disagree with the oracle (equal values folded, #{}):\n{}\n{:#?}",
-                spelling, ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE, spec, report
+                "{:?}: the reported `default`s disagree with the oracle:\n{}\n{:#?}",
+                spelling, spec, report
             );
         }
     }
