@@ -34,13 +34,14 @@ pub(crate) fn parse_json(
             } else {
                 error.message
             };
-            Diagnostic::error(
-                error.code,
-                Provenance::new(JsonPointer::root(), Some(error.span)),
-            )
-            .message(message)
-            .remedy(error.remedy)
-            .emit(diags);
+            let pointer = error
+                .path
+                .as_deref()
+                .map_or_else(JsonPointer::root, pointer_of);
+            Diagnostic::error(error.code, Provenance::new(pointer, Some(error.span)))
+                .message(message)
+                .remedy(error.remedy)
+                .emit(diags);
             Err(Aborted)
         }
     }
@@ -98,6 +99,33 @@ pub(crate) fn parse_yaml(
     builder.build(diags)
 }
 
+/// One step of the path from the document root to a duplicate key: an object member or an array
+/// element. Both parsers collect the path innermost first while the failure unwinds, so a document
+/// that parses pays nothing for it.
+enum Segment {
+    Key(String),
+    Index(usize),
+}
+
+/// The pointer that `path`, innermost segment first, addresses.
+fn pointer_of(path: &[Segment]) -> JsonPointer {
+    path.iter()
+        .rev()
+        .fold(JsonPointer::root(), |pointer, segment| match segment {
+            Segment::Key(name) => pointer.push(name),
+            Segment::Index(index) => pointer.index(*index),
+        })
+}
+
+/// The message `E022` carries in both parsers.
+fn duplicate_key_message(name: &str) -> String {
+    format!("duplicate object key `{name}`")
+}
+
+/// The remedy `E022` carries in both parsers.
+const DUPLICATE_KEY_REMEDY: &str =
+    "remove or rename the duplicate key so the object is unambiguous";
+
 // JSON: hand-rolled span-tracking recursive-descent parser
 
 /// Guard against unbounded recursion on pathological input (deeply nested `[[[…]]]`).
@@ -111,6 +139,21 @@ struct JsonError {
     code: Code,
     message: String,
     remedy: &'static str,
+    /// The path from the document root to the duplicate key, innermost segment first, for a
+    /// duplicate key; `None` for a syntax error, which is reported at the root pointer.
+    path: Option<Vec<Segment>>,
+}
+
+impl JsonError {
+    /// The error as seen from the container one level up, which holds the failing value under
+    /// `segment`. Each container the error unwinds through prepends its own segment, so the path
+    /// is built only on failure.
+    fn within(mut self, segment: Segment) -> Self {
+        if let Some(path) = &mut self.path {
+            path.push(segment);
+        }
+        self
+    }
 }
 
 /// A cursor over the raw bytes of a JSON document that maintains line/column/offset so it can
@@ -167,16 +210,19 @@ impl<'a> JsonParser<'a> {
             code: Code::InvalidInput,
             message: message.into(),
             remedy: "fix the JSON syntax before running spargen",
+            path: None,
         }
     }
 
-    /// A duplicate-object-key error (`E022`) pointed at the offending (second) key.
+    /// A duplicate-object-key error (`E022`) pointed at the offending (second) key, whose pointer
+    /// the enclosing containers complete as the error unwinds through them.
     fn duplicate_key_error(&self, key_span: Span, name: &str) -> JsonError {
         JsonError {
             span: key_span,
             code: Code::DuplicateObjectKey,
-            message: format!("duplicate object key `{name}`"),
-            remedy: "remove or rename the duplicate key so the object is unambiguous",
+            message: duplicate_key_message(name),
+            remedy: DUPLICATE_KEY_REMEDY,
+            path: Some(vec![Segment::Key(name.to_owned())]),
         }
     }
 
@@ -270,7 +316,9 @@ impl<'a> JsonParser<'a> {
                 return Err(self.error("expected ':' after object key"));
             }
             self.bump(); // consume ':'
-            let value = self.parse_value(depth + 1)?;
+            let value = self
+                .parse_value(depth + 1)
+                .map_err(|error| error.within(Segment::Key(name.clone())))?;
             map.push(
                 SpannedKey {
                     name,
@@ -302,7 +350,9 @@ impl<'a> JsonParser<'a> {
             return Ok(SpannedValue::new(Node::Array(items), self.span_from(start)));
         }
         loop {
-            let value = self.parse_value(depth + 1)?;
+            let value = self
+                .parse_value(depth + 1)
+                .map_err(|error| error.within(Segment::Index(items.len())))?;
             items.push(value);
             self.skip_ws();
             match self.peek() {
@@ -575,6 +625,40 @@ struct YamlBuilder<'a> {
     anchors: std::collections::HashMap<usize, SpannedValue>,
 }
 
+/// Why [`YamlBuilder::build_node`] stopped.
+enum YamlFailure {
+    /// The failure is already reported in the diagnostics.
+    Reported(Aborted),
+    /// A mapping declares `name` twice; the second occurrence sits at `span`. `path` runs from the
+    /// document root to that key, innermost segment first, and each enclosing container prepends
+    /// its own segment as the failure unwinds through it, before [`YamlBuilder::build`] reports it.
+    DuplicateKey {
+        path: Vec<Segment>,
+        span: Span,
+        name: String,
+    },
+}
+
+impl YamlFailure {
+    /// The failure as seen from the container one level up, which holds the failing node under
+    /// `segment`.
+    fn within(mut self, segment: Segment) -> Self {
+        if let Self::DuplicateKey { path, .. } = &mut self {
+            path.push(segment);
+        }
+        self
+    }
+
+    /// The failure as seen from a mapping whose key failed to build: a key has no pointer of its
+    /// own, so a duplicate inside it is addressed by the mapping that holds the key.
+    fn in_key(mut self) -> Self {
+        if let Self::DuplicateKey { path, .. } = &mut self {
+            path.clear();
+        }
+        self
+    }
+}
+
 impl YamlBuilder<'_> {
     fn build(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, Aborted> {
         // Advance to the (single) document's first node event.
@@ -584,10 +668,25 @@ impl YamlBuilder<'_> {
             self.idx += 1;
         }
         self.idx += 1; // step past DocumentStart onto the root node
-        self.build_node(diags)
+        self.build_node(diags).map_err(|failure| match failure {
+            YamlFailure::Reported(aborted) => aborted,
+            YamlFailure::DuplicateKey { path, span, name } => {
+                // `YamlLoader` rejected duplicate mapping keys; keep rejecting them (now with a
+                // precise span at the second occurrence) rather than silently retaining a
+                // duplicate.
+                Diagnostic::error(
+                    Code::DuplicateObjectKey,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(duplicate_key_message(&name))
+                .remedy(DUPLICATE_KEY_REMEDY)
+                .emit(diags);
+                Aborted
+            }
+        })
     }
 
-    fn build_node(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, Aborted> {
+    fn build_node(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, YamlFailure> {
         let events = self.events;
         let positions = self.positions;
         let (event, marker) = &events[self.idx];
@@ -617,7 +716,10 @@ impl YamlBuilder<'_> {
                 self.idx += 1;
                 let mut items = Vec::new();
                 while !matches!(events[self.idx].0, Event::SequenceEnd) {
-                    items.push(self.build_node(diags)?);
+                    let item = self
+                        .build_node(diags)
+                        .map_err(|failure| failure.within(Segment::Index(items.len())))?;
+                    items.push(item);
                 }
                 let end = positions.loc(events[self.idx].1.index());
                 self.idx += 1; // consume SequenceEnd
@@ -634,7 +736,7 @@ impl YamlBuilder<'_> {
                 self.idx += 1;
                 let mut map = SpannedMap::default();
                 while !matches!(events[self.idx].0, Event::MappingEnd) {
-                    let key = self.build_node(diags)?;
+                    let key = self.build_node(diags).map_err(YamlFailure::in_key)?;
                     let Node::String(name) = key.node else {
                         Diagnostic::error(
                             Code::InvalidInput,
@@ -642,22 +744,18 @@ impl YamlBuilder<'_> {
                         )
                         .message("YAML object keys must be strings")
                         .emit(diags);
-                        return Err(Aborted);
+                        return Err(YamlFailure::Reported(Aborted));
                     };
                     if map.get(&name).is_some() {
-                        // `YamlLoader` rejected duplicate mapping keys; keep rejecting them (now
-                        // with a precise span at the second occurrence) rather than silently
-                        // retaining a duplicate.
-                        Diagnostic::error(
-                            Code::DuplicateObjectKey,
-                            Provenance::new(JsonPointer::root(), Some(key.span)),
-                        )
-                        .message(format!("duplicate object key `{name}`"))
-                        .remedy("remove or rename the duplicate key so the object is unambiguous")
-                        .emit(diags);
-                        return Err(Aborted);
+                        return Err(YamlFailure::DuplicateKey {
+                            path: vec![Segment::Key(name.clone())],
+                            span: key.span,
+                            name,
+                        });
                     }
-                    let value = self.build_node(diags)?;
+                    let value = self
+                        .build_node(diags)
+                        .map_err(|failure| failure.within(Segment::Key(name.clone())))?;
                     map.push(
                         SpannedKey {
                             name,
@@ -696,7 +794,7 @@ impl YamlBuilder<'_> {
                 )
                 .message("unexpected YAML structure")
                 .emit(diags);
-                return Err(Aborted);
+                return Err(YamlFailure::Reported(Aborted));
             }
         };
         if anchor_id > 0 {
@@ -1001,6 +1099,58 @@ mod tests {
         let span = diag.span.expect("duplicate-key span");
         assert_eq!(span.start.line, 2, "{diag:?}");
         assert_eq!(span.start.col, 21, "{diag:?}");
+        assert_eq!(diag.pointer.as_str(), "/type", "{diag:?}");
+    }
+
+    /// The duplicate key's pointer, or `None` when `diags` holds no `E022`.
+    fn duplicate_key_pointer(diags: &Diagnostics) -> Option<String> {
+        diags
+            .items()
+            .iter()
+            .find(|diag| diag.code == Code::DuplicateObjectKey)
+            .map(|diag| diag.pointer.as_str().to_owned())
+    }
+
+    #[test]
+    fn duplicate_object_key_points_at_the_key_through_objects_and_arrays() {
+        // The path runs through an object member, an array element, and a member whose name
+        // needs RFC 6901 escaping, so each kind of segment and the escape are reached.
+        let json = r#"{"a": {"x/y": [0, {"k": 1, "k": 2}]}}"#;
+        let yaml = "a:\n  x/y:\n    - 0\n    - k: 1\n      k: 2\n";
+        let mut diags = Diagnostics::default();
+        assert!(parse_json(FileId(0), json, &mut diags).is_err());
+        assert_eq!(
+            duplicate_key_pointer(&diags).as_deref(),
+            Some("/a/x~1y/1/k")
+        );
+        let mut diags = Diagnostics::default();
+        assert!(parse_yaml(FileId(0), yaml, &mut diags).is_err());
+        assert_eq!(
+            duplicate_key_pointer(&diags).as_deref(),
+            Some("/a/x~1y/1/k")
+        );
+    }
+
+    #[test]
+    fn a_json_syntax_error_keeps_the_root_pointer() {
+        // Only a duplicate key collects a path; a syntax error stays document-level.
+        let mut diags = Diagnostics::default();
+        assert!(parse_json(FileId(0), r#"{"a": [1, }"#, &mut diags).is_err());
+        let diag = diags
+            .items()
+            .iter()
+            .find(|diag| diag.code == Code::InvalidInput)
+            .expect("syntax diagnostic");
+        assert_eq!(diag.pointer.as_str(), "", "{diag:?}");
+    }
+
+    #[test]
+    fn a_duplicate_inside_a_yaml_complex_key_points_at_the_mapping_holding_the_key() {
+        // A key has no pointer of its own, so the mapping that holds it addresses the duplicate.
+        let mut diags = Diagnostics::default();
+        let text = "a:\n  ? {k: 1, k: 2}\n  : v\n";
+        assert!(parse_yaml(FileId(0), text, &mut diags).is_err());
+        assert_eq!(duplicate_key_pointer(&diags).as_deref(), Some("/a"));
     }
 
     #[test]
@@ -1015,6 +1165,7 @@ mod tests {
             .find(|diag| diag.code == Code::DuplicateObjectKey)
             .expect("duplicate-key diagnostic");
         assert_eq!(diag.span.expect("span").start.line, 2, "{diag:?}");
+        assert_eq!(diag.pointer.as_str(), "/a", "{diag:?}");
     }
 
     #[test]
