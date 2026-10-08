@@ -1814,7 +1814,7 @@ const PAIRINGS: &[Pairing] = &[
         job: "mutants",
         tasks: &["mutants"],
         ci_only: &[
-            CHECKOUT,
+            CHECKOUT_LFS,
             STABLE,
             CACHE,
             provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-mutants@27.1.0"),
