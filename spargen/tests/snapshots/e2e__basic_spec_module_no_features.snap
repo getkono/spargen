@@ -673,22 +673,15 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            match serde_json::from_slice::<T>(&body) {
-                Ok(value) => Ok(ResponseValue::new(status, headers, value)),
-                Err(error) => {
-                    let (body, truncated) = cap_body(body, core.config().max_error_body);
-                    Err(Error::Decode {
-                        status,
-                        headers,
-                        path: error.to_string(),
-                        body,
-                        truncated,
-                    })
-                }
-            }
+            decode_success_with(
+                    core,
+                    response,
+                    |body| {
+                        serde_json::from_slice::<T>(body)
+                            .map_err(|error| error.to_string())
+                    },
+                )
+                .await
         }
         /// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
         /// type. Converting through `Value::String` keeps generated string enums and string formats typed
@@ -702,10 +695,22 @@ mod support {
         where
             T: DeserializeOwned,
         {
+            decode_success_with(core, response, decode_text_body::<T>).await
+        }
+        /// The body every structured success decoder shares: read the whole body, run `decode` over it, and
+        /// wrap the value with status and headers. A decode failure becomes [`Error::Decode`] carrying the
+        /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
+        /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
+        /// capped.
+        pub(crate) async fn decode_success_with<T>(
+            core: &ClientCore,
+            response: Response,
+            decode: impl FnOnce(&[u8]) -> Result<T, String>,
+        ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let status = response.status();
             let headers = response.headers().clone();
             let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            match decode_text_body::<T>(&body) {
+            match decode(&body) {
                 Ok(value) => Ok(ResponseValue::new(status, headers, value)),
                 Err(path) => {
                     let (body, truncated) = cap_body(body, core.config().max_error_body);
@@ -817,35 +822,16 @@ mod support {
         where
             E: DeserializeOwned,
         {
-            let status = response.status();
-            let headers = response.headers().clone();
-            match read_capped(core, response).await {
-                Ok((body, truncated)) => {
-                    if documented.iter().any(|spec| spec.matches(status)) {
-                        match serde_json::from_slice::<E>(&body) {
-                            Ok(value) => {
-                                Error::Api(ResponseValue::new(status, headers, value))
-                            }
-                            Err(error) => {
-                                Error::Decode {
-                                    status,
-                                    headers,
-                                    path: error.to_string(),
-                                    body,
-                                    truncated,
-                                }
-                            }
-                        }
-                    } else {
-                        Error::UnexpectedStatus {
-                            status,
-                            headers,
-                            body,
-                        }
-                    }
-                }
-                Err(error) => error,
-            }
+            classify_with(
+                    core,
+                    response,
+                    documented,
+                    |body| {
+                        serde_json::from_slice::<E>(body)
+                            .map_err(|error| error.to_string())
+                    },
+                )
+                .await
         }
         /// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
         pub async fn classify_error_text<E>(
@@ -856,12 +842,24 @@ mod support {
         where
             E: DeserializeOwned,
         {
+            classify_with(core, response, documented, decode_text_body::<E>).await
+        }
+        /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
+        /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
+        /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
+        /// [`Error::UnexpectedStatus`] with the raw body preserved.
+        pub(crate) async fn classify_with<E>(
+            core: &ClientCore,
+            response: Response,
+            documented: &[StatusSpec],
+            decode: impl FnOnce(&[u8]) -> Result<E, String>,
+        ) -> Error<E> {
             let status = response.status();
             let headers = response.headers().clone();
             match read_capped(core, response).await {
                 Ok((body, truncated)) => {
                     if documented.iter().any(|spec| spec.matches(status)) {
-                        match decode_text_body::<E>(&body) {
+                        match decode(&body) {
                             Ok(value) => {
                                 Error::Api(ResponseValue::new(status, headers, value))
                             }
@@ -4052,30 +4050,13 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            match decode_xml_body::<T>(&body) {
-                Ok(value) => Ok(ResponseValue::new(status, headers, value)),
-                Err(path) => {
-                    let (body, truncated) = super::dispatch::cap_body(
-                        body,
-                        core.config().max_error_body,
-                    );
-                    Err(Error::Decode {
-                        status,
-                        headers,
-                        path,
-                        body,
-                        truncated,
-                    })
-                }
-            }
+            super::dispatch::decode_success_with(core, response, decode_xml_body::<T>)
+                .await
         }
         /// Classify a non-success XML response into the operation's typed error body `E`. A documented
         /// status parses into `E` ([`Error::Api`], falling back to [`Error::Decode`] on a parse failure); an
         /// undocumented status is [`Error::UnexpectedStatus`]. The XML analogue of
-        /// [`super::classify_error`], reusing [`super::read_error_body`] so the error-body cap is identical.
+        /// [`super::classify_error`], sharing its classification body so the error-body cap is identical.
         pub async fn classify_error_xml<E>(
             core: &ClientCore,
             response: Response,
@@ -4084,34 +4065,13 @@ mod support {
         where
             E: DeserializeOwned,
         {
-            let (status, headers, body, truncated) = match super::read_error_body::<
-                E,
-            >(core, response)
+            super::dispatch::classify_with(
+                    core,
+                    response,
+                    documented,
+                    decode_xml_body::<E>,
+                )
                 .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return error,
-            };
-            if documented.iter().any(|spec| spec.matches(status)) {
-                match decode_xml_body::<E>(&body) {
-                    Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
-                    Err(path) => {
-                        Error::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated,
-                        }
-                    }
-                }
-            } else {
-                Error::UnexpectedStatus {
-                    status,
-                    headers,
-                    body,
-                }
-            }
         }
         /// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
         /// UTF-8 or a quick-xml parse error) suitable for [`Error::Decode`]'s `path`. The XML analogue of
