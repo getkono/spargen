@@ -2025,9 +2025,10 @@ components:
 /// Issue #541: a `$ref` member whose target is an untyped object component admits `null` without
 /// deciding it, exactly as the same member written inline does (#425). The `$ref` to `U` used to
 /// record `U`'s lowered non-null struct as a decision, so `viaRefs`, `untypedRef` and `besideOneOf`
-/// denied `null` that `inline` and `sibling` admit. `U` alone still lowers to a non-null struct, and
-/// a meet of untyped members alone still decides nothing. Held in the root document, in a sub-file
-/// (whose `#/components/schemas/` names its own components), and for a vendored remote `U`.
+/// denied `null` that `inline` and `sibling` admit. A bare alias `A` of `U` is `U` (`viaAlias`,
+/// `aliasRef`). `U` alone still lowers to a non-null struct, and a meet of untyped members alone
+/// still decides nothing. Held in the root document, in a sub-file (whose `#/components/schemas/`
+/// names its own components), and for a vendored remote `U`.
 #[test]
 fn a_ref_to_an_untyped_object_component_admits_null_in_an_object_meet() {
     const COMPONENTS: &str = r##"
@@ -2036,10 +2037,13 @@ components:
     N: { type: [object, 'null'], properties: { n: { type: string } } }
     U: { properties: { u: { type: string } } }
     V: { properties: { v: { type: string } } }
+    A: { $ref: '#/components/schemas/U' }
     Holder:
       type: object
-      required: [viaRefs, inline, sibling, untypedRef, besideOneOf, untypedOnly, alone]
+      required: [viaRefs, inline, sibling, untypedRef, besideOneOf, viaAlias, aliasRef, untypedOnly, alone]
       properties:
+        viaAlias: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/A' }] }
+        aliasRef: { $ref: '#/components/schemas/A', type: [object, 'null'], properties: { n: { type: string } } }
         viaRefs: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/U' }] }
         inline: { allOf: [{ type: [object, 'null'], properties: { n: { type: string } } }, { properties: { u: { type: string } } }] }
         sibling: { $ref: '#/components/schemas/N', properties: { u: { type: string } } }
@@ -2048,12 +2052,14 @@ components:
         untypedOnly: { allOf: [{ $ref: '#/components/schemas/U' }, { $ref: '#/components/schemas/V' }] }
         alone: { $ref: '#/components/schemas/U' }
 "##;
-    const EXPECTED: [(&str, bool); 7] = [
+    const EXPECTED: [(&str, bool); 9] = [
         ("pub via_refs:", true),
         ("pub inline:", true),
         ("pub sibling:", true),
         ("pub untyped_ref:", true),
         ("pub beside_one_of:", true),
+        ("pub via_alias:", true),
+        ("pub alias_ref:", true),
         ("pub untyped_only:", false),
         ("pub alone:", false),
     ];

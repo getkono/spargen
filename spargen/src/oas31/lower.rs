@@ -4700,24 +4700,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`target_decides_null`] of the schema the `$ref` written at `at` lowered to: a root
     /// component first, as [`Self::ensure_component`] chooses it, then a remote document from the
     /// root, as [`Self::ensure_remote`] resolves it, and otherwise the referring file's target.
-    /// The target was already lowered from the same resolution, so this only re-reads it; a target
-    /// that cannot be read keeps its lowered nullability as the decision, and reports nothing a
-    /// second time.
+    /// A target that is a bare alias (a `$ref` with no shape-bearing sibling) is the schema it
+    /// names, so the chain is followed to its body. The target was already lowered from the same
+    /// resolution, so this only re-reads it; a target that cannot be read keeps its lowered
+    /// nullability as the decision, and reports nothing a second time.
     fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
-        if let Some(RefOr::Item(target)) = reference
-            .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.document.components.schemas.get(name))
-        {
-            return target_decides_null(target);
+        let mut reference = reference.to_owned();
+        let mut at = at.clone();
+        // Lowering the chain already refused an alias cycle; the bound only keeps this total.
+        for _ in 0..MAX_SCHEMA_DEPTH {
+            let component = reference
+                .strip_prefix("#/components/schemas/")
+                .and_then(|name| self.document.components.schemas.get(name));
+            let target = match component {
+                Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
+                Some(RefOr::Ref(alias)) => {
+                    reference.clone_from(&alias.reference);
+                    at = alias.provenance.clone();
+                    continue;
+                }
+                None => {
+                    let from = if is_remote_ref(&reference) {
+                        &self.document.provenance
+                    } else {
+                        &at
+                    };
+                    let Ok(resolved) =
+                        self.resolver
+                            .resolve(&reference, from, &mut Diagnostics::default())
+                    else {
+                        return true;
+                    };
+                    resolved.schema
+                }
+            };
+            let Some(next) = &target.reference else {
+                return target_decides_null(&target);
+            };
+            let mut sibling = target.as_ref().clone();
+            sibling.reference = None;
+            if schema_has_shape_constraint(&sibling) {
+                return target_decides_null(&target);
+            }
+            reference.clone_from(next);
+            at = target.provenance.clone();
         }
-        let from = if is_remote_ref(reference) {
-            &self.document.provenance
-        } else {
-            at
-        };
-        self.resolver
-            .resolve(reference, from, &mut Diagnostics::default())
-            .map_or(true, |resolved| target_decides_null(&resolved.schema))
+        true
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
