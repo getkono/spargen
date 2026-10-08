@@ -10,12 +10,18 @@
 //!   dispatch or overlapping shapes require typed trial matching;
 //! * `allOf` merge reconciles exactly — a property declared with two different types is `E013`, and
 //!   an otherwise-consistent merge keeps the union of every member's fields (no field loss) with the
-//!   union of every member's `required`.
+//!   union of every member's `required`;
+//! * the intersection laws (#474), read through the `syn`-based [`shape`] oracle: one conjunction
+//!   lowers alike in each of its spellings, an `allOf`'s member order changes nothing, an object
+//!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
+//!   `null` is the null type, #450), and every written `default` is kept or reported at its
+//!   pointer. Where today's output still splits a law, the gap is held exactly and names the open
+//!   issue that tracks it (#541, #542, #543, #545), so the law tightens when the issue's fix lands.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
-//! each generated union's variants are distinguishable by shape unless a warning says why or an
-//! open issue tracks the gap (#402), and each case moved into a referenced file
-//! (`oracles::relocate`) reaches the same verdict, codes and shapes (#446).
+//! and each generated union's variants are distinguishable by shape unless a warning says why or an
+//! open issue tracks the gap (#402). Each case of the first three properties moved into a
+//! referenced file (`oracles::relocate`) also reaches the same verdict, codes and shapes (#446).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -204,7 +210,7 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
 
 // The allOf merge reconciles member constraints exactly.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum PropType {
     String,
     Integer,
@@ -426,6 +432,1092 @@ proptest! {
                 ident,
                 ty,
                 source
+            );
+        }
+    }
+}
+
+// The intersection laws (#474): one conjunction lowers to one shape however it is spelled and in
+// whatever order its members come, admits `null` exactly when its members do, and accounts for
+// every `default` it was written with.
+
+/// What an object member says about `null`: `type: object` denies it, `type: [object, 'null']`
+/// admits it, and a member with no `type` admits it without deciding, as its object keywords bind
+/// objects only (#425).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nullability {
+    Object,
+    ObjectOrNull,
+    Untyped,
+}
+
+/// One property of an intersected object member.
+#[derive(Clone, Copy, Debug)]
+struct Prop {
+    ty: PropType,
+    required: bool,
+    /// An index into [`DEFAULT_VALUES`]' row for `ty`: the `default` written on the property.
+    default: Option<usize>,
+}
+
+/// The `default` values a [`Prop`] may be written with, a row per [`PropType`], each in its own
+/// type, and each row in ascending order.
+const DEFAULT_VALUES: [(PropType, [&str; 2]); 2] = [
+    (PropType::String, ["x", "y"]),
+    (PropType::Integer, ["1", "2"]),
+];
+
+/// A `default` as the intersection orders the candidates it keeps one of: a number before a string
+/// (as JSON values sort), numbers by value, strings by text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DefaultValue {
+    Integer(i64),
+    String(&'static str),
+}
+
+impl DefaultValue {
+    fn of(ty: PropType, index: usize) -> Self {
+        let text = DEFAULT_VALUES
+            .iter()
+            .find(|(row, _)| *row == ty)
+            .map(|(_, values)| values[index])
+            .unwrap();
+        match ty {
+            PropType::String => DefaultValue::String(text),
+            PropType::Integer => DefaultValue::Integer(text.parse().unwrap()),
+        }
+    }
+
+    /// The value as YAML writes it, and as the rustdoc `Default: `…`.` line shows it.
+    fn display(self) -> String {
+        match self {
+            DefaultValue::Integer(value) => value.to_string(),
+            DefaultValue::String(text) => text.to_owned(),
+        }
+    }
+
+    /// The value as JSON writes it, as the rustdoc `Default (not applied): `…`.` line shows it.
+    fn raw(self) -> String {
+        match self {
+            DefaultValue::Integer(value) => value.to_string(),
+            DefaultValue::String(text) => format!("\"{text}\""),
+        }
+    }
+}
+
+/// One object member of an intersection: property index into [`KEYS`] → property.
+#[derive(Clone, Debug)]
+struct Obj {
+    nullability: Nullability,
+    props: BTreeMap<usize, Prop>,
+}
+
+impl Obj {
+    /// The member's keywords as the entries of a YAML flow mapping, without its braces, so they
+    /// can stand as a member of their own or beside a `$ref`.
+    fn keywords(&self) -> String {
+        let mut keywords = Vec::new();
+        match self.nullability {
+            Nullability::Object => keywords.push("type: object".to_owned()),
+            Nullability::ObjectOrNull => keywords.push("type: [object, 'null']".to_owned()),
+            Nullability::Untyped => {}
+        }
+        let required: Vec<&str> = self
+            .props
+            .iter()
+            .filter(|(_, prop)| prop.required)
+            .map(|(&key, _)| KEYS[key])
+            .collect();
+        if !required.is_empty() {
+            keywords.push(format!("required: [{}]", required.join(", ")));
+        }
+        let properties: Vec<String> = self
+            .props
+            .iter()
+            .map(|(&key, prop)| {
+                let ty = match prop.ty {
+                    PropType::String => "string",
+                    PropType::Integer => "integer",
+                };
+                match prop.default {
+                    Some(index) => format!(
+                        "{}: {{ type: {ty}, default: {} }}",
+                        KEYS[key],
+                        DefaultValue::of(prop.ty, index).display()
+                    ),
+                    None => format!("{}: {{ type: {ty} }}", KEYS[key]),
+                }
+            })
+            .collect();
+        keywords.push(format!("properties: {{ {} }}", properties.join(", ")));
+        keywords.join(", ")
+    }
+
+    /// The member as a YAML flow mapping.
+    fn inline(&self) -> String {
+        format!("{{ {} }}", self.keywords())
+    }
+}
+
+/// The property keys an intersection member draws from: fewer than [`KEYS`], so members repeat a
+/// property often and the meet has a field to reconcile.
+const MEET_KEYS: usize = 3;
+
+fn prop_strategy() -> impl Strategy<Value = Prop> {
+    (
+        prop_oneof![Just(PropType::String), Just(PropType::Integer)],
+        any::<bool>(),
+        proptest::option::of(0usize..2),
+    )
+        .prop_map(|(ty, required, default)| Prop {
+            ty,
+            required,
+            default,
+        })
+}
+
+fn nullability_strategy() -> impl Strategy<Value = Nullability> {
+    prop_oneof![
+        Just(Nullability::Object),
+        Just(Nullability::ObjectOrNull),
+        Just(Nullability::Untyped),
+    ]
+}
+
+fn obj_strategy() -> impl Strategy<Value = Obj> {
+    (
+        nullability_strategy(),
+        proptest::collection::btree_map(0usize..MEET_KEYS, prop_strategy(), 1..=MEET_KEYS),
+    )
+        .prop_map(|(nullability, props)| Obj { nullability, props })
+}
+
+/// One way to write the conjunction of an intersection's members as the required property
+/// `Holder.p`. Every spelling declares each member as the component `M{id}` too, whether or not it
+/// refers to it, so the diagnostics the members' own lowering reports are the same in each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spelling {
+    /// `allOf: [{ $ref: M0 }, { $ref: M1 }, …]`.
+    AllOfRefs,
+    /// `{ $ref: M0, <M1's keywords> }`: two members only.
+    RefSiblings,
+    /// `allOf: [<M0>, <M1>, …]`, each member written inline.
+    InlineAllOf,
+    /// `allOf: [{ $ref: M0 }, …]` beside `oneOf: [{}]`, a union whose one branch admits everything.
+    AllOfBesideOneOf,
+}
+
+impl Spelling {
+    const ALL: [Spelling; 4] = [
+        Spelling::AllOfRefs,
+        Spelling::RefSiblings,
+        Spelling::InlineAllOf,
+        Spelling::AllOfBesideOneOf,
+    ];
+
+    /// Whether the spelling can write a conjunction of `members` members.
+    fn writes(self, members: usize) -> bool {
+        self != Spelling::RefSiblings || members == 2
+    }
+
+    /// Whether the member at `position` is written as a `$ref` to its component.
+    fn refers(self, position: usize) -> bool {
+        match self {
+            Spelling::AllOfRefs | Spelling::AllOfBesideOneOf => true,
+            Spelling::RefSiblings => position == 0,
+            Spelling::InlineAllOf => false,
+        }
+    }
+
+    /// The schema of `Holder.p`, the members in the order given, each with the id of its component.
+    fn schema(self, members: &[(usize, &Obj)]) -> String {
+        let reference = |id: usize| format!("{{ $ref: '#/components/schemas/M{id}' }}");
+        let refs: Vec<String> = members.iter().map(|&(id, _)| reference(id)).collect();
+        match self {
+            Spelling::AllOfRefs => format!("{{ allOf: [{}] }}", refs.join(", ")),
+            Spelling::RefSiblings => format!(
+                "{{ $ref: '#/components/schemas/M{}', {} }}",
+                members[0].0,
+                members[1].1.keywords()
+            ),
+            Spelling::InlineAllOf => {
+                let inline: Vec<String> = members.iter().map(|(_, obj)| obj.inline()).collect();
+                format!("{{ allOf: [{}] }}", inline.join(", "))
+            }
+            Spelling::AllOfBesideOneOf => {
+                format!("{{ allOf: [{}], oneOf: [{{}}] }}", refs.join(", "))
+            }
+        }
+    }
+
+    /// The pointer of the schema whose keywords write the member at `position` (component `id`).
+    fn member_pointer(self, position: usize, id: usize) -> String {
+        if self.refers(position) {
+            return format!("/components/schemas/M{id}");
+        }
+        match self {
+            Spelling::RefSiblings => HOLDER_P.to_owned(),
+            _ => format!("{HOLDER_P}/allOf/{position}"),
+        }
+    }
+}
+
+/// The pointer of the property every [`Spelling`] writes its conjunction as.
+const HOLDER_P: &str = "/components/schemas/Holder/properties/p";
+
+/// The document declaring each member (id = index into `members`) as a component and `Holder.p` as
+/// their conjunction, written by `spelling` with the members in `order`.
+fn intersection_spec(members: &[Obj], order: &[usize], spelling: Spelling) -> String {
+    let mut spec = String::from(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n",
+    );
+    for (id, member) in members.iter().enumerate() {
+        spec.push_str(&format!("    M{id}: {}\n", member.inline()));
+    }
+    let ordered: Vec<(usize, &Obj)> = order.iter().map(|&id| (id, &members[id])).collect();
+    spec.push_str(&format!(
+        "    Holder:\n      type: object\n      required: [p]\n      properties:\n        p: {}\n",
+        spelling.schema(&ordered)
+    ));
+    spec
+}
+
+/// `pointer` with the location `spelling` wrote a member at (members in `order`) replaced by the
+/// member's component name, so the same diagnostic about the same member reads the same whichever
+/// position or spelling wrote it. A pointer into no member is returned unchanged.
+fn member_normalised(pointer: &str, order: &[usize], spelling: Spelling) -> String {
+    let mut best: Option<(usize, String)> = None;
+    for (position, &id) in order.iter().enumerate() {
+        let prefix = spelling.member_pointer(position, id);
+        let Some(rest) = pointer.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !(rest.is_empty() || rest.starts_with('/')) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(len, _)| prefix.len() > *len) {
+            best = Some((prefix.len(), format!("M{id}{rest}")));
+        }
+    }
+    best.map_or_else(|| pointer.to_owned(), |(_, normalised)| normalised)
+}
+
+/// The deduplicated `(code, member-normalised pointer)` set of a report, each `W005` pointer passed
+/// through [`one_default_pointer`].
+fn normalised_diagnostics(
+    report: &Report,
+    members: &[Obj],
+    order: &[usize],
+    spelling: Spelling,
+) -> BTreeSet<(&'static str, String)> {
+    report
+        .diagnostics()
+        .iter()
+        .map(|d| {
+            let pointer = member_normalised(d.pointer.as_str(), order, spelling);
+            let pointer = if d.code == Code::SchemaDefaultNotApplied {
+                one_default_pointer(members, &pointer)
+            } else {
+                pointer
+            };
+            (d.code.as_str(), pointer)
+        })
+        .collect()
+}
+
+/// The sorted error codes of a report, duplicates kept.
+fn error_codes(report: &Report) -> Vec<&'static str> {
+    let mut codes: Vec<&'static str> = report.errors().map(|d| d.code.as_str()).collect();
+    codes.sort_unstable();
+    codes
+}
+
+/// The issue tracking a rejected `$ref`-sibling meet reporting fewer warnings than the `allOf`
+/// spellings of the same conjunction: beside its `E013`, it stops before the `W005` they report.
+const ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS: u32 = 545;
+
+/// Whether `check` or `generate` rejected the document. The two name a success differently
+/// (`Clean` against `Generated`), so this is the verdict they must agree on.
+fn rejected(report: &Report) -> bool {
+    report.outcome() == Outcome::Rejected
+}
+
+/// The issue tracking a dropped `default` that several members write with one value: the meet
+/// takes the equal values as one `default` (#432) and reports it (`W005`) at only the pointer the
+/// merge reached first, so the others are neither applied nor reported, and which one is reported
+/// depends on the members' order.
+const ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE: u32 = 543;
+
+/// The member-normalised `default` pointer `M{id}/properties/{key}/default` as the pointer of the
+/// least member id that writes the same value on `key`, so equal values several members write
+/// compare as the one `default` [`ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE`] reports. Any other
+/// pointer is returned unchanged.
+fn one_default_pointer(members: &[Obj], pointer: &str) -> String {
+    let parsed = pointer.strip_prefix('M').and_then(|rest| {
+        let (id, rest) = rest.split_once("/properties/")?;
+        let key = rest.strip_suffix("/default")?;
+        Some((
+            id.parse::<usize>().ok()?,
+            KEYS.iter().position(|k| *k == key)?,
+        ))
+    });
+    let Some((id, key)) = parsed else {
+        return pointer.to_owned();
+    };
+    let value = |member: &Obj| {
+        let prop = member.props.get(&key)?;
+        Some(DefaultValue::of(prop.ty, prop.default?))
+    };
+    let Some(written) = members.get(id).and_then(value) else {
+        return pointer.to_owned();
+    };
+    let first = members
+        .iter()
+        .position(|member| value(member) == Some(written))
+        .unwrap_or(id);
+    format!("M{first}/properties/{}/default", KEYS[key])
+}
+
+/// The property keys some member requires with types the members disagree on: no value is both,
+/// and every instance must carry one, so the meet is irreconcilable (`E013`).
+fn meet_conflicts(members: &[Obj]) -> (BTreeSet<usize>, bool) {
+    let mut types: BTreeMap<usize, BTreeSet<PropType>> = BTreeMap::new();
+    for member in members {
+        for (&key, prop) in &member.props {
+            types.entry(key).or_default().insert(prop.ty);
+        }
+    }
+    let conflicts: BTreeSet<usize> = types
+        .into_iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|(key, _)| key)
+        .collect();
+    let irreconcilable = members.iter().any(|member| {
+        member
+            .props
+            .iter()
+            .any(|(key, prop)| prop.required && conflicts.contains(key))
+    });
+    (conflicts, irreconcilable)
+}
+
+/// Whether the conjunction of `members` admits `null`: no member denies it, and some member admits
+/// it of its own accord. Untyped members decide nothing, so a meet of them alone is the non-null
+/// struct an untyped object schema lowers to by itself (#425).
+fn meet_admits_null(members: &[Obj]) -> bool {
+    !members.iter().any(|m| m.nullability == Nullability::Object)
+        && members
+            .iter()
+            .any(|m| m.nullability == Nullability::ObjectOrNull)
+}
+
+/// The issue tracking a `$ref` to an untyped object component denying `null` in an object meet,
+/// where the same member written inline admits it without deciding (#425's rule).
+const ISSUE_REF_TO_UNTYPED_DENIES_NULL: u32 = 541;
+
+/// The issue tracking an `allOf` of nullable object members whose object meet is irreconcilable
+/// (`E013`), where the `$ref`-sibling spelling of the same conjunction lowers it to the null type:
+/// no object satisfies every member, and `null` satisfies them all.
+const ISSUE_NULL_ONLY_ALL_OF_REJECTED: u32 = 542;
+
+/// Whether `Holder.p` is emitted nullable today: [`meet_admits_null`], except that a member written
+/// as a `$ref` to its untyped component denies `null` (#541, [`ISSUE_REF_TO_UNTYPED_DENIES_NULL`]).
+/// Where the two disagree the gap is the known one, and this is what the gap emits.
+fn emitted_nullable(members: &[Obj], order: &[usize], spelling: Spelling) -> bool {
+    let denies = order.iter().enumerate().any(|(position, &id)| {
+        let nullability = members[id].nullability;
+        nullability == Nullability::Object
+            || (nullability == Nullability::Untyped && spelling.refers(position))
+    });
+    !denies && meet_admits_null(members)
+}
+
+/// What a conjunction lowers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lowered {
+    /// No value satisfies every member: `E013`.
+    Rejected,
+    /// Only `null` does: the null type `()`.
+    Null,
+    /// An object struct, `Option`al exactly when `nullable`.
+    Object { nullable: bool },
+}
+
+/// What `spelling` lowers the conjunction of `members` (in `order`) to today. An irreconcilable
+/// object meet leaves `null` alone when every member admits it, so it is the null type; else it is
+/// `E013`. Two known gaps differ from that: [`emitted_nullable`]'s (#541), and only the `$ref`-sibling
+/// spelling finding the null type, when its sibling keywords admit `null` of their own accord
+/// (`type: [object, 'null']`), the other spellings rejecting it (#542,
+/// [`ISSUE_NULL_ONLY_ALL_OF_REJECTED`]).
+fn emitted(members: &[Obj], order: &[usize], spelling: Spelling) -> Lowered {
+    let nullable = emitted_nullable(members, order, spelling);
+    if !meet_conflicts(members).1 {
+        return Lowered::Object { nullable };
+    }
+    if nullable
+        && spelling == Spelling::RefSiblings
+        && members[order[1]].nullability == Nullability::ObjectOrNull
+    {
+        Lowered::Null
+    } else {
+        Lowered::Rejected
+    }
+}
+
+/// What a run lowered `Holder.p` to, read from its report and module.
+fn lowered(report: &Report, source: &str) -> Result<Lowered, TestCaseError> {
+    if rejected(report) {
+        return Ok(Lowered::Rejected);
+    }
+    let shape = holder_p_shape(source)?;
+    Ok(if shape == "()" {
+        Lowered::Null
+    } else {
+        Lowered::Object {
+            nullable: shape.starts_with("Option<"),
+        }
+    })
+}
+
+/// What a written `default` became in the meet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefaultFate {
+    /// The merged field carries it: its rustdoc reads ``Default: `v`.``, and it is wired as a serde
+    /// default exactly when the field is optional.
+    Kept,
+    /// Reported (`W005`) at the `default` that wrote it, and neither applied nor documented there:
+    /// another member's different `default` is the one kept.
+    Superseded,
+    /// Reported (`W005`) at the `default` that wrote it: the field is uninhabited, so no value is
+    /// one of its values, and its rustdoc reads ``Default (not applied): `v`.`` for the one kept.
+    Uninhabited,
+}
+
+/// The reference oracle for the meet's `default`s: for property `key`, the value the merged field
+/// keeps (`None` when no member writes one) and the fate of each member's `default`, by member id.
+///
+/// Of the different `default`s the members write, the one a member could apply as a serde default
+/// (on a property that member does not require) is kept over one it could not, and then the least
+/// value (#432). Every other value is superseded; a value equal to the kept one is the same
+/// `default`. A field whose members' types share no value keeps none of them (#453).
+fn default_oracle(
+    members: &[Obj],
+    key: usize,
+    uninhabited: bool,
+) -> (Option<DefaultValue>, BTreeMap<usize, DefaultFate>) {
+    let written: Vec<(usize, DefaultValue, bool)> = members
+        .iter()
+        .enumerate()
+        .filter_map(|(id, member)| {
+            let prop = member.props.get(&key)?;
+            let value = DefaultValue::of(prop.ty, prop.default?);
+            Some((id, value, prop.required))
+        })
+        .collect();
+    let kept = written
+        .iter()
+        .map(|&(_, value, required)| (required, value))
+        .min()
+        .map(|(_, value)| value);
+    let fates = written
+        .iter()
+        .map(|&(id, value, _)| {
+            let fate = if uninhabited {
+                DefaultFate::Uninhabited
+            } else if Some(value) == kept {
+                DefaultFate::Kept
+            } else {
+                DefaultFate::Superseded
+            };
+            (id, fate)
+        })
+        .collect();
+    (kept, fates)
+}
+
+/// The shape oracle over a generated module, read with `syn` rather than line by line, so a type is
+/// what the parser says it is however `prettyplease` wraps it.
+mod shape {
+    use std::collections::BTreeMap;
+
+    use quote::ToTokens;
+
+    /// The item declarations of a generated `types` module, keyed by name.
+    pub struct Types {
+        items: BTreeMap<String, syn::Item>,
+    }
+
+    /// What a struct field is: its wire name and type, its `serde` attributes other than its rename
+    /// (a `default` function by its body, not its name), and its rustdoc lines.
+    pub struct Field {
+        pub wire: String,
+        pub ty: syn::Type,
+        pub serde: Vec<String>,
+        pub docs: Vec<String>,
+    }
+
+    impl Types {
+        /// The `types` module of the generated module `code`; empty when there is none.
+        pub fn read(code: &str) -> Self {
+            let mut items = BTreeMap::new();
+            let file = syn::parse_file(code).unwrap_or_else(|error| {
+                panic!("the generated module does not parse: {error}\n{code}")
+            });
+            let module = file.items.into_iter().find_map(|item| match item {
+                syn::Item::Mod(module) if module.ident == "types" => module.content,
+                _ => None,
+            });
+            for item in module.map(|(_, items)| items).unwrap_or_default() {
+                let name = match &item {
+                    syn::Item::Type(alias) => alias.ident.to_string(),
+                    syn::Item::Struct(item) => item.ident.to_string(),
+                    syn::Item::Enum(item) => item.ident.to_string(),
+                    syn::Item::Fn(function) => function.sig.ident.to_string(),
+                    _ => continue,
+                };
+                items.insert(name, item);
+            }
+            Self { items }
+        }
+
+        /// The fields of `pub struct name`, or `None` when the module declares no such struct.
+        pub fn fields(&self, name: &str) -> Option<Vec<Field>> {
+            let Some(syn::Item::Struct(item)) = self.items.get(name) else {
+                return None;
+            };
+            Some(item.fields.iter().map(|field| self.field(field)).collect())
+        }
+
+        /// The type of the field `wire` of `pub struct name`.
+        pub fn field_type(&self, name: &str, wire: &str) -> Option<syn::Type> {
+            self.fields(name)?
+                .into_iter()
+                .find(|field| field.wire == wire)
+                .map(|field| field.ty)
+        }
+
+        /// The struct `ty` names once its aliases and `Option`s are expanded, if it names one.
+        pub fn struct_of(&self, ty: &syn::Type, depth: usize) -> Option<String> {
+            let syn::Type::Path(path) = ty else {
+                return None;
+            };
+            let segment = path.path.segments.last()?;
+            if segment.ident == "Option" || segment.ident == "Box" {
+                let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                    return None;
+                };
+                let syn::GenericArgument::Type(inner) = args.args.first()? else {
+                    return None;
+                };
+                return self.struct_of(inner, depth.checked_sub(1)?);
+            }
+            if path.path.segments.len() != 1 {
+                return None;
+            }
+            let name = segment.ident.to_string();
+            match self.items.get(&name)? {
+                syn::Item::Type(alias) => self.struct_of(&alias.ty, depth.checked_sub(1)?),
+                syn::Item::Struct(_) => Some(name),
+                _ => None,
+            }
+        }
+
+        /// The body of the function `name`, as tokens.
+        pub fn function_body(&self, name: &str) -> Option<String> {
+            match self.items.get(name)? {
+                syn::Item::Fn(function) => Some(function.block.to_token_stream().to_string()),
+                _ => None,
+            }
+        }
+
+        fn field(&self, field: &syn::Field) -> Field {
+            let mut wire = field
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let mut serde = Vec::new();
+            let mut docs = Vec::new();
+            for attribute in &field.attrs {
+                if attribute.path().is_ident("doc") {
+                    if let syn::Meta::NameValue(syn::MetaNameValue {
+                        value:
+                            syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(text),
+                                ..
+                            }),
+                        ..
+                    }) = &attribute.meta
+                    {
+                        docs.push(text.value().trim().to_owned());
+                    }
+                    continue;
+                }
+                if !attribute.path().is_ident("serde") {
+                    serde.push(attribute.to_token_stream().to_string());
+                    continue;
+                }
+                attribute
+                    .parse_nested_meta(|meta| {
+                        let key = meta.path.to_token_stream().to_string();
+                        if !meta.input.peek(syn::Token![=]) {
+                            serde.push(key);
+                            return Ok(());
+                        }
+                        let value: syn::LitStr = meta.value()?.parse()?;
+                        match key.as_str() {
+                            "rename" => wire = value.value(),
+                            "default" => serde.push(format!(
+                                "default = {}",
+                                self.function_body(&value.value())
+                                    .unwrap_or_else(|| value.value())
+                            )),
+                            _ => serde.push(format!("{key} = {}", value.value())),
+                        }
+                        Ok(())
+                    })
+                    .unwrap_or_else(|error| panic!("unreadable serde attribute: {error}"));
+            }
+            Field {
+                wire,
+                ty: field.ty.clone(),
+                serde,
+                docs,
+            }
+        }
+
+        /// The shape of `ty`: what it stands for with every name the module declares expanded, so
+        /// two modules that lower one schema under different names agree. An alias is its target;
+        /// a struct is its fields sorted by wire name, each with its type's shape, its `serde`
+        /// attributes and the rustdoc lines that state its `default`; an enum is its variants'
+        /// payload shapes, sorted (a unit variant by its wire name). A path of more than one segment
+        /// (`serde_json::Value`) is never a declared name. Expansion stops at `depth`, so a
+        /// recursive type ends.
+        pub fn shape(&self, ty: &syn::Type, depth: usize) -> String {
+            match ty {
+                syn::Type::Path(path) if path.qself.is_none() => {
+                    let segments = &path.path.segments;
+                    if segments.len() == 1 && segments[0].arguments.is_none() && depth > 0 {
+                        if let Some(shape) = self.expand(&segments[0].ident.to_string(), depth) {
+                            return shape;
+                        }
+                    }
+                    let rendered: Vec<String> = segments
+                        .iter()
+                        .map(|segment| match &segment.arguments {
+                            syn::PathArguments::AngleBracketed(args) => {
+                                let args: Vec<String> = args
+                                    .args
+                                    .iter()
+                                    .map(|arg| match arg {
+                                        syn::GenericArgument::Type(ty) => self.shape(ty, depth),
+                                        other => other.to_token_stream().to_string(),
+                                    })
+                                    .collect();
+                                format!("{}<{}>", segment.ident, args.join(", "))
+                            }
+                            _ => segment.ident.to_string(),
+                        })
+                        .collect();
+                    rendered.join("::")
+                }
+                syn::Type::Tuple(tuple) => {
+                    let elements: Vec<String> =
+                        tuple.elems.iter().map(|ty| self.shape(ty, depth)).collect();
+                    format!("({})", elements.join(", "))
+                }
+                other => other.to_token_stream().to_string(),
+            }
+        }
+
+        /// [`Self::shape`] of the declared name `name`, or `None` when nothing declares it.
+        fn expand(&self, name: &str, depth: usize) -> Option<String> {
+            let depth = depth - 1;
+            Some(match self.items.get(name)? {
+                syn::Item::Type(alias) => self.shape(&alias.ty, depth),
+                syn::Item::Struct(_) => {
+                    let mut fields: Vec<String> = self
+                        .fields(name)?
+                        .into_iter()
+                        .map(|field| {
+                            let docs: Vec<&String> = field
+                                .docs
+                                .iter()
+                                .filter(|line| line.starts_with("Default"))
+                                .collect();
+                            format!(
+                                "{}: {} {:?} {:?}",
+                                field.wire,
+                                self.shape(&field.ty, depth),
+                                field.serde,
+                                docs
+                            )
+                        })
+                        .collect();
+                    fields.sort();
+                    format!("struct {{ {} }}", fields.join("; "))
+                }
+                syn::Item::Enum(item) => {
+                    let mut variants: Vec<String> = item
+                        .variants
+                        .iter()
+                        .map(|variant| match &variant.fields {
+                            syn::Fields::Unit => {
+                                let mut wire = variant.ident.to_string();
+                                for attribute in &variant.attrs {
+                                    if attribute.path().is_ident("serde") {
+                                        let _ = attribute.parse_nested_meta(|meta| {
+                                            if meta.path.is_ident("rename") {
+                                                let value: syn::LitStr = meta.value()?.parse()?;
+                                                wire = value.value();
+                                            }
+                                            Ok(())
+                                        });
+                                    }
+                                }
+                                format!("{wire:?}")
+                            }
+                            fields => {
+                                let payload: Vec<String> = fields
+                                    .iter()
+                                    .map(|field| self.shape(&field.ty, depth))
+                                    .collect();
+                                format!("({})", payload.join(", "))
+                            }
+                        })
+                        .collect();
+                    variants.sort();
+                    format!("enum {{ {} }}", variants.join(", "))
+                }
+                // A `default` function is read through the field naming it, never as a type.
+                _ => return None,
+            })
+        }
+    }
+
+    /// The shape of the field `wire` of `pub struct name` in the generated module `code`, `None`
+    /// when no such field was emitted.
+    pub fn field(code: &str, name: &str, wire: &str) -> Option<String> {
+        let types = Types::read(code);
+        let ty = types.field_type(name, wire)?;
+        Some(types.shape(&ty, 8))
+    }
+}
+
+/// The shape of `Holder.p` in `source`, which must have been emitted.
+fn holder_p_shape(source: &str) -> Result<String, TestCaseError> {
+    shape::field(source, "Holder", "p")
+        .ok_or_else(|| TestCaseError::fail(format!("`Holder.p` was not emitted:\n{source}")))
+}
+
+/// [`holder_p_shape`] without the `Option` that makes it nullable, so two shapes that differ only
+/// in admitting `null` compare equal.
+fn non_null(shape: &str) -> &str {
+    shape
+        .strip_prefix("Option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or(shape)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+    /// One conjunction of two members lowers to one shape however it is written: as `allOf` of
+    /// `$ref`s, as a `$ref` with the other member's keywords beside it, as an inline `allOf`, and as
+    /// an `allOf` beside `oneOf: [{}]`. Each spelling reaches the same verdict through `check` and
+    /// `generate`, with the same code multiset, and gives `Holder.p` the same shape. Each spelling
+    /// lowers to what [`emitted`] says, and two known gaps may still split them: a member's `$ref`
+    /// to its untyped component deciding `null` differently (#541), and the null type only the
+    /// `$ref`-sibling spelling finds (#542). Spellings the gaps split are compared with neither.
+    #[test]
+    fn every_spelling_of_one_conjunction_lowers_alike(
+        members in proptest::collection::vec(obj_strategy(), 2)
+    ) {
+        let order = [0, 1];
+        let mut seen: Vec<(Spelling, Lowered, Report, Option<String>)> = Vec::new();
+        for spelling in Spelling::ALL {
+            let spec = intersection_spec(&members, &order, spelling);
+            let (report, source) = generate_module(&spec);
+            let checked = check(&spec);
+            prop_assert_eq!(rejected(&checked), rejected(&report), "{:?}: {}", spelling, spec);
+            prop_assert_eq!(codes(&checked), codes(&report), "{:?}: {}", spelling, spec);
+            let lowered = lowered(&report, &source)?;
+            prop_assert_eq!(
+                lowered,
+                emitted(&members, &order, spelling),
+                "{:?}: {:#?}\n{}\n(known gaps: #{}, #{})",
+                spelling,
+                report,
+                spec,
+                ISSUE_REF_TO_UNTYPED_DENIES_NULL,
+                ISSUE_NULL_ONLY_ALL_OF_REJECTED
+            );
+            let shape = (!rejected(&report)).then(|| holder_p_shape(&source)).transpose()?;
+            for (at, lowered_at, report_at, shape_at) in &seen {
+                // Only a nullability gap may split two object spellings, so they still agree on the
+                // rest of the shape; a split verdict leaves nothing to compare.
+                let same_kind = match (lowered, *lowered_at) {
+                    (Lowered::Object { .. }, Lowered::Object { .. }) => true,
+                    (kind, kind_at) => kind == kind_at,
+                };
+                if !same_kind {
+                    continue;
+                }
+                let (compared, compared_at) = if lowered == Lowered::Rejected
+                    && (spelling == Spelling::RefSiblings || *at == Spelling::RefSiblings)
+                {
+                    (error_codes(&report), error_codes(report_at))
+                } else {
+                    (codes(&report), codes(report_at))
+                };
+                prop_assert_eq!(
+                    &compared,
+                    &compared_at,
+                    "{:?} and {:?} (known gap #{} compares only errors):\n{}",
+                    spelling,
+                    at,
+                    ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS,
+                    spec
+                );
+                if let (Some(shape), Some(shape_at)) = (&shape, shape_at) {
+                    prop_assert_eq!(
+                        non_null(shape),
+                        non_null(shape_at),
+                        "{:?} and {:?} lower `Holder.p` to different shapes:\n{}",
+                        spelling,
+                        at,
+                        spec
+                    );
+                }
+            }
+            seen.push((spelling, lowered, report, shape));
+        }
+    }
+
+    /// The order of an `allOf`'s members changes nothing: the same shape for `Holder.p`, the same
+    /// `W005` presence, and the same diagnostics about the same members, in each spelling that
+    /// writes the members in order.
+    #[test]
+    fn all_of_member_order_changes_nothing(
+        (members, order) in proptest::collection::vec(obj_strategy(), 2..=3).prop_flat_map(|members| {
+            let ids: Vec<usize> = (0..members.len()).collect();
+            (Just(members), Just(ids).prop_shuffle())
+        })
+    ) {
+        let identity: Vec<usize> = (0..members.len()).collect();
+        for spelling in [Spelling::AllOfRefs, Spelling::InlineAllOf, Spelling::AllOfBesideOneOf] {
+            let in_order = intersection_spec(&members, &identity, spelling);
+            let shuffled = intersection_spec(&members, &order, spelling);
+            let (report, source) = generate_module(&in_order);
+            let (moved, moved_source) = generate_module(&shuffled);
+            prop_assert_eq!(moved.outcome(), report.outcome(), "{:?}:\n{}\n{}", spelling, in_order, shuffled);
+            prop_assert_eq!(
+                has_code(&moved, Code::SchemaDefaultNotApplied),
+                has_code(&report, Code::SchemaDefaultNotApplied),
+                "{:?}:\n{}\n{}",
+                spelling,
+                in_order,
+                shuffled
+            );
+            prop_assert_eq!(
+                normalised_diagnostics(&moved, &members, &order, spelling),
+                normalised_diagnostics(&report, &members, &identity, spelling),
+                "{:?}:\n{}\n{}",
+                spelling,
+                in_order,
+                shuffled
+            );
+            if report.outcome() != Outcome::Rejected {
+                prop_assert_eq!(
+                    holder_p_shape(&moved_source)?,
+                    holder_p_shape(&source)?,
+                    "{:?}: reordering the members changed `Holder.p`:\n{}\n{}",
+                    spelling,
+                    in_order,
+                    shuffled
+                );
+            }
+        }
+    }
+
+    /// An object meet admits `null` exactly when every member does and one of them decides it
+    /// ([`meet_admits_null`]), in every spelling, for every order of its members. Where a member is
+    /// a `$ref` to its untyped component the known gap [`emitted_nullable`] names is what is held.
+    #[test]
+    fn an_object_meet_admits_null_exactly_when_its_members_do(
+        (members, order) in proptest::collection::vec(
+            (nullability_strategy(), proptest::collection::btree_set(0usize..MEET_KEYS, 1..=MEET_KEYS))
+                .prop_map(|(nullability, keys)| Obj {
+                    nullability,
+                    props: keys
+                        .into_iter()
+                        .map(|key| (key, Prop { ty: PropType::String, required: false, default: None }))
+                        .collect(),
+                }),
+            2..=3,
+        )
+        .prop_flat_map(|members| {
+            let ids: Vec<usize> = (0..members.len()).collect();
+            (Just(members), Just(ids).prop_shuffle())
+        })
+    ) {
+        for spelling in Spelling::ALL.into_iter().filter(|s| s.writes(members.len())) {
+            let spec = intersection_spec(&members, &order, spelling);
+            let (report, source) = generate_module(&spec);
+            prop_assert_eq!(report.outcome(), Outcome::Generated, "{:?}: {:#?}\n{}", spelling, report, spec);
+            let shape = holder_p_shape(&source)?;
+            let expected = emitted_nullable(&members, &order, spelling);
+            prop_assert_eq!(
+                shape.starts_with("Option<"),
+                expected,
+                "{:?}: `Holder.p` is `{}`, but `null` is {} here (meet rule: {}, known gap #{}):\n{}",
+                spelling,
+                shape,
+                if expected { "valid" } else { "invalid" },
+                meet_admits_null(&members),
+                ISSUE_REF_TO_UNTYPED_DENIES_NULL,
+                spec
+            );
+        }
+    }
+
+    /// A nullable union of objects (#450) refined by untyped object keywords: where the refiner
+    /// excludes every object branch only `null` is left, and the schema is the null type `()`,
+    /// never `E013`; without the `null` branch nothing is left, which is a rejection; a refiner
+    /// that excludes no branch keeps the union. Each holds in every spelling of the refinement.
+    #[test]
+    fn a_refined_nullable_union_keeps_exactly_what_the_refiner_admits(
+        refined in prop_oneof![Just("integer"), Just("boolean"), Just("string")],
+        nullable in any::<bool>(),
+        spelling in 0usize..3,
+    ) {
+        let union = if nullable {
+            "[{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }, { type: 'null' }]"
+        } else {
+            "[{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }]"
+        };
+        let refiner = format!("properties: {{ kind: {{ type: {refined} }} }}");
+        let pet = match spelling {
+            0 => format!("    Pet:\n      allOf: [{{ {refiner} }}]\n      oneOf: {union}\n"),
+            1 => format!("    U:\n      oneOf: {union}\n    Pet:\n      $ref: '#/components/schemas/U'\n      {refiner}\n"),
+            _ => format!("    Pet:\n      {refiner}\n      oneOf: {union}\n"),
+        };
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    \
+             Cat:\n      type: object\n      required: [kind]\n      properties: {{ kind: {{ type: string }} }}\n    \
+             Dog:\n      type: object\n      required: [kind, bark]\n      properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }}\n\
+             {pet}    Holder:\n      type: object\n      required: [p]\n      properties:\n        p: {{ $ref: '#/components/schemas/Pet' }}\n"
+        );
+        let excluded = refined != "string";
+        let (report, source) = generate_module(&spec);
+        let checked = check(&spec);
+        prop_assert_eq!(rejected(&checked), rejected(&report), "{}", spec);
+        if excluded && !nullable {
+            // Which code says so is the spelling's: `E013` beside an `allOf`, `E007` for the
+            // union's own siblings.
+            prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
+            return Ok(());
+        }
+        prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
+        prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}\n{}", report, spec);
+        let shape = holder_p_shape(&source)?;
+        prop_assert_eq!(shape == "()", excluded, "`Holder.p` is `{}`:\n{}", shape, spec);
+    }
+
+    /// Every `default` a member writes on a property is accounted for by the meet, exactly as
+    /// [`default_oracle`] says: kept (the merged field's rustdoc reads ``Default: `v`.``, wired as a
+    /// serde default exactly when the field is optional), or reported (`W005`) at exactly the
+    /// pointer that wrote it, and then documented as not applied when the field is uninhabited and
+    /// not at all when another member's `default` was kept. No other `default` pointer is reported.
+    #[test]
+    fn every_written_default_is_kept_or_reported(
+        (members, order) in proptest::collection::vec(obj_strategy(), 2..=3).prop_flat_map(|members| {
+            let ids: Vec<usize> = (0..members.len()).collect();
+            (Just(members), Just(ids).prop_shuffle())
+        })
+    ) {
+        let (conflicts, _) = meet_conflicts(&members);
+        for spelling in Spelling::ALL.into_iter().filter(|s| s.writes(members.len())) {
+            let spec = intersection_spec(&members, &order, spelling);
+            let (report, source) = generate_module(&spec);
+            let expected = emitted(&members, &order, spelling);
+            prop_assert_eq!(lowered(&report, &source)?, expected, "{:?}: {:#?}\n{}", spelling, report, spec);
+            match expected {
+                Lowered::Rejected => {
+                    prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:?}: {:#?}\n{}", spelling, report, spec);
+                    continue;
+                }
+                // The null type has no field to carry a `default`; what its members' `default`s
+                // report is #542's to settle, as only the gap's spelling reaches it today.
+                Lowered::Null => continue,
+                Lowered::Object { .. } => {}
+            }
+
+            let reported: BTreeSet<String> = normalised_diagnostics(&report, &members, &order, spelling)
+                .into_iter()
+                .filter(|(code, _)| *code == Code::SchemaDefaultNotApplied.as_str())
+                .map(|(_, pointer)| pointer)
+                .collect();
+            let types = shape::Types::read(&source);
+            let holder_p = types.field_type("Holder", "p");
+            let meet = holder_p.as_ref().and_then(|ty| types.struct_of(ty, 8));
+            let meet = meet.ok_or_else(|| TestCaseError::fail(format!("{spelling:?}: no merged struct:\n{source}")))?;
+            let fields = types.fields(&meet).unwrap();
+
+            let mut expected_reported = BTreeSet::new();
+            let keys: BTreeSet<usize> = members.iter().flat_map(|m| m.props.keys().copied()).collect();
+            for key in keys {
+                let uninhabited = conflicts.contains(&key);
+                let (kept, fates) = default_oracle(&members, key, uninhabited);
+                for (&id, fate) in &fates {
+                    if *fate != DefaultFate::Kept {
+                        expected_reported.insert(one_default_pointer(&members, &format!("M{id}/properties/{}/default", KEYS[key])));
+                    }
+                }
+                let field = fields
+                    .iter()
+                    .find(|field| field.wire == KEYS[key])
+                    .ok_or_else(|| TestCaseError::fail(format!("{spelling:?}: no `{}` field in `{meet}`:\n{source}", KEYS[key])))?;
+                let notes: Vec<&String> = field.docs.iter().filter(|line| line.starts_with("Default")).collect();
+                let wired = field.serde.iter().find(|attr| attr.starts_with("default = "));
+                let optional = !members.iter().any(|m| m.props.get(&key).is_some_and(|p| p.required));
+                let expected_note = kept.map(|value| {
+                    if uninhabited {
+                        format!("Default (not applied): `{}`.", value.raw())
+                    } else {
+                        format!("Default: `{}`.", value.display())
+                    }
+                });
+                prop_assert_eq!(
+                    notes,
+                    expected_note.iter().collect::<Vec<_>>(),
+                    "{:?}: `{}.{}` documents the wrong default:\n{}\n{}",
+                    spelling, meet, KEYS[key], spec, source
+                );
+                let expected_wired = kept.filter(|_| optional && !uninhabited);
+                prop_assert_eq!(
+                    wired.is_some(),
+                    expected_wired.is_some(),
+                    "{:?}: `{}.{}` wires {:?}, but the oracle keeps {:?}:\n{}\n{}",
+                    spelling, meet, KEYS[key], wired, expected_wired, spec, source
+                );
+                if let (Some(wired), Some(value)) = (wired, expected_wired) {
+                    let literal = match value {
+                        DefaultValue::Integer(value) => value.to_string(),
+                        DefaultValue::String(text) => format!("\"{text}\""),
+                    };
+                    prop_assert!(
+                        wired.contains(&format!("Some ({literal}")),
+                        "{:?}: `{}.{}` wires `{}`, not {}:\n{}",
+                        spelling, meet, KEYS[key], wired, literal, spec
+                    );
+                }
+            }
+            prop_assert_eq!(
+                reported,
+                expected_reported,
+                "{:?}: the reported `default`s disagree with the oracle (equal values folded, #{}):\n{}\n{:#?}",
+                spelling, ISSUE_EQUAL_DROPPED_DEFAULT_REPORTED_ONCE, spec, report
             );
         }
     }
