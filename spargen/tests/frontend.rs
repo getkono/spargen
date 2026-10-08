@@ -30051,6 +30051,45 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
             format!("{{ enum: [null], allOf: [{members}] }}"),
             true,
         ),
+        // A nested `allOf` member is flattened into the outer meet, and its own `type`, `enum` or
+        // `const` constrains every value just as the outer schema's does (#569).
+        (
+            "a nested member's own `type: string`",
+            format!("{{ allOf: [{{ type: string, allOf: [{members}] }}] }}"),
+            false,
+        ),
+        (
+            "a nested member's own `enum: [1]`",
+            format!("{{ allOf: [{{ enum: [1], allOf: [{members}] }}] }}"),
+            false,
+        ),
+        (
+            "a nested member's own `const: x`",
+            format!("{{ allOf: [{{ const: x, allOf: [{members}] }}] }}"),
+            false,
+        ),
+        (
+            "a twice-nested member's own `type: string`",
+            format!("{{ allOf: [{{ allOf: [{{ type: string, allOf: [{members}] }}] }}] }}"),
+            false,
+        ),
+        (
+            "a `$ref` member's own `type: string` beside a nested `allOf`",
+            "{ allOf: [{ $ref: '#/components/schemas/M0', type: string, \
+             allOf: [{ $ref: '#/components/schemas/M1' }] }] }"
+                .to_owned(),
+            false,
+        ),
+        (
+            "a nested member's own `type: [string, 'null']`",
+            format!("{{ allOf: [{{ type: [string, 'null'], allOf: [{members}] }}] }}"),
+            true,
+        ),
+        (
+            "a nested member's own `enum: [null]`",
+            format!("{{ allOf: [{{ enum: [null], allOf: [{members}] }}] }}"),
+            true,
+        ),
         (
             "a `oneOf` member admitting `null`",
             format!(

@@ -5229,8 +5229,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `type` listing `null` counts as their answer, and does not override a member that denies
     /// it: no value satisfies such a schema. Its own `type`, `enum` or `const` that is not an
     /// object keyword ([`schema_is_object_like`]) is no contribution, yet constrains every value
-    /// all the same, so one that excludes `null` leaves nothing either ([`own_keywords_admit_null`]).
-    /// `None` where `null` is excluded, so the caller reports the empty composition.
+    /// all the same, so one that excludes `null` leaves nothing either. So does such a keyword on
+    /// a nested `allOf` member [`Self::gather_member`] flattens into this meet, which equally
+    /// contributes nothing of its own ([`flattened_keywords_admit_null`], #569). `None` where `null` is excluded, so the caller reports the empty composition.
     ///
     /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
     /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
@@ -5244,7 +5245,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: &[Contribution],
         mark: u32,
     ) -> Option<Ty> {
-        if !object_all_of_admits_null(contributions) || !own_keywords_admit_null(schema) {
+        if !object_all_of_admits_null(contributions) || !flattened_keywords_admit_null(schema) {
             return None;
         }
         self.discard_meet_intermediates(mark, &TypeKind::Null);
@@ -11373,6 +11374,22 @@ fn own_keywords_admit_null(schema: &Schema) -> bool {
         .as_ref()
         .is_none_or(|value| matches!(value.node, Node::Null));
     type_admits && enum_admits && const_admits
+}
+
+/// [`own_keywords_admit_null`] over an object `allOf` schema and every nested `allOf` member
+/// [`LowerCtx::gather_member`] flattens into its meet: a member with an `allOf` and no union
+/// beside it, whether inline or as a `$ref`'s siblings. Flattening gathers only such a member's
+/// members and object keywords, so its own `type`, `enum` or `const` reaches no contribution, yet
+/// still constrains every value of the meet (#569). Any other member is lowered or read as a
+/// contribution of its own, which carries its nullability already.
+fn flattened_keywords_admit_null(schema: &Schema) -> bool {
+    own_keywords_admit_null(schema)
+        && schema.all_of.iter().all(|member| match member {
+            SchemaOr::Schema(member) if !member.all_of.is_empty() && !schema_has_union(member) => {
+                flattened_keywords_admit_null(member)
+            }
+            _ => true,
+        })
 }
 
 fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
