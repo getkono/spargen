@@ -5840,6 +5840,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // An unrepresentable property is remembered rather than returned at once: a later
         // required property whose types are disjoint still proves the whole object empty.
         let mut unrepresentable = false;
+        // So is an emptied one, though nothing outranks it: every property is still merged, so the
+        // `default`s the merge drops are reported (`W005`) beside the verdict, as the `allOf`
+        // merge, which reads every member before deciding, reports them (#545).
+        let mut empty = false;
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
@@ -5875,7 +5879,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         }
                         // Required on one side or the other: every instance must carry a value no
                         // type admits, so the composition really is empty.
-                        Err(NoMeet::Empty) => return Err(NoMeet::Empty),
+                        Err(NoMeet::Empty) => {
+                            empty = true;
+                            continue;
+                        }
                         // Values both sides admit exist, so an uninhabited field would refuse every
                         // object carrying one, required or not.
                         Err(NoMeet::Unrepresentable) => {
@@ -5894,6 +5901,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields.insert(field.name.wire.clone(), field.clone());
                 }
             }
+        }
+        if empty {
+            return Err(NoMeet::Empty);
         }
         // A field neither side declares is an undeclared key of the side that does not carry it
         // too, so that side's `additionalProperties` value schema constrains it:
