@@ -60,6 +60,8 @@ in every mode). When the client is inlined by the macro, that gate resolves agai
 features. A crate that does not declare it compiles the blocking client out cleanly, including
 under `-D warnings`. To opt in, declare the feature as `blocking = ["dep:tokio"]` together with a
 native-only optional `tokio`: `spargen deps <spec>` prints both, commented out, at the tested
-floor, and uncommenting them is the whole opt-in.
+floor. Uncommenting them is the whole opt-in, except that an entry whose `[features]` table,
+`blocking` key, or dependency table your manifest already declares merges into it rather than
+being added a second time, which TOML rejects.
 
 Licensed under MIT OR Apache-2.0.

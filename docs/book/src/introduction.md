@@ -18,7 +18,7 @@ Generated code compiles, or generation fails with a diagnostic that names the co
 Pointer, and a remedy. Every construct is supported, warned about, or rejected; the
 [feature support matrix](./support-matrix.md) and the [diagnostic index](./errors.md) are that
 operational contract. The rest of the design guarantees (freestanding output, determinism,
-edition-independent output, no `serde(untagged)`, and a cap on retained error bodies) are listed
+edition-independent output, `include!`-friendly output, no `serde(untagged)`, and a cap on retained error bodies) are listed
 once, in the README's
 [Design guarantees](https://github.com/getkono/spargen#design-guarantees).
 
