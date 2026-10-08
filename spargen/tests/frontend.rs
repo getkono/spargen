@@ -17691,6 +17691,83 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
     }
 }
 
+/// Three more sites re-emit a meet's kind under the enclosing schema's own name, as an all-scalar
+/// `allOf` and a `$ref`-sibling intersection do (#401), so the meet's own definition is unused
+/// unless the re-emitted kind refers to it (#462). Each leaked one: a union whose sole non-null
+/// member meets the union's siblings left `…Constrained`, a union whose siblings exclude all but
+/// one member left the survivor's `…Variant0Constrained`, and a `$ref` to a union refined by
+/// untyped sibling keywords left the met union `…ReferenceIntersection`. Each is now discarded,
+/// while a type the re-emitted kind does refer to — the `$ref` case's met branch — is kept.
+#[test]
+fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
+    fn spec(field: &str) -> String {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
+             description: ok\n          content:\n            application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Holder' }}\n\
+             components:\n  schemas:\n    \
+             Pet: {{ type: object, properties: {{ name: {{ type: string }} }} }}\n    \
+             Target: {{ oneOf: [{{ type: object, properties: {{ name: {{ type: string }} }} }}, {{ type: string }}] }}\n    \
+             Holder: {{ type: object, properties: {{ field: {field} }} }}\n"
+        )
+    }
+    /// The types lowered for `Holder.field`, in source order.
+    fn field_types(code: &str) -> Vec<String> {
+        types_module(code)
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| {
+                ["pub struct ", "pub enum ", "pub type "]
+                    .iter()
+                    .find_map(|item| line.strip_prefix(item))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+            .filter(|name| name.starts_with("Holderfield"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    let cases: [(&str, &str, &[&str], &str); 3] = [
+        (
+            "sole non-null member",
+            "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: 'null' }], required: [name] }",
+            &["HolderfieldConstraint", "Holderfield"],
+            "HolderfieldConstrained",
+        ),
+        (
+            "one member left by the siblings",
+            "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: integer }], type: object, \
+             required: [name] }",
+            &[
+                "HolderfieldConstraint",
+                "HolderfieldVariant1",
+                "Holderfield",
+            ],
+            "HolderfieldVariant0Constrained",
+        ),
+        (
+            "$ref to a union with untyped siblings",
+            "{ $ref: '#/components/schemas/Target', required: [name] }",
+            &[
+                "HolderfieldConstraint",
+                "HolderfieldReferenceIntersectionVariant0",
+                "Holderfield",
+            ],
+            "HolderfieldReferenceIntersection",
+        ),
+    ];
+    for (case, field, expected, discarded) in cases {
+        let (report, code) = generate_with_code(&spec(field));
+        assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
+        let mut lowered = field_types(&code);
+        // The sibling's own lowered field alias is emitted as every lowered sibling is, and is not
+        // what this pins.
+        lowered.retain(|name| name != "HolderfieldConstraintname");
+        assert_eq!(lowered, expected, "{case}: `{discarded}` is unused");
+    }
+}
+
 /// Issue #454: two `allOf` members that both declare an object-typed property `p` meet it in a
 /// struct of its own (`PetpIntersection`). That struct carried the document root's provenance, so
 /// a `W005` against it named the type as `` in `` `` and a `W006` against it had an empty pointer
