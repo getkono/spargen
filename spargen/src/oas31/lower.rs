@@ -5720,9 +5720,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// counterpart of [`Self::merge_indistinguishable_variants`] (#402). Called once
     /// [`Self::indistinguishable_union_variant`] has found that not every variant shares one type,
     /// so two or more variants remain. Variants are grouped apart from their own `null`
-    /// ([`Self::same_type_apart_from_null`]); a merged set in which exactly one branch accepts
-    /// `null` keeps it, and one in which two or more do puts `null` in two branches, which fails
-    /// exactly-one, so `null` is then invalid everywhere in the union.
+    /// ([`Self::same_type_apart_from_null`]). `null` is counted across the union's own `null`
+    /// member and every branch of every set: where exactly one accepts it, that one keeps it; where
+    /// two or more do, `null` is in two branches, which fails exactly-one, so it is then invalid
+    /// everywhere in the union.
     fn merge_intersected_one_of(
         &mut self,
         schema: &Schema,
@@ -5750,15 +5751,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if groups.len() == union.variants.len() {
             return None;
         }
-        // The members of a set need not agree on `null`. A set accepts it when exactly one member
-        // does; two or more put `null` in two branches, which fails exactly-one everywhere.
+        // The members of a set need not agree on `null`, and neither need the sets nor the union's
+        // own `null` member (`ty.nullable`). `null` is counted across all of them, as the
+        // all-collapse path in [`Self::collapse_met_union`] counts it: it stays valid, where it
+        // was, only when exactly one source accepts it; two or more put `null` in two branches,
+        // which fails exactly-one everywhere in the union.
         let accepting_null = |group: &Vec<usize>| {
             group
                 .iter()
                 .filter(|index| union.variants[**index].ty.nullable)
                 .count()
         };
-        let null_twice = groups.iter().any(|group| accepting_null(group) > 1);
+        let null_sources =
+            usize::from(ty.nullable) + groups.iter().map(accepting_null).sum::<usize>();
+        let null_twice = null_sources > 1;
         let retained: Vec<usize> = groups.iter().map(|group| group[0]).collect();
         let variants = groups
             .iter()
