@@ -9,6 +9,7 @@ hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 "cargo:mdbook" = "0.5.4"                    # documentation site builder
 "aqua:release-plz/release-plz" = "0.3.160"  # the changelog/version oracle release-plz.yml runs
+"cargo:cargo-mutants" = "27.1.0"            # mutation testing (`mise run mutants`)
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -178,6 +179,27 @@ description = "Run the generation benchmarks (criterion). CI uploads these as a 
 # The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
 # measures what the published artifact measured.
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
+
+[tasks.mutants]
+description = "Mutation testing over the runtime, the response partition and the name allocator"
+# CI's `mutants` job in `mutants.yml` runs this command byte for byte, weekly and on
+# `workflow_dispatch` (`every_mise_task_runs_exactly_what_its_ci_job_runs`): it takes well over the
+# time a pull request should wait, so no hook or pull request runs it. The scope is the embedded
+# runtime, `ir/media.rs`'s success/error partition, and the name allocator; `oas31/lower.rs` is
+# left out until its rework settles, and then needs `--shard` (#490).
+# - `--config` names `.cargo/mutants.toml` rather than relying on its default location, so a
+#   missing file fails the run instead of silently dropping every exclusion. That file lists each
+#   excluded mutant with the argument for why no test can observe it.
+# - `--all-features` builds the `xml`, `blocking` and `time` modules: a mutant in code the build
+#   leaves out compiles, passes every test, and would be reported missed.
+# - `-- --lib` runs each mutated package's unit tests, where the tests of all three scopes live. A
+#   mutant only an integration test (`spargen/tests/e2e.rs` and the rest) would catch is reported
+#   missed, which fails the run; the kill belongs beside the code. Running the integration suites
+#   per mutant would take hours.
+# - `|| test $? -eq 3` accepts cargo-mutants' "timeouts but none missed" status. A mutant that hangs
+#   the suite (`+=` to `*=` on a loop index that starts at 0 never ends) has been detected; exit
+#   status 2, any missed mutant, still fails, as do 1 (usage) and 4 (the unmutated tree fails).
+run = "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3"
 
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"

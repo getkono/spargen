@@ -63,6 +63,7 @@ mise run powerset   # cargo hack: every feature combination, not just --all-feat
 mise run corpus-smoke  # pinned real-world specs
 mise run example    # both petstore examples over a local mock server
 mise run github-api # the full GitHub client: native strict clippy + wasm32
+mise run mutants    # cargo-mutants over support-runtime, ir/media.rs and name/ (weekly in CI)
 mise run deny       # supply-chain audit
 mise run deny-published  # advisory audit of the Cargo.lock the latest release ships
 mise run release-preview  # release-plz update in a scratch clone: the next release's CHANGELOG
@@ -80,7 +81,8 @@ second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit; `fmt
 alone is globbed); `commit-msg` validates each message as it is written. Run `mise run hooks` once
 to install them. The rest — `check`, `bench-build`, `msrv`, `package`, `runtime-dependencies`,
 `powerset`, `corpus-smoke`, `example`, `github-api`, `deny-published`, `release-preview`, `docs`,
-and `doc-links` (a step inside the `docs` CI job, not a job of its own) — never run in a hook;
+`mutants` (weekly and on demand in `mutants.yml`, never on a pull request), and `doc-links` (a
+step inside the `docs` CI job, not a job of its own) — never run in a hook;
 they are too slow, so a green pre-push is not a green CI. `msrv` needs
 `rustup toolchain install 1.88.0`, and `package` a clean tree.
 
@@ -95,8 +97,8 @@ workflow (it publishes); an unclassified workflow fails. Each gate workflow's `o
 tool install), are pinned literally, and task keys such as `dir` or a mise config file beside
 `mise.toml`, which would change what a task runs without appearing in its command, are rejected.
 CI's `test` job runs the same two commands as `mise run test` and `mise run bench-build`; `bench`
-pairs with `benchmarks.yml`, and `deny` and `deny-published` with `deny.yml`'s jobs of those
-names. The only differences are named exceptions in that test's `PAIRINGS` table, each pinned
+pairs with `benchmarks.yml`, `mutants` with `mutants.yml`, and `deny` and `deny-published` with
+`deny.yml`'s jobs of those names. The only differences are named exceptions in that test's `PAIRINGS` table, each pinned
 literally on both sides:
 
 - `commits` checks the pull request's `base.sha..head.sha` where `commit-range` checks
@@ -104,10 +106,10 @@ literally on both sides:
 - The `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only.
 - `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact.
 - The `deny-published` job's pinned `if:` runs it only on the schedule and on `workflow_dispatch`.
-- CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook`, `convco` and `release-plz`
-  itself, at the versions mise's `[tools]` pins; `release-plz.yml`'s action is held to the
-  `release-plz` pin through its `version:` input. Every pin but `hk`, which CI never runs, is
-  installed by each job that runs it.
+- CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `cargo-mutants`, `mdbook`, `convco` and
+  `release-plz` itself, at the versions mise's `[tools]` pins; `release-plz.yml`'s action is held
+  to the `release-plz` pin through its `version:` input. Every pin but `hk`, which CI never runs,
+  is installed by each job that runs it.
 
 The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel` is a concrete release
 (not `stable`), which selects the toolchain for every local `cargo` call and so for every
