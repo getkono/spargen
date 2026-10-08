@@ -822,12 +822,13 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
                     Ok(parsed) => Yaml::Integer(parsed),
                     Err(_) => Yaml::BadValue,
                 },
+                // An explicit `!!float` stays a float even over integer text (`!!float 5`), so it
+                // bypasses the integer classification `yaml_scalar_to_node` gives a `Real`.
                 "float" => {
                     if is_yaml_real(value) {
-                        Yaml::Real(value.to_owned())
-                    } else {
-                        Yaml::BadValue
+                        return Node::Number(Number::Float(value.parse().unwrap_or(0.0)));
                     }
+                    Yaml::BadValue
                 }
                 "null" => match value {
                     "~" | "null" => Yaml::Null,
@@ -844,14 +845,19 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
     yaml_scalar_to_node(yaml)
 }
 
-/// Map a scalar [`Yaml`] onto a [`Node`], preserving the previous path's number handling
-/// (`Integer` → `Int`, `Real` → `Float`, out-of-range/`BadValue` fall through to `Null`).
+/// Map a scalar [`Yaml`] onto a [`Node`] (`BadValue` falls through to `Null`), classifying an
+/// integer literal as the JSON parser does: `yaml_rust2` reads one that overflows `i64` as a
+/// `Real`, so a `Real` whose text parses as a `u64` (`18446744073709551615`, `+…`) is a `UInt`;
+/// any other `Real` (a fraction, an exponent, a literal beyond `u64`) is a `Float`.
 fn yaml_scalar_to_node(yaml: Yaml) -> Node {
     match yaml {
         Yaml::Null | Yaml::BadValue => Node::Null,
         Yaml::Boolean(value) => Node::Bool(value),
         Yaml::Integer(value) => Node::Number(Number::Int(value)),
-        Yaml::Real(value) => Node::Number(Number::Float(value.parse().unwrap_or(0.0))),
+        Yaml::Real(value) => match value.parse::<u64>() {
+            Ok(unsigned) => Node::Number(Number::UInt(unsigned)),
+            Err(_) => Node::Number(Number::Float(value.parse().unwrap_or(0.0))),
+        },
         Yaml::String(value) => Node::String(value),
         // Scalars never carry these variants; treat defensively as null.
         Yaml::Array(_) | Yaml::Hash(_) | Yaml::Alias(_) => Node::Null,
@@ -1006,6 +1012,44 @@ mod tests {
         assert_eq!(
             root.get("e").unwrap().node,
             Node::Number(Number::Float(1000.0))
+        );
+    }
+
+    #[test]
+    fn yaml_integer_classification_matches_the_json_parser() {
+        // Issue #540: `yaml_rust2` reads an integer literal beyond `i64::MAX` as a `Real`; it must
+        // still classify as the JSON parser classifies it, `Int`, else `UInt`, else `Float`.
+        let text = "i: -7\nmax: 9223372036854775807\nu: 18446744073709551615\n\
+                    plus: +18446744073709551615\nover: 18446744073709551616\n\
+                    under: -9223372036854775809\nf: 1.5\ntagged: !!float 5\n";
+        let root = parse_yaml_ok(text);
+        let json = parse_json_ok(
+            "{\"i\": -7, \"max\": 9223372036854775807, \"u\": 18446744073709551615, \
+             \"over\": 18446744073709551616, \"under\": -9223372036854775809, \"f\": 1.5}",
+        );
+        for key in ["i", "max", "u", "over", "under", "f"] {
+            assert_eq!(
+                root.get(key).unwrap().node,
+                json.get(key).unwrap().node,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            root.get("u").unwrap().node,
+            Node::Number(Number::UInt(u64::MAX))
+        );
+        assert_eq!(
+            root.get("plus").unwrap().node,
+            Node::Number(Number::UInt(u64::MAX))
+        );
+        assert_eq!(
+            root.get("over").unwrap().node,
+            Node::Number(Number::Float(18446744073709551616.0))
+        );
+        // An explicit `!!float` stays a float over integer text.
+        assert_eq!(
+            root.get("tagged").unwrap().node,
+            Node::Number(Number::Float(5.0))
         );
     }
 
