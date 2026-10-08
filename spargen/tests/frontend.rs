@@ -3269,6 +3269,17 @@ fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
             admits,
         ));
     }
+    // A `oneOf` of one untyped branch beside a branch that denies `null`, over the nullable `N`:
+    // `null` is in the untyped branch alone, so exactly one branch takes it.
+    for other in ["{ type: object }", "{ type: string }"] {
+        let one_untyped = format!("[ {{ properties: {{ a: {{ type: string }} }} }}, {other} ]");
+        rows.push(("N", format!("{{ {n}, oneOf: {one_untyped} }}"), true));
+        rows.push((
+            "N",
+            format!("{{ allOf: [ {{ {n} }}, {{ oneOf: {one_untyped} }} ] }}"),
+            true,
+        ));
+    }
     // Nothing in these compositions admits `null` by a `type`: the conjuncts are untyped objects
     // alone, or the untyped `U`, so every spelling keeps the non-null struct an untyped object
     // lowers to, and the held-back union's untyped branches take no `null` from the meet.
