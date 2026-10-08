@@ -1562,6 +1562,109 @@ components:
     );
 }
 
+/// The partly shared `$ref`-sibling merge counts `null` across the whole union (#528), as the
+/// all-collapse path does: the union's own `null` member and every branch of every merged set are
+/// each a source, and `null` stays valid, where it was, only when exactly one source accepts it.
+/// Beside `NI: {type: [integer, 'null']}`, an untyped branch meets `NI` to a nullable integer and
+/// `{type: integer}` to a plain one, so `{minimum: 0}` and `{type: integer}` are one variant, while
+/// an `int32` branch makes a second. Each case is `(branches, the position is Option<_>, variants that are
+/// Option<_>)`:
+/// - a `null` member beside a nullable merged branch is two sources, so `null` is invalid;
+/// - a `null` member beside no nullable branch is one, so the position keeps it;
+/// - a nullable branch in each of two sets is two, so neither variant keeps it.
+#[test]
+fn a_partly_shared_ref_sibling_one_of_counts_null_across_the_whole_union() {
+    for (branches, position_nullable, nullable_variants) in [
+        (
+            "[ { type: 'null' }, { minimum: 0 }, { type: integer }, \
+             { type: integer, format: int32 } ]",
+            false,
+            0,
+        ),
+        (
+            "[ { type: 'null' }, { type: integer, minimum: 0 }, { type: integer }, \
+             { type: integer, format: int32 } ]",
+            true,
+            0,
+        ),
+        (
+            "[ { minimum: 0 }, { type: integer }, \
+             { type: [integer, 'null'], format: int32 } ]",
+            false,
+            0,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NI: {{ type: [integer, 'null'] }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NI'
+          oneOf: {branches}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{branches} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "{branches} via {entry}: the partial merge must warn at `x`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("{branches}: no `x` field: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            position_nullable,
+            "{branches}: `x` is `{x}`: {types}"
+        );
+        let inner = x
+            .strip_prefix("Option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(&x);
+        let variants = enum_variants(&types, inner);
+        assert_eq!(
+            variants.len(),
+            2,
+            "{branches}: the two `i64` branches must be one variant beside `int32`: {types}"
+        );
+        assert_eq!(
+            variants
+                .iter()
+                .filter(|variant| variant.contains("(Option<"))
+                .count(),
+            nullable_variants,
+            "{branches}: `null` has more than one source, or its one source is the position: \
+             {variants:?}"
+        );
+    }
+}
+
 /// Issue #425: an object `allOf` admits `null` exactly when every member does, as its `$ref`-sibling
 /// spelling and the all-scalar `allOf` already do. A nullable `$ref` member decides `null` for
 /// itself; an untyped inline member's object keywords bind objects only, so it admits `null`
