@@ -4924,9 +4924,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// The null type for an object `allOf` whose object meet is empty, when `null` still satisfies
-    /// it: every member admits `null` and one decides it ([`object_all_of_admits_null`]), or the
-    /// schema's own `type` lists it, the nullability [`Self::combine_all_of`] gives the merged
-    /// struct. `None` where `null` is excluded too, so the caller reports the empty composition.
+    /// it: every member admits `null` and one decides it ([`object_all_of_admits_null`]). The
+    /// schema's own object keywords are one of those members ([`Self::gather_all_of`]), so its
+    /// `type` listing `null` counts as their answer, and does not override a member that denies
+    /// it: no value satisfies such a schema. `None` where `null` is excluded, so the caller
+    /// reports the empty composition.
     ///
     /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
     /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
@@ -4940,9 +4942,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: &[Contribution],
         mark: u32,
     ) -> Option<Ty> {
-        let admits_null = object_all_of_admits_null(contributions)
-            || schema.types.types.contains(&JsonType::Null);
-        if !admits_null {
+        if !object_all_of_admits_null(contributions) {
             return None;
         }
         self.discard_meet_intermediates(mark, &TypeKind::Null);

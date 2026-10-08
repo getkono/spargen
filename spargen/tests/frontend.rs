@@ -29175,4 +29175,15 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
     let ty = field_type(&types_module(&code), "pub p:")
         .unwrap_or_else(|| panic!("no `Holder.p`: {code}"));
     assert!(code.contains(&format!("pub type {ty} = ();")), "{code}");
+
+    // The schema's own `type` listing `null` does not make `null` valid where its `allOf` members
+    // deny it: no value satisfies the schema, so that stays `E013`, never the null type.
+    let denied = document(
+        "object",
+        "{ type: [object, 'null'], allOf: [{ type: object, properties: { b: { type: string } } }, \
+         { $ref: '#/components/schemas/M1' }] }",
+    );
+    let (report, _) = generate_with_code(&denied);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
