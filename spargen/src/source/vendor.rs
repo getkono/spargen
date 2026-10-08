@@ -254,11 +254,9 @@ pub(crate) fn vendor(
         let Some(value) = scanned.docs[index].value.pointer(&pointer) else {
             continue;
         };
-        let doc_refs: Vec<String> = collect_refs(value, &pointer)
-            .into_iter()
-            .map(|collected| collected.reference)
-            .collect();
-        for reference in &doc_refs {
+        let collected_refs = collect_refs(value, &pointer);
+        for collected in &collected_refs {
+            let reference = &collected.reference;
             match classify_ref(reference, remote_base.as_deref()) {
                 RefTarget::InDocument => {}
                 RefTarget::LocalRelative(path) => {
@@ -281,9 +279,13 @@ pub(crate) fn vendor(
                 // A document's opaque `$self` names it, as the build resolves such a reference.
                 RefTarget::UnsupportedRemote(url) if scanned.remote_docs.contains_key(&url) => {}
                 RefTarget::UnsupportedRemote(url) => {
+                    // Located at the reference, in its document's terms. Every scanned document
+                    // is parsed as `FileId(0)` (`parse_scratch`), so only the root's spans name
+                    // the file they lie in; any other document's reference keeps its pointer.
+                    let span = (index == root).then_some(collected.span);
                     Diagnostic::error(
                         Code::AbsoluteRefUnsupported,
-                        Provenance::new(JsonPointer::root(), None),
+                        Provenance::new(collected.pointer.clone(), span),
                     )
                     .message(format!("cannot vendor non-http(s) $ref `{url}`"))
                     .remedy("vendor the referenced document locally and use a relative $ref")
@@ -368,8 +370,9 @@ pub(crate) fn vendor(
             }
         }
         // Every document a reference names has been scanned by now, so its target can be found.
-        for reference in doc_refs
+        for reference in collected_refs
             .iter()
+            .map(|collected| &collected.reference)
             .filter(|reference| enters_extension(reference))
         {
             let target = match classify_ref(reference, remote_base.as_deref()) {
@@ -572,6 +575,73 @@ mod tests {
         assert!(vendor_dir
             .join(vendor_path_for_url("https://api.example.com/tag.yaml"))
             .exists());
+    }
+
+    /// A non-http(s) `$ref` the lock cannot vendor is `E003` at each `$ref` that names it, not at
+    /// the root: two sites in the root document give two reports, each with its own pointer and
+    /// the span of its string; one in a local file it reaches carries that file's pointer and no
+    /// span, since every scanned document is parsed as `FileId(0)`.
+    #[test]
+    fn a_non_http_ref_the_lock_cannot_vendor_is_e003_at_each_site() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             components:\n\
+             \x20 schemas:\n\
+             \x20   Pet:\n\
+             \x20     $ref: \"urn:example:pet\"\n\
+             \x20   Tag:\n\
+             \x20     $ref: \"urn:example:pet\"\n\
+             \x20   Lib:\n\
+             \x20     $ref: \"lib.yaml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib.yaml"),
+            "type: object\n\
+             properties:\n\
+             \x20 pet: { $ref: \"urn:example:pet\" }\n",
+        )
+        .unwrap();
+        let fetcher = StubFetcher {
+            docs: std::collections::HashMap::new(),
+        };
+
+        let mut diags = Diagnostics::default();
+        assert!(vendor(&spec, &fetcher, &mut diags).is_err());
+
+        let located: Vec<(Code, &str, Option<u32>)> = diags
+            .items()
+            .iter()
+            .map(|diag| {
+                (
+                    diag.code,
+                    diag.pointer.as_str(),
+                    diag.span.map(|span| span.start.line),
+                )
+            })
+            .collect();
+        assert_eq!(
+            located,
+            [
+                (
+                    Code::AbsoluteRefUnsupported,
+                    "/components/schemas/Pet/$ref",
+                    Some(5)
+                ),
+                (
+                    Code::AbsoluteRefUnsupported,
+                    "/components/schemas/Tag/$ref",
+                    Some(7)
+                ),
+                (Code::AbsoluteRefUnsupported, "/properties/pet/$ref", None),
+            ],
+            "{:?}",
+            diags.items()
+        );
     }
 
     /// `spargen lock` follows the references a build follows (#239): none inside a specification
