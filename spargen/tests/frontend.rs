@@ -648,7 +648,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
     let refiner = "{ properties: { a: { type: string } } }";
     let b = "B: { type: object, properties: { a: { type: string } } }";
     // Each spelling, with the types it no longer emits and the ones it must keep.
-    let cases: [(&str, String, &[&str], &[&str]); 6] = [
+    let cases: [(&str, String, &[&str], &[&str]); 7] = [
         (
             "an allOf member",
             format!("U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}"),
@@ -683,6 +683,21 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
                 "UconstraintConstraint",
             ],
             &["B", "U", "UconstraintConstraintc"],
+        ),
+        (
+            "beside a $ref and its typed keywords, met with the target first",
+            format!(
+                "{b}\n    U: {{ $ref: '#/components/schemas/B', type: object, properties: {{ c: \
+                 {{ type: integer }} }}, oneOf: [{{ required: [a] }}, {{ type: object }}] }}"
+            ),
+            &[
+                "Uunion",
+                "UunionVariant0",
+                "UunionVariant1",
+                "Uconstraint",
+                "UreferenceComposition",
+            ],
+            &["B", "U", "Uconstraintc"],
         ),
         (
             "a $ref'd component first lowered inside the union",
