@@ -4,13 +4,16 @@
 
 A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x. Nothing older.
 
+<!-- ANCHOR: name -->
 The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
 board, carrying the entire span in flight with nothing propping it up. That is the product:
 everything structural is decided at generation time; nothing is interpreted at runtime. Spec in,
 spar out.
+<!-- ANCHOR_END: name -->
 
 ## Why
 
+<!-- ANCHOR: why -->
 Most of the modern Rust server ecosystem emits OpenAPI **3.1** (utoipa, aide, poem-openapi —
 everything downstream of JSON Schema 2020-12), but the ecosystem's client generators target
 3.0.x. 3.1 is not a patch over 3.0: it replaces OpenAPI's bespoke schema dialect with real JSON
@@ -22,6 +25,7 @@ semantics.
 Spargen speaks 3.1 and its focused 3.2 extension natively, fails loudly and precisely on what it
 does not support, and treats dependency hygiene as a first-class constraint. 3.0.x input is
 rejected with a diagnostic, never converted.
+<!-- ANCHOR_END: why -->
 
 ## What it does
 
