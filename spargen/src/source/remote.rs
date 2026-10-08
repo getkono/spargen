@@ -10,7 +10,7 @@
 //! fetched is [`vendor`](fn@super::vendor) — driven exclusively by `spargen lock`. This is also the anti-SSRF
 //! boundary: no spec content can trigger a network request during a build.
 
-use crate::diag::JsonPointer;
+use crate::diag::{JsonPointer, Span};
 
 use super::{canonical_pointer, Node, SpannedValue};
 
@@ -159,8 +159,22 @@ pub(crate) fn rewrite_refs_to_absolute(value: &mut SpannedValue, base_url: &str)
     }
 }
 
+/// A reference string [`collect_refs`] found, with where it was found, so a diagnostic about it
+/// can be placed at it rather than at its document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollectedRef {
+    /// The reference as written.
+    pub(crate) reference: String,
+    /// Where it is written, in its document: the `$ref` member, or the Security Requirement member
+    /// whose key is the URI. Never the document root, since a reference is always a member.
+    pub(crate) pointer: JsonPointer,
+    /// The span of the text that spells it: the `$ref` value's, or the key's.
+    pub(crate) span: Span,
+}
+
 /// Collect every reference string in a value tree, in document order, outside specification
-/// extensions.
+/// extensions. `at` is where `value` lies in its document, so each reference's pointer addresses
+/// it in that document.
 ///
 /// This is `$ref` plus one other place OpenAPI puts a reference without calling it one: OpenAPI
 /// 3.2 allows a Security Requirement Object's *key* to be the URI of a Security Scheme Object, so
@@ -172,10 +186,10 @@ pub(crate) fn rewrite_refs_to_absolute(value: &mut SpannedValue, base_url: &str)
 /// `$ref`-shaped object inside one is author data rather than a Reference Object, and nothing it
 /// names is loaded. An extension's contents are interpreted only where a reference addresses them;
 /// [`enters_extension`] names those, and the caller walks each one's target as a value of its own.
-pub(crate) fn collect_refs(value: &SpannedValue) -> Vec<String> {
+pub(crate) fn collect_refs(value: &SpannedValue, at: &JsonPointer) -> Vec<CollectedRef> {
     let mut refs = Vec::new();
-    collect_refs_inner(value, Keys::Fields, &mut refs);
-    collect_security_requirement_refs(value, &mut refs);
+    collect_refs_inner(value, at, Keys::Fields, &mut refs);
+    collect_security_requirement_refs(value, at, &mut refs);
     refs
 }
 
@@ -248,30 +262,41 @@ const NAME_KEYED_FIELDS: &[&str] = &[
 ];
 
 /// Collect Security Requirement Object keys that name a scheme by URI rather than component name.
-fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String>) {
+fn collect_security_requirement_refs(
+    value: &SpannedValue,
+    at: &JsonPointer,
+    refs: &mut Vec<CollectedRef>,
+) {
     let Node::Object(root) = &value.node else {
         return;
     };
-    let mut visit = |requirements: &SpannedValue| {
+    let mut visit = |requirements: &SpannedValue, at: JsonPointer| {
         let Node::Array(entries) = &requirements.node else {
             return;
         };
-        for entry in entries {
+        for (index, entry) in entries.iter().enumerate() {
             let Node::Object(map) = &entry.node else {
                 continue;
             };
             for (key, _) in map.iter() {
                 // A single-segment name is a component name unless `./` forces the URI reading.
-                if let Some(rest) = key.name.strip_prefix("./") {
-                    refs.push(rest.to_owned());
+                let reference = if let Some(rest) = key.name.strip_prefix("./") {
+                    rest
                 } else if key.name.contains('/') || key.name.contains('#') {
-                    refs.push(key.name.clone());
-                }
+                    key.name.as_str()
+                } else {
+                    continue;
+                };
+                refs.push(CollectedRef {
+                    reference: reference.to_owned(),
+                    pointer: at.index(index).push(&key.name),
+                    span: key.span,
+                });
             }
         }
     };
     if let Some(security) = root.get("security") {
-        visit(security);
+        visit(security, at.push("security"));
     }
     if let Some(Node::Object(paths)) = root.get("paths").map(|paths| &paths.node) {
         for (path, item) in paths.iter() {
@@ -286,20 +311,37 @@ fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String
                     continue;
                 }
                 if let Some(security) = operation.get("security") {
-                    visit(security);
+                    visit(
+                        security,
+                        at.push("paths")
+                            .push(&path.name)
+                            .push(&method.name)
+                            .push("security"),
+                    );
                 }
             }
         }
     }
 }
 
-fn collect_refs_inner(value: &SpannedValue, keys: Keys, refs: &mut Vec<String>) {
+fn collect_refs_inner(
+    value: &SpannedValue,
+    at: &JsonPointer,
+    keys: Keys,
+    refs: &mut Vec<CollectedRef>,
+) {
     match &value.node {
         Node::Object(map) => {
             // In a map, `$ref` is an entry's name (a property called `$ref`), not a reference.
             if matches!(keys, Keys::Fields) {
-                if let Some(reference) = map.get("$ref").and_then(SpannedValue::as_str) {
-                    refs.push(reference.to_owned());
+                if let Some(member) = map.get("$ref") {
+                    if let Some(reference) = member.as_str() {
+                        refs.push(CollectedRef {
+                            reference: reference.to_owned(),
+                            pointer: at.push("$ref"),
+                            span: member.span(),
+                        });
+                    }
                 }
             }
             for (key, value) in map.iter() {
@@ -312,12 +354,12 @@ fn collect_refs_inner(value: &SpannedValue, keys: Keys, refs: &mut Vec<String>) 
                     Keys::Fields if NAME_KEYED_FIELDS.contains(&key) => Keys::Names,
                     Keys::Fields => Keys::Fields,
                 };
-                collect_refs_inner(value, child, refs);
+                collect_refs_inner(value, &at.push(key), child, refs);
             }
         }
         Node::Array(values) => {
-            for value in values {
-                collect_refs_inner(value, Keys::Fields, refs);
+            for (index, value) in values.iter().enumerate() {
+                collect_refs_inner(value, &at.index(index), Keys::Fields, refs);
             }
         }
         Node::Null | Node::Bool(_) | Node::Number(_) | Node::String(_) => {}
@@ -356,7 +398,10 @@ mod tests {
     fn refs_in(yaml: &str) -> Vec<String> {
         let value = super::super::parse_yaml(crate::diag::FileId(0), yaml, &mut Default::default())
             .unwrap();
-        collect_refs(&value)
+        collect_refs(&value, &JsonPointer::root())
+            .into_iter()
+            .map(|collected| collected.reference)
+            .collect()
     }
 
     /// The walk skips a specification extension wherever keys are fixed fields — the document
@@ -399,6 +444,51 @@ mod tests {
                 "webhook.yaml",
                 "component.yaml",
                 "component-response.yaml",
+            ]
+        );
+    }
+
+    /// Each collected reference carries the pointer of the member that spells it, below the
+    /// pointer the walk starts at, through objects, arrays and name maps, and the span of that
+    /// text: the `$ref` value, or the Security Requirement key (#534).
+    #[test]
+    fn collected_refs_are_located_at_the_member_that_spells_them() {
+        let yaml = "paths:\n\
+                    \x20 /p:\n\
+                    \x20   get:\n\
+                    \x20     security: [{ ./scheme.yaml: [] }]\n\
+                    \x20     responses:\n\
+                    \x20       '200':\n\
+                    \x20         content:\n\
+                    \x20           application/json:\n\
+                    \x20             schema: { allOf: [{ $ref: a.yaml }] }\n";
+        let value = super::super::parse_yaml(crate::diag::FileId(0), yaml, &mut Default::default())
+            .unwrap();
+        let located: Vec<(String, String, u32)> =
+            collect_refs(&value, &JsonPointer::root().push("x-defs"))
+                .into_iter()
+                .map(|collected| {
+                    (
+                        collected.reference,
+                        collected.pointer.as_str().to_owned(),
+                        collected.span.start.line,
+                    )
+                })
+                .collect();
+        assert_eq!(
+            located,
+            [
+                (
+                    "a.yaml".to_owned(),
+                    "/x-defs/paths/~1p/get/responses/200/content/application~1json/schema/allOf/0/$ref"
+                        .to_owned(),
+                    9
+                ),
+                (
+                    "scheme.yaml".to_owned(),
+                    "/x-defs/paths/~1p/get/security/0/.~1scheme.yaml".to_owned(),
+                    4
+                ),
             ]
         );
     }

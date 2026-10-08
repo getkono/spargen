@@ -254,7 +254,10 @@ pub(crate) fn vendor(
         let Some(value) = scanned.docs[index].value.pointer(&pointer) else {
             continue;
         };
-        let doc_refs = collect_refs(value);
+        let doc_refs: Vec<String> = collect_refs(value, &pointer)
+            .into_iter()
+            .map(|collected| collected.reference)
+            .collect();
         for reference in &doc_refs {
             match classify_ref(reference, remote_base.as_deref()) {
                 RefTarget::InDocument => {}
