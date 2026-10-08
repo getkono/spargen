@@ -19013,6 +19013,72 @@ fn a_default_equal_to_the_one_the_meet_keeps_is_never_reported_in_any_member_ord
     }
 }
 
+/// An object `allOf` merge that is rejected from inside its member loop reports no `W005` for the
+/// `default`s it had read by then: which member's `default` the merged field keeps is decided
+/// once, after the loop (#577), and a rejected merge emits no field to keep one. Before #577 the
+/// pairwise fold had already reported one of M0's `x` and M1's `y` (both required, so neither
+/// applies) by the time M2 was read, so a partial, order-dependent `W005` stood beside the
+/// rejection. Each case puts the rejecting member last, after the two conflicting `default`s, and
+/// pins the three in-loop rejections: an `additionalProperties` conflict, a reference cycle
+/// through an `additionalProperties` value schema, and a repeated property whose types share
+/// values no single Rust type represents.
+#[test]
+fn an_all_of_merge_rejected_inside_its_member_loop_reports_no_default_it_read() {
+    let base = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+                schemas:\n    M0: { type: object, required: [a], properties: { a: { type: \
+                string, default: x }, b: B0 }, additionalProperties: { type: string } }\n    \
+                M1: { type: object, required: [a], properties: { a: { type: string, default: y \
+                } } }\n    M2: M2BODY\n    Holder: { allOf: [{ $ref: '#/components/schemas/M0' \
+                }, { $ref: '#/components/schemas/M1' }, { $ref: '#/components/schemas/M2' }] }\n";
+    for (label, b0, m2, message) in [
+        (
+            "additionalProperties conflict",
+            "{ type: string }",
+            "{ type: object, additionalProperties: { type: integer } }",
+            "`allOf` members declare conflicting `additionalProperties`",
+        ),
+        (
+            "additionalProperties reference cycle",
+            "{ type: string }",
+            "{ type: object, additionalProperties: { $ref: '#/components/schemas/Holder' } }",
+            "closes a reference cycle back to the schema being lowered",
+        ),
+        (
+            "unrepresentable property meet",
+            "{ type: array, prefixItems: [{ type: number }, { type: number }], items: false }",
+            "{ type: object, properties: { b: { type: array, items: { type: string } } } }",
+            "share values no single Rust type represents",
+        ),
+    ] {
+        let spec = base.replace("B0", b0).replace("M2BODY", m2);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}, {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains(message)),
+                "{label}, {entry}: {report:#?}"
+            );
+            let reported: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                reported,
+                Vec::<&str>::new(),
+                "{label}, {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
