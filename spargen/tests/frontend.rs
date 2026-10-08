@@ -2377,6 +2377,139 @@ components:
     }
 }
 
+/// The diagnostics a `$ref` whose siblings are a union and further keywords draws once those
+/// keywords are met apart from the union (#538), in the `$ref` spelling's own words: typed
+/// keywords the target or the union cannot meet are `E013` with the `$ref`-sibling remedy, untyped
+/// keywords of a category no branch has are `W011` naming the `$ref`'s siblings, and object and
+/// array keywords together beside a branch of no category are `E013` naming them too. A sibling
+/// `allOf` keeps the one-schema lowering, so the target's `null` survives an `anyOf` there.
+#[test]
+fn a_ref_union_sibling_beside_other_keywords_reports_in_the_ref_spelling() {
+    let spec = |site: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB: {{ type: [object, 'null'], properties: {{ a: {{ type: string }}, b: {{ type: string }} }} }}
+    Free: {{ description: anything }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        )
+    };
+    let nb = "$ref: '#/components/schemas/NB'";
+    let ref_sibling_remedy =
+        "restructure the schema so the `$ref` target and its sibling keywords \
+                              describe one representable type";
+    let union_sibling_remedy = "give the sibling keywords a `type`";
+    let rejected = |site: &str, expected: &str, remedy_head: &str| {
+        let spec = spec(site);
+        let (report, _) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let found: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .collect();
+        assert_eq!(found.len(), 1, "{site}: {report:#?}");
+        assert!(found[0].message.contains(expected), "{site}: {report:#?}");
+        assert!(
+            found[0]
+                .remedy
+                .as_deref()
+                .is_some_and(|remedy| remedy.starts_with(remedy_head)),
+            "{site}: {report:#?}"
+        );
+    };
+    // Typed keywords meet the target, and the union none of whose branches meets that is `E013`.
+    rejected(
+        &format!(
+            "{{ {nb}, type: object, properties: {{ c: {{ type: integer }} }}, oneOf: [ {{ type: \
+             string }}, {{ type: integer }} ] }}"
+        ),
+        "the `$ref` target, this schema's own sibling keywords and the `oneOf`/`anyOf` beside \
+         them all apply",
+        ref_sibling_remedy,
+    );
+    // Typed keywords the target itself cannot meet are `E013` before the union is reached.
+    rejected(
+        &format!("{{ {nb}, type: string, oneOf: [ {{ minLength: 1 }}, {{ maxLength: 3 }} ] }}"),
+        "the `$ref` target and this schema's own sibling keywords have an empty or \
+         unrepresentable intersection",
+        ref_sibling_remedy,
+    );
+    // Object and array keywords together beside a branch that states no category.
+    rejected(
+        "{ $ref: '#/components/schemas/Free', required: [c], items: { type: integer }, oneOf: [ \
+         {}, { type: string } ] }",
+        "a branch of the union beside this `$ref` states no JSON category, and this `$ref`'s \
+         sibling untyped keywords are both object keywords and array keywords",
+        union_sibling_remedy,
+    );
+
+    // Untyped array keywords beside object branches refine none of them (`W011`), and the met
+    // branches, alike once `required` is not carried, collapse with `W001`. `null` matches both
+    // branches, so the `oneOf` rejects it.
+    let spec_text = spec(&format!(
+        "{{ {nb}, items: {{ type: string }}, oneOf: [ {{ required: [a] }}, {{ required: [b] }} ] }}"
+    ));
+    let (report, code) = generate_with_code(&spec_text);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let unreached = messages_for(&report, Code::DeclarationHasNoEffect);
+    assert_eq!(unreached.len(), 1, "{report:#?}");
+    assert!(
+        unreached[0].starts_with(
+            "this `$ref`'s sibling untyped array keywords (`items`, `prefixItems`) constrain only \
+             the instances of their own category, and no branch of the union beside the `$ref` \
+             has that category"
+        ),
+        "{unreached:?}"
+    );
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Pick"), ["a", "b"], "{types}");
+    assert_eq!(
+        field_type(&types, "pub pick").as_deref(),
+        Some("Pick"),
+        "{types}"
+    );
+
+    // A sibling `allOf` stays on the one-schema lowering, whose `anyOf` keeps the target's `null`
+    // in every branch rather than denying it (#562).
+    let spec_text = spec(&format!(
+        "{{ {nb}, allOf: [ {{ required: [a] }} ], anyOf: [ {{ required: [a] }}, {{ required: [b] \
+         }} ] }}"
+    ));
+    let (report, code) = generate_with_code(&spec_text);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let variants = enum_variants(&types, "Pick");
+    assert_eq!(variants.len(), 2, "{types}");
+    assert!(
+        variants.iter().all(|variant| variant.contains("(Option<")),
+        "a nested `allOf` beside a `$ref`'s `anyOf` denied the target's `null`: {types}"
+    );
+}
+
 /// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
 /// nest one union in another's branches, so the composition is rejected with the stable `E013` it
 /// has always drawn rather than emitting a union of identical variants (#463).

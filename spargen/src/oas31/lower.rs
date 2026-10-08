@@ -1777,8 +1777,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
             if has_union_sibling {
+                // Keywords carrying an `allOf` of their own stay on the one-schema path: lowered
+                // as a conjunct, that nested `allOf` denies the target's `null` (#562), which
+                // would turn a union that admits `null` into one that rejects it.
                 let (keywords, union) = split_union_sibling(&sibling);
-                if schema_has_shape_constraint(&keywords) {
+                if keywords.all_of.is_empty() && schema_has_shape_constraint(&keywords) {
                     return self
                         .meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
                 }
