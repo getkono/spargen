@@ -12354,7 +12354,7 @@ components:
 fn e008_names_an_integer_member_above_i64_max() {
     // An integer above `i64::MAX` parses as a `u64` but has no `i64` discriminant: E008, and the
     // message names the range rather than blaming object/array members. check/generate parity.
-    // A JSON document, because the JSON parser is the one that keeps such a literal a `u64`.
+    // `e008_names_a_yaml_integer_member_above_i64_max` pins the same message for a YAML document.
     let document = serde_json::from_str(
         r#"{
             "openapi": "3.1.0",
@@ -12368,6 +12368,34 @@ fn e008_names_an_integer_member_above_i64_max() {
     .unwrap();
     let (generated, checked) = run_placement(&[("openapi.json", document)]);
     for report in [generated, checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::NonScalarEnum);
+        assert!(
+            !messages.is_empty()
+                && messages.iter().all(|m| {
+                    m.contains("18446744073709551615 exceeds i64::MAX") && !m.contains("object")
+                }),
+            "{messages:#?}"
+        );
+    }
+}
+
+#[test]
+fn e008_names_a_yaml_integer_member_above_i64_max() {
+    // Issue #540: the YAML parser classifies an integer literal above `i64::MAX` as a `u64`, as
+    // the JSON parser does, so the E008 message names the range rather than calling the member a
+    // float. check/generate parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Huge:
+      type: integer
+      enum: [1, 18446744073709551615]
+"##;
+    for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let messages = messages_for(&report, Code::NonScalarEnum);
         assert!(
