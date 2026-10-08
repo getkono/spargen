@@ -740,19 +740,6 @@ fn normalised_diagnostics(
         .collect()
 }
 
-/// The sorted error codes of a report, duplicates kept.
-fn error_codes(report: &Report) -> Vec<&'static str> {
-    let mut codes: Vec<&'static str> = report.errors().map(|d| d.code.as_str()).collect();
-    codes.sort_unstable();
-    codes
-}
-
-/// The issue tracking a rejected `$ref`-sibling meet reporting fewer warnings than the `allOf`
-/// spellings of the same conjunction: beside its `E013`, it stops before the `W005` they report.
-/// An empty object meet that admits `null` lowers to the null type in every spelling (#542), and
-/// the `$ref`-sibling spelling stops before the same `W005` there.
-const ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS: u32 = 545;
-
 /// Whether `check` or `generate` rejected the document. The two name a success differently
 /// (`Clean` against `Generated`), so this is the verdict they must agree on.
 fn rejected(report: &Report) -> bool {
@@ -1203,24 +1190,16 @@ proptest! {
             );
             let shape = (!rejected(&report)).then(|| holder_p_shape(&source)).transpose()?;
             // Every spelling is held to the one verdict [`emitted`] gives, nullability included, so
-            // two spellings are compared on their diagnostics and the rest of the shape. An empty
-            // object meet, rejected or the null type, is where the `$ref`-sibling spelling stops
-            // before the `W005` the `allOf` spellings report (#545).
+            // two spellings are compared on their diagnostics and the rest of the shape: an empty
+            // object meet, rejected or the null type, reports the `W005` for each `default` it
+            // drops in every spelling (#545).
             for (at, report_at, shape_at) in &seen {
-                let (compared, compared_at) = if !matches!(lowered, Lowered::Object { .. })
-                    && (spelling == Spelling::RefSiblings || *at == Spelling::RefSiblings)
-                {
-                    (error_codes(&report), error_codes(report_at))
-                } else {
-                    (codes(&report), codes(report_at))
-                };
                 prop_assert_eq!(
-                    &compared,
-                    &compared_at,
-                    "{:?} and {:?} (known gap #{} compares only errors):\n{}",
+                    codes(&report),
+                    codes(report_at),
+                    "{:?} and {:?} report different diagnostics:\n{}",
                     spelling,
                     at,
-                    ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS,
                     spec
                 );
                 if let (Some(shape), Some(shape_at)) = (&shape, shape_at) {

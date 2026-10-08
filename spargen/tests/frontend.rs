@@ -18226,6 +18226,80 @@ fn a_default_an_uninhabited_meet_drops_is_reported_not_applied() {
     );
 }
 
+/// Issue #545: a meet a required property empties also repeats an optional property `c` whose
+/// types share no value, and each side gives `c` a different `default`. The `allOf` spellings merge
+/// every property before deciding the meet is empty, so beside the `E013` they report the
+/// `default` the merge drops (`W005`); the `$ref`-sibling spelling stopped at the required
+/// property and reported `E013` alone. Every spelling now reports the same diagnostics, the `W005`
+/// at the `default` `M1`'s side wrote, whether the meet is rejected or, where both sides admit
+/// `null`, the null type (#542).
+#[test]
+fn an_emptied_ref_sibling_meet_reports_the_default_it_drops() {
+    let document = |ty: &str, p: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    M0:\n      type: {ty}\n      properties: {{ a: {{ type: string }}, \
+             c: {{ type: integer, default: 1 }} }}\n    M1:\n      type: {ty}\n      \
+             required: [a]\n      properties: {{ a: {{ type: integer }}, \
+             c: {{ type: string, default: x }} }}\n    Holder:\n      type: object\n      \
+             required: [p]\n      properties:\n        p: {p}\n"
+        )
+    };
+    for (ty, null_only) in [("object", false), ("[object, 'null']", true)] {
+        let m0 = format!(
+            "{{ type: {ty}, properties: {{ a: {{ type: string }}, \
+             c: {{ type: integer, default: 1 }} }} }}"
+        );
+        let m1 = format!(
+            "type: {ty}, required: [a], properties: {{ a: {{ type: integer }}, \
+             c: {{ type: string, default: x }} }}"
+        );
+        for (what, p, dropped) in [
+            (
+                "an `allOf` of `$ref`s",
+                "{ allOf: [{ $ref: '#/components/schemas/M0' }, \
+                 { $ref: '#/components/schemas/M1' }] }"
+                    .to_owned(),
+                "/components/schemas/M1/properties/c/default",
+            ),
+            (
+                "an inline `allOf`",
+                format!("{{ allOf: [{m0}, {{ {m1} }}] }}"),
+                "/components/schemas/Holder/properties/p/allOf/1/properties/c/default",
+            ),
+            (
+                "a `$ref` beside the keywords",
+                format!("{{ $ref: '#/components/schemas/M0', {m1} }}"),
+                "/components/schemas/Holder/properties/p/properties/c/default",
+            ),
+        ] {
+            let spec = document(ty, &p);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome() == Outcome::Rejected,
+                    !null_only,
+                    "{ty} {what} {entry}: {report:#?}"
+                );
+                let mut seen: Vec<(&str, &str)> = report
+                    .diagnostics()
+                    .iter()
+                    .map(|d| (d.code.as_str(), d.pointer.as_str()))
+                    .collect();
+                seen.sort_unstable();
+                let mut expected = vec![(Code::SchemaDefaultNotApplied.as_str(), dropped)];
+                if !null_only {
+                    expected.push((
+                        Code::AllOfIrreconcilable.as_str(),
+                        "/components/schemas/Holder/properties/p",
+                    ));
+                }
+                expected.sort_unstable();
+                assert_eq!(seen, expected, "{ty} {what} {entry}: {report:#?}");
+            }
+        }
+    }
+}
+
 /// Issue #432: an intersection whose sides repeat a property merges the `default` either side
 /// declares, whichever side comes first. `allOf: [Narrow, Base]` wires `Base`'s default exactly as
 /// `allOf: [Base, Narrow]` does, and so does a `$ref` whose sibling `properties` declare it. Two
