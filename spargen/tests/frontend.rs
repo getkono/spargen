@@ -18935,6 +18935,84 @@ fn a_dropped_default_several_members_write_alike_is_reported_at_each_pointer() {
     }
 }
 
+/// Issue #577: which of the intersected members' `default`s the merged field keeps is decided once
+/// over every member, not pair by pair. A pairwise fold reported a `default` as superseded as soon
+/// as one pair ranked it lower, before a later member's equal value outranked the one that beat
+/// it: here M0's `x` beat M1's `y` (both are required, so neither is applied), then M2's applied
+/// `y` beat `x`, and the field kept `y` while M1's `y` stood reported as differing from it. In
+/// every member order, `W005` is reported exactly at M0's superseded `x` and at M1's `c`, whose
+/// `string`/`integer` field is uninhabited.
+#[test]
+fn a_default_equal_to_the_one_the_meet_keeps_is_never_reported_in_any_member_order() {
+    fn spec(order: [usize; 3]) -> String {
+        let members = [
+            "{ type: object, required: [a], properties: { a: { type: string, default: x }, \
+             c: { type: string } } }",
+            "{ type: [object, 'null'], required: [a], properties: { a: { type: string, \
+             default: y }, c: { type: integer, default: 1 } } }",
+            "{ properties: { a: { type: string, default: y } } }",
+        ];
+        let mut spec = String::from(
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n",
+        );
+        for (id, member) in members.iter().enumerate() {
+            spec.push_str(&format!("    M{id}: {member}\n"));
+        }
+        let refs: Vec<String> = order
+            .iter()
+            .map(|id| format!("{{ $ref: '#/components/schemas/M{id}' }}"))
+            .collect();
+        spec.push_str(&format!(
+            "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+             p: {{ allOf: [{}] }}\n",
+            refs.join(", ")
+        ));
+        spec
+    }
+
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for order in orders {
+        let spec = spec(order);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            let mut pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            pointers.sort_unstable();
+            assert_eq!(
+                pointers,
+                [
+                    "/components/schemas/M0/properties/a/default",
+                    "/components/schemas/M1/properties/c/default",
+                ],
+                "{entry}, order {order:?}: {report:#?}\n{spec}"
+            );
+            if let Some(superseded) = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.pointer.as_str() == "/components/schemas/M0/properties/a/default")
+            {
+                assert!(
+                    superseded.message.contains("M2/properties/a/default"),
+                    "{entry}, order {order:?}: the kept `y` is the applicable one M2 writes: \
+                     {superseded:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
