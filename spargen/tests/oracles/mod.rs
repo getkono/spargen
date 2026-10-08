@@ -30,11 +30,6 @@ pub struct Violation {
     pub known: Option<u32>,
 }
 
-/// The open issue tracking the pre-meet union of an `allOf`'s `oneOf` member, which is emitted
-/// although nothing refers to it: [`indistinguishable_variants`] reports a `serde_json::Value`
-/// variant of such a union as known ([`Declarations::is_dead_meet_input`]).
-pub const ISSUE_DEAD_MEET_INPUT: u32 = 561;
-
 /// The diagnostics whose pointer is still the document root although the construct they report has
 /// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
 /// their empty pointer as known; every other rule still applies to them, each checked on its own.
@@ -123,12 +118,6 @@ fn types_module(code: &str) -> &str {
         .map_or("", |start| &code[start..])
 }
 
-/// The Rust identifiers in `text`, in order.
-fn idents(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|ident| !ident.is_empty())
-}
-
 /// The item declarations of a generated module, keyed by name: each `pub type`, `pub struct` and
 /// `pub enum`, with what [`shape_of`] reads from it.
 #[derive(Default)]
@@ -180,33 +169,6 @@ impl Declarations {
                 .insert(name.to_owned(), (kind, attributes, body));
         }
         declarations
-    }
-
-    /// Whether the union `name`, of variant lines `body`, is the pre-meet union of an `allOf`'s
-    /// `oneOf` member that is emitted although nothing uses it (#561): no other declaration, and no
-    /// `types::` path in `code`, names it, while another declaration names one of its payload
-    /// types, which the meet carried into the union it made. A component union nothing refers to
-    /// is not one, since no other declaration takes its payloads.
-    fn is_dead_meet_input(&self, code: &str, name: &str, body: &[String]) -> bool {
-        let others = || {
-            self.items
-                .iter()
-                .filter(move |(other, _)| other.as_str() != name)
-                .flat_map(|(_, (_, _, lines))| lines.iter().map(String::as_str))
-                .chain(self.aliases.values().map(String::as_str))
-        };
-        let named = |ty: &str| others().any(|line| idents(line).any(|ident| ident == ty));
-        let payloads: Vec<&str> = body
-            .iter()
-            .filter_map(|line| line.split_once('(').map(|(_, payload)| payload))
-            .flat_map(idents)
-            .filter(|ident| self.aliases.contains_key(*ident) || self.items.contains_key(*ident))
-            .collect();
-        !named(name)
-            && !idents(code)
-                .zip(idents(code).skip(1))
-                .any(|(path, ident)| path == "types" && ident == name)
-            && payloads.iter().any(|payload| named(payload))
     }
 
     /// The structure `ty` stands for, with every name the module declares replaced by what it
@@ -301,12 +263,11 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
         )) {
             continue;
         }
-        let dead = declarations.is_dead_meet_input(code, name, body);
         for (variant, shape) in &payloads {
             if shape == "serde_json::Value" {
                 violations.push(Violation {
                     reason: format!("`oneOf` `{name}` variant `{variant}` is `serde_json::Value`"),
-                    known: dead.then_some(ISSUE_DEAD_MEET_INPUT),
+                    known: None,
                 });
             }
         }
