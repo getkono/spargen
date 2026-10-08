@@ -17697,7 +17697,8 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
 /// member meets the union's siblings left `…Constrained`, a union whose siblings exclude all but
 /// one member left the survivor's `…Variant0Constrained`, and a `$ref` to a union refined by
 /// untyped sibling keywords left the met union `…ReferenceIntersection`. Each is now discarded,
-/// while a type the re-emitted kind does refer to — the `$ref` case's met branch — is kept.
+/// while a type the re-emitted kind does refer to — the `$ref` case's met branch, or the nested
+/// struct a sole member's meet builds for a property both sides declare — is kept.
 #[test]
 fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
     fn spec(field: &str) -> String {
@@ -17708,6 +17709,7 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
              schema: {{ $ref: '#/components/schemas/Holder' }}\n\
              components:\n  schemas:\n    \
              Pet: {{ type: object, properties: {{ name: {{ type: string }} }} }}\n    \
+             Box: {{ type: object, properties: {{ sub: {{ type: object, properties: {{ q: {{ type: string }} }} }} }} }}\n    \
              Target: {{ oneOf: [{{ type: object, properties: {{ name: {{ type: string }} }} }}, {{ type: string }}] }}\n    \
              Holder: {{ type: object, properties: {{ field: {field} }} }}\n"
         )
@@ -17728,11 +17730,24 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
             .collect()
     }
 
-    let cases: [(&str, &str, &[&str], &str); 3] = [
+    let cases: [(&str, &str, &[&str], &str); 4] = [
         (
             "sole non-null member",
             "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: 'null' }], required: [name] }",
             &["HolderfieldConstraint", "Holderfield"],
+            "HolderfieldConstrained",
+        ),
+        (
+            "sole non-null member whose meet builds a nested struct",
+            "{ oneOf: [{ $ref: '#/components/schemas/Box' }, { type: 'null' }], \
+             properties: { sub: { type: object, required: [q] } } }",
+            &[
+                "HolderfieldConstraintsubq",
+                "HolderfieldConstraintsub",
+                "HolderfieldConstraint",
+                "HolderfieldConstrainedsub",
+                "Holderfield",
+            ],
             "HolderfieldConstrained",
         ),
         (
