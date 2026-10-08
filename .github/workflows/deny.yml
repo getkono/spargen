@@ -1,12 +1,10 @@
 name: Supply chain
 
-# The audit's verdict depends on when it runs, not only on what is committed: cargo-deny fetches
-# the RustSec database fresh each run, and `yanked = "deny"` reads the registry as it is now. A new
-# advisory therefore turns every open pull request red while `master`'s last status stays green,
-# and before this schedule it was found by whichever contributor's unrelated pull request hit it
-# first (#146). The daily run finds it on `master` itself; CLAUDE.md says who responds. The `deny`
-# job is the same gate pull requests and pushes run, in its own workflow so the schedule re-runs
-# only it; `deny-published` audits the lockfile the latest release ships, on the schedule only.
+# The audit's verdict depends on when it runs, not only on what is committed, so the daily run
+# finds a new advisory on `master` itself rather than on an unrelated pull request; AGENTS.md's
+# "Lockfiles and advisories" says why and who responds. The `deny` job is the same gate pull
+# requests and pushes run, in its own workflow so the schedule re-runs only it; `deny-published`
+# audits the lockfile the latest release ships, on the schedule only.
 on:
   push:
     branches: [master]
@@ -37,20 +35,8 @@ jobs:
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2
       # `mise run deny`'s commands, byte for byte
-      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
-      # cargo-deny filters out every lockfile entry no feature activates (a yanked `chacha20`
-      # reached `Cargo.lock` only through a weak `quinn?/ring` feature and was never checked), so
-      # `cargo audit` reads every entry of each lockfile, over the RustSec checkout
-      # `cargo deny fetch db` just made, after the step that logs its commit: the log names the
-      # database revision the verdict was reached against (#187).
-      # `--no-fetch` also leaves the crates.io index unupdated, and this runner's index cache starts
-      # empty, so the yank check could check no entry and still exited 0 (#414): each `cargo fetch`
-      # refreshes that cache for every entry of the lockfile audited after it, and each audit fails
-      # on any error or warning it printed, so an unchecked yank fails instead of passing. The root
-      # audit reads the committed `Cargo.lock` (its fetch is `--locked`); an example's fetch is
-      # unlocked, like its `cargo deny check`, so it rewrites that lockfile (at least the stale
-      # `spargen` stamp) and the example audit reads it as the example gates resolve it.
-      # `the_lockfile_audit_reads_every_committed_lockfile` pins these steps' shape.
+      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`); the comment on `[tasks.deny]` in
+      # mise.toml says why each one is there.
       - run: cargo deny fetch db
       - run: git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'
       - run: cargo fetch --locked
@@ -61,25 +47,13 @@ jobs:
       - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi
       - run: cargo fetch --manifest-path examples/petstore-macro/Cargo.toml
       - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi
-      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
-      # through reqwest's TLS feature, so without it the audit sees no TLS stack at all (#147).
-      # `--locked` makes the committed `Cargo.lock` the audited one: without it cargo-deny's
-      # `cargo metadata` silently rewrote a skewed lockfile, or wrote a missing one, and audited
-      # that instead (#146). `the_deny_gate_states_the_feature_scope_it_audits` holds the command
-      # to both flags, to a bare `check`, and to no flag outside an allow-list of ones that cannot
-      # narrow the graph (#238).
       - run: cargo deny --all-features --locked check
-      # Each example workspace's lockfile, under the same policy (#184). No `--locked`, like every
-      # gate that compiles them: their `spargen` path-package stamp goes stale on each release.
       - run: cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check
       - run: cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check
       - run: cargo deny --manifest-path examples/petstore-macro/Cargo.toml --config deny.toml --all-features check
 
-  # The lockfile the latest `spargen` release ships, not the committed one: `cargo install spargen
-  # --features cli --locked` installs its pins, and a fix on `master` reaches it only when a release
-  # carries it (#178). Scheduled and manual runs only: a pull request cannot change a published
-  # artefact, and failing every pull request on it would block the release pull request that
-  # carries the fix. `mise run deny-published`'s commands, byte for byte.
+  # `mise run deny-published`'s commands, byte for byte, on scheduled and manual runs only; the
+  # comment on `[tasks.deny-published]` in mise.toml says why.
   deny-published:
     name: cargo-deny (published spargen)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
