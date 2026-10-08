@@ -4153,7 +4153,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(reference) = &schema.reference {
             let target_decides =
                 if reference.starts_with("#/components/schemas/") || is_remote_ref(reference) {
-                    self.ref_target_decides_null(reference, &schema.provenance)
+                    self.ref_target_decides_null_within(reference, &schema.provenance, depth + 1)
                 } else {
                     match self.resolver.resolve(
                         reference,
@@ -4920,7 +4920,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// names, so the chain is followed to its body. The target was already lowered from the same
     /// resolution, so this only re-reads it; a target that cannot be read keeps its lowered
     /// nullability as the decision, and reports nothing a second time.
+    ///
+    /// A target body that is an `allOf` decides exactly when some member of its merge does
+    /// ([`Self::all_of_decides_null`], issue #565): a component composed of untyped object members
+    /// alone lowers to the non-null struct [`object_all_of_admits_null`] gives a merge no member
+    /// decides, and that struct is no decision, as the same members written inline make none.
     fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
+        self.ref_target_decides_null_within(reference, at, 0)
+    }
+
+    /// [`Self::ref_target_decides_null`] reached `depth` steps into an
+    /// [`Self::all_of_decides_null`] walk, which bounds the two together: a target's `allOf` can
+    /// name the `$ref` that reached it.
+    fn ref_target_decides_null_within(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
+        let body_decides = |target: &Schema| {
+            if target.all_of.is_empty() {
+                target_decides_null(target)
+            } else {
+                self.all_of_decides_null(target, depth + 1)
+            }
+        };
         let mut reference = reference.to_owned();
         let mut at = at.clone();
         // Lowering the chain already refused an alias cycle; the bound only keeps this total.
@@ -4951,12 +4970,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             };
             let Some(next) = &target.reference else {
-                return target_decides_null(&target);
+                return body_decides(&target);
             };
             let mut sibling = target.as_ref().clone();
             sibling.reference = None;
             if schema_has_shape_constraint(&sibling) {
-                return target_decides_null(&target);
+                return body_decides(&target);
             }
             reference.clone_from(next);
             at = target.provenance.clone();
@@ -4973,9 +4992,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
     /// silent scalar. A caller cannot forget the guard because it no longer holds it.
     ///
-    /// `decides_null` is [`target_decides_null`] of the target: an untyped object target admits
-    /// `null` without deciding the merge's nullability, as the same member written inline does
-    /// (issue #541), so its lowered non-null struct is not recorded as a decision.
+    /// `decides_null` is [`Self::ref_target_decides_null`] of the target: an untyped object target,
+    /// or one composed of untyped object members alone, admits `null` without deciding the merge's
+    /// nullability, as the same member written inline does (issues #541, #565), so its lowered
+    /// non-null struct is not recorded as a decision.
     fn push_ref_member(
         &mut self,
         ty: Ty,
@@ -10814,8 +10834,9 @@ enum Contribution {
         required: Vec<String>,
         /// Whether the member admits `null`, where the member decides it: `Some` for a member
         /// that states a `type` (whether it lists `"null"`) or is a `$ref` target that decides it
-        /// (its lowered nullability, [`target_decides_null`]), `None` for an untyped one, inline
-        /// ([`stated_nullability`]) or a `$ref` to an untyped object component. An untyped member's
+        /// (its lowered nullability, [`LowerCtx::ref_target_decides_null`]), `None` for an untyped
+        /// one, inline ([`stated_nullability`]) or a `$ref` to an untyped object component, or to
+        /// one composed of untyped object members alone. An untyped member's
         /// object keywords constrain only objects, so it admits `null` without deciding the
         /// merge's nullability, as an untyped `$ref` sibling leaves its target's alone.
         nullable: Option<bool>,
@@ -10894,7 +10915,8 @@ fn stated_nullability(schema: &Schema) -> Option<bool> {
 /// A plain untyped body — no `type`, no `enum` or `const`, no `$ref` and no composition
 /// — is the inline untyped member written as a component: it admits `null` and decides nothing, as
 /// [`stated_nullability`] reads the inline spelling. Anything else keeps its lowered nullability as
-/// the decision it was before.
+/// the decision it was before, except that [`LowerCtx::ref_target_decides_null`] reads a `$ref`
+/// target's `allOf` body through its members (issue #565).
 fn target_decides_null(schema: &Schema) -> bool {
     stated_nullability(schema).is_some()
         || schema.enum_values.is_some()

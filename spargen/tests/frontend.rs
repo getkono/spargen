@@ -2478,6 +2478,74 @@ components:
     }
 }
 
+/// Issue #565: a `$ref` to a component that is itself an `allOf` of untyped object members admits
+/// `null` without deciding it, as the same members written inline do (#425, #541). `C`'s merge
+/// decides nothing, yet its lowered non-null struct used to be recorded as a decision, so
+/// `viaComposed`, `viaComposedRefs` and `composedSibling` denied the `null` that `inline` admits.
+/// A composition some member decides keeps its answer: `D` denies `null` (`viaDecided`) and `E`
+/// admits it (`viaDecidedNull`). `C` alone, and met only with an untyped member, still lowers to a
+/// non-null struct.
+#[test]
+fn a_ref_to_an_untyped_all_of_component_admits_null_in_an_object_meet() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Holder' } }
+components:
+  schemas:
+    N: { type: [object, 'null'], properties: { n: { type: string } } }
+    U: { properties: { u: { type: string } } }
+    V: { properties: { v: { type: string } } }
+    C: { allOf: [{ properties: { u: { type: string } } }, { properties: { w: { type: string } } }] }
+    R: { allOf: [{ $ref: '#/components/schemas/U' }, { $ref: '#/components/schemas/V' }] }
+    D: { allOf: [{ type: object, properties: { d: { type: string } } }] }
+    E: { allOf: [{ $ref: '#/components/schemas/N' }, { properties: { e: { type: string } } }] }
+    Holder:
+      type: object
+      required: [viaComposed, viaComposedRefs, composedSibling, inline, viaDecided, viaDecidedNull, composedOnly, alone]
+      properties:
+        viaComposed: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/C' }] }
+        viaComposedRefs: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/R' }] }
+        composedSibling: { $ref: '#/components/schemas/C', type: [object, 'null'], properties: { n: { type: string } } }
+        inline: { allOf: [{ $ref: '#/components/schemas/N' }, { allOf: [{ properties: { u: { type: string } } }, { properties: { w: { type: string } } }] }] }
+        viaDecided: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/D' }] }
+        viaDecidedNull: { allOf: [{ $ref: '#/components/schemas/E' }, { $ref: '#/components/schemas/U' }] }
+        composedOnly: { allOf: [{ $ref: '#/components/schemas/C' }, { $ref: '#/components/schemas/U' }] }
+        alone: { $ref: '#/components/schemas/C' }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for (field, nullable) in [
+        ("pub via_composed:", true),
+        ("pub via_composed_refs:", true),
+        ("pub composed_sibling:", true),
+        ("pub inline:", true),
+        ("pub via_decided:", false),
+        ("pub via_decided_null:", true),
+        ("pub composed_only:", false),
+        ("pub alone:", false),
+    ] {
+        let ty = field_type(&code, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
+        assert_eq!(
+            ty.starts_with("Option<"),
+            nullable,
+            "`{field}` is `{ty}`, but `null` is {} here: {code}",
+            if nullable { "valid" } else { "invalid" }
+        );
+    }
+}
+
 /// Issue #541, beside a union: a `$ref` to an untyped object component `U` admits `null` without
 /// deciding it when the meet also carries a `oneOf`/`anyOf`, as the inline untyped member does.
 /// The `$ref` with a union sibling (`refUnion`) is met in `meet_ref_union_sibling`, and the
