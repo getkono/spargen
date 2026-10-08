@@ -1793,6 +1793,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             let sibling = sibling?;
+            // An untyped object target admits `null` without deciding it, as the same conjunct
+            // written inline as an `allOf` member does (#541), so beside a sibling typed `object`
+            // the sibling's own answer about `null` is the meet's. Only there: what an untyped
+            // target means beside another category is not an object meet, and keeps its verdict.
+            let referenced = if schema.types.types.contains(&JsonType::Object)
+                && matches!(
+                    self.graph.get(referenced.id).map(|def| &def.kind),
+                    Some(TypeKind::Struct(_))
+                )
+                && !self.ref_target_decides_null(reference, &schema.provenance)
+            {
+                Ty {
+                    nullable: true,
+                    ..referenced
+                }
+            } else {
+                referenced
+            };
             let mark = self.graph_mark();
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
@@ -4523,12 +4541,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             // The pre-check above sees root components only. A name the root does not declare
             // is a *sub-file* component, and it reaches its own reservation through
             // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
             // rather than being caught above; `push_ref_member` refuses to read it.
             return self.push_ref_member(
                 ty,
+                decides_null,
                 &schema.provenance,
                 "an `allOf` member is a direct recursive `$ref` to the component being lowered",
                 out,
@@ -4546,8 +4566,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             let ty = self.ensure_remote(reference)?;
+            let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
                 ty,
+                decides_null,
                 &schema.provenance,
                 "an `allOf` member is a direct recursive remote `$ref` to the schema being \
                  lowered",
@@ -4675,6 +4697,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         result
     }
 
+    /// [`target_decides_null`] of the schema the `$ref` written at `at` lowered to: a root
+    /// component first, as [`Self::ensure_component`] chooses it, then a remote document from the
+    /// root, as [`Self::ensure_remote`] resolves it, and otherwise the referring file's target.
+    /// The target was already lowered from the same resolution, so this only re-reads it; a target
+    /// that cannot be read keeps its lowered nullability as the decision, and reports nothing a
+    /// second time.
+    fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
+        if let Some(RefOr::Item(target)) = reference
+            .strip_prefix("#/components/schemas/")
+            .and_then(|name| self.document.components.schemas.get(name))
+        {
+            return target_decides_null(target);
+        }
+        let from = if is_remote_ref(reference) {
+            &self.document.provenance
+        } else {
+            at
+        };
+        self.resolver
+            .resolve(reference, from, &mut Diagnostics::default())
+            .map_or(true, |resolved| target_decides_null(&resolved.schema))
+    }
+
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
     /// contributes a *copy* of its fields/`additionalProperties`; any other lowered kind is a
     /// scalar member.
@@ -4683,9 +4728,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// message, rather than by each caller: a reservation's kind says nothing about the schema's
     /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
     /// silent scalar. A caller cannot forget the guard because it no longer holds it.
+    ///
+    /// `decides_null` is [`target_decides_null`] of the target: an untyped object target admits
+    /// `null` without deciding the merge's nullability, as the same member written inline does
+    /// (issue #541), so its lowered non-null struct is not recorded as a decision.
     fn push_ref_member(
         &mut self,
         ty: Ty,
+        decides_null: bool,
         provenance: &Provenance,
         recursive: &str,
         out: &mut Vec<Contribution>,
@@ -4711,7 +4761,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields,
                     additional,
                     required,
-                    nullable: Some(ty.nullable),
+                    nullable: decides_null.then_some(ty.nullable),
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -10453,8 +10503,9 @@ enum Contribution {
         additional: AdditionalProps,
         required: Vec<String>,
         /// Whether the member admits `null`, where the member decides it: `Some` for a member
-        /// that states a `type` (whether it lists `"null"`) or is a `$ref` target (its lowered
-        /// nullability), `None` for an untyped one ([`stated_nullability`]). An untyped member's
+        /// that states a `type` (whether it lists `"null"`) or is a `$ref` target that decides it
+        /// (its lowered nullability, [`target_decides_null`]), `None` for an untyped one, inline
+        /// ([`stated_nullability`]) or a `$ref` to an untyped object component. An untyped member's
         /// object keywords constrain only objects, so it admits `null` without deciding the
         /// merge's nullability, as an untyped `$ref` sibling leaves its target's alone.
         nullable: Option<bool>,
@@ -10488,6 +10539,20 @@ fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
 /// category and so decides nothing about `null` in an `allOf` merge.
 fn stated_nullability(schema: &Schema) -> Option<bool> {
     (!schema.types.types.is_empty()).then(|| schema.types.types.contains(&JsonType::Null))
+}
+
+/// Whether a `$ref` member's target decides its own nullability in an `allOf` merge (issue #541).
+/// A plain untyped body — no `type`, no `enum` or `const`, no `$ref` and no composition
+/// — is the inline untyped member written as a component: it admits `null` and decides nothing, as
+/// [`stated_nullability`] reads the inline spelling. Anything else keeps its lowered nullability as
+/// the decision it was before.
+fn target_decides_null(schema: &Schema) -> bool {
+    stated_nullability(schema).is_some()
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || schema.reference.is_some()
+        || !schema.all_of.is_empty()
+        || schema_has_union(schema)
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`

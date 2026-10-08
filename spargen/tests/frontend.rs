@@ -2022,6 +2022,150 @@ components:
     }
 }
 
+/// Issue #541: a `$ref` member whose target is an untyped object component admits `null` without
+/// deciding it, exactly as the same member written inline does (#425). The `$ref` to `U` used to
+/// record `U`'s lowered non-null struct as a decision, so `viaRefs`, `untypedRef` and `besideOneOf`
+/// denied `null` that `inline` and `sibling` admit. `U` alone still lowers to a non-null struct, and
+/// a meet of untyped members alone still decides nothing. Held in the root document, in a sub-file
+/// (whose `#/components/schemas/` names its own components), and for a vendored remote `U`.
+#[test]
+fn a_ref_to_an_untyped_object_component_admits_null_in_an_object_meet() {
+    const COMPONENTS: &str = r##"
+components:
+  schemas:
+    N: { type: [object, 'null'], properties: { n: { type: string } } }
+    U: { properties: { u: { type: string } } }
+    V: { properties: { v: { type: string } } }
+    Holder:
+      type: object
+      required: [viaRefs, inline, sibling, untypedRef, besideOneOf, untypedOnly, alone]
+      properties:
+        viaRefs: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/U' }] }
+        inline: { allOf: [{ type: [object, 'null'], properties: { n: { type: string } } }, { properties: { u: { type: string } } }] }
+        sibling: { $ref: '#/components/schemas/N', properties: { u: { type: string } } }
+        untypedRef: { $ref: '#/components/schemas/U', type: [object, 'null'], properties: { n: { type: string } } }
+        besideOneOf: { allOf: [{ $ref: '#/components/schemas/N' }, { $ref: '#/components/schemas/U' }], oneOf: [{}] }
+        untypedOnly: { allOf: [{ $ref: '#/components/schemas/U' }, { $ref: '#/components/schemas/V' }] }
+        alone: { $ref: '#/components/schemas/U' }
+"##;
+    const EXPECTED: [(&str, bool); 7] = [
+        ("pub via_refs:", true),
+        ("pub inline:", true),
+        ("pub sibling:", true),
+        ("pub untyped_ref:", true),
+        ("pub beside_one_of:", true),
+        ("pub untyped_only:", false),
+        ("pub alone:", false),
+    ];
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+{COMPONENTS}"##
+    );
+    let (generated, root_code) = generate_with_code(&root);
+    let checked = check(&root);
+    let (split_generated, split_checked, split_code) =
+        split("./lib.yaml#/components/schemas/Holder", COMPONENTS);
+    for (entry, report) in [
+        ("root/generate", &generated),
+        ("root/check", &checked),
+        ("split/generate", &split_generated),
+        ("split/check", &split_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for (spelling, code) in [("root", &root_code), ("split", &split_code)] {
+        for (field, nullable) in EXPECTED {
+            let ty = field_type(code, field)
+                .unwrap_or_else(|| panic!("{spelling}: no `{field}` field: {code}"));
+            assert_eq!(
+                ty.starts_with("Option<"),
+                nullable,
+                "{spelling}: `{field}` is `{ty}`, but `null` is {} here: {code}",
+                if nullable { "valid" } else { "invalid" }
+            );
+        }
+    }
+
+    // The vendored-remote spelling: `U` is a whole remote document, met with the nullable `N`.
+    use sha2::{Digest, Sha256};
+    const URL: &str = "https://api.example.com/schemas/untyped.yaml";
+    const VENDORED: &str = "api.example.com/schemas/untyped.yaml";
+    let untyped = "properties:\n  u: { type: string }\n";
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    N: {{ type: [object, 'null'], properties: {{ n: {{ type: string }} }} }}
+    Holder:
+      type: object
+      required: [remote, remoteSibling, remoteOnly]
+      properties:
+        remote: {{ allOf: [{{ $ref: '#/components/schemas/N' }}, {{ $ref: '{URL}' }}] }}
+        remoteSibling: {{ $ref: '{URL}', type: [object, 'null'], properties: {{ n: {{ type: string }} }} }}
+        remoteOnly: {{ allOf: [{{ $ref: '{URL}' }}] }}
+"##
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("spargen.lock"),
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{URL}\"\nsha256 = \"{:x}\"\npath = \"{VENDORED}\"\n",
+            Sha256::digest(untyped.as_bytes())
+        ),
+    )
+    .unwrap();
+    let vendored = dir.join(".spargen/vendor").join(VENDORED);
+    std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+    std::fs::write(&vendored, untyped).unwrap();
+    let out = dir.join("client.rs");
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
+    for (field, nullable) in [
+        ("pub remote:", true),
+        ("pub remote_sibling:", true),
+        ("pub remote_only:", false),
+    ] {
+        let ty = field_type(&code, field)
+            .unwrap_or_else(|| panic!("remote: no `{field}` field: {code}"));
+        assert_eq!(
+            ty.starts_with("Option<"),
+            nullable,
+            "remote: `{field}` is `{ty}`, but `null` is {} here: {code}",
+            if nullable { "valid" } else { "invalid" }
+        );
+    }
+}
+
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
 /// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
 /// intersection this change does not touch: its branches may intersect to one type, but it must

@@ -16,7 +16,7 @@
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
 //!   `null` is the null type, #450), and every written `default` is kept or reported at its
 //!   pointer. Where today's output still splits a law, the gap is held exactly and names the open
-//!   issue that tracks it (#541, #542, #545), so the law tightens when the issue's fix lands.
+//!   issue that tracks it (#542, #545), so the law tightens when the issue's fix lands.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a warning says why or an
@@ -789,26 +789,10 @@ fn meet_admits_null(members: &[Obj]) -> bool {
             .any(|m| m.nullability == Nullability::ObjectOrNull)
 }
 
-/// The issue tracking a `$ref` to an untyped object component denying `null` in an object meet,
-/// where the same member written inline admits it without deciding (#425's rule).
-const ISSUE_REF_TO_UNTYPED_DENIES_NULL: u32 = 541;
-
 /// The issue tracking an `allOf` of nullable object members whose object meet is irreconcilable
 /// (`E013`), where the `$ref`-sibling spelling of the same conjunction lowers it to the null type:
 /// no object satisfies every member, and `null` satisfies them all.
 const ISSUE_NULL_ONLY_ALL_OF_REJECTED: u32 = 542;
-
-/// Whether `Holder.p` is emitted nullable today: [`meet_admits_null`], except that a member written
-/// as a `$ref` to its untyped component denies `null` (#541, [`ISSUE_REF_TO_UNTYPED_DENIES_NULL`]).
-/// Where the two disagree the gap is the known one, and this is what the gap emits.
-fn emitted_nullable(members: &[Obj], order: &[usize], spelling: Spelling) -> bool {
-    let denies = order.iter().enumerate().any(|(position, &id)| {
-        let nullability = members[id].nullability;
-        nullability == Nullability::Object
-            || (nullability == Nullability::Untyped && spelling.refers(position))
-    });
-    !denies && meet_admits_null(members)
-}
 
 /// What a conjunction lowers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -823,12 +807,11 @@ enum Lowered {
 
 /// What `spelling` lowers the conjunction of `members` (in `order`) to today. An irreconcilable
 /// object meet leaves `null` alone when every member admits it, so it is the null type; else it is
-/// `E013`. Two known gaps differ from that: [`emitted_nullable`]'s (#541), and only the `$ref`-sibling
-/// spelling finding the null type, when its sibling keywords admit `null` of their own accord
-/// (`type: [object, 'null']`), the other spellings rejecting it (#542,
-/// [`ISSUE_NULL_ONLY_ALL_OF_REJECTED`]).
+/// `E013`. One known gap differs from that: only the `$ref`-sibling spelling finds the null type,
+/// when its sibling keywords admit `null` of their own accord (`type: [object, 'null']`), the other
+/// spellings rejecting it (#542, [`ISSUE_NULL_ONLY_ALL_OF_REJECTED`]).
 fn emitted(members: &[Obj], order: &[usize], spelling: Spelling) -> Lowered {
-    let nullable = emitted_nullable(members, order, spelling);
+    let nullable = meet_admits_null(members);
     if !meet_conflicts(members).1 {
         return Lowered::Object { nullable };
     }
@@ -1204,9 +1187,8 @@ proptest! {
     /// `$ref`s, as a `$ref` with the other member's keywords beside it, as an inline `allOf`, and as
     /// an `allOf` beside `oneOf: [{}]`. Each spelling reaches the same verdict through `check` and
     /// `generate`, with the same code multiset, and gives `Holder.p` the same shape. Each spelling
-    /// lowers to what [`emitted`] says, and two known gaps may still split them: a member's `$ref`
-    /// to its untyped component deciding `null` differently (#541), and the null type only the
-    /// `$ref`-sibling spelling finds (#542). Spellings the gaps split are compared with neither.
+    /// lowers to what [`emitted`] says, and one known gap may still split them: the null type only
+    /// the `$ref`-sibling spelling finds (#542). Spellings the gap splits are compared with neither.
     #[test]
     fn every_spelling_of_one_conjunction_lowers_alike(
         members in proptest::collection::vec(obj_strategy(), 2)
@@ -1223,17 +1205,16 @@ proptest! {
             prop_assert_eq!(
                 lowered,
                 emitted(&members, &order, spelling),
-                "{:?}: {:#?}\n{}\n(known gaps: #{}, #{})",
+                "{:?}: {:#?}\n{}\n(known gap: #{})",
                 spelling,
                 report,
                 spec,
-                ISSUE_REF_TO_UNTYPED_DENIES_NULL,
                 ISSUE_NULL_ONLY_ALL_OF_REJECTED
             );
             let shape = (!rejected(&report)).then(|| holder_p_shape(&source)).transpose()?;
             for (at, lowered_at, report_at, shape_at) in &seen {
-                // Only a nullability gap may split two object spellings, so they still agree on the
-                // rest of the shape; a split verdict leaves nothing to compare.
+                // Each spelling's nullability is held to [`emitted`] above, so two object spellings
+                // are compared on the rest of the shape; a split verdict leaves nothing to compare.
                 let same_kind = match (lowered, *lowered_at) {
                     (Lowered::Object { .. }, Lowered::Object { .. }) => true,
                     (kind, kind_at) => kind == kind_at,
@@ -1319,8 +1300,8 @@ proptest! {
     }
 
     /// An object meet admits `null` exactly when every member does and one of them decides it
-    /// ([`meet_admits_null`]), in every spelling, for every order of its members. Where a member is
-    /// a `$ref` to its untyped component the known gap [`emitted_nullable`] names is what is held.
+    /// ([`meet_admits_null`]), in every spelling, for every order of its members — a member written
+    /// as a `$ref` to its untyped component included (#541).
     #[test]
     fn an_object_meet_admits_null_exactly_when_its_members_do(
         (members, order) in proptest::collection::vec(
@@ -1344,16 +1325,14 @@ proptest! {
             let (report, source) = generate_module(&spec);
             prop_assert_eq!(report.outcome(), Outcome::Generated, "{:?}: {:#?}\n{}", spelling, report, spec);
             let shape = holder_p_shape(&source)?;
-            let expected = emitted_nullable(&members, &order, spelling);
+            let expected = meet_admits_null(&members);
             prop_assert_eq!(
                 shape.starts_with("Option<"),
                 expected,
-                "{:?}: `Holder.p` is `{}`, but `null` is {} here (meet rule: {}, known gap #{}):\n{}",
+                "{:?}: `Holder.p` is `{}`, but `null` is {} here:\n{}",
                 spelling,
                 shape,
                 if expected { "valid" } else { "invalid" },
-                meet_admits_null(&members),
-                ISSUE_REF_TO_UNTYPED_DENIES_NULL,
                 spec
             );
         }
