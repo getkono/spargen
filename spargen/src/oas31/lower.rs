@@ -605,6 +605,15 @@ impl MetUnion {
             (MetUnion::AllOfMember, true) => "this `allOf`'s `oneOf` member and its other members",
         }
     }
+
+    /// The suffix of the hint the meet with the union is inserted under, and so of the names its
+    /// branches take.
+    fn meet_suffix(self) -> &'static str {
+        match self {
+            MetUnion::RefSibling => "ReferenceIntersection",
+            MetUnion::BesideAllOf | MetUnion::AllOfMember => "Intersection",
+        }
+    }
 }
 
 /// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
@@ -1767,6 +1776,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 None => {}
             }
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            if has_union_sibling {
+                let (keywords, union) = split_union_sibling(&sibling);
+                if schema_has_shape_constraint(&keywords) {
+                    return self
+                        .meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
+                }
+            }
             let enclosing_unmerged = std::mem::replace(
                 &mut self.unmerged_union,
                 has_union_sibling.then(|| schema.provenance.clone()),
@@ -3989,10 +4005,54 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(refiners)
     }
 
+    /// Lower `{$ref: T, <keywords>, oneOf|anyOf: […]}`, a `$ref` whose siblings are a union and
+    /// shape-bearing `keywords` beside it ([`split_union_sibling`]), as the two `allOf` spellings of
+    /// the same conjunction are lowered (#538): `keywords` meet the target, the union is met with
+    /// that composition, and what the meet leaves sharing one generated type collapses with `W001`
+    /// ([`Self::meet_union_with_all_of`]). Untyped object or array `keywords` refine the union's
+    /// branches of their own category after the collapse, as such an `allOf` member does.
+    ///
+    /// Lowered as one schema, the sibling met `keywords` with each branch before the target, and
+    /// the union hoisted every branch's `null` to itself, so the collapse could no longer count
+    /// how many branches accept `null`: a `oneOf` that `null` matches twice kept it.
+    fn meet_ref_union_sibling(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        referenced: Ty,
+        keywords: &Schema,
+        union: &Schema,
+    ) -> Option<Ty> {
+        let keywords_hint = format!("{hint}Constraint");
+        let (composed, refiners) = if implied_applicator_category(keywords).is_some() {
+            let scoped = self.lower_scoped_refiners(keywords, true, None, &keywords_hint)?;
+            (referenced, vec![(keywords, Refiner::Scoped(scoped))])
+        } else {
+            let keywords = self.lower_schema(keywords, &keywords_hint)?;
+            let Ok(composed) =
+                self.intersect_types(referenced, keywords, &format!("{hint}ReferenceComposition"))
+            else {
+                return self.reject_ref_sibling_intersection(schema);
+            };
+            (composed, Vec::new())
+        };
+        self.meet_union_with_all_of(
+            schema,
+            hint,
+            Some(composed),
+            refiners,
+            union,
+            &format!("{hint}Union"),
+            MetUnion::RefSibling,
+        )
+    }
+
     /// Lower `union`, with its own merge held back, meet it with an `allOf`'s `composed` members,
     /// collapse what that meet leaves sharing one generated type, and then meet the result with
     /// each of its `refiners`; the result is inserted as `schema`'s type under `hint`. The meet
-    /// shared by [`Self::lower_all_of_beside_union`] and [`Self::lower_all_of_with_union_member`].
+    /// shared by [`Self::lower_all_of_beside_union`], [`Self::lower_all_of_with_union_member`] and
+    /// [`Self::meet_ref_union_sibling`], whose `composed` is the `$ref` target met with the
+    /// keywords beside the union.
     #[allow(clippy::too_many_arguments)]
     fn meet_union_with_all_of(
         &mut self,
@@ -4004,13 +4064,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union_hint: &str,
         spelling: MetUnion,
     ) -> Option<Ty> {
-        let (union_is, beside) = match spelling {
-            MetUnion::AllOfMember => ("the union member of this `allOf`", "the union member"),
-            MetUnion::BesideAllOf | MetUnion::RefSibling => (
+        // How the refiner diagnostics name the union and the keywords that refine it.
+        let (union_is, beside, refining) = match spelling {
+            MetUnion::AllOfMember => (
+                "the union member of this `allOf`",
+                "the union member",
+                "this `allOf` member's",
+            ),
+            MetUnion::BesideAllOf => (
                 "the union beside this `allOf`",
                 "the union beside the `allOf`",
+                "this `allOf` member's",
+            ),
+            MetUnion::RefSibling => (
+                "the union beside this `$ref`",
+                "the union beside the `$ref`",
+                "this `$ref`'s sibling",
             ),
         };
+        let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
@@ -4018,8 +4090,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mark = self.graph_mark();
         let mut meet = lowered;
         if let Some(composed) = composed {
-            let Ok(met) = self.intersect_types(composed, meet, &format!("{hint}Intersection"))
-            else {
+            let Ok(met) = self.intersect_types(composed, meet, &meet_hint) else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
@@ -4028,13 +4099,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the composition left as one type distinct definitions of the same shape: the refiners
         // constrain every branch of their category alike, so refining the collapsed type admits
         // the same values.
-        let (collapsed, untyped_check) = self.collapse_met_union(
-            schema,
-            meet,
-            !union.one_of.is_empty(),
-            &format!("{hint}Intersection"),
-            spelling,
-        );
+        let (collapsed, untyped_check) =
+            self.collapse_met_union(schema, meet, !union.one_of.is_empty(), &meet_hint, spelling);
         meet = collapsed;
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
             let mut reach = ScopeReach::default();
@@ -4046,7 +4112,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
             if met.is_err() && reach.uncategorised {
                 let message = format!(
-                    "a branch of {union_is} states no JSON category, and this member's untyped \
+                    "a branch of {union_is} states no JSON category, and {refining} untyped \
                      keywords are both object keywords and array keywords with no `type` to \
                      choose between them, so no single Rust type represents what they constrain \
                      of it"
@@ -4055,7 +4121,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             for keywords in unreached_halves(refiner, &reach) {
                 let message = format!(
-                    "this `allOf` member's untyped {keywords} constrain only the instances of \
+                    "{refining} untyped {keywords} constrain only the instances of \
                      their own category, and no branch of {beside} has that category, so they \
                      apply to no value the union accepts"
                 );
@@ -4859,20 +4925,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// members, have no single typed intersection (see [`Self::meet_union_with_all_of`]): no branch
     /// meets the composition, or one does in a way no single Rust type represents.
     fn reject_all_of_union_meet(&mut self, schema: &Schema, spelling: MetUnion) -> Option<Ty> {
-        let message = match spelling {
-            MetUnion::AllOfMember => {
+        let (message, remedy) = match spelling {
+            MetUnion::AllOfMember => (
                 "this `allOf`'s `oneOf`/`anyOf` member and its other members all apply, and their \
-                 intersection is empty or unrepresentable"
-            }
-            MetUnion::BesideAllOf | MetUnion::RefSibling => {
+                 intersection is empty or unrepresentable",
+                ALL_OF_REMEDY,
+            ),
+            MetUnion::BesideAllOf => (
                 "this schema's `allOf` and the `oneOf`/`anyOf` beside it both apply, and their \
-                 intersection is empty or unrepresentable"
-            }
+                 intersection is empty or unrepresentable",
+                ALL_OF_REMEDY,
+            ),
+            MetUnion::RefSibling => (
+                "the `$ref` target, this schema's own sibling keywords and the `oneOf`/`anyOf` \
+                 beside them all apply, and their intersection is empty or unrepresentable",
+                REF_SIBLING_REMEDY,
+            ),
         };
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
             .message(message)
-            .remedy(ALL_OF_REMEDY)
+            .remedy(remedy)
             .emit(self.diags);
         None
     }
@@ -10603,6 +10676,52 @@ fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCategory> {
         (true, true) => Some(ImpliedCategory::Conflicting),
         (false, false) => None,
     }
+}
+
+/// Split the siblings of a `$ref` (`sibling`, the reference already stripped) that carry a
+/// `oneOf`/`anyOf` into the keywords beside the union and the union itself, as separate conjuncts
+/// ([`LowerCtx::meet_ref_union_sibling`]). The union keeps its `discriminator` and the sibling's
+/// provenance, and nothing else: every other keyword, annotations included, stays with the
+/// keywords, so each is lowered, and reported, once. The struct literal is exhaustive, so a field
+/// added to [`Schema`] has to be placed here.
+fn split_union_sibling(sibling: &Schema) -> (Schema, Schema) {
+    let mut keywords = sibling.clone();
+    let one_of = std::mem::take(&mut keywords.one_of);
+    let any_of = std::mem::take(&mut keywords.any_of);
+    let discriminator = keywords.discriminator.take();
+    let union = Schema {
+        boolean: None,
+        types: super::TypeSet::default(),
+        reference: None,
+        properties: IndexMap::new(),
+        required: Vec::new(),
+        additional_properties: None,
+        pattern_properties: IndexMap::new(),
+        items: None,
+        prefix_items: Vec::new(),
+        all_of: Vec::new(),
+        one_of,
+        any_of,
+        discriminator,
+        defs: IndexMap::new(),
+        validation_children: Vec::new(),
+        enum_values: None,
+        const_value: None,
+        default: None,
+        format: None,
+        content_encoding: None,
+        content_media_type: None,
+        content_schema: None,
+        xml: None,
+        validation: ValidationKeywords::default(),
+        deprecated: false,
+        read_only: false,
+        write_only: false,
+        title: None,
+        description: None,
+        provenance: sibling.provenance.clone(),
+    };
+    (keywords, union)
 }
 
 /// Whether a non-object schema still imposes a scalar/leaf constraint (a non-null primitive type,

@@ -2239,12 +2239,34 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     // union's object branches) or the same keywords nested in an `allOf` of their own (a member
     // combined with the target). `null` satisfies the target, the conjunct and both branches, so
     // the `anyOf` admits it and the `oneOf`, which it matches twice, does not. The `$ref` spelling
-    // of the conjunct, `{$ref: NB, required: [a], oneOf|anyOf: […]}`, does not collapse its met
-    // branches yet (#538), so these rows drive the two `allOf` spellings alone.
+    // writes the conjunct's keywords beside the `$ref`, `{$ref: NB, required: [a], oneOf|anyOf:
+    // […]}` (#538). Its nested-`allOf` form, `{$ref: NB, allOf: [{required: [a]}], …}`, denies
+    // the target's `null` (#562), so that row drives the two `allOf` spellings alone.
     let mut conjunct_cases = Vec::new();
-    for (form, conjunct) in [
-        ("refiner member", "{ required: [a] }"),
-        ("nested allOf member", "{ allOf: [ { required: [a] } ] }"),
+    //
+    // A typed conjunct, a nullable object with a further property `c`, meets the target before the
+    // union rather than refining its branches, and admits `null` of its own accord.
+    let ab: &[&str] = &["a", "b"];
+    let abc: &[&str] = &["a", "b", "c"];
+    for (form, conjunct, fields) in [
+        (
+            "refiner member",
+            ("{ required: [a] }", Some(", required: [a]")),
+            ab,
+        ),
+        (
+            "nested allOf member",
+            ("{ allOf: [ { required: [a] } ] }", None),
+            ab,
+        ),
+        (
+            "typed member",
+            (
+                "{ type: [object, 'null'], properties: { c: { type: integer } } }",
+                Some(", type: [object, 'null'], properties: { c: { type: integer } }"),
+            ),
+            abc,
+        ),
     ] {
         for (keyword, nullable) in [("oneOf", false), ("anyOf", true)] {
             conjunct_cases.push((
@@ -2253,7 +2275,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
                 keyword,
                 required,
                 vec![Code::ValidationKeywordIgnored],
-                Shape::Fields(&["a", "b"], nullable),
+                Shape::Fields(fields, nullable),
                 Some(conjunct),
             ));
         }
@@ -2274,12 +2296,17 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
         .chain(conjunct_cases);
     for (case, target, keyword, branches, codes, shape, conjunct) in cases {
         let target_ref = format!("'#/components/schemas/{target}'");
-        let member = conjunct.map_or_else(String::new, |member| format!(", {member}"));
-        for (spelling, site) in [
+        let member = conjunct.map_or_else(String::new, |(member, _)| format!(", {member}"));
+        // The conjunct's keywords written beside the `$ref`, as further siblings; `None` where
+        // that spelling is not driven.
+        let keywords = conjunct.map_or(Some(""), |(_, keywords)| keywords);
+        let ref_sibling = keywords.map(|keywords| {
             (
                 "$ref sibling",
-                format!("{{ $ref: {target_ref}, {keyword}: {branches} }}"),
-            ),
+                format!("{{ $ref: {target_ref}{keywords}, {keyword}: {branches} }}"),
+            )
+        });
+        for (spelling, site) in ref_sibling.into_iter().chain([
             (
                 "allOf member",
                 format!(
@@ -2291,10 +2318,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
                 "beside allOf",
                 format!("{{ allOf: [ {{ $ref: {target_ref} }}{member} ], {keyword}: {branches} }}"),
             ),
-        ]
-        .into_iter()
-        .filter(|(spelling, _)| conjunct.is_none() || *spelling != "$ref sibling")
-        {
+        ]) {
             let spec = format!(
                 r##"
 openapi: 3.1.0
