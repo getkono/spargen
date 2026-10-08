@@ -521,28 +521,22 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     );
 }
 
-/// Structurally equal inline `oneOf` branches are still two variants with no diagnostic (#492),
-/// and union members that accept every value are still `serde_json::Value` variants with none
-/// (#535), so [`oracles::indistinguishable_variants`] still needs to let both through as known.
-/// Once either issue is fixed this fails: remove its known gap and its case here together.
+/// Union members that accept every value are still `serde_json::Value` variants with no
+/// diagnostic (#535), so [`oracles::indistinguishable_variants`] still needs to let them through
+/// as known. Once the issue is fixed this fails: remove its known gap and its case here together.
+/// (Structurally equal `oneOf` branches, #492, are merged with `W001` now; see
+/// `one_of_branches_of_one_structure_merge_and_warn`.)
 #[test]
-fn equal_nominal_and_untyped_variants_are_still_tracked_by_492_and_535() {
+fn untyped_variants_are_still_tracked_by_535() {
     let cases = [
-        (
-            "oneOf: [{ type: object, additionalProperties: false, required: [a], properties: \
-             { a: { type: string } } }, { type: object, additionalProperties: false, required: [a], \
-             properties: { a: { type: string } } }]",
-            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
-        ),
-        (
-            "oneOf: [{ type: string, enum: [x] }, { type: string, enum: [x] }]",
-            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
-        ),
         (
             "anyOf: [{ required: [a] }, { required: [b] }]",
             oracles::ISSUE_UNTYPED_UNION_MEMBER,
         ),
-        ("oneOf: [{ type: string }, {}]", oracles::ISSUE_UNTYPED_UNION_MEMBER),
+        (
+            "oneOf: [{ type: string }, {}]",
+            oracles::ISSUE_UNTYPED_UNION_MEMBER,
+        ),
     ];
     for (schema, issue) in cases {
         let (report, code) = generate_with_code(&format!(

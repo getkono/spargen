@@ -57,8 +57,7 @@ fn generate_module(spec: &str) -> (Report, String) {
 /// `generate` on the root document at `root`, writing the module beside it, held to
 /// [`oracles::location_violations`] and, when it generates, to
 /// [`oracles::indistinguishable_variants`]: a union's variants are told apart by shape, or a
-/// warning says why, or an open issue tracks the gap (#492 for the equal nominal variants a
-/// repeated closed-object key set lowers to).
+/// warning says why, or an open issue tracks the gap.
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
