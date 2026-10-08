@@ -1517,7 +1517,7 @@ struct GateWorkflow {
 /// Every workflow under `.github/workflows/` (`.yml` or `.yaml`) is one of these or one of
 /// [`NON_GATE_WORKFLOWS`]; an unclassified file fails, so a new workflow cannot run a gate no
 /// pairing sees.
-const GATE_WORKFLOWS: [GateWorkflow; 3] = [
+const GATE_WORKFLOWS: [GateWorkflow; 4] = [
     GateWorkflow {
         file: "ci.yml",
         on: "push:\n  branches: [master]\npull_request:",
@@ -1538,6 +1538,14 @@ const GATE_WORKFLOWS: [GateWorkflow; 3] = [
         on: "push:\n  tags: [\"v*\"]\nworkflow_dispatch:",
         concurrency: None,
         permissions: None,
+    },
+    // Weekly and on demand only: a run takes hours, so no pull request waits on it (#490).
+    // `cancel-in-progress: false` keeps a manual dispatch from cancelling a scheduled run.
+    GateWorkflow {
+        file: "mutants.yml",
+        on: "schedule:\n  - cron: \"23 5 * * 1\"\nworkflow_dispatch:",
+        concurrency: Some("group: mutants-${{ github.ref }}\ncancel-in-progress: false"),
+        permissions: Some("contents: read"),
     },
 ];
 
@@ -1798,6 +1806,18 @@ const PAIRINGS: &[Pairing] = &[
                 mise: "",
                 why: "captures the output for the artifact without changing what runs",
             },
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        workflow: "mutants.yml",
+        job: "mutants",
+        tasks: &["mutants"],
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            CACHE,
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-mutants@27.1.0"),
         ],
         ..PAIR
     }),

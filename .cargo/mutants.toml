@@ -1,0 +1,28 @@
+# cargo-mutants configuration. `mise run mutants` and the `mutants` job in
+# `.github/workflows/mutants.yml` pass `--config .cargo/mutants.toml`; the comment on
+# `[tasks.mutants]` in `mise.toml` says what the command scopes and why.
+#
+# Every `exclude_re` entry is an equivalent mutant: one no test can observe, so the run could never
+# kill it. Each carries its argument here, and the same argument sits beside the code as a
+# `// Mutation testing:` comment. A mutant a test could observe but none does is never excluded: it
+# is killed with a test. The `mutants` crate's `#[mutants::skip]` is not used because everything
+# above a runtime file's `#[cfg(test)]` marker is embedded into generated code, which must not
+# depend on it.
+#
+# The patterns match the names `cargo mutants --list` prints, which start with
+# `<file>:<line>:<column>: `.
+exclude_re = [
+  # `support-runtime/src/dispatch.rs`, the `wasm32` `read_capped`: compiled only for
+  # `target_arch = "wasm32"`, so a native test binary holds the native `read_capped` in its place
+  # and no native test reaches the mutated body; on `wasm32` the runtime is compile-checked by
+  # `mise run github-api`, not tested. Both functions share a name, so the pattern is anchored on
+  # the wasm body's line and column: the native one stays tested, and once an edit moves the line
+  # the pattern matches nothing and the two mutants fail the run as missed until it is updated,
+  # rather than excluding whatever moved onto that line.
+  '^support-runtime/src/dispatch\.rs:664:5: replace read_capped -> ',
+  # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
+  # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
+  # and no test or caller can observe what the body returns.
+  '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorBody for std::convert::Infallible>::body -> ',
+  '^support-runtime/src/error\.rs:\d+:\d+: replace <impl ApiErrorProblem for std::convert::Infallible>::problem -> ',
+]

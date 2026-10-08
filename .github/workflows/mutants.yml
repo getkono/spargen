@@ -1,0 +1,39 @@
+name: Mutation testing
+
+# `mise run mutants`, weekly on `master` and on demand. A run takes far longer than a pull request
+# should wait, so no pull request or push runs it; the comment on `[tasks.mutants]` in mise.toml
+# says what it scopes and why each flag is there. A red run is a missed mutant on `master`: kill it
+# with a test, or, only where no test can observe it, add it to `.cargo/mutants.toml`'s
+# `exclude_re` with its argument.
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+# A manual dispatch waits for a running scheduled run rather than cancelling hours of work.
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # The cargo-mutants version `[tools]` pins in mise.toml
+      # (`ci_installs_exactly_the_tool_versions_mise_pins`).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      # `mise run mutants`'s command, byte for byte
+      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
+      - run: cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3
