@@ -496,7 +496,8 @@ impl DefaultValue {
         }
     }
 
-    /// The value as JSON writes it, as the rustdoc `Default (not applied): `…`.` line shows it.
+    /// The value as JSON writes it, as the rustdoc `Default (not applied): `…`.` line shows it and
+    /// as the wired serde default function's body spells it.
     fn raw(self) -> String {
         match self {
             DefaultValue::Integer(value) => value.to_string(),
@@ -1502,10 +1503,7 @@ proptest! {
                     spelling, meet, KEYS[key], wired, expected_wired, spec, source
                 );
                 if let (Some(wired), Some(value)) = (wired, expected_wired) {
-                    let literal = match value {
-                        DefaultValue::Integer(value) => value.to_string(),
-                        DefaultValue::String(text) => format!("\"{text}\""),
-                    };
+                    let literal = value.raw();
                     prop_assert!(
                         wired.contains(&format!("Some ({literal}")),
                         "{:?}: `{}.{}` wires `{}`, not {}:\n{}",
