@@ -33,18 +33,12 @@ pub struct Violation {
 /// The diagnostics whose pointer is still the document root although the construct they report has
 /// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
 /// their empty pointer as known; every other rule still applies to them, each checked on its own.
-pub const KNOWN_ROOT_POINTERS: &[(Code, u32)] = &[
-    (Code::AbsoluteRefUnsupported, ISSUE_REMOTE_REF_POINTER),
-    (Code::VendoredRefDrift, ISSUE_REMOTE_REF_POINTER),
-];
+pub const KNOWN_ROOT_POINTERS: &[(Code, u32)] = &[];
 
 /// The diagnostics whose span still covers the whole root document although the construct they
 /// report has a span of its own, each with the open issue that tracks it. [`location_violations`]
 /// reports that span as known; every other rule still applies to them, each checked on its own.
-pub const KNOWN_WHOLE_ROOT_SPANS: &[(Code, u32)] = &[
-    (Code::AbsoluteRefUnsupported, ISSUE_REMOTE_REF_POINTER),
-    (Code::VendoredRefDrift, ISSUE_REMOTE_REF_POINTER),
-];
+pub const KNOWN_WHOLE_ROOT_SPANS: &[(Code, u32)] = &[];
 
 /// The issue `table` tracks `code` under, if any.
 fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
@@ -53,11 +47,6 @@ fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
         .find(|(known, _)| *known == code)
         .map(|(_, issue)| *issue)
 }
-
-/// The issue (#534) tracking `E003`'s and `E021`'s root pointer and whole-document span: the
-/// bundle raises them against the referring file's root value rather than the `$ref` that names
-/// the remote document.
-pub const ISSUE_REMOTE_REF_POINTER: u32 = 534;
 
 /// The issue tracking structurally equal nominal `oneOf` variants: two inline structs, or two
 /// string enums, with the same definition are not merged (#492).
