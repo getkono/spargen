@@ -5972,6 +5972,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     doc_note: format!("Default: `{display}`."),
                     applied,
                     provenance,
+                    also_written: Vec::new(),
                 })
             }
             None => {
@@ -5989,6 +5990,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     doc_note: format!("Default (not applied): `{}`.", raw_display(raw)),
                     applied: None,
                     provenance,
+                    also_written: Vec::new(),
                 })
             }
         }
@@ -9219,18 +9221,21 @@ fn retype_field_defaults(
                 .as_ref()
                 .map(written_default_display)
                 .unwrap_or_default();
-            Diagnostic::warning(Code::SchemaDefaultNotApplied, default.provenance.clone())
-                .message(format!(
-                    "schema `default` `{written}` of property `{}` is not a value of the type an \
-                     intersection narrows the property to in `{}`; it is documented in rustdoc \
-                     there but not applied as a deserialization default",
-                    field.name.wire, located
-                ))
-                .remedy(
-                    "use a default every intersected schema of the property admits, or set the \
-                     value explicitly at each call site",
-                )
-                .emit(diags);
+            // Each `default` that wrote this value is dropped with it, so each is reported (#543).
+            for at in std::iter::once(&default.provenance).chain(&default.also_written) {
+                Diagnostic::warning(Code::SchemaDefaultNotApplied, at.clone())
+                    .message(format!(
+                        "schema `default` `{written}` of property `{}` is not a value of the type \
+                         an intersection narrows the property to in `{}`; it is documented in \
+                         rustdoc there but not applied as a deserialization default",
+                        field.name.wire, located
+                    ))
+                    .remedy(
+                        "use a default every intersected schema of the property admits, or set \
+                         the value explicitly at each call site",
+                    )
+                    .emit(diags);
+            }
             default.doc_note = format!("Default (not applied): `{written}`.");
         }
         default.applied = value;
@@ -10359,10 +10364,12 @@ fn take_declaration(existing: &mut Field, other: &Field) -> bool {
 /// defaults keep the same one in either order — an applicable default before one that cannot be
 /// applied, then the lesser rustdoc note, then the lesser `default` location — while the other is
 /// reported (`W005`) at the `default` that wrote it, since the field cannot carry it. Two defaults
-/// of one value (`3` and `3.0` alike) are one default. The kept default is then decided against
-/// the merged field as every other is: a requirement drops its application here, and
-/// [`retype_field_defaults`] re-types it against the narrowed type, which for an empty meet
-/// leaves it unapplied and reports it as `W005` (#453).
+/// of one value (`3` and `3.0` alike) are one default for choosing what to keep, but not for
+/// accounting: the kept one carries the other's pointers in [`FieldDefault::also_written`], and
+/// whichever drop reports it reports every pointer that wrote the value (#543). The kept default
+/// is then decided against the merged field as every other is: a requirement drops its
+/// application here, and [`retype_field_defaults`] re-types it against the narrowed type, which
+/// for an empty meet leaves it unapplied and reports it as `W005` (#453).
 fn merge_field_default(
     kept: &mut Option<FieldDefault>,
     other: Option<&FieldDefault>,
@@ -10380,11 +10387,7 @@ fn merge_field_default(
         (
             default.applied.is_none(),
             default.doc_note.clone(),
-            default.provenance.pointer.to_string(),
-            default
-                .provenance
-                .span
-                .map(|span| (span.file.0, span.start.offset, span.end.offset)),
+            provenance_rank(&default.provenance),
         )
     };
     let other_first = rank(other) < rank(current);
@@ -10397,8 +10400,22 @@ fn merge_field_default(
         (Some(left), Some(right)) => reclassify_default(left) == reclassify_default(right),
         _ => winner.doc_note == loser.doc_note,
     };
-    if !same_value {
-        Diagnostic::warning(Code::SchemaDefaultNotApplied, loser.provenance.clone())
+    if same_value {
+        // The equal value the loser wrote is merged, not forgotten: its pointers ride on the kept
+        // default, so a later drop reports each of them (#543).
+        let mut merged = winner.clone();
+        merged.also_written.push(loser.provenance.clone());
+        merged
+            .also_written
+            .extend(loser.also_written.iter().cloned());
+        merged.also_written.sort_by_key(provenance_rank);
+        *kept = Some(merged);
+        return;
+    }
+    // Every pointer that wrote the dropped value is reported, not only the one the merge reached
+    // first, so which `default`s are reported does not depend on the members' order (#543).
+    for at in std::iter::once(&loser.provenance).chain(&loser.also_written) {
+        Diagnostic::warning(Code::SchemaDefaultNotApplied, at.clone())
             .message(format!(
                 "schema `default` of property `{property}` differs from the `default` another \
                  intersected schema declares for it at `{}`, which the merged field keeps; this \
@@ -10414,6 +10431,17 @@ fn merge_field_default(
     if other_first {
         *kept = Some(other.clone());
     }
+}
+
+/// The total order [`merge_field_default`] breaks ties by and keeps [`FieldDefault::also_written`]
+/// in: the `default`'s pointer, then its source span.
+fn provenance_rank(provenance: &Provenance) -> (String, Option<(u32, usize, usize)>) {
+    (
+        provenance.pointer.to_string(),
+        provenance
+            .span
+            .map(|span| (span.file.0, span.start.offset, span.end.offset)),
+    )
 }
 
 /// The category a schema's object or array applicators imply, for a schema that establishes none

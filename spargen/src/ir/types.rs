@@ -571,6 +571,12 @@ pub(crate) struct FieldDefault {
     /// own lowering — an intersection that narrows the field's type to one the value is not a
     /// member of — is reported where the value was written.
     pub(crate) provenance: crate::diag::Provenance,
+    /// The other `default` keywords an intersection merged into this one because they wrote the
+    /// same value (#432), ordered by location. They are one value for choosing what the merged
+    /// field keeps, but each is still a `default` someone wrote: when the merge or a later
+    /// re-typing drops this default, `W005` is reported at every one of them as well as at
+    /// [`Self::provenance`] (#543), so the report does not depend on the members' order.
+    pub(crate) also_written: Vec<crate::diag::Provenance>,
 }
 
 /// A representable scalar `default`, carried so codegen can render it as a correct Rust literal for

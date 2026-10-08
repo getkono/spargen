@@ -17701,6 +17701,64 @@ fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
     }
 }
 
+/// Issue #543: equal `default`s several intersected members write are one value for choosing what
+/// the merged field keeps, not for accounting. When the meet drops that value — the field is
+/// uninhabited, or another member's different `default` is kept — `W005` is reported at every
+/// pointer that wrote it, in every member order, not only at the one the merge reached first.
+#[test]
+fn a_dropped_default_several_members_write_alike_is_reported_at_each_pointer() {
+    fn spec(third: &str, order: [usize; 3]) -> String {
+        let members = [
+            "{ type: object, properties: { a: { type: string, default: y } } }".to_owned(),
+            "{ properties: { a: { type: string, default: y } } }".to_owned(),
+            format!("{{ properties: {{ a: {third} }} }}"),
+        ];
+        let mut spec = String::from(
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n",
+        );
+        for (id, member) in members.iter().enumerate() {
+            spec.push_str(&format!("    M{id}: {member}\n"));
+        }
+        let refs: Vec<String> = order
+            .iter()
+            .map(|id| format!("{{ $ref: '#/components/schemas/M{id}' }}"))
+            .collect();
+        spec.push_str(&format!(
+            "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+             p: {{ allOf: [{}] }}\n",
+            refs.join(", ")
+        ));
+        spec
+    }
+
+    // An uninhabited `a` (`string` meets `integer`) drops `y`; a kept `x` supersedes it.
+    for third in ["{ type: integer }", "{ type: string, default: x }"] {
+        for order in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
+            let spec = spec(third, order);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+                let mut pointers: Vec<&str> = report
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                    .map(|d| d.pointer.as_str())
+                    .collect();
+                pointers.sort_unstable();
+                pointers.dedup();
+                assert_eq!(
+                    pointers,
+                    [
+                        "/components/schemas/M0/properties/a/default",
+                        "/components/schemas/M1/properties/a/default",
+                    ],
+                    "{entry}, {third}, order {order:?}: {report:#?}\n{spec}"
+                );
+            }
+        }
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
