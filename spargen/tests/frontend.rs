@@ -491,6 +491,27 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     // `serde_json::Value` payload make another variant undecodable (#535).
     let any_of = code.replace("exactly one", "at least one");
     assert!(reasons(&any_of).is_empty(), "{:#?}", reasons(&any_of));
+    // A union nothing names, whose payload another declaration took over, is the pre-meet union
+    // of an `allOf` member (#561), and only its `serde_json::Value` variant is known. Named by a
+    // field or by a `types::` path, it is a union the output uses, and its variant is not known.
+    let known = |code: &str| -> Vec<Option<u32>> {
+        oracles::indistinguishable_variants(code)
+            .into_iter()
+            .map(|violation| violation.known)
+            .collect()
+    };
+    assert_eq!(known(code), [None, None]);
+    let dead = code.replace(
+        "pub type C = serde_json::Value;\n",
+        "pub type C = serde_json::Value;\npub struct W {\n    pub a: A,\n}\n",
+    );
+    assert_eq!(known(&dead), [Some(oracles::ISSUE_DEAD_MEET_INPUT), None]);
+    for used in [
+        dead.replace("pub a: A,", "pub a: A,\n    pub u: U,"),
+        format!("{dead}pub fn f() -> types::U {{}}\n"),
+    ] {
+        assert_eq!(known(&used), [None, None], "{used}");
+    }
     // An enum with no `Deserialize` impl of its own is not a union.
     let not_a_union = code.replace("serde::Deserialize<'de> for U", "Other");
     assert!(
@@ -576,6 +597,50 @@ fn a_one_of_member_accepting_every_value_warns() {
             !oracles::indistinguishable_variants(&code).is_empty(),
             "{schema}"
         );
+    }
+}
+
+/// An untyped `oneOf` branch that the `allOf`'s untyped object keywords refine is no longer
+/// `serde_json::Value` (#535): the refiner meets every branch of no category, so the branch the
+/// union wrote as `{}` is generated as a typed struct, and nothing reports it as accepting every
+/// value. The check runs on the union the refiners leave, not on the meet before them.
+#[test]
+fn a_refined_untyped_one_of_branch_does_not_warn() {
+    for refiner in [
+        "{ properties: { a: { type: string } } }",
+        "{ required: [a] }",
+    ] {
+        let schema = format!("{{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}");
+        let (report, code) = generate_with_code(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    U:\n      {schema}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        let untyped: Vec<&Diagnostic> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.message
+                    .contains("to `serde_json::Value`, which accepts every value")
+            })
+            .collect();
+        assert!(untyped.is_empty(), "{schema}: {untyped:#?}\n{code}");
+        assert!(code.contains("pub enum U"), "{schema}");
+        // The generated union `U` has no `serde_json::Value` variant. The pre-meet union the
+        // `allOf` member lowered to is still emitted, unused, and is known (#561).
+        let found = oracles::indistinguishable_variants(&code);
+        assert!(
+            !found
+                .iter()
+                .any(|violation| violation.reason.starts_with("`oneOf` `U` ")),
+            "{schema}: {found:#?}"
+        );
+        let unknown = oracles::unknown(found);
+        assert!(unknown.is_empty(), "{schema}: {unknown:#?}");
     }
 }
 

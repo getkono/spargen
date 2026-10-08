@@ -1790,13 +1790,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
             let intersection = if has_union_sibling {
-                self.collapse_met_union(
+                let (collapsed, untyped_check) = self.collapse_met_union(
                     schema,
                     intersection,
                     !schema.one_of.is_empty(),
                     &format!("{hint}ReferenceIntersection"),
                     MetUnion::RefSibling,
-                )
+                );
+                // Nothing meets the union after the collapse here.
+                if untyped_check {
+                    self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
+                }
+                collapsed
             } else {
                 intersection
             };
@@ -4023,13 +4028,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the composition left as one type distinct definitions of the same shape: the refiners
         // constrain every branch of their category alike, so refining the collapsed type admits
         // the same values.
-        meet = self.collapse_met_union(
+        let (collapsed, untyped_check) = self.collapse_met_union(
             schema,
             meet,
             !union.one_of.is_empty(),
             &format!("{hint}Intersection"),
             spelling,
         );
+        meet = collapsed;
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
             let mut reach = ScopeReach::default();
             let met = self.meet_scoped_refiner(
@@ -4059,6 +4065,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
+        }
+        // After the refiners, which give an untyped branch of their category a type (#535).
+        if untyped_check {
+            self.warn_untyped_met_variants(schema, meet, spelling);
         }
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
@@ -5775,7 +5785,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Collapse `met`, the meet of a `oneOf` (`one_of`) or `anyOf` with what the union is
     /// conjoined with, as each of the [`MetUnion`] spellings must: the union is lowered with its
     /// own merge held back ([`Self::unmerged_union`]), because its branches are compared once the
-    /// meet has made them what they are. Returns `met` itself where nothing collapses.
+    /// meet has made them what they are. Returns `met` itself where nothing collapses, beside
+    /// whether the result is a `oneOf` whose `serde_json::Value` variants the caller reports
+    /// ([`Self::warn_untyped_met_variants`]) once nothing else meets it.
     fn collapse_met_union(
         &mut self,
         schema: &Schema,
@@ -5783,7 +5795,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         one_of: bool,
         hint: &str,
         spelling: MetUnion,
-    ) -> Ty {
+    ) -> (Ty, bool) {
         // A `oneOf`'s branches are compared by generated type, as the inline merge compares them
         // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart,
         // and two structs or string enums of one structure decode the same values (#492).
@@ -5816,30 +5828,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                     .remedy("keep producer-side validation for the union's branch constraints")
                     .emit(self.diags);
-                common
+                (common, false)
             }
             // Only some branches share a generated type: they become one variant, as the inline
             // merge makes them, and the others stand. A `serde_json::Value` variant left among them
-            // is reported as the inline union reports it (#535).
+            // is the caller's to report ([`Self::warn_untyped_met_variants`]), once whatever still
+            // meets the union after the collapse has made its branches final (#535).
             None if one_of => {
                 let collapsed = self
                     .merge_intersected_one_of(schema, met, hint, spelling)
                     .unwrap_or(met);
-                if let Some(TypeKind::Union(union)) =
-                    self.graph.get(collapsed.id).map(|def| def.kind.clone())
-                {
-                    let positions: Vec<usize> = (0..union.variants.len()).collect();
-                    self.warn_untyped_one_of_variants(
-                        &schema.provenance,
-                        &union,
-                        &positions,
-                        &format!("{} intersect to a `oneOf` whose", spelling.subject(true)),
-                        "variant",
-                    );
-                }
-                collapsed
+                (collapsed, true)
             }
-            None => met,
+            None => (met, false),
+        }
+    }
+
+    /// Report, as the inline union reports them ([`Self::warn_untyped_one_of_variants`]), the
+    /// `serde_json::Value` variants of `met`, a `oneOf` meet that [`Self::collapse_met_union`]
+    /// left a union (#535). Called on the union as it is generated: after the `allOf` refiners,
+    /// whose untyped object or array keywords give a branch of no category a type of their own, so
+    /// a branch they refine is not reported as accepting every value.
+    fn warn_untyped_met_variants(&mut self, schema: &Schema, met: Ty, spelling: MetUnion) {
+        if let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| def.kind.clone()) {
+            let positions: Vec<usize> = (0..union.variants.len()).collect();
+            self.warn_untyped_one_of_variants(
+                &schema.provenance,
+                &union,
+                &positions,
+                &format!("{} intersect to a `oneOf` whose", spelling.subject(true)),
+                "variant",
+            );
         }
     }
 
