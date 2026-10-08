@@ -1991,6 +1991,160 @@ components:
     }
 }
 
+/// A `"null"` in the `type` array beside a `oneOf`/`anyOf` only permits `null`: the union still
+/// needs a branch `null` matches (exactly one for `oneOf`, at least one for `anyOf`), so its
+/// branches alone decide whether the position is `Option` (#574). Branches typed `object` beside
+/// `type: [object, 'null']` all refuse `null`, so the field is not `Option`, with several branches
+/// or one, and where the multi-type array is dropped for lowering with nothing else beside it.
+/// A branch that accepts `null` itself, or an untyped one that takes it from the `type` array,
+/// keeps it valid.
+#[test]
+fn a_union_admits_null_only_through_a_branch_that_accepts_it() {
+    let typed_objects = "\n            - { type: object, required: [a] }\n            \
+                         - { type: object, required: [c], properties: { d: { type: string } } }";
+    let props = "properties: { a: { type: string }, c: { type: integer } }";
+    for (shape, schema, nullable) in [
+        (
+            "oneOf of typed objects beside a nullable object type",
+            format!("type: [object, 'null']\n          {props}\n          oneOf:{typed_objects}"),
+            false,
+        ),
+        (
+            "anyOf of typed objects beside a nullable object type",
+            format!("type: [object, 'null']\n          {props}\n          anyOf:{typed_objects}"),
+            false,
+        ),
+        (
+            "sole typed branch beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          \
+                 oneOf: [ {{ type: object, required: [a] }} ]"
+            ),
+            false,
+        ),
+        (
+            "typed scalars beside a dropped multi-type array",
+            "type: [string, integer, 'null']\n          \
+             oneOf: [ { type: string }, { type: integer } ]"
+                .to_owned(),
+            false,
+        ),
+        (
+            "anyOf of typed scalars beside a dropped multi-type array",
+            "type: [string, integer, 'null']\n          \
+             anyOf: [ { type: string }, { type: integer } ]"
+                .to_owned(),
+            false,
+        ),
+        (
+            "sole typed scalar beside a dropped multi-type array",
+            "type: [string, integer, 'null']\n          oneOf: [ { type: string } ]".to_owned(),
+            false,
+        ),
+        (
+            "a branch that accepts null itself",
+            format!(
+                "type: [object, 'null']\n          {props}\n          oneOf:\n            \
+                 - {{ type: [object, 'null'], required: [a] }}\n            \
+                 - {{ type: object, required: [c] }}"
+            ),
+            true,
+        ),
+        (
+            "an untyped branch beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          oneOf:\n            \
+                 - {{ required: [a] }}\n            \
+                 - {{ type: object, required: [c], properties: {{ d: {{ type: string }} }} }}"
+            ),
+            true,
+        ),
+        (
+            "an anyOf of untyped object branches beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          \
+                 anyOf: [ {{ properties: {{ a: {{ type: string }} }} }}, {{ properties: {{ b: {{ \
+                 type: string }} }} }} ]"
+            ),
+            true,
+        ),
+        (
+            "a sole untyped object branch beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          \
+                 oneOf: [ {{ properties: {{ b: {{ type: string }} }} }} ]"
+            ),
+            true,
+        ),
+        // `null` matches both untyped branches, which fails the `oneOf`'s exactly-one.
+        (
+            "a oneOf of two untyped object branches beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          \
+                 oneOf: [ {{ properties: {{ a: {{ type: string }} }} }}, {{ properties: {{ b: {{ \
+                 type: string }} }} }} ]"
+            ),
+            false,
+        ),
+        (
+            "an untyped object branch beside a dropped multi-type array",
+            "type: [object, string, 'null']\n          \
+             oneOf: [ { properties: { a: { type: string } } }, { type: string } ]"
+                .to_owned(),
+            true,
+        ),
+        (
+            "a sole untyped object branch beside a dropped multi-type array",
+            "type: [object, string, 'null']\n          \
+             oneOf: [ { properties: { a: { type: string } } } ]"
+                .to_owned(),
+            true,
+        ),
+        (
+            "a null member beside typed scalars and a dropped multi-type array",
+            "type: [string, integer, 'null']\n          \
+             oneOf: [ { type: 'null' }, { type: string }, { type: integer } ]"
+                .to_owned(),
+            true,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        x:
+          {schema}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("{shape}: no `x`: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            nullable,
+            "{shape}: `x` is `{x}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
+        );
+    }
+}
+
 /// After the meet with a `$ref` target, each `oneOf` branch keeps its own nullability, so branches
 /// that emit one Rust type need not agree on `null` (#402). Beside `NI: {type: [integer, 'null']}`,
 /// `{minimum: 0}` says nothing about `null` and meets `NI` to a nullable integer, while
@@ -3224,8 +3378,9 @@ components:
 /// branch, which takes the nullable `type`'s `null` as an untyped `Value` branch does (#563).
 ///
 /// Not pinned here: a `oneOf` written with the nullable `type` in the union's own schema (the
-/// `allOf`-member and inline spellings) still admits the `null` its two branches share, as a plain
-/// `{type: [object, 'null'], oneOf: [...]}` does (#579).
+/// `allOf`-member and inline spellings, and a plain `{type: [object, 'null'], oneOf: [...]}`)
+/// (#579). Its untyped branches now take that `type`'s `null` themselves (#574), and
+/// `a_union_admits_null_only_through_a_branch_that_accepts_it` pins the inline spelling.
 #[test]
 fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
     let branches =

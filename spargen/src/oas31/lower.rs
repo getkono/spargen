@@ -2196,8 +2196,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 real_members.push(member);
             }
         }
-        // The union's overall acceptance needs both; only the rescues below need them apart.
-        let mut nullable = null_from_type_array || null_from_member;
+        // The union accepts `null` only through a branch `null` matches (#574): a `null` member,
+        // or a real branch that accepts it after its sibling meet. The `type` array alone adds
+        // nothing, so it does not start this; an untyped branch, which decides nothing about
+        // `null`, takes the array's `null` below, and the meet keeps it where the other sibling
+        // keywords admit it.
+        let mut nullable = null_from_member;
 
         // Every schema the discriminator names is checked against the members before any path
         // below can return. The collapses do not build a discriminated dispatch at all, so a check
@@ -2338,6 +2342,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 inner.nullable = inner.nullable || nullable;
                 inner.boxed = true;
                 return Some(inner);
+            }
+            // An untyped member accepts the `null` the `type` array permits (#574), as the
+            // multi-member path's untyped variants do, before the sibling meet so the other
+            // sibling keywords can still take it away. Without a sibling to meet (a multi-type
+            // array dropped for lowering) it is then a branch `null` matches; with one, the meet
+            // below recounts it.
+            if null_from_type_array && member_untyped {
+                inner.nullable = true;
+                member_takes_null = true;
             }
             if let Some(sibling) = sibling {
                 // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
@@ -2493,6 +2506,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && self.unmerged_union.as_ref() == Some(&schema.provenance)
                 && self.unmerged_union_meets_null
                 && self.branch_leaves_null_undecided(member, ty)
+            {
+                ty.nullable = true;
+            }
+            // An untyped branch accepts the `null` the `type` array permits (#574), before the
+            // sibling meet so the other sibling keywords can still take it away, and is then
+            // counted as a branch `null` matches. Without a sibling to meet (a multi-type array
+            // dropped for lowering) nothing else would give it the array's `null`.
+            if null_from_type_array
+                && (self
+                    .graph
+                    .get(ty.id)
+                    .is_some_and(|def| matches!(def.kind, TypeKind::Any))
+                    || self.branch_leaves_null_undecided(member, ty))
             {
                 ty.nullable = true;
             }
