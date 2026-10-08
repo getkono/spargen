@@ -1810,6 +1810,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut self.unmerged_union,
                 has_union_sibling.then(|| schema.provenance.clone()),
             );
+            let sibling_mark = self.graph_mark();
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             let sibling = sibling?;
@@ -1876,6 +1877,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;
+            // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
+            // is, and the collapse re-emitted what the meet left of it (#561).
+            if has_union_sibling {
+                self.elide_unused_union_lowering(sibling_mark..mark);
+            }
             return Some(ty);
         }
 
@@ -4134,6 +4140,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
+        let union_mark = self.graph_mark();
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
         let lowered = lowered?;
@@ -4191,7 +4198,59 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut ty = self.insert_schema_type(schema, hint, kind);
         ty.nullable = meet.nullable;
         ty.boxed = meet.boxed;
+        self.elide_unused_union_lowering(union_mark..mark);
         Some(ty)
+    }
+
+    /// [Elide](TypeGraph::elide) every type in `lowered` that nothing can name any more. `lowered`
+    /// holds the ids a union was lowered into, with its merge held back ([`Self::unmerged_union`]),
+    /// before [`Self::meet_union_with_all_of`] or a `$ref`'s target met it. The pre-meet union
+    /// itself and the branch types the meet replaced were emitted as public types nothing referred
+    /// to (#561).
+    ///
+    /// Unlike the meets' own inserts ([`Self::elide_meet_intermediates`]), these come from lowering
+    /// a schema, so a memo may hold one: a component, remote or bundle target a branch `$ref`s and
+    /// first lowered here, which every later use of it is handed, or a type in a memoised `allOf`
+    /// contribution. So a type stays when the graph outside `lowered` reaches it, which takes in
+    /// the re-emitted meet, or a memo holds it, or one of those reaches it. Eliding keeps each id
+    /// and name, so no type the output carries is renamed or reordered.
+    fn elide_unused_union_lowering(&mut self, lowered: std::ops::Range<u32>) {
+        if lowered.is_empty() {
+            return;
+        }
+        let inside = |id: &TypeId| lowered.contains(&id.0);
+        let mut roots: Vec<TypeId> = self
+            .graph
+            .emitted()
+            .filter(|(id, _)| !inside(id))
+            .flat_map(|(_, def)| kind_edges(&def.kind))
+            .filter(inside)
+            .collect();
+        roots.extend(
+            self.components
+                .values()
+                .chain(self.in_progress.values())
+                .chain(self.remote_components.values())
+                .chain(self.remote_in_progress.values())
+                .chain(self.resolved_components.values())
+                .chain(self.resolved_in_progress.values())
+                .map(|&(id, _)| id)
+                .filter(inside),
+        );
+        for contribution in self.resolved_contributions.values().flatten() {
+            match contribution {
+                Contribution::Object { fields, .. } => {
+                    roots.extend(fields.iter().map(|field| field.ty.id).filter(inside));
+                }
+                Contribution::Scalar(ty) => roots.extend(Some(ty.id).filter(inside)),
+            }
+        }
+        let reached = reachable_types(&self.graph, &roots);
+        for id in lowered.map(TypeId) {
+            if !reached.contains(&id) && self.graph.get(id).is_some() {
+                self.graph.elide(id);
+            }
+        }
     }
 
     /// Combine the gathered members of an `allOf` into its type; see [`Self::lower_all_of`].

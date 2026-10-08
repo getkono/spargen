@@ -491,27 +491,10 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     // `serde_json::Value` payload make another variant undecodable (#535).
     let any_of = code.replace("exactly one", "at least one");
     assert!(reasons(&any_of).is_empty(), "{:#?}", reasons(&any_of));
-    // A union nothing names, whose payload another declaration took over, is the pre-meet union
-    // of an `allOf` member (#561), and only its `serde_json::Value` variant is known. Named by a
-    // field or by a `types::` path, it is a union the output uses, and its variant is not known.
-    let known = |code: &str| -> Vec<Option<u32>> {
-        oracles::indistinguishable_variants(code)
-            .into_iter()
-            .map(|violation| violation.known)
-            .collect()
-    };
-    assert_eq!(known(code), [None, None]);
-    let dead = code.replace(
-        "pub type C = serde_json::Value;\n",
-        "pub type C = serde_json::Value;\npub struct W {\n    pub a: A,\n}\n",
-    );
-    assert_eq!(known(&dead), [Some(oracles::ISSUE_DEAD_MEET_INPUT), None]);
-    for used in [
-        dead.replace("pub a: A,", "pub a: A,\n    pub u: U,"),
-        format!("{dead}pub fn f() -> types::U {{}}\n"),
-    ] {
-        assert_eq!(known(&used), [None, None], "{used}");
-    }
+    // No issue tracks either defect, so neither is known.
+    assert!(oracles::indistinguishable_variants(code)
+        .iter()
+        .all(|violation| violation.known.is_none()));
     // An enum with no `Deserialize` impl of its own is not a union.
     let not_a_union = code.replace("serde::Deserialize<'de> for U", "Other");
     assert!(
@@ -630,17 +613,127 @@ fn a_refined_untyped_one_of_branch_does_not_warn() {
             .collect();
         assert!(untyped.is_empty(), "{schema}: {untyped:#?}\n{code}");
         assert!(code.contains("pub enum U"), "{schema}");
-        // The generated union `U` has no `serde_json::Value` variant. The pre-meet union the
-        // `allOf` member lowered to is still emitted, unused, and is known (#561).
+        // The generated union `U` has no `serde_json::Value` variant, and the pre-meet union the
+        // `allOf` member lowered to, which had one, is no longer emitted (#561).
         let found = oracles::indistinguishable_variants(&code);
-        assert!(
-            !found
-                .iter()
-                .any(|violation| violation.reason.starts_with("`oneOf` `U` ")),
-            "{schema}: {found:#?}"
+        assert!(found.is_empty(), "{schema}: {found:#?}");
+    }
+}
+
+/// A union met with an `allOf`'s other members, or with a `$ref`'s target, is lowered on its own
+/// first, with its merge held back, and the meet re-emits what it leaves under the schema's own
+/// name. The pre-meet union, and the branch types the meet replaced, were left in the output as
+/// public types nothing referred to (#561), such as `Umember0`, a trial-matched `oneOf` with a
+/// `serde_json::Value` variant, beside the met union `U`. Each spelling of the meet now withholds
+/// them: as an `allOf` member, beside an `allOf`, and beside a `$ref` alone or with keywords. What
+/// something can still name stays: a branch the met union refers to, a `$ref`'d component first
+/// lowered inside the union, and a `$ref`'d subschema the resolver's memo hands a later `$ref`.
+#[test]
+fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
+    /// The types the `types` module declares, in source order.
+    fn declared(code: &str) -> Vec<String> {
+        types_module(code)
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| {
+                ["pub struct ", "pub enum ", "pub type "]
+                    .iter()
+                    .find_map(|item| line.strip_prefix(item))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+            .map(str::to_owned)
+            .collect()
+    }
+    let refiner = "{ properties: { a: { type: string } } }";
+    let b = "B: { type: object, properties: { a: { type: string } } }";
+    // Each spelling, with the types it no longer emits and the ones it must keep.
+    let cases: [(&str, String, &[&str], &[&str]); 6] = [
+        (
+            "an allOf member",
+            format!("U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}"),
+            &["Umember0", "Umember0Variant1"],
+            &["U", "Umember0Variant0"],
+        ),
+        (
+            "beside an allOf",
+            format!("U: {{ oneOf: [{{ type: string }}, {{}}], allOf: [{refiner}] }}"),
+            &["Uunion", "UunionVariant1"],
+            &["U", "UunionVariant0"],
+        ),
+        (
+            "beside a $ref",
+            format!(
+                "{b}\n    U: {{ $ref: '#/components/schemas/B', \
+                 oneOf: [{{ required: [a] }}, {{ type: object }}] }}"
+            ),
+            &["Uconstraint", "UconstraintVariant0", "UconstraintVariant1"],
+            &["B", "U"],
+        ),
+        (
+            "beside a $ref and its keywords",
+            format!(
+                "{b}\n    U: {{ $ref: '#/components/schemas/B', properties: {{ c: {{ type: integer \
+                 }} }}, oneOf: [{{ required: [a] }}, {{ type: object }}] }}"
+            ),
+            &["Uunion", "UunionVariant0", "UunionVariant1"],
+            &["B", "U"],
+        ),
+        (
+            "a $ref'd component first lowered inside the union",
+            format!(
+                "U: {{ allOf: [{{ oneOf: [{{ $ref: '#/components/schemas/S' }}, {{}}] }}, \
+                 {refiner}] }}\n    S: {{ type: object, properties: {{ s: {{ type: string }} }} }}"
+            ),
+            &["Umember0", "Umember0Variant1"],
+            &["U", "S", "Ss"],
+        ),
+        (
+            "a $ref'd subschema the resolver hands a later $ref",
+            format!(
+                "U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{ $ref: \
+                 '#/components/schemas/W/properties/w' }}] }}, {refiner}] }}\n    \
+                 W: {{ type: object, properties: {{ w: {{ type: object, properties: \
+                 {{ b: {{ type: integer }} }} }} }} }}\n    \
+                 X: {{ type: object, properties: {{ x: {{ $ref: \
+                 '#/components/schemas/W/properties/w' }} }} }}"
+            ),
+            &["Umember0"],
+            &["U", "Umember0Variant0", "X"],
+        ),
+    ];
+    for (spelling, schemas, withheld, kept) in cases {
+        let (report, code) = generate_with_code(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    {schemas}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
         );
-        let unknown = oracles::unknown(found);
-        assert!(unknown.is_empty(), "{schema}: {unknown:#?}");
+        let declared = declared(&code);
+        for name in withheld {
+            assert!(
+                !declared.iter().any(|declared| declared == name),
+                "{spelling}: `{name}` is still emitted: {declared:?}"
+            );
+        }
+        for name in kept {
+            assert!(
+                declared.iter().any(|declared| declared == name),
+                "{spelling}: `{name}` is no longer emitted: {declared:?}"
+            );
+        }
+        // The type the resolver first lowered inside the union is the one `X.x` names.
+        if let Some((_, rest)) = code.split_once("pub x: Option<") {
+            let shared = rest.split('>').next().unwrap_or_default();
+            assert!(
+                declared.iter().any(|declared| declared == shared),
+                "{spelling}: `X.x`'s `{shared}` is not emitted: {declared:?}"
+            );
+        }
+        let found = oracles::indistinguishable_variants(&code);
+        assert!(found.is_empty(), "{spelling}: {found:#?}");
     }
 }
 
