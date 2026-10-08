@@ -2105,7 +2105,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut union = schema.clone();
         union.boolean = None;
         union.reference = None;
-        union.types.types.retain(|ty| *ty == JsonType::Null);
+        union.types.types.clear();
         union.properties.clear();
         union.required.clear();
         union.additional_properties = None;
@@ -2124,6 +2124,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union.content_schema = None;
         union.xml = None;
         union.validation = ValidationKeywords::default();
+        // The array's `null` is a branch of its own: a union's `null` comes only from a branch
+        // `null` matches (#574), and a `null` left in the union's `type` would instead be a
+        // sibling every non-null branch is met with.
+        if schema.types.types.contains(&JsonType::Null) {
+            let mut null = union.clone();
+            null.title = None;
+            null.description = None;
+            null.any_of.clear();
+            null.types.types = vec![JsonType::Null];
+            union.any_of.push(SchemaOr::Schema(Box::new(null)));
+        }
         self.lower_union(&union, hint)
     }
 
@@ -2270,12 +2281,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // meet an untyped member is not counted, as that path does not count one either.
             let mut member_takes_null = member_nullable;
             // An untyped object member's non-null struct decides nothing about `null` either
-            // (#567), so it takes `null` from a sibling or a meet as `Value` does.
-            let member_untyped = self
-                .graph
-                .get(inner.id)
-                .is_some_and(|def| matches!(def.kind, TypeKind::Any))
-                || self.branch_leaves_null_undecided(real_members[0], inner);
+            // (#567), so it takes `null` from a sibling or a meet as `Value` does; so does any
+            // other member whose own keywords leave `null` undecided (#574).
+            let member_untyped = self.branch_takes_permitted_null(real_members[0], inner);
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -2339,7 +2347,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          own and cannot be given a generated type",
                     );
                 }
-                inner.nullable = inner.nullable || nullable;
+                // A sibling meet is refused above, so here the `type` array was dropped for
+                // lowering, and a target whose keywords decide nothing takes its `null` (#574).
+                inner.nullable =
+                    inner.nullable || nullable || (null_from_type_array && member_untyped);
                 inner.boxed = true;
                 return Some(inner);
             }
@@ -2513,13 +2524,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // sibling meet so the other sibling keywords can still take it away, and is then
             // counted as a branch `null` matches. Without a sibling to meet (a multi-type array
             // dropped for lowering) nothing else would give it the array's `null`.
-            if null_from_type_array
-                && (self
-                    .graph
-                    .get(ty.id)
-                    .is_some_and(|def| matches!(def.kind, TypeKind::Any))
-                    || self.branch_leaves_null_undecided(member, ty))
-            {
+            if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
                 ty.nullable = true;
             }
             if let Some(sibling) = sibling {
@@ -2920,7 +2925,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
     /// them. A multi-non-null `type` array is already expressed by the union members and is removed
-    /// here (its `null` member is handled by the union's outer nullability).
+    /// here. Its `null` only permits `null`: the union admits it through a branch `null` matches
+    /// (#574), which a branch whose own keywords leave `null` undecided takes from the array
+    /// ([`Self::branch_takes_permitted_null`]), and which [`Self::lower_type_array`] spells as a
+    /// `null` member of the union it synthesizes.
     fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<UnionSibling>> {
         let mut sibling = schema.clone();
         sibling.one_of.clear();
@@ -4285,6 +4293,73 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(TypeKind::Struct(_))
             )
             && !self.all_of_decides_null(member, 0)
+    }
+
+    /// Whether `member`, a union branch lowered to `ty`, takes the `null` its enclosing `type`
+    /// array permits (#574): its own keywords leave `null` undecided, so `null` matches it
+    /// wherever the union's other sibling keywords admit it. That is a branch lowering to `Value`,
+    /// an untyped object ([`Self::branch_leaves_null_undecided`]), a cycle-closing `$ref` whose
+    /// target's struct is still a reservation and whose keywords decide nothing, and a nested
+    /// union `null` matches through its own branches ([`Self::union_admits_null_undecided`]).
+    fn branch_takes_permitted_null(&self, member: &SchemaOr, ty: Ty) -> bool {
+        // A nested union's branches decide, whatever it lowered to: one that is `Value` can still
+        // be a `oneOf` that `null` matches twice.
+        if let SchemaOr::Schema(member) = member {
+            if schema_has_union(member) {
+                return !ty.nullable && self.union_admits_null_undecided(member, 0);
+            }
+        }
+        if self
+            .graph
+            .get(ty.id)
+            .is_some_and(|def| matches!(def.kind, TypeKind::Any))
+            || self.branch_leaves_null_undecided(member, ty)
+        {
+            return true;
+        }
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        !ty.nullable && self.is_reservation(ty.id) && !self.all_of_decides_null(member, 0)
+    }
+
+    /// Whether `schema` is a `oneOf`/`anyOf` whose other keywords decide nothing about `null` and
+    /// whose branches `null` matches by the union's own rule (exactly one for `oneOf`, at least one
+    /// for `anyOf`), counting a branch that states `null`, one that is `true`, one whose keywords
+    /// leave `null` undecided, and a nested union that admits it in turn. `depth` bounds the walk.
+    fn union_admits_null_undecided(&self, schema: &Schema, depth: u32) -> bool {
+        let (members, one_of) = match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
+            (false, true) => (&schema.one_of, true),
+            (true, false) => (&schema.any_of, false),
+            _ => return false,
+        };
+        if depth >= MAX_SCHEMA_DEPTH {
+            return false;
+        }
+        let mut rest = schema.clone();
+        rest.one_of.clear();
+        rest.any_of.clear();
+        rest.discriminator = None;
+        if self.all_of_decides_null(&rest, depth + 1) {
+            return false;
+        }
+        let matching = members
+            .iter()
+            .filter(|member| match member {
+                SchemaOr::Bool(accepts) => *accepts,
+                SchemaOr::Schema(member) => {
+                    stated_nullability(member) == Some(true)
+                        || self.union_admits_null_undecided(member, depth + 1)
+                        || (!schema_has_union(member)
+                            && !self.all_of_decides_null(member, depth + 1))
+                }
+            })
+            .count();
+        if one_of {
+            matching == 1
+        } else {
+            matching > 0
+        }
     }
 
     /// Lower `{$ref: T, <keywords>, oneOf|anyOf: […]}`, a `$ref` whose siblings are a union and

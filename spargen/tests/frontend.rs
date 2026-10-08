@@ -2107,6 +2107,58 @@ fn a_union_admits_null_only_through_a_branch_that_accepts_it() {
                 .to_owned(),
             true,
         ),
+        // A nested union of untyped branches states nothing about `null` either: `null` matches
+        // both of its `anyOf`'s branches, so it matches the nested union.
+        (
+            "an untyped nested anyOf branch beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          oneOf:\n            \
+                 - {{ anyOf: [ {{ required: [a] }}, {{ required: [c] }} ] }}\n            \
+                 - {{ type: object, required: [c], properties: {{ d: {{ type: string }} }} }}"
+            ),
+            true,
+        ),
+        (
+            "a sole untyped nested anyOf branch beside a nullable object type",
+            format!(
+                "type: [object, 'null']\n          {props}\n          \
+                 oneOf: [ {{ anyOf: [ {{ required: [a] }}, {{ required: [c] }} ] }} ]"
+            ),
+            true,
+        ),
+        (
+            "an untyped nested anyOf branch beside a dropped multi-type array",
+            "type: [object, string, 'null']\n          \
+             oneOf: [ { anyOf: [ { required: [a] }, { required: [b] } ] }, { type: string } ]"
+                .to_owned(),
+            true,
+        ),
+        // `null` matches both branches of the nested `oneOf`, so it matches no branch here.
+        (
+            "an untyped nested oneOf branch that null matches twice",
+            "type: [object, string, 'null']\n          \
+             oneOf: [ { oneOf: [ { required: [a] }, { required: [b] } ] }, { type: string } ]"
+                .to_owned(),
+            false,
+        ),
+        // A `true` branch lowers to `Value` and takes the array's `null` with no sibling to meet.
+        (
+            "a true branch beside a dropped multi-type array",
+            "type: [string, integer, 'null']\n          oneOf: [ true, { type: integer } ]"
+                .to_owned(),
+            true,
+        ),
+        (
+            "a sole true branch beside a dropped multi-type array",
+            "type: [string, integer, 'null']\n          oneOf: [ true ]".to_owned(),
+            true,
+        ),
+        // No union keyword at all: the array's own `null` is the synthesized union's null branch.
+        (
+            "a plain multi-type array",
+            "type: [string, integer, 'null']".to_owned(),
+            true,
+        ),
     ] {
         let spec = format!(
             r##"
@@ -2141,6 +2193,58 @@ components:
             nullable,
             "{shape}: `x` is `{x}`, but `null` is {} here: {types}",
             if nullable { "valid" } else { "invalid" }
+        );
+    }
+}
+
+/// A cycle-closing `$ref` branch to an untyped object component takes the `null` a dropped
+/// multi-type array permits, as an inline untyped branch does (#574): the component's struct is
+/// still a reservation when the branch is lowered, so whether `null` matches it is read from the
+/// target's own keywords, and `properties` is vacuous on `null`.
+#[test]
+fn a_cycle_closing_ref_branch_to_an_untyped_object_takes_the_type_arrays_null() {
+    for (shape, schema) in [
+        (
+            "a sole cycle-closing branch",
+            "type: [object, array, 'null']\n          oneOf: [ { $ref: '#/components/schemas/Holder' } ]",
+        ),
+        (
+            "a cycle-closing branch beside a typed one",
+            "type: [object, string, 'null']\n          \
+             oneOf: [ { $ref: '#/components/schemas/Holder' }, { type: string } ]",
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      properties:
+        child:
+          {schema}
+      required: [child]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        let types = types_module(&code);
+        let child = field_type(&types, "pub child")
+            .unwrap_or_else(|| panic!("{shape}: no `child`: {types}"));
+        assert!(
+            child.starts_with("Option<"),
+            "{shape}: `child` is `{child}`, but `null` is valid here: {types}"
         );
     }
 }
