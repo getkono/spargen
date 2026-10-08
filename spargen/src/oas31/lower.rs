@@ -3924,7 +3924,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let has_object = contributions
                 .iter()
                 .any(|contribution| matches!(contribution, Contribution::Object { .. }));
-            Some(undecided_admits_null(composed, has_object, &contributions))
+            Some(undecided_admits_null(
+                composed,
+                has_object,
+                &contributions,
+                &union,
+            ))
         };
         let refiners = self.lower_all_of_refiners(&scoped, hint)?;
         self.meet_union_with_all_of(
@@ -3999,7 +4004,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             let composed =
                 self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?;
-            Some(undecided_admits_null(composed, has_object, &contributions))
+            Some(undecided_admits_null(
+                composed,
+                has_object,
+                &contributions,
+                union,
+            ))
         };
         let refiners = self.lower_all_of_refiners(&scoped, hint)?;
         let mut ty = self.meet_union_with_all_of(
@@ -10577,9 +10587,16 @@ fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
 /// (issue #541): its members are untyped objects alone — `$ref`s to untyped object components,
 /// which [`object_all_of_admits_null`] reads as denying `null` for want of a decision — and the
 /// same members written inline are scoped refiners that leave `null` to the union. So the union
-/// decides it in either spelling. A composition some member decides, or a scalar one, keeps its
-/// nullability.
-fn undecided_admits_null(mut composed: Ty, has_object: bool, contributions: &[Contribution]) -> Ty {
+/// decides it in either spelling, where it decides it at all: a `union` that states no `type` and
+/// whose every branch is untyped decides nothing either, and the meet keeps the non-null answer an
+/// `allOf` of untyped members alone gets. A composition some member decides, or a scalar one,
+/// keeps its nullability.
+fn undecided_admits_null(
+    mut composed: Ty,
+    has_object: bool,
+    contributions: &[Contribution],
+    union: &Schema,
+) -> Ty {
     let decided = contributions.iter().any(|contribution| {
         matches!(
             contribution,
@@ -10589,7 +10606,16 @@ fn undecided_admits_null(mut composed: Ty, has_object: bool, contributions: &[Co
             }
         )
     });
-    if has_object && !decided {
+    let union_decides = stated_nullability(union).is_some()
+        || union
+            .one_of
+            .iter()
+            .chain(&union.any_of)
+            .any(|branch| match branch {
+                SchemaOr::Bool(admits) => !admits,
+                SchemaOr::Schema(branch) => target_decides_null(branch),
+            });
+    if has_object && !decided && union_decides {
         composed.nullable = true;
     }
     composed
