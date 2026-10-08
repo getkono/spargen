@@ -1758,11 +1758,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     return self.refine_union_target(schema, hint, referenced, &union, &sibling);
                 }
             }
-            let mut inferred_category = false;
+            let mut inferred_category = None;
             match category {
                 Some(ImpliedCategory::Only(category)) => {
                     sibling.types.types = vec![category, JsonType::Null];
-                    inferred_category = true;
+                    inferred_category = Some(category);
                 }
                 Some(ImpliedCategory::Conflicting) => {
                     return self.reject_ref_sibling_category(
@@ -1850,10 +1850,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // another category the two share only `null`, and typing that as the exact JSON null
             // would silently replace, say, a nullable string with `()`: the category contradiction
             // is the same empty intersection it is against the non-null target, and is reported
-            // the same way. A target that is itself exactly `null` keeps its type.
-            if inferred_category
+            // the same way. A target that is itself exactly `null` keeps its type, and so does a
+            // nullable target OF the inferred category: there no category is contradicted, the
+            // object meet is empty, and `null` satisfies both, as it does when the same keywords
+            // are an untyped `allOf` member beside the target (#542).
+            let target_kind = &self.graph.get(referenced.id)?.kind;
+            let same_category = matches!(
+                (inferred_category, value_category(target_kind)),
+                (Some(JsonType::Object), Some(JsonCategory::Object))
+                    | (Some(JsonType::Array), Some(JsonCategory::Array))
+            );
+            if inferred_category.is_some()
+                && !same_category
                 && matches!(kind, TypeKind::Null)
-                && !matches!(self.graph.get(referenced.id)?.kind, TypeKind::Null)
+                && !matches!(target_kind, TypeKind::Null)
             {
                 return self.reject_ref_sibling_category(
                     schema,
@@ -4415,9 +4425,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         );
                         return self.reject_all_of_cycle(schema.provenance.clone(), &message);
                     }
-                    // The field is required, so a value no type admits empties the composition.
+                    // The field is required, so a value no type admits empties the object meet:
+                    // only `null` can be left (see `null_only_all_of`).
                     Err(NoMeet::Empty) => {
-                        return self.reject_all_of_undeclared_required(schema, &field.name.wire);
+                        let name = field.name.wire.clone();
+                        return self
+                            .null_only_all_of(schema, hint, contributions, mark)
+                            .or_else(|| self.reject_all_of_undeclared_required(schema, &name));
                     }
                     Err(NoMeet::Unrepresentable) => {
                         let message = format!(
@@ -4432,12 +4446,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        // An uninhabited property that any member requires obliges every instance to carry a value
-        // no type admits: the composition is empty, and that is the document error.
+        // An uninhabited property that any member requires obliges every object instance to carry
+        // a value no type admits: no object satisfies the composition, which leaves only `null`
+        // (see `null_only_all_of`), and where `null` does not satisfy it either that is the
+        // document error.
         if let Some(name) = uninhabited.iter().find(|name| {
             required.contains(name) || fields.get(*name).is_some_and(|field| field.required)
         }) {
-            return self.reject_all_of_required_property(schema, name);
+            let name = name.clone();
+            return self
+                .null_only_all_of(schema, hint, contributions, mark)
+                .or_else(|| self.reject_all_of_required_property(schema, &name));
         }
 
         // Apply the required union, then keep required fields consistent: a serde default only fires
@@ -4902,6 +4921,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty.nullable = true;
         }
         ty
+    }
+
+    /// The null type for an object `allOf` whose object meet is empty, when `null` still satisfies
+    /// it: every member admits `null` and one decides it ([`object_all_of_admits_null`]), or the
+    /// schema's own `type` lists it, the nullability [`Self::combine_all_of`] gives the merged
+    /// struct. `None` where `null` is excluded too, so the caller reports the empty composition.
+    ///
+    /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
+    /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
+    /// here split the spellings of one conjunction (#542), as #450 removed for a nullable union
+    /// refined to nothing but `null`. The meets inserted since `mark` reach nothing the null type
+    /// refers to, so they are discarded, and the null type is the final graph insert.
+    fn null_only_all_of(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        contributions: &[Contribution],
+        mark: u32,
+    ) -> Option<Ty> {
+        let admits_null = object_all_of_admits_null(contributions)
+            || schema.types.types.contains(&JsonType::Null);
+        if !admits_null {
+            return None;
+        }
+        self.discard_meet_intermediates(mark, &TypeKind::Null);
+        Some(self.insert_schema_type(schema, hint, TypeKind::Null))
     }
 
     /// An `allOf` that mixes object and scalar members, which no single type can be.

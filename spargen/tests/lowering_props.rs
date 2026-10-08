@@ -15,8 +15,9 @@
 //!   lowers alike in each of its spellings, an `allOf`'s member order changes nothing, an object
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
 //!   `null` is the null type, #450), and every written `default` is kept or reported at its
-//!   pointer. Where today's output still splits a law, the gap is held exactly and names the open
-//!   issue that tracks it (#542, #545), so the law tightens when the issue's fix lands.
+//!   pointer; an irreconcilable object meet whose members all admit `null` is the null type in
+//!   every spelling (#542). Where today's output still splits a law, the gap is held exactly and
+//!   names the open issue that tracks it (#545), so the law tightens when the issue's fix lands.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a warning says why or an
@@ -748,6 +749,8 @@ fn error_codes(report: &Report) -> Vec<&'static str> {
 
 /// The issue tracking a rejected `$ref`-sibling meet reporting fewer warnings than the `allOf`
 /// spellings of the same conjunction: beside its `E013`, it stops before the `W005` they report.
+/// An empty object meet that admits `null` lowers to the null type in every spelling (#542), and
+/// the `$ref`-sibling spelling stops before the same `W005` there.
 const ISSUE_REJECTED_SIBLING_MEET_WARNS_LESS: u32 = 545;
 
 /// Whether `check` or `generate` rejected the document. The two name a success differently
@@ -789,11 +792,6 @@ fn meet_admits_null(members: &[Obj]) -> bool {
             .any(|m| m.nullability == Nullability::ObjectOrNull)
 }
 
-/// The issue tracking an `allOf` of nullable object members whose object meet is irreconcilable
-/// (`E013`), where the `$ref`-sibling spelling of the same conjunction lowers it to the null type:
-/// no object satisfies every member, and `null` satisfies them all.
-const ISSUE_NULL_ONLY_ALL_OF_REJECTED: u32 = 542;
-
 /// What a conjunction lowers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lowered {
@@ -805,20 +803,14 @@ enum Lowered {
     Object { nullable: bool },
 }
 
-/// What `spelling` lowers the conjunction of `members` (in `order`) to today. An irreconcilable
-/// object meet leaves `null` alone when every member admits it, so it is the null type; else it is
-/// `E013`. One known gap differs from that: only the `$ref`-sibling spelling finds the null type,
-/// when its sibling keywords admit `null` of their own accord (`type: [object, 'null']`), the other
-/// spellings rejecting it (#542, [`ISSUE_NULL_ONLY_ALL_OF_REJECTED`]).
-fn emitted(members: &[Obj], order: &[usize], spelling: Spelling) -> Lowered {
+/// What the conjunction of `members` lowers to, in every spelling and every order of its members.
+/// An irreconcilable object meet leaves `null` alone when the meet admits it ([`meet_admits_null`]),
+/// so it is the null type (#542); else it is `E013`.
+fn emitted(members: &[Obj]) -> Lowered {
     let nullable = meet_admits_null(members);
     if !meet_conflicts(members).1 {
-        return Lowered::Object { nullable };
-    }
-    if nullable
-        && spelling == Spelling::RefSiblings
-        && members[order[1]].nullability == Nullability::ObjectOrNull
-    {
+        Lowered::Object { nullable }
+    } else if nullable {
         Lowered::Null
     } else {
         Lowered::Rejected
@@ -1187,14 +1179,13 @@ proptest! {
     /// `$ref`s, as a `$ref` with the other member's keywords beside it, as an inline `allOf`, and as
     /// an `allOf` beside `oneOf: [{}]`. Each spelling reaches the same verdict through `check` and
     /// `generate`, with the same code multiset, and gives `Holder.p` the same shape. Each spelling
-    /// lowers to what [`emitted`] says, and one known gap may still split them: the null type only
-    /// the `$ref`-sibling spelling finds (#542). Spellings the gap splits are compared with neither.
+    /// lowers to what [`emitted`] says, the null type included (#542).
     #[test]
     fn every_spelling_of_one_conjunction_lowers_alike(
         members in proptest::collection::vec(obj_strategy(), 2)
     ) {
         let order = [0, 1];
-        let mut seen: Vec<(Spelling, Lowered, Report, Option<String>)> = Vec::new();
+        let mut seen: Vec<(Spelling, Report, Option<String>)> = Vec::new();
         for spelling in Spelling::ALL {
             let spec = intersection_spec(&members, &order, spelling);
             let (report, source) = generate_module(&spec);
@@ -1204,25 +1195,19 @@ proptest! {
             let lowered = lowered(&report, &source)?;
             prop_assert_eq!(
                 lowered,
-                emitted(&members, &order, spelling),
-                "{:?}: {:#?}\n{}\n(known gap: #{})",
+                emitted(&members),
+                "{:?}: {:#?}\n{}",
                 spelling,
                 report,
-                spec,
-                ISSUE_NULL_ONLY_ALL_OF_REJECTED
+                spec
             );
             let shape = (!rejected(&report)).then(|| holder_p_shape(&source)).transpose()?;
-            for (at, lowered_at, report_at, shape_at) in &seen {
-                // Each spelling's nullability is held to [`emitted`] above, so two object spellings
-                // are compared on the rest of the shape; a split verdict leaves nothing to compare.
-                let same_kind = match (lowered, *lowered_at) {
-                    (Lowered::Object { .. }, Lowered::Object { .. }) => true,
-                    (kind, kind_at) => kind == kind_at,
-                };
-                if !same_kind {
-                    continue;
-                }
-                let (compared, compared_at) = if lowered == Lowered::Rejected
+            // Every spelling is held to the one verdict [`emitted`] gives, nullability included, so
+            // two spellings are compared on their diagnostics and the rest of the shape. An empty
+            // object meet, rejected or the null type, is where the `$ref`-sibling spelling stops
+            // before the `W005` the `allOf` spellings report (#545).
+            for (at, report_at, shape_at) in &seen {
+                let (compared, compared_at) = if !matches!(lowered, Lowered::Object { .. })
                     && (spelling == Spelling::RefSiblings || *at == Spelling::RefSiblings)
                 {
                     (error_codes(&report), error_codes(report_at))
@@ -1249,7 +1234,7 @@ proptest! {
                     );
                 }
             }
-            seen.push((spelling, lowered, report, shape));
+            seen.push((spelling, report, shape));
         }
     }
 
@@ -1397,15 +1382,15 @@ proptest! {
         for spelling in Spelling::ALL.into_iter().filter(|s| s.writes(members.len())) {
             let spec = intersection_spec(&members, &order, spelling);
             let (report, source) = generate_module(&spec);
-            let expected = emitted(&members, &order, spelling);
+            let expected = emitted(&members);
             prop_assert_eq!(lowered(&report, &source)?, expected, "{:?}: {:#?}\n{}", spelling, report, spec);
             match expected {
                 Lowered::Rejected => {
                     prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:?}: {:#?}\n{}", spelling, report, spec);
                     continue;
                 }
-                // The null type has no field to carry a `default`; what its members' `default`s
-                // report is #542's to settle, as only the gap's spelling reaches it today.
+                // The null type has no field to carry a `default`: no object instance exists, so no
+                // property of one is ever absent for a `default` to fill.
                 Lowered::Null => continue,
                 Lowered::Object { .. } => {}
             }

@@ -29085,3 +29085,94 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
         );
     }
 }
+
+/// An irreconcilable meet of nullable objects leaves exactly `null`: no object satisfies both
+/// members, whose required property types share no value, and both admit `null`. Every spelling
+/// of that conjunction lowers it to the null type `()`, as the `$ref`-sibling spelling already
+/// did; the `allOf` spellings, and a `$ref` beside untyped object keywords, rejected it with
+/// `E013` (#542). A member that denies `null` leaves nothing at all, which stays `E013` in every
+/// spelling.
+#[test]
+fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
+    let document = |second_type: &str, p: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    M0:\n      type: [object, 'null']\n      required: [a]\n      \
+             properties: {{ a: {{ type: string }}, b: {{ type: string }} }}\n    M1:\n      \
+             type: {second_type}\n      required: [b]\n      \
+             properties: {{ b: {{ type: integer }} }}\n    Holder:\n      type: object\n      \
+             required: [p]\n      properties:\n        p: {p}\n"
+        )
+    };
+    let spellings = |second_type: &str| {
+        [
+            (
+                "an `allOf` of `$ref`s",
+                "{ allOf: [{ $ref: '#/components/schemas/M0' }, \
+                 { $ref: '#/components/schemas/M1' }] }"
+                    .to_owned(),
+            ),
+            (
+                "an inline `allOf`",
+                format!(
+                    "{{ allOf: [{{ type: [object, 'null'], properties: {{ b: {{ type: string }} }} }}, \
+                     {{ type: {second_type}, required: [b], \
+                     properties: {{ b: {{ type: integer }} }} }}] }}"
+                ),
+            ),
+            (
+                "keywords beside an `allOf` member",
+                format!(
+                    "{{ type: {second_type}, required: [b], properties: {{ b: {{ type: integer }} }}, \
+                     allOf: [{{ type: [object, 'null'], properties: {{ b: {{ type: string }} }} }}] }}"
+                ),
+            ),
+            (
+                "a `$ref` beside typed keywords",
+                format!(
+                    "{{ $ref: '#/components/schemas/M0', type: {second_type}, required: [b], \
+                     properties: {{ b: {{ type: integer }} }} }}"
+                ),
+            ),
+        ]
+    };
+
+    for (second_type, admits_null) in [("[object, 'null']", true), ("object", false)] {
+        for (what, p) in spellings(second_type) {
+            let spec = document(second_type, &p);
+            let (report, code) = generate_with_code(&spec);
+            if !admits_null {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{what}: {report:#?}"
+                );
+                continue;
+            }
+            assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{what}: {report:#?}"
+            );
+            let ty = field_type(&types_module(&code), "pub p:")
+                .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
+            assert!(
+                code.contains(&format!("pub type {ty} = ();")),
+                "{what}: only `null` satisfies both members, so `Holder.p` is the null type: {code}"
+            );
+        }
+    }
+
+    // A `$ref` to a nullable object beside untyped object keywords: the keywords admit `null`
+    // without deciding it (#425), so this meet is null-only too, not a category contradiction.
+    let untyped = document(
+        "[object, 'null']",
+        "{ $ref: '#/components/schemas/M0', properties: { a: { type: integer } } }",
+    );
+    let (report, code) = generate_with_code(&untyped);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    let ty = field_type(&types_module(&code), "pub p:")
+        .unwrap_or_else(|| panic!("no `Holder.p`: {code}"));
+    assert!(code.contains(&format!("pub type {ty} = ();")), "{code}");
+}
