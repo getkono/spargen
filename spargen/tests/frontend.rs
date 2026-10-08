@@ -19073,6 +19073,150 @@ fn a_dropped_default_several_members_write_alike_is_reported_at_each_pointer() {
     }
 }
 
+/// Issue #577: which of the intersected members' `default`s the merged field keeps is decided once
+/// over every member, not pair by pair. A pairwise fold reported a `default` as superseded as soon
+/// as one pair ranked it lower, before a later member's equal value outranked the one that beat
+/// it: here M0's `x` beat M1's `y` (both are required, so neither is applied), then M2's applied
+/// `y` beat `x`, and the field kept `y` while M1's `y` stood reported as differing from it. In
+/// every member order, `W005` is reported exactly at M0's superseded `x` and at M1's `c`, whose
+/// `string`/`integer` field is uninhabited.
+#[test]
+fn a_default_equal_to_the_one_the_meet_keeps_is_never_reported_in_any_member_order() {
+    fn spec(order: [usize; 3]) -> String {
+        let members = [
+            "{ type: object, required: [a], properties: { a: { type: string, default: x }, \
+             c: { type: string } } }",
+            "{ type: [object, 'null'], required: [a], properties: { a: { type: string, \
+             default: y }, c: { type: integer, default: 1 } } }",
+            "{ properties: { a: { type: string, default: y } } }",
+        ];
+        let mut spec = String::from(
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n",
+        );
+        for (id, member) in members.iter().enumerate() {
+            spec.push_str(&format!("    M{id}: {member}\n"));
+        }
+        let refs: Vec<String> = order
+            .iter()
+            .map(|id| format!("{{ $ref: '#/components/schemas/M{id}' }}"))
+            .collect();
+        spec.push_str(&format!(
+            "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+             p: {{ allOf: [{}] }}\n",
+            refs.join(", ")
+        ));
+        spec
+    }
+
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for order in orders {
+        let spec = spec(order);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            let mut pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            pointers.sort_unstable();
+            assert_eq!(
+                pointers,
+                [
+                    "/components/schemas/M0/properties/a/default",
+                    "/components/schemas/M1/properties/c/default",
+                ],
+                "{entry}, order {order:?}: {report:#?}\n{spec}"
+            );
+            if let Some(superseded) = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.pointer.as_str() == "/components/schemas/M0/properties/a/default")
+            {
+                assert!(
+                    superseded.message.contains("M2/properties/a/default"),
+                    "{entry}, order {order:?}: the kept `y` is the applicable one M2 writes: \
+                     {superseded:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// An object `allOf` merge that is rejected from inside its member loop reports no `W005` for the
+/// `default`s it had read by then: which member's `default` the merged field keeps is decided
+/// once, after the loop (#577), and a rejected merge emits no field to keep one. Before #577 the
+/// pairwise fold had already reported one of M0's `x` and M1's `y` (both required, so neither
+/// applies) by the time M2 was read, so a partial, order-dependent `W005` stood beside the
+/// rejection. Each case puts the rejecting member last, after the two conflicting `default`s, and
+/// pins the three in-loop rejections: an `additionalProperties` conflict, a reference cycle
+/// through an `additionalProperties` value schema, and a repeated property whose types share
+/// values no single Rust type represents.
+#[test]
+fn an_all_of_merge_rejected_inside_its_member_loop_reports_no_default_it_read() {
+    let base = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+                schemas:\n    M0: { type: object, required: [a], properties: { a: { type: \
+                string, default: x }, b: B0 }, additionalProperties: { type: string } }\n    \
+                M1: { type: object, required: [a], properties: { a: { type: string, default: y \
+                } } }\n    M2: M2BODY\n    Holder: { allOf: [{ $ref: '#/components/schemas/M0' \
+                }, { $ref: '#/components/schemas/M1' }, { $ref: '#/components/schemas/M2' }] }\n";
+    for (label, b0, m2, message) in [
+        (
+            "additionalProperties conflict",
+            "{ type: string }",
+            "{ type: object, additionalProperties: { type: integer } }",
+            "`allOf` members declare conflicting `additionalProperties`",
+        ),
+        (
+            "additionalProperties reference cycle",
+            "{ type: string }",
+            "{ type: object, additionalProperties: { $ref: '#/components/schemas/Holder' } }",
+            "closes a reference cycle back to the schema being lowered",
+        ),
+        (
+            "unrepresentable property meet",
+            "{ type: array, prefixItems: [{ type: number }, { type: number }], items: false }",
+            "{ type: object, properties: { b: { type: array, items: { type: string } } } }",
+            "share values no single Rust type represents",
+        ),
+    ] {
+        let spec = base.replace("B0", b0).replace("M2BODY", m2);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}, {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains(message)),
+                "{label}, {entry}: {report:#?}"
+            );
+            let reported: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                reported,
+                Vec::<&str>::new(),
+                "{label}, {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
