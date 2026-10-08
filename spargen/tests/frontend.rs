@@ -1788,6 +1788,129 @@ components:
     }
 }
 
+/// A `oneOf` admits `null` only when exactly one of its branches does, whether or not any of its
+/// variants merge (#563). The branches of `Pick` are typed `[object, 'null']` and stay two variants
+/// after the meet with `NB`, which admits `null` too: `null` matches both branches and fails
+/// exactly-one, so the position is not `Option`, in the `allOf`-member spelling, in the
+/// `$ref`-sibling one, and inline with no meet at all, two nullable scalars or a `null` member
+/// beside a nullable branch. Where only one branch accepts `null`, or the union is an `anyOf`, it
+/// stays valid.
+#[test]
+fn a_one_of_whose_null_matches_two_unmerged_branches_rejects_null() {
+    let nullable_objects =
+        "\n            - { type: [object, 'null'], required: [a] }\n            \
+                            - { type: [object, 'null'], required: [b] }";
+    for (shape, schema, nullable) in [
+        (
+            "allOf member",
+            format!(
+                "allOf:\n          - $ref: '#/components/schemas/NB'\n          - oneOf:\
+                 {nullable_objects}"
+            ),
+            false,
+        ),
+        (
+            "$ref sibling",
+            format!("$ref: '#/components/schemas/NB'\n          oneOf:{nullable_objects}"),
+            false,
+        ),
+        // The typed branch's `null` is hoisted onto the union before the meet, and the untyped
+        // one takes `null` from `NB` in the meet: the two variants stay distinct, and both accept
+        // `null`.
+        (
+            "allOf member, one typed and one untyped branch",
+            "allOf:\n          - $ref: '#/components/schemas/NB'\n          - oneOf:\n            \
+             - { type: [object, 'null'], required: [a] }\n            - { required: [b] }"
+                .to_owned(),
+            false,
+        ),
+        (
+            "inline nullable scalars",
+            "oneOf: [ { type: [string, 'null'] }, { type: [integer, 'null'] } ]".to_owned(),
+            false,
+        ),
+        (
+            "inline null member beside a nullable branch",
+            "oneOf: [ { type: 'null' }, { type: [string, 'null'] }, { type: integer } ]".to_owned(),
+            false,
+        ),
+        (
+            "inline null member beside its only nullable branch",
+            "oneOf: [ { type: 'null' }, { type: [string, 'null'] } ]".to_owned(),
+            false,
+        ),
+        (
+            "inline single nullable branch",
+            "oneOf: [ { type: [string, 'null'] }, { type: integer } ]".to_owned(),
+            true,
+        ),
+        (
+            "inline null member beside non-null branches",
+            "oneOf: [ { type: 'null' }, { type: string }, { type: integer } ]".to_owned(),
+            true,
+        ),
+        (
+            "inline anyOf",
+            "anyOf: [ { type: [string, 'null'] }, { type: [integer, 'null'] } ]".to_owned(),
+            true,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Holder:
+      type: object
+      properties:
+        x:
+          {schema}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("{shape}: no `x`: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            nullable,
+            "{shape}: `x` is `{x}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
+        );
+        // With a single real branch the position is that branch's own type, not a union.
+        let single = shape.contains("only nullable branch");
+        if !nullable && !single {
+            let union = x.trim_start_matches("Box<").trim_end_matches('>');
+            let variants = enum_variants(&types, union);
+            assert!(
+                variants.len() >= 2,
+                "{shape}: `{union}` must stay a union of distinct variants: {types}"
+            );
+            assert!(
+                !variants.iter().any(|variant| variant.contains("(Option<")),
+                "{shape}: no variant may accept `null`, which matches two branches: {variants:?}"
+            );
+        }
+    }
+}
+
 /// After the meet with a `$ref` target, each `oneOf` branch keeps its own nullability, so branches
 /// that emit one Rust type need not agree on `null` (#402). Beside `NI: {type: [integer, 'null']}`,
 /// `{minimum: 0}` says nothing about `null` and meets `NI` to a nullable integer, while

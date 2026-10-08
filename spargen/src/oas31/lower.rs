@@ -2124,10 +2124,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `null` satisfies.
         let null_from_type_array = schema.types.types.contains(&JsonType::Null);
         let mut null_from_member = false;
+        // How many null-only members there are: each is a branch `null` matches, which a `oneOf`
+        // counts against its exactly-one rule beside the real branches that accept `null` too.
+        let mut null_members = 0usize;
         let mut real_members: Vec<&SchemaOr> = Vec::new();
         for member in members {
             if member_is_null_only(member) {
                 null_from_member = true;
+                null_members += 1;
             } else {
                 real_members.push(member);
             }
@@ -2330,7 +2334,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // them (#462). Without a sibling nothing was inserted since `mark`.
             self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
-            ty.nullable = inner.nullable || nullable;
+            // A `null` member beside a member that accepts `null` itself puts `null` in two
+            // branches, which fails a `oneOf`'s exactly-one rule (#563). A sibling meet only ever
+            // removes `null`, so counting the member's own nullability before it is sound.
+            let null_twice =
+                mode == UnionMode::OneOf && null_members + usize::from(member_nullable) > 1;
+            ty.nullable = (inner.nullable || nullable) && !null_twice;
             ty.boxed = inner.boxed;
             return Some(ty);
         }
@@ -2342,8 +2351,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The real member each variant came from: sibling keywords can exclude a member, so a
         // variant's position is not its member's.
         let mut variant_members: Vec<usize> = Vec::new();
-        // Whether each variant accepted `null` before its nullability was hoisted to the union.
-        let mut variant_nullable: Vec<bool> = Vec::new();
+        // How many variants accepted `null` before their nullability was hoisted to the union.
+        let mut nullable_variants = 0usize;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -2440,7 +2449,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
-            variant_nullable.push(ty.nullable);
+            nullable_variants += usize::from(ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
                 .clone()
@@ -2481,6 +2490,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "union sibling constraints make every variant impossible",
             );
         }
+        // A `oneOf` admits `null` only where exactly one branch does: the `null` members and the
+        // variants that accepted it before it was hoisted are counted together, whether or not any
+        // of the variants merge below, since two put `null` in two branches, which fails
+        // exactly-one (#563). Decided here, before a meet the union is held back for
+        // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
+        // them, and a meet only ever removes `null` from a branch.
+        if mode == UnionMode::OneOf && null_members + nullable_variants > 1 {
+            nullable = false;
+        }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same
         // values, so every value one of them accepts fails exactly-one: branches of nothing but
@@ -2502,8 +2520,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut variants,
                 &mut ref_names,
                 &mut variant_members,
-                &variant_nullable,
-                &mut nullable,
             );
         }
         if variants.len() == 1 {
@@ -2712,34 +2728,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// type, or to distinct structs or string enums of one structure (#492,
     /// [`TypeGraph::same_decoded_values`]) — into the first of them, keeping `ref_names` and
     /// `variant_members` aligned with `variants`, and report the merge as
-    /// `W001` at the union. `variant_nullable` is whether each variant accepted `null` before it
-    /// was hoisted to the union: two merged variants that both did put `null` in two branches,
-    /// which fails exactly-one whatever else the union admits, so `null` is then invalid.
+    /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_closed`]
+    /// counts the branches that accept it before any merge, across the merged sets and the rest.
     fn merge_indistinguishable_variants(
         &mut self,
         schema: &Schema,
         variants: &mut Vec<UnionVariant>,
         ref_names: &mut Vec<Option<String>>,
         variant_members: &mut Vec<usize>,
-        variant_nullable: &[bool],
-        nullable: &mut bool,
     ) {
-        // Each kept variant, with the members merged into it and whether one of them accepted
-        // `null`.
-        let mut groups: Vec<(usize, Vec<usize>, bool)> = Vec::new();
-        let mut null_twice = false;
+        // Each kept variant, with the members merged into it.
+        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
         for (index, variant) in variants.iter().enumerate() {
-            let shared = groups.iter_mut().find(|(kept, _, _)| {
+            let shared = groups.iter_mut().find(|(kept, _)| {
                 self.graph
                     .same_decoded_values(variants[*kept].ty, variant.ty)
             });
             match shared {
-                Some((_, members, accepts_null)) => {
-                    members.push(variant_members[index]);
-                    null_twice |= *accepts_null && variant_nullable[index];
-                    *accepts_null |= variant_nullable[index];
-                }
-                None => groups.push((index, vec![variant_members[index]], variant_nullable[index])),
+                Some((_, members)) => members.push(variant_members[index]),
+                None => groups.push((index, vec![variant_members[index]])),
             }
         }
         if groups.len() == variants.len() {
@@ -2747,8 +2754,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let merged: Vec<String> = groups
             .iter()
-            .filter(|(_, members, _)| members.len() > 1)
-            .map(|(_, members, _)| {
+            .filter(|(_, members)| members.len() > 1)
+            .map(|(_, members)| {
                 let members: Vec<String> = members.iter().map(usize::to_string).collect();
                 format!("members {}", members.join(", "))
             })
@@ -2775,13 +2782,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .filter_map(|(index, item)| kept.contains(&index).then_some(item))
                 .collect();
         }
-        let kept: HashSet<usize> = groups.iter().map(|(kept, _, _)| *kept).collect();
+        let kept: HashSet<usize> = groups.iter().map(|(kept, _)| *kept).collect();
         keep(variants, &kept);
         keep(ref_names, &kept);
         keep(variant_members, &kept);
-        if null_twice {
-            *nullable = false;
-        }
     }
 
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
@@ -6194,13 +6198,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // is the caller's to report ([`Self::warn_untyped_met_variants`]), once whatever still
             // meets the union after the collapse has made its branches final (#535).
             None if one_of => {
-                let collapsed = self
-                    .merge_intersected_one_of(schema, met, hint, spelling)
-                    .unwrap_or(met);
+                let collapsed = match self.merge_intersected_one_of(schema, met, hint, spelling) {
+                    Some(merged) => merged,
+                    None => self.drop_null_matching_two_branches(met, hint),
+                };
                 (collapsed, true)
             }
             None => (met, false),
         }
+    }
+
+    /// `met`, a `oneOf` meet whose variants all stay distinct, with `null` made invalid where two
+    /// or more of its sources accept it (#563): the union's own `null` (`met.nullable`, which
+    /// carries the branches the union hoisted before the meet) and each variant the meet left
+    /// accepting it, such as an untyped branch that took a nullable target's shape. `null` in two
+    /// branches fails exactly-one, so no variant keeps it and neither does the union, as
+    /// [`Self::merge_intersected_one_of`] answers for the variants it merges.
+    fn drop_null_matching_two_branches(&mut self, met: Ty, hint: &str) -> Ty {
+        let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) else {
+            return met;
+        };
+        let nullable_variants = union
+            .variants
+            .iter()
+            .filter(|variant| variant.ty.nullable)
+            .count();
+        if nullable_variants == 0 || usize::from(met.nullable) + nullable_variants < 2 {
+            return met;
+        }
+        let mut union = union.clone();
+        for variant in &mut union.variants {
+            variant.ty.nullable = false;
+        }
+        let mut ty = self.insert_type(hint, TypeKind::Union(union), Docs::default(), None);
+        ty.boxed = met.boxed;
+        ty
     }
 
     /// Report, as the inline union reports them ([`Self::warn_untyped_one_of_variants`]), the
