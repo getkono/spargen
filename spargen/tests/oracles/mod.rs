@@ -48,10 +48,6 @@ fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
         .map(|(_, issue)| *issue)
 }
 
-/// The issue tracking structurally equal nominal `oneOf` variants: two inline structs, or two
-/// string enums, with the same definition are not merged (#492).
-pub const ISSUE_EQUAL_NOMINAL_VARIANTS: u32 = 492;
-
 /// The issue (#535) tracking union members that lower to `serde_json::Value` with no diagnostic.
 pub const ISSUE_UNTYPED_UNION_MEMBER: u32 = 535;
 
@@ -277,13 +273,14 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
         for (at, (first, shape)) in payloads.iter().enumerate() {
             for (second, other) in &payloads[at + 1..] {
                 if shape == other {
-                    let nominal = shape.starts_with("struct ") || shape.starts_with("enum ");
+                    // Equal nominal payloads (two structs, or two string enums, of one
+                    // definition) are merged with `W001` since #492, so no issue tracks them.
                     violations.push(Violation {
                         reason: format!(
                             "`oneOf` `{name}` variants `{first}` and `{second}` have one shape: \
                              {shape}"
                         ),
-                        known: nominal.then_some(ISSUE_EQUAL_NOMINAL_VARIANTS),
+                        known: None,
                     });
                 }
             }

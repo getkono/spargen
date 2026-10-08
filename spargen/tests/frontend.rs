@@ -495,28 +495,22 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     );
 }
 
-/// Structurally equal inline `oneOf` branches are still two variants with no diagnostic (#492),
-/// and union members that accept every value are still `serde_json::Value` variants with none
-/// (#535), so [`oracles::indistinguishable_variants`] still needs to let both through as known.
-/// Once either issue is fixed this fails: remove its known gap and its case here together.
+/// Union members that accept every value are still `serde_json::Value` variants with no
+/// diagnostic (#535), so [`oracles::indistinguishable_variants`] still needs to let them through
+/// as known. Once the issue is fixed this fails: remove its known gap and its case here together.
+/// (Structurally equal `oneOf` branches, #492, are merged with `W001` now; see
+/// `one_of_branches_of_one_structure_merge_and_warn`.)
 #[test]
-fn equal_nominal_and_untyped_variants_are_still_tracked_by_492_and_535() {
+fn untyped_variants_are_still_tracked_by_535() {
     let cases = [
-        (
-            "oneOf: [{ type: object, additionalProperties: false, required: [a], properties: \
-             { a: { type: string } } }, { type: object, additionalProperties: false, required: [a], \
-             properties: { a: { type: string } } }]",
-            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
-        ),
-        (
-            "oneOf: [{ type: string, enum: [x] }, { type: string, enum: [x] }]",
-            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
-        ),
         (
             "anyOf: [{ required: [a] }, { required: [b] }]",
             oracles::ISSUE_UNTYPED_UNION_MEMBER,
         ),
-        ("oneOf: [{ type: string }, {}]", oracles::ISSUE_UNTYPED_UNION_MEMBER),
+        (
+            "oneOf: [{ type: string }, {}]",
+            oracles::ISSUE_UNTYPED_UNION_MEMBER,
+        ),
     ];
     for (schema, issue) in cases {
         let (report, code) = generate_with_code(&format!(
@@ -1241,6 +1235,161 @@ components:
         inner == "String" || types.contains(&format!("pub type {inner} = String;")),
         "`x` must be the one `String` both branches lower to: {types}"
     );
+}
+
+/// The merge above for `oneOf` branches that lower to distinct generated items of one structure
+/// (#492): two inline objects with the same fields, `required` flags, and `additionalProperties`
+/// policy, nested ones included, or two string enums listing one value set in any order. Each is
+/// its own nominal item, but no value tells them apart, so they become one variant with `W001`.
+/// Branches that differ in a `required` flag, a value, the `additionalProperties` policy (`false`,
+/// `true`, or a schema, or two schemas that decode different values), or a field's XML hint in an
+/// XML body (`xml.name`, `xml.attribute`) decode different values, so they stay distinct variants,
+/// unwarned. (String-enum openness is pinned in `ir/types.rs`'s tests: every `oneOf` branch is
+/// lowered closed, so no document puts an open and a closed set of one value set side by side.)
+#[test]
+fn one_of_branches_of_one_structure_merge_and_warn() {
+    let object = "{ type: object, additionalProperties: false, required: [a], properties: { a: { \
+                  type: string } } }";
+    let nested = "{ type: object, required: [n], properties: { n: { type: object, properties: { \
+                  a: { type: string } } } } }";
+    let optional = "{ type: object, additionalProperties: false, properties: { a: { type: string \
+                    } } }";
+    let additional = |policy: &str| {
+        format!(
+            "{{ type: object, additionalProperties: {policy}, required: [a], properties: {{ a: {{ \
+             type: string }} }} }}"
+        )
+    };
+    let hinted = |xml: &str| {
+        format!(
+            "{{ type: object, required: [a], properties: {{ a: {{ type: string, xml: {xml} }} }} }}"
+        )
+    };
+    let plain = "{ type: object, required: [a], properties: { a: { type: string } } }";
+    let (json, xml) = ("application/json", "application/xml");
+    for (shape, members, media, merged, variants) in [
+        (
+            "identical objects",
+            format!("{object}, {object}"),
+            json,
+            true,
+            None,
+        ),
+        (
+            "identical nested objects",
+            format!("{nested}, {nested}"),
+            json,
+            true,
+            None,
+        ),
+        (
+            "string enums of one value set",
+            "{ enum: [x, y] }, { enum: [y, x] }, { type: integer }".to_owned(),
+            json,
+            true,
+            Some(2),
+        ),
+        (
+            "a different required flag",
+            format!("{object}, {optional}"),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "different enum values",
+            "{ enum: [x, y] }, { enum: [x, z] }".to_owned(),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties false beside true",
+            format!("{}, {}", additional("false"), additional("true")),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties false beside a schema",
+            format!(
+                "{}, {}",
+                additional("false"),
+                additional("{ type: integer }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties true beside a schema",
+            format!(
+                "{}, {}",
+                additional("true"),
+                additional("{ type: integer }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "additionalProperties schemas of different types",
+            format!(
+                "{}, {}",
+                additional("{ type: integer }"),
+                additional("{ type: boolean }")
+            ),
+            json,
+            false,
+            Some(2),
+        ),
+        (
+            "an xml.name hint",
+            format!("{}, {plain}", hinted("{ name: b }")),
+            xml,
+            false,
+            Some(2),
+        ),
+        (
+            "an xml.attribute hint",
+            format!("{}, {plain}", hinted("{ attribute: true }")),
+            xml,
+            false,
+            Some(2),
+        ),
+    ] {
+        let spec = single_component_document(&format!("      oneOf: [ {members} ]\n"))
+            .replace("application/json", media);
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert_eq!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                        && d.message.contains("identically structured")
+                }),
+                merged,
+                "{shape} via {entry}: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match variants {
+            Some(count) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: wrong variant count: {types}"
+            ),
+            None => assert!(
+                types.contains("pub struct U ") && !types.contains("pub enum U "),
+                "{shape}: `U` must be the one object both branches lower to: {types}"
+            ),
+        }
+    }
 }
 
 /// The `$ref` spelling of the merge above gives the same answer when its branches share a generated
