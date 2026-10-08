@@ -4927,8 +4927,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// it: every member admits `null` and one decides it ([`object_all_of_admits_null`]). The
     /// schema's own object keywords are one of those members ([`Self::gather_all_of`]), so its
     /// `type` listing `null` counts as their answer, and does not override a member that denies
-    /// it: no value satisfies such a schema. `None` where `null` is excluded, so the caller
-    /// reports the empty composition.
+    /// it: no value satisfies such a schema. Its own `type`, `enum` or `const` that is not an
+    /// object keyword ([`schema_is_object_like`]) is no contribution, yet constrains every value
+    /// all the same, so one that excludes `null` leaves nothing either ([`own_keywords_admit_null`]).
+    /// `None` where `null` is excluded, so the caller reports the empty composition.
     ///
     /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
     /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
@@ -4942,7 +4944,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: &[Contribution],
         mark: u32,
     ) -> Option<Ty> {
-        if !object_all_of_admits_null(contributions) {
+        if !object_all_of_admits_null(contributions) || !own_keywords_admit_null(schema) {
             return None;
         }
         self.discard_meet_intermediates(mark, &TypeKind::Null);
@@ -11022,6 +11024,22 @@ fn schema_is_nullable(schema: &Schema) -> bool {
             .const_value
             .as_ref()
             .is_some_and(|value| matches!(value.node, Node::Null))
+}
+
+/// Whether every one of a schema's own `type`, `enum` and `const` that it states admits `null`
+/// (vacuously so where it states none). Unlike [`schema_is_nullable`], which asks whether any of
+/// them lists `null`, this is their conjunction: `{type: string, enum: [null]}` admits no `null`.
+fn own_keywords_admit_null(schema: &Schema) -> bool {
+    let type_admits = stated_nullability(schema).unwrap_or(true);
+    let enum_admits = schema
+        .enum_values
+        .as_ref()
+        .is_none_or(|values| values.iter().any(|value| matches!(value.node, Node::Null)));
+    let const_admits = schema
+        .const_value
+        .as_ref()
+        .is_none_or(|value| matches!(value.node, Node::Null));
+    type_admits && enum_admits && const_admits
 }
 
 fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {

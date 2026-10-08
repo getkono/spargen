@@ -29186,4 +29186,73 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
     let (report, _) = generate_with_code(&denied);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    // The schema's own `type`, `enum` or `const` beside the `allOf` of the two nullable members
+    // is no object keyword, so it contributes no member, yet it constrains every value: one that
+    // excludes `null` leaves nothing, which stays `E013`; one that admits it leaves `null`. So
+    // does a `oneOf` member beside them, met with the null type the object members leave.
+    let members = "{ $ref: '#/components/schemas/M0' }, { $ref: '#/components/schemas/M1' }";
+    for (what, p, null_only) in [
+        (
+            "own `type: string`",
+            format!("{{ type: string, allOf: [{members}] }}"),
+            false,
+        ),
+        (
+            "own `enum: [1]`",
+            format!("{{ enum: [1], allOf: [{members}] }}"),
+            false,
+        ),
+        (
+            "own `const: x`",
+            format!("{{ const: x, allOf: [{members}] }}"),
+            false,
+        ),
+        (
+            "own `type: [string, 'null']`",
+            format!("{{ type: [string, 'null'], allOf: [{members}] }}"),
+            true,
+        ),
+        (
+            "own `enum: [null]`",
+            format!("{{ enum: [null], allOf: [{members}] }}"),
+            true,
+        ),
+        (
+            "a `oneOf` member admitting `null`",
+            format!(
+                "{{ allOf: [{members}, {{ oneOf: [{{ type: string }}, {{ type: 'null' }}] }}] }}"
+            ),
+            true,
+        ),
+        (
+            "a `oneOf` member denying `null`",
+            format!(
+                "{{ allOf: [{members}, {{ oneOf: [{{ type: string }}, {{ type: integer }}] }}] }}"
+            ),
+            false,
+        ),
+    ] {
+        let spec = document("[object, 'null']", &p);
+        let (report, code) = generate_with_code(&spec);
+        if !null_only {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "{what}: {report:#?}"
+            );
+            continue;
+        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{what}: {report:#?}"
+        );
+        let ty = field_type(&types_module(&code), "pub p:")
+            .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
+        assert!(
+            code.contains(&format!("pub type {ty} = ();")),
+            "{what}: only `null` is left, so `Holder.p` is the null type: {code}"
+        );
+    }
 }
