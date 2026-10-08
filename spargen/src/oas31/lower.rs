@@ -2427,7 +2427,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // by which variants decode. Variants that lower to the same generated type decode the same
         // values, so every value one of them accepts fails exactly-one: branches of nothing but
         // `required` beside `type: object` (#402), or bare ones that each lower to
-        // `serde_json::Value`. They become one variant — the whole union is that type when every
+        // `serde_json::Value`. Two inline objects of one structure, or two string enums of one
+        // value set, are distinct generated items that decode the same values too (#492). They
+        // become one variant — the whole union is that type when every
         // variant shares it, as the `$ref`-sibling collapse answers for the same branches — and
         // the distinctions the generated type does not carry are reported, not dropped in silence.
         // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
@@ -2571,8 +2573,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
-    /// Merge the `oneOf` variants that lower to the same generated type into the first of them,
-    /// keeping `ref_names` and `variant_members` aligned with `variants`, and report the merge as
+    /// Merge the `oneOf` variants that decode the same values — that lower to the same generated
+    /// type, or to distinct structs or string enums of one structure (#492,
+    /// [`TypeGraph::same_decoded_values`]) — into the first of them, keeping `ref_names` and
+    /// `variant_members` aligned with `variants`, and report the merge as
     /// `W001` at the union. `variant_nullable` is whether each variant accepted `null` before it
     /// was hoisted to the union: two merged variants that both did put `null` in two branches,
     /// which fails exactly-one whatever else the union admits, so `null` is then invalid.
@@ -2592,7 +2596,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, variant) in variants.iter().enumerate() {
             let shared = groups.iter_mut().find(|(kept, _, _)| {
                 self.graph
-                    .same_generated_type(variants[*kept].ty, variant.ty)
+                    .same_decoded_values(variants[*kept].ty, variant.ty)
             });
             match shared {
                 Some((_, members, accepts_null)) => {
@@ -2621,9 +2625,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(format!(
-                "this `oneOf`'s {} lower to the same generated type, differing only in keywords it \
-                 does not carry, so a value matching one matches all of them and would fail the \
-                 exactly-one rule: {consequence}, and which of them a value matches is not enforced",
+                "this `oneOf`'s {} lower to the same generated type or to identically structured \
+                 ones, differing at most in keywords it does not carry, so a value matching one \
+                 matches all of them and would fail the exactly-one rule: {consequence}, and which \
+                 of them a value matches is not enforced",
                 merged.join(" and ")
             ))
             .remedy("keep producer-side validation for the union's branch constraints")
@@ -5680,12 +5685,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         .then_some((first.ty, nullable))
     }
 
-    /// Whether two `oneOf` variants emit one Rust type once each one's own `null` is set aside.
+    /// Whether two `oneOf` variants decode the same values — one Rust type, or two of one
+    /// structure ([`TypeGraph::same_decoded_values`]) — once each one's own `null` is set aside.
     /// No non-null value tells them apart, so they are one variant whatever their nullability; the
     /// callers decide `null` separately, by how many of the merged branches accept it.
     fn same_type_apart_from_null(&self, a: Ty, b: Ty) -> bool {
         self.graph
-            .same_generated_type(non_nullable(a), non_nullable(b))
+            .same_decoded_values(non_nullable(a), non_nullable(b))
     }
 
     /// Collapse `met`, the meet of a `oneOf` (`one_of`) or `anyOf` with what the union is
@@ -5701,7 +5707,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         spelling: MetUnion,
     ) -> Ty {
         // A `oneOf`'s branches are compared by generated type, as the inline merge compares them
-        // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart.
+        // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart,
+        // and two structs or string enums of one structure decode the same values (#492).
         // An `anyOf` keeps the identity comparison it has always had.
         match self.indistinguishable_union_variant(met, one_of) {
             // Every branch of the intersected union is one and the same type: the branches differ

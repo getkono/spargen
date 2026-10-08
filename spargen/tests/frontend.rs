@@ -1269,6 +1269,84 @@ components:
     );
 }
 
+/// The merge above for `oneOf` branches that lower to distinct generated items of one structure
+/// (#492): two inline objects with the same fields, `required` flags, and `additionalProperties`
+/// policy, nested ones included, or two string enums listing one value set in any order. Each is
+/// its own nominal item, but no value tells them apart, so they become one variant with `W001`.
+/// Branches that differ in a `required` flag or a value stay distinct variants, unwarned.
+#[test]
+fn one_of_branches_of_one_structure_merge_and_warn() {
+    let object = "{ type: object, additionalProperties: false, required: [a], properties: { a: { \
+                  type: string } } }";
+    let nested = "{ type: object, required: [n], properties: { n: { type: object, properties: { \
+                  a: { type: string } } } } }";
+    let optional = "{ type: object, additionalProperties: false, properties: { a: { type: string \
+                    } } }";
+    for (shape, members, merged, variants) in [
+        (
+            "identical objects",
+            format!("{object}, {object}"),
+            true,
+            None,
+        ),
+        (
+            "identical nested objects",
+            format!("{nested}, {nested}"),
+            true,
+            None,
+        ),
+        (
+            "string enums of one value set",
+            "{ enum: [x, y] }, { enum: [y, x] }, { type: integer }".to_owned(),
+            true,
+            Some(2),
+        ),
+        (
+            "a different required flag",
+            format!("{object}, {optional}"),
+            false,
+            Some(2),
+        ),
+        (
+            "different enum values",
+            "{ enum: [x, y] }, { enum: [x, z] }".to_owned(),
+            false,
+            Some(2),
+        ),
+    ] {
+        let spec = single_component_document(&format!("      oneOf: [ {members} ]\n"));
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert_eq!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                        && d.message.contains("identically structured")
+                }),
+                merged,
+                "{shape} via {entry}: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match variants {
+            Some(count) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: wrong variant count: {types}"
+            ),
+            None => assert!(
+                types.contains("pub struct U ") && !types.contains("pub enum U "),
+                "{shape}: `U` must be the one object both branches lower to: {types}"
+            ),
+        }
+    }
+}
+
 /// The `$ref` spelling of the merge above gives the same answer when its branches share a generated
 /// type only structurally (#402). `$ref: Int` beside `oneOf: [{enum: [1]}, {enum: [2]}]` meets to
 /// two distinct `i64`-alias enums, one generated type: emitted as two variants, every value would

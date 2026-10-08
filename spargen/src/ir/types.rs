@@ -130,13 +130,32 @@ impl TypeGraph {
     /// tuple item keeps its `Box`. Independent of the `uuid`/`time` features: a feature-mapped
     /// primitive never equals `String`, even in a build where it would emit one.
     pub(crate) fn same_generated_type(&self, a: Ty, b: Ty) -> bool {
-        self.same_generated_type_guarded(a, b, &mut Vec::new())
+        self.same_generated_type_guarded(a, b, false, &mut Vec::new())
     }
 
+    /// Whether two references decode exactly the same JSON values: [`same_generated_type`], or two
+    /// nominal definitions that are distinct Rust items of one structure (#492). Two structs match
+    /// when they declare the same wire names with the same `required` flags and XML hints, each
+    /// field's type matches by this same test, and their `additionalProperties` policies match;
+    /// two string enums match when they list the same value set and agree on whether they are
+    /// open. A union or `Never` still matches only itself. Sound rather than complete, like
+    /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s
+    /// exactly-one rule needs, but not that they are one Rust type, so a caller that needs one type
+    /// (a response body's) asks [`same_generated_type`] instead. Annotations a decode never reads
+    /// — docs, `deprecated`, `readOnly`/`writeOnly`, a field's `default` — are not compared.
+    ///
+    /// [`same_generated_type`]: Self::same_generated_type
+    pub(crate) fn same_decoded_values(&self, a: Ty, b: Ty) -> bool {
+        self.same_generated_type_guarded(a, b, true, &mut Vec::new())
+    }
+
+    /// [`same_generated_type`](Self::same_generated_type) when `structural` is false, and
+    /// [`same_decoded_values`](Self::same_decoded_values) when it is true.
     fn same_generated_type_guarded(
         &self,
         a: Ty,
         b: Ty,
+        structural: bool,
         visiting: &mut Vec<(TypeId, TypeId)>,
     ) -> bool {
         if a.nullable != b.nullable || a.boxed != b.boxed {
@@ -157,8 +176,21 @@ impl TypeGraph {
         visiting.push(pair);
         let same = match (&a_def.kind, &b_def.kind) {
             (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
+            // Two distinct struct items decode the same values only when their structure does.
+            (TypeKind::Struct(x), TypeKind::Struct(y)) if structural => {
+                self.same_struct_shape(x, y, visiting)
+            }
             // Integer and boolean enums are `pub type X = i64` / `bool` aliases; a string enum is a
-            // real `pub enum`, so it is nominal.
+            // real `pub enum`, so it is nominal, and decodes the same values as another one only
+            // when both list the same values and both or neither admit the unlisted strings.
+            (TypeKind::Enum(x), TypeKind::Enum(y))
+                if x.repr == ScalarRepr::String && y.repr == ScalarRepr::String =>
+            {
+                structural
+                    && x.is_open() == y.is_open()
+                    && x.variants.iter().all(|value| y.variants.contains(value))
+                    && y.variants.iter().all(|value| x.variants.contains(value))
+            }
             (TypeKind::Enum(x), TypeKind::Enum(y)) => {
                 x.repr == y.repr && x.repr != ScalarRepr::String
             }
@@ -168,14 +200,13 @@ impl TypeGraph {
                 (ScalarRepr::Int, Prim::I64) | (ScalarRepr::Bool, Prim::Bool)
             ),
             (TypeKind::Array(x), TypeKind::Array(y)) => {
-                self.same_generated_type_guarded(**x, **y, visiting)
+                self.same_generated_type_guarded(**x, **y, structural, visiting)
             }
             (TypeKind::Tuple(xs), TypeKind::Tuple(ys)) => {
                 xs.len() == ys.len()
-                    && xs
-                        .iter()
-                        .zip(ys)
-                        .all(|(x, y)| self.same_generated_type_guarded(*x, *y, visiting))
+                    && xs.iter().zip(ys).all(|(x, y)| {
+                        self.same_generated_type_guarded(*x, *y, structural, visiting)
+                    })
             }
             (TypeKind::Bytes, TypeKind::Bytes)
             | (TypeKind::Null, TypeKind::Null)
@@ -189,6 +220,38 @@ impl TypeGraph {
         };
         visiting.pop();
         same
+    }
+
+    /// Whether two structs decode the same values, for
+    /// [`same_decoded_values`](Self::same_decoded_values): the same wire names, each with the same
+    /// `required` flag, XML hints, and a field type that decodes the same values, and matching
+    /// `additionalProperties` policies. Field order is not compared; a decode reads by name.
+    fn same_struct_shape(
+        &self,
+        x: &Struct,
+        y: &Struct,
+        visiting: &mut Vec<(TypeId, TypeId)>,
+    ) -> bool {
+        let additional = match (&x.additional, &y.additional) {
+            (AdditionalProps::Deny, AdditionalProps::Deny)
+            | (AdditionalProps::Allow, AdditionalProps::Allow) => true,
+            (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
+                self.same_generated_type_guarded(**x, **y, true, visiting)
+            }
+            _ => false,
+        };
+        additional
+            && x.fields.len() == y.fields.len()
+            && x.fields.iter().all(|field| {
+                y.fields.iter().any(|other| {
+                    other.name == field.name
+                        && other.required == field.required
+                        && other.xml.name == field.xml.name
+                        && other.xml.attribute == field.xml.attribute
+                        && other.xml.unsupported == field.xml.unsupported
+                        && self.same_generated_type_guarded(field.ty, other.ty, true, visiting)
+                })
+            })
     }
 }
 

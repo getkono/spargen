@@ -343,7 +343,10 @@ proptest! {
     }
 
     /// Every closed-object combination lowers to a typed enum. Unique required keys select a direct
-    /// dispatch fast path; overlapping required-key sets use typed trial matching.
+    /// dispatch fast path; overlapping required-key sets use typed trial matching. A repeated key
+    /// set is two inline structs of one structure, which no value can tell apart, so they are one
+    /// variant and the merge is reported (#492); a union of one repeated key set is that struct,
+    /// not an enum.
     #[test]
     fn closed_object_unions_generate_typed(
         variants in proptest::collection::vec(key_set_strategy(), 2..=4)
@@ -353,7 +356,23 @@ proptest! {
         let (report, source) = &generated;
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(report, Code::NonDisjointUnion), "{:#?}", report);
-        prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
+        let distinct: BTreeSet<&BTreeSet<usize>> = variants.iter().collect();
+        prop_assert_eq!(
+            has_code(report, Code::ValidationKeywordIgnored),
+            distinct.len() < variants.len(),
+            "{:#?}",
+            report
+        );
+        prop_assert_eq!(
+            source.contains("pub enum U"),
+            distinct.len() > 1,
+            "union of {:?} emitted as the wrong shape:\n{}",
+            variants,
+            source
+        );
+        if distinct.len() == 1 {
+            prop_assert!(source.contains("pub struct U"), "union of one key set is not that struct:\n{source}");
+        }
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
