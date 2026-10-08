@@ -1790,13 +1790,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
             let intersection = if has_union_sibling {
-                self.collapse_met_union(
+                let (collapsed, untyped_check) = self.collapse_met_union(
                     schema,
                     intersection,
                     !schema.one_of.is_empty(),
                     &format!("{hint}ReferenceIntersection"),
                     MetUnion::RefSibling,
-                )
+                );
+                // Nothing meets the union after the collapse here.
+                if untyped_check {
+                    self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
+                }
+                collapsed
             } else {
                 intersection
             };
@@ -2567,10 +2572,87 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         };
 
-        let mut ty =
-            self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
+        let union = Union { variants, strategy };
+        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
+        // branches what they are ([`Self::collapse_met_union`]), as its merge is.
+        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
+            self.warn_untyped_one_of_variants(
+                &schema.provenance,
+                &union,
+                &variant_members,
+                "this `oneOf`'s",
+                "member",
+            );
+        }
+        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode
+    /// requires exactly one variant to match) that lower to `serde_json::Value` beside another
+    /// variant (#535). Such a variant accepts every value, so every value another variant accepts
+    /// matches two of them and fails the exactly-one rule. The union is faithful to the document,
+    /// which admits only the values no other branch accepts, but the generated enum does not show
+    /// that its other variants never decode a value and fail to serialize one, so it is said.
+    /// `labels` gives each variant's position for the message, named `noun` after `prefix`.
+    ///
+    /// An `anyOf` is not reported: its most specific match picks a typed variant for every value
+    /// one accepts, so a `serde_json::Value` variant, the faithful lowering of an untyped member,
+    /// takes only the rest. Neither is a discriminated or disjoint union, which tells the variant
+    /// apart by its tag or its JSON category.
+    fn warn_untyped_one_of_variants(
+        &mut self,
+        provenance: &Provenance,
+        union: &Union,
+        labels: &[usize],
+        prefix: &str,
+        noun: &str,
+    ) {
+        if union.variants.len() < 2
+            || !matches!(
+                union.strategy,
+                UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                    ..
+                }
+            )
+        {
+            return;
+        }
+        let untyped: Vec<String> = union
+            .variants
+            .iter()
+            .zip(labels)
+            .filter(|(variant, _)| {
+                matches!(
+                    self.graph.get(variant.ty.id).map(|def| &def.kind),
+                    Some(TypeKind::Any)
+                )
+            })
+            .map(|(_, label)| label.to_string())
+            .collect();
+        if untyped.is_empty() {
+            return;
+        }
+        let (noun, verb) = if untyped.len() == 1 {
+            (noun.to_owned(), "lowers")
+        } else {
+            (format!("{noun}s"), "lower")
+        };
+        Diagnostic::warning(Code::ValidationKeywordIgnored, provenance.clone())
+            .message(format!(
+                "{prefix} {noun} {} {verb} to `serde_json::Value`, which accepts every value, so \
+                 a value any other variant accepts matches two variants and fails the exactly-one \
+                 rule: the other variants never decode a value and fail to serialize one, and \
+                 only a value no other variant accepts decodes, as `serde_json::Value`",
+                untyped.join(", ")
+            ))
+            .remedy(
+                "give the untyped branch the type its values have, or use `anyOf` where a value \
+                 may match more than one branch",
+            )
+            .emit(self.diags);
     }
 
     /// Merge the `oneOf` variants that decode the same values — that lower to the same generated
@@ -3946,13 +4028,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the composition left as one type distinct definitions of the same shape: the refiners
         // constrain every branch of their category alike, so refining the collapsed type admits
         // the same values.
-        meet = self.collapse_met_union(
+        let (collapsed, untyped_check) = self.collapse_met_union(
             schema,
             meet,
             !union.one_of.is_empty(),
             &format!("{hint}Intersection"),
             spelling,
         );
+        meet = collapsed;
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
             let mut reach = ScopeReach::default();
             let met = self.meet_scoped_refiner(
@@ -3982,6 +4065,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = met;
+        }
+        // After the refiners, which give an untyped branch of their category a type (#535).
+        if untyped_check {
+            self.warn_untyped_met_variants(schema, meet, spelling);
         }
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
@@ -5698,7 +5785,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Collapse `met`, the meet of a `oneOf` (`one_of`) or `anyOf` with what the union is
     /// conjoined with, as each of the [`MetUnion`] spellings must: the union is lowered with its
     /// own merge held back ([`Self::unmerged_union`]), because its branches are compared once the
-    /// meet has made them what they are. Returns `met` itself where nothing collapses.
+    /// meet has made them what they are. Returns `met` itself where nothing collapses, beside
+    /// whether the result is a `oneOf` whose `serde_json::Value` variants the caller reports
+    /// ([`Self::warn_untyped_met_variants`]) once nothing else meets it.
     fn collapse_met_union(
         &mut self,
         schema: &Schema,
@@ -5706,7 +5795,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         one_of: bool,
         hint: &str,
         spelling: MetUnion,
-    ) -> Ty {
+    ) -> (Ty, bool) {
         // A `oneOf`'s branches are compared by generated type, as the inline merge compares them
         // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart,
         // and two structs or string enums of one structure decode the same values (#492).
@@ -5739,14 +5828,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                     .remedy("keep producer-side validation for the union's branch constraints")
                     .emit(self.diags);
-                common
+                (common, false)
             }
             // Only some branches share a generated type: they become one variant, as the inline
-            // merge makes them, and the others stand.
-            None if one_of => self
-                .merge_intersected_one_of(schema, met, hint, spelling)
-                .unwrap_or(met),
-            None => met,
+            // merge makes them, and the others stand. A `serde_json::Value` variant left among them
+            // is the caller's to report ([`Self::warn_untyped_met_variants`]), once whatever still
+            // meets the union after the collapse has made its branches final (#535).
+            None if one_of => {
+                let collapsed = self
+                    .merge_intersected_one_of(schema, met, hint, spelling)
+                    .unwrap_or(met);
+                (collapsed, true)
+            }
+            None => (met, false),
+        }
+    }
+
+    /// Report, as the inline union reports them ([`Self::warn_untyped_one_of_variants`]), the
+    /// `serde_json::Value` variants of `met`, a `oneOf` meet that [`Self::collapse_met_union`]
+    /// left a union (#535). Called on the union as it is generated: after the `allOf` refiners,
+    /// whose untyped object or array keywords give a branch of no category a type of their own, so
+    /// a branch they refine is not reported as accepting every value.
+    fn warn_untyped_met_variants(&mut self, schema: &Schema, met: Ty, spelling: MetUnion) {
+        if let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| def.kind.clone()) {
+            let positions: Vec<usize> = (0..union.variants.len()).collect();
+            self.warn_untyped_one_of_variants(
+                &schema.provenance,
+                &union,
+                &positions,
+                &format!("{} intersect to a `oneOf` whose", spelling.subject(true)),
+                "variant",
+            );
         }
     }
 

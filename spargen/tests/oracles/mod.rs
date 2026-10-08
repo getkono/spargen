@@ -30,6 +30,11 @@ pub struct Violation {
     pub known: Option<u32>,
 }
 
+/// The open issue tracking the pre-meet union of an `allOf`'s `oneOf` member, which is emitted
+/// although nothing refers to it: [`indistinguishable_variants`] reports a `serde_json::Value`
+/// variant of such a union as known ([`Declarations::is_dead_meet_input`]).
+pub const ISSUE_DEAD_MEET_INPUT: u32 = 561;
+
 /// The diagnostics whose pointer is still the document root although the construct they report has
 /// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
 /// their empty pointer as known; every other rule still applies to them, each checked on its own.
@@ -47,9 +52,6 @@ fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
         .find(|(known, _)| *known == code)
         .map(|(_, issue)| *issue)
 }
-
-/// The issue (#535) tracking union members that lower to `serde_json::Value` with no diagnostic.
-pub const ISSUE_UNTYPED_UNION_MEMBER: u32 = 535;
 
 /// Whether `diagnostic` is about the document as a whole, so the root is its true location: an
 /// unsupported `openapi` version (`E001`), and an invalid input document (`E011`) the validator
@@ -121,6 +123,12 @@ fn types_module(code: &str) -> &str {
         .map_or("", |start| &code[start..])
 }
 
+/// The Rust identifiers in `text`, in order.
+fn idents(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|ident| !ident.is_empty())
+}
+
 /// The item declarations of a generated module, keyed by name: each `pub type`, `pub struct` and
 /// `pub enum`, with what [`shape_of`] reads from it.
 #[derive(Default)]
@@ -172,6 +180,33 @@ impl Declarations {
                 .insert(name.to_owned(), (kind, attributes, body));
         }
         declarations
+    }
+
+    /// Whether the union `name`, of variant lines `body`, is the pre-meet union of an `allOf`'s
+    /// `oneOf` member that is emitted although nothing uses it (#561): no other declaration, and no
+    /// `types::` path in `code`, names it, while another declaration names one of its payload
+    /// types, which the meet carried into the union it made. A component union nothing refers to
+    /// is not one, since no other declaration takes its payloads.
+    fn is_dead_meet_input(&self, code: &str, name: &str, body: &[String]) -> bool {
+        let others = || {
+            self.items
+                .iter()
+                .filter(move |(other, _)| other.as_str() != name)
+                .flat_map(|(_, (_, _, lines))| lines.iter().map(String::as_str))
+                .chain(self.aliases.values().map(String::as_str))
+        };
+        let named = |ty: &str| others().any(|line| idents(line).any(|ident| ident == ty));
+        let payloads: Vec<&str> = body
+            .iter()
+            .filter_map(|line| line.split_once('(').map(|(_, payload)| payload))
+            .flat_map(idents)
+            .filter(|ident| self.aliases.contains_key(*ident) || self.items.contains_key(*ident))
+            .collect();
+        !named(name)
+            && !idents(code)
+                .zip(idents(code).skip(1))
+                .any(|(path, ident)| path == "types" && ident == name)
+            && payloads.iter().any(|payload| named(payload))
     }
 
     /// The structure `ty` stands for, with every name the module declares replaced by what it
@@ -229,13 +264,17 @@ impl Declarations {
 
 /// Each union in a generated module whose variants cannot be told apart (#402): two variants of a
 /// `oneOf` (one whose decode requires exactly one variant to match) whose payloads have the same
-/// shape, so every value matches both or neither; and any union variant whose payload is
-/// `serde_json::Value`, a typed member silently degraded.
+/// shape, so every value matches both or neither; and a `oneOf` variant whose payload is
+/// `serde_json::Value` (#535), which accepts every value, so every value another variant accepts
+/// matches two.
 ///
 /// A union is an enum with its own `Deserialize` impl, of one-field tuple variants. A discriminated
 /// union tells equal payloads apart by its tag and a JSON-category dispatch by the category, so
 /// only the trial-matched `oneOf`, whose decode error says "must match exactly one typed variant",
-/// is held to distinct payloads.
+/// is held to distinct, typed payloads. An `anyOf` is not: one match decodes it, and its most
+/// specific match is selected, so a typed variant still takes every value it accepts, and a
+/// `serde_json::Value` variant, the lowering of an untyped member (`{}`, `true`), takes only the
+/// rest. That is the faithful lowering of what the document says, so it is not reported.
 pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
     let types = types_module(code);
     let declarations = Declarations::read(types);
@@ -257,18 +296,19 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
                 Some((variant, declarations.shape_of(payload, 8)))
             })
             .collect();
-        for (variant, shape) in &payloads {
-            if shape == "serde_json::Value" {
-                violations.push(Violation {
-                    reason: format!("union `{name}` variant `{variant}` is `serde_json::Value`"),
-                    known: Some(ISSUE_UNTYPED_UNION_MEMBER),
-                });
-            }
-        }
         if !types.contains(&format!(
             "must match exactly one typed variant of union {name}\""
         )) {
             continue;
+        }
+        let dead = declarations.is_dead_meet_input(code, name, body);
+        for (variant, shape) in &payloads {
+            if shape == "serde_json::Value" {
+                violations.push(Violation {
+                    reason: format!("`oneOf` `{name}` variant `{variant}` is `serde_json::Value`"),
+                    known: dead.then_some(ISSUE_DEAD_MEET_INPUT),
+                });
+            }
         }
         for (at, (first, shape)) in payloads.iter().enumerate() {
             for (second, other) in &payloads[at + 1..] {
