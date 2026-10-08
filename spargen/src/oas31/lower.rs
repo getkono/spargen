@@ -2567,10 +2567,87 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         };
 
-        let mut ty =
-            self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
+        let union = Union { variants, strategy };
+        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
+        // branches what they are ([`Self::collapse_met_union`]), as its merge is.
+        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
+            self.warn_untyped_one_of_variants(
+                &schema.provenance,
+                &union,
+                &variant_members,
+                "this `oneOf`'s",
+                "member",
+            );
+        }
+        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode
+    /// requires exactly one variant to match) that lower to `serde_json::Value` beside another
+    /// variant (#535). Such a variant accepts every value, so every value another variant accepts
+    /// matches two of them and fails the exactly-one rule. The union is faithful to the document,
+    /// which admits only the values no other branch accepts, but the generated enum does not show
+    /// that its other variants never decode a value and fail to serialize one, so it is said.
+    /// `labels` gives each variant's position for the message, named `noun` after `prefix`.
+    ///
+    /// An `anyOf` is not reported: its most specific match picks a typed variant for every value
+    /// one accepts, so a `serde_json::Value` variant, the faithful lowering of an untyped member,
+    /// takes only the rest. Neither is a discriminated or disjoint union, which tells the variant
+    /// apart by its tag or its JSON category.
+    fn warn_untyped_one_of_variants(
+        &mut self,
+        provenance: &Provenance,
+        union: &Union,
+        labels: &[usize],
+        prefix: &str,
+        noun: &str,
+    ) {
+        if union.variants.len() < 2
+            || !matches!(
+                union.strategy,
+                UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                    ..
+                }
+            )
+        {
+            return;
+        }
+        let untyped: Vec<String> = union
+            .variants
+            .iter()
+            .zip(labels)
+            .filter(|(variant, _)| {
+                matches!(
+                    self.graph.get(variant.ty.id).map(|def| &def.kind),
+                    Some(TypeKind::Any)
+                )
+            })
+            .map(|(_, label)| label.to_string())
+            .collect();
+        if untyped.is_empty() {
+            return;
+        }
+        let (noun, verb) = if untyped.len() == 1 {
+            (noun.to_owned(), "lowers")
+        } else {
+            (format!("{noun}s"), "lower")
+        };
+        Diagnostic::warning(Code::ValidationKeywordIgnored, provenance.clone())
+            .message(format!(
+                "{prefix} {noun} {} {verb} to `serde_json::Value`, which accepts every value, so \
+                 a value any other variant accepts matches two variants and fails the exactly-one \
+                 rule: the other variants never decode a value and fail to serialize one, and \
+                 only a value no other variant accepts decodes, as `serde_json::Value`",
+                untyped.join(", ")
+            ))
+            .remedy(
+                "give the untyped branch the type its values have, or use `anyOf` where a value \
+                 may match more than one branch",
+            )
+            .emit(self.diags);
     }
 
     /// Merge the `oneOf` variants that decode the same values — that lower to the same generated
@@ -5742,10 +5819,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 common
             }
             // Only some branches share a generated type: they become one variant, as the inline
-            // merge makes them, and the others stand.
-            None if one_of => self
-                .merge_intersected_one_of(schema, met, hint, spelling)
-                .unwrap_or(met),
+            // merge makes them, and the others stand. A `serde_json::Value` variant left among them
+            // is reported as the inline union reports it (#535).
+            None if one_of => {
+                let collapsed = self
+                    .merge_intersected_one_of(schema, met, hint, spelling)
+                    .unwrap_or(met);
+                if let Some(TypeKind::Union(union)) =
+                    self.graph.get(collapsed.id).map(|def| def.kind.clone())
+                {
+                    let positions: Vec<usize> = (0..union.variants.len()).collect();
+                    self.warn_untyped_one_of_variants(
+                        &schema.provenance,
+                        &union,
+                        &positions,
+                        &format!("{} intersect to a `oneOf` whose", spelling.subject(true)),
+                        "variant",
+                    );
+                }
+                collapsed
+            }
             None => met,
         }
     }

@@ -48,9 +48,6 @@ fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
         .map(|(_, issue)| *issue)
 }
 
-/// The issue (#535) tracking union members that lower to `serde_json::Value` with no diagnostic.
-pub const ISSUE_UNTYPED_UNION_MEMBER: u32 = 535;
-
 /// Whether `diagnostic` is about the document as a whole, so the root is its true location: an
 /// unsupported `openapi` version (`E001`), and an invalid input document (`E011`) the validator
 /// could place nowhere below the root.
@@ -229,13 +226,17 @@ impl Declarations {
 
 /// Each union in a generated module whose variants cannot be told apart (#402): two variants of a
 /// `oneOf` (one whose decode requires exactly one variant to match) whose payloads have the same
-/// shape, so every value matches both or neither; and any union variant whose payload is
-/// `serde_json::Value`, a typed member silently degraded.
+/// shape, so every value matches both or neither; and a `oneOf` variant whose payload is
+/// `serde_json::Value` (#535), which accepts every value, so every value another variant accepts
+/// matches two.
 ///
 /// A union is an enum with its own `Deserialize` impl, of one-field tuple variants. A discriminated
 /// union tells equal payloads apart by its tag and a JSON-category dispatch by the category, so
 /// only the trial-matched `oneOf`, whose decode error says "must match exactly one typed variant",
-/// is held to distinct payloads.
+/// is held to distinct, typed payloads. An `anyOf` is not: one match decodes it, and its most
+/// specific match is selected, so a typed variant still takes every value it accepts, and a
+/// `serde_json::Value` variant, the lowering of an untyped member (`{}`, `true`), takes only the
+/// rest. That is the faithful lowering of what the document says, so it is not reported.
 pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
     let types = types_module(code);
     let declarations = Declarations::read(types);
@@ -257,18 +258,18 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
                 Some((variant, declarations.shape_of(payload, 8)))
             })
             .collect();
-        for (variant, shape) in &payloads {
-            if shape == "serde_json::Value" {
-                violations.push(Violation {
-                    reason: format!("union `{name}` variant `{variant}` is `serde_json::Value`"),
-                    known: Some(ISSUE_UNTYPED_UNION_MEMBER),
-                });
-            }
-        }
         if !types.contains(&format!(
             "must match exactly one typed variant of union {name}\""
         )) {
             continue;
+        }
+        for (variant, shape) in &payloads {
+            if shape == "serde_json::Value" {
+                violations.push(Violation {
+                    reason: format!("`oneOf` `{name}` variant `{variant}` is `serde_json::Value`"),
+                    known: None,
+                });
+            }
         }
         for (at, (first, shape)) in payloads.iter().enumerate() {
             for (second, other) in &payloads[at + 1..] {

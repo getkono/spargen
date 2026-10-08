@@ -455,8 +455,9 @@ fn e022_points_at_the_duplicate_key() {
 }
 
 /// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
-/// named structs with one shape, and a variant that is `serde_json::Value`. A field of another type
-/// is another shape. Without this an oracle that matched nothing would pass every fixture.
+/// named structs with one shape, and a variant that is `serde_json::Value`, both in a `oneOf`. A
+/// field of another type is another shape, and an `anyOf` is held to neither. Without this an
+/// oracle that matched nothing would pass every fixture.
 #[test]
 fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     let code = "pub mod types {\n\
@@ -486,6 +487,10 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     );
     let distinct = code.replace("pub type Ba = String;", "pub type Ba = i64;");
     assert_eq!(reasons(&distinct).len(), 1, "{:#?}", reasons(&distinct));
+    // An `anyOf` selects its most specific match, so neither equal payloads nor a
+    // `serde_json::Value` payload make another variant undecodable (#535).
+    let any_of = code.replace("exactly one", "at least one");
+    assert!(reasons(&any_of).is_empty(), "{:#?}", reasons(&any_of));
     // An enum with no `Deserialize` impl of its own is not a union.
     let not_a_union = code.replace("serde::Deserialize<'de> for U", "Other");
     assert!(
@@ -495,24 +500,97 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     );
 }
 
-/// Union members that accept every value are still `serde_json::Value` variants with no
-/// diagnostic (#535), so [`oracles::indistinguishable_variants`] still needs to let them through
-/// as known. Once the issue is fixed this fails: remove its known gap and its case here together.
-/// (Structurally equal `oneOf` branches, #492, are merged with `W001` now; see
-/// `one_of_branches_of_one_structure_merge_and_warn`.)
+/// A `oneOf` member that lowers to `serde_json::Value` beside another accepts every value, so every
+/// value another member accepts matches two and fails exactly-one (#535). The union is kept, since
+/// it is what the document says, and the dead variants are reported as `W001` at the union: inline,
+/// as a `$ref` member to an untyped component, under a discriminator no member's tag selects, as
+/// an `allOf`'s sole member, and after the meet beside a `$ref` or an `allOf`, whose merge is held
+/// back until then. The variant's position is named, as a member before a meet and a variant
+/// after one.
 #[test]
-fn untyped_variants_are_still_tracked_by_535() {
+fn a_one_of_member_accepting_every_value_warns() {
     let cases = [
+        ("oneOf: [{ type: string }, {}]", "`oneOf`'s member 1 lowers"),
+        ("oneOf: [true, { type: integer }]", "`oneOf`'s member 0 lowers"),
         (
-            "anyOf: [{ required: [a] }, { required: [b] }]",
-            oracles::ISSUE_UNTYPED_UNION_MEMBER,
+            "oneOf: [{ type: string }, { $ref: '#/components/schemas/Any' }]\n    Any: {}",
+            "`oneOf`'s member 1 lowers",
         ),
         (
-            "oneOf: [{ type: string }, {}]",
-            oracles::ISSUE_UNTYPED_UNION_MEMBER,
+            "{ oneOf: [{ type: string }, {}], discriminator: { propertyName: k } }",
+            "`oneOf`'s member 1 lowers",
+        ),
+        (
+            "{ allOf: [{ oneOf: [{ type: string }, {}] }] }",
+            "`oneOf`'s member 1 lowers",
+        ),
+        (
+            "{ type: object, properties: { p: { oneOf: [{ type: string }, {}] } } }",
+            "`oneOf`'s member 1 lowers",
+        ),
+        (
+            "{ $ref: '#/components/schemas/Any', oneOf: [{ type: string }, {}] }\n    Any: {}",
+            "`$ref` and its `oneOf` sibling intersect to a `oneOf` whose variant 1 lowers",
+        ),
+        (
+            "{ allOf: [{ $ref: '#/components/schemas/Any' }], oneOf: [{ type: string }, {}] }\n    \
+             Any: {}",
+            "`allOf` and the `oneOf` beside it intersect to a `oneOf` whose variant 1 lowers",
         ),
     ];
-    for (schema, issue) in cases {
+    for (schema, says) in cases {
+        let (report, code) = generate_with_code(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    U:\n      {schema}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        let untyped: Vec<&Diagnostic> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.message
+                    .contains("to `serde_json::Value`, which accepts every value")
+            })
+            .collect();
+        assert_eq!(untyped.len(), 1, "{schema}: {report:#?}");
+        assert_eq!(untyped[0].code, Code::ValidationKeywordIgnored, "{schema}");
+        assert_eq!(untyped[0].severity, Severity::Warning, "{schema}");
+        // At the union itself: the schema, or the `allOf` member or property that holds it.
+        let union_at = if schema.contains("allOf: [{ oneOf") {
+            "/components/schemas/U/allOf/0"
+        } else if schema.contains("properties") {
+            "/components/schemas/U/properties/p"
+        } else {
+            "/components/schemas/U"
+        };
+        assert_eq!(untyped[0].pointer.as_str(), union_at, "{schema}");
+        assert!(untyped[0].message.contains(says), "{schema}: {untyped:#?}");
+        // The union stands: the typed variant still excludes the values it accepts.
+        assert!(code.contains("pub enum U"), "{schema}");
+        // The oracle sees the `serde_json::Value` variant, which the warning explains.
+        assert!(
+            !oracles::indistinguishable_variants(&code).is_empty(),
+            "{schema}"
+        );
+    }
+}
+
+/// A `serde_json::Value` variant of an `anyOf` stays silent (#535): one match decodes an `anyOf`
+/// and the most specific match is selected, so a typed variant still takes every value it
+/// accepts and the `serde_json::Value` variant, the lowering of an untyped member, only the rest.
+/// [`oracles::indistinguishable_variants`] holds only a trial-matched `oneOf` to typed variants,
+/// so it finds nothing here. Neither does a `oneOf` whose untyped members all merge into one
+/// variant, which the merge already reports (#402).
+#[test]
+fn an_untyped_any_of_member_stays_silent() {
+    for schema in [
+        "anyOf: [{ type: string }, {}]",
+        "anyOf: [{ required: [a] }, { required: [b] }]",
+    ] {
         let (report, code) = generate_with_code(&format!(
             "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
              schemas:\n    U:\n      {schema}\n"
@@ -523,17 +601,24 @@ fn untyped_variants_are_still_tracked_by_535() {
             "{schema}: {report:#?}"
         );
         assert!(report.diagnostics().is_empty(), "{schema}: {report:#?}");
-        let known: std::collections::BTreeSet<Option<u32>> =
-            oracles::indistinguishable_variants(&code)
-                .into_iter()
-                .map(|violation| violation.known)
-                .collect();
-        assert_eq!(
-            known,
-            std::collections::BTreeSet::from([Some(issue)]),
-            "{schema}"
-        );
+        assert!(code.contains("= serde_json::Value;"), "{schema}");
+        let found = oracles::unknown(oracles::indistinguishable_variants(&code));
+        assert!(found.is_empty(), "{schema}: {found:#?}");
     }
+    let (report, _) = generate_with_code(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    \
+         U:\n      oneOf: [{ required: [a] }, { required: [b] }]\n",
+    );
+    let messages: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("the union is that one type"),
+        "{messages:#?}"
+    );
 }
 
 /// The name of the `pub struct` that declares the first field line starting with `field`.
