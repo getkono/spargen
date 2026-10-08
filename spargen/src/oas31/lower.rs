@@ -1775,6 +1775,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
                 None => {}
             }
+            // An untyped object target admits `null` without deciding it, as the same conjunct
+            // written inline as an `allOf` member does (#541), so beside a sibling typed `object`
+            // the sibling's own answer about `null` is the meet's. Read before the union-sibling
+            // dispatch below, so a sibling carrying a `oneOf`/`anyOf` meets the same target. Only
+            // there: what an untyped target means beside another category is not an object meet,
+            // and keeps its verdict.
+            let referenced = if schema.types.types.contains(&JsonType::Object)
+                && matches!(
+                    self.graph.get(referenced.id).map(|def| &def.kind),
+                    Some(TypeKind::Struct(_))
+                )
+                && !self.ref_target_decides_null(reference, &schema.provenance)
+            {
+                Ty {
+                    nullable: true,
+                    ..referenced
+                }
+            } else {
+                referenced
+            };
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
             if has_union_sibling {
                 // Keywords carrying an `allOf` of their own stay on the one-schema path: lowered
@@ -1793,24 +1813,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             let sibling = sibling?;
-            // An untyped object target admits `null` without deciding it, as the same conjunct
-            // written inline as an `allOf` member does (#541), so beside a sibling typed `object`
-            // the sibling's own answer about `null` is the meet's. Only there: what an untyped
-            // target means beside another category is not an object meet, and keeps its verdict.
-            let referenced = if schema.types.types.contains(&JsonType::Object)
-                && matches!(
-                    self.graph.get(referenced.id).map(|def| &def.kind),
-                    Some(TypeKind::Struct(_))
-                )
-                && !self.ref_target_decides_null(reference, &schema.provenance)
-            {
-                Ty {
-                    nullable: true,
-                    ..referenced
-                }
-            } else {
-                referenced
-            };
             let mark = self.graph_mark();
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
@@ -3916,8 +3918,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             None
         } else {
             // Under the nullability `combine_all_of` gives it, as the `allOf`-member spelling
-            // takes it: an untyped object member admits `null` and decides nothing.
-            Some(self.combine_all_of(&composition, &composition_hint, &contributions)?)
+            // takes it: an untyped object member admits `null` and decides nothing, so a
+            // composition no member decides leaves `null` to the union.
+            let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
+            let has_object = contributions
+                .iter()
+                .any(|contribution| matches!(contribution, Contribution::Object { .. }));
+            Some(undecided_admits_null(composed, has_object, &contributions))
         };
         let refiners = self.lower_all_of_refiners(&scoped, hint)?;
         self.meet_union_with_all_of(
@@ -3990,7 +3997,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let composed = if contributions.is_empty() {
             None
         } else {
-            Some(self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?)
+            let composed =
+                self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?;
+            Some(undecided_admits_null(composed, has_object, &contributions))
         };
         let refiners = self.lower_all_of_refiners(&scoped, hint)?;
         let mut ty = self.meet_union_with_all_of(
@@ -10561,6 +10570,29 @@ fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
         }
     }
     decided
+}
+
+/// An object composition met with a union beside it ([`LowerCtx::lower_all_of_beside_union`],
+/// [`LowerCtx::lower_all_of_with_union_member`]), made to admit `null` where no member decides it
+/// (issue #541): its members are untyped objects alone — `$ref`s to untyped object components,
+/// which [`object_all_of_admits_null`] reads as denying `null` for want of a decision — and the
+/// same members written inline are scoped refiners that leave `null` to the union. So the union
+/// decides it in either spelling. A composition some member decides, or a scalar one, keeps its
+/// nullability.
+fn undecided_admits_null(mut composed: Ty, has_object: bool, contributions: &[Contribution]) -> Ty {
+    let decided = contributions.iter().any(|contribution| {
+        matches!(
+            contribution,
+            Contribution::Object {
+                nullable: Some(_),
+                ..
+            }
+        )
+    });
+    if has_object && !decided {
+        composed.nullable = true;
+    }
+    composed
 }
 
 /// Whether a schema's own `type` admits `null`: `None` for an untyped schema, which states no
