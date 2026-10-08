@@ -625,7 +625,8 @@ fn a_refined_untyped_one_of_branch_does_not_warn() {
 /// name. The pre-meet union, and the branch types the meet replaced, were left in the output as
 /// public types nothing referred to (#561), such as `Umember0`, a trial-matched `oneOf` with a
 /// `serde_json::Value` variant, beside the met union `U`. Each spelling of the meet now withholds
-/// them: as an `allOf` member, beside an `allOf`, and beside a `$ref` alone or with keywords. What
+/// them: as an `allOf` member, beside an `allOf`, and beside a `$ref` alone or with keywords, where
+/// the keywords' own lowered type, `UconstraintConstraint`, is withheld too (#571). What
 /// something can still name stays: a branch the met union refers to, a `$ref`'d component first
 /// lowered inside the union, and a `$ref`'d subschema the resolver's memo hands a later `$ref`.
 #[test]
@@ -647,7 +648,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
     let refiner = "{ properties: { a: { type: string } } }";
     let b = "B: { type: object, properties: { a: { type: string } } }";
     // Each spelling, with the types it no longer emits and the ones it must keep.
-    let cases: [(&str, String, &[&str], &[&str]); 6] = [
+    let cases: [(&str, String, &[&str], &[&str]); 7] = [
         (
             "an allOf member",
             format!("U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}"),
@@ -675,8 +676,28 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
                 "{b}\n    U: {{ $ref: '#/components/schemas/B', properties: {{ c: {{ type: integer \
                  }} }}, oneOf: [{{ required: [a] }}, {{ type: object }}] }}"
             ),
-            &["Uunion", "UunionVariant0", "UunionVariant1"],
-            &["B", "U"],
+            &[
+                "Uunion",
+                "UunionVariant0",
+                "UunionVariant1",
+                "UconstraintConstraint",
+            ],
+            &["B", "U", "UconstraintConstraintc"],
+        ),
+        (
+            "beside a $ref and its typed keywords, met with the target first",
+            format!(
+                "{b}\n    U: {{ $ref: '#/components/schemas/B', type: object, properties: {{ c: \
+                 {{ type: integer }} }}, oneOf: [{{ required: [a] }}, {{ type: object }}] }}"
+            ),
+            &[
+                "Uunion",
+                "UunionVariant0",
+                "UunionVariant1",
+                "Uconstraint",
+                "UreferenceComposition",
+            ],
+            &["B", "U", "Uconstraintc"],
         ),
         (
             "a $ref'd component first lowered inside the union",

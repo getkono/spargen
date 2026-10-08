@@ -4280,6 +4280,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union: &Schema,
     ) -> Option<Ty> {
         let keywords_hint = format!("{hint}Constraint");
+        let keywords_mark = self.graph_mark();
         let (composed, refiners) = if implied_applicator_category(keywords).is_some() {
             let scoped = self.lower_scoped_refiners(keywords, true, None, &keywords_hint)?;
             (referenced, vec![(keywords, Refiner::Scoped(scoped))])
@@ -4292,7 +4293,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             (composed, Vec::new())
         };
-        self.meet_union_with_all_of(
+        let keywords_lowered = keywords_mark..self.graph_mark();
+        let ty = self.meet_union_with_all_of(
             schema,
             hint,
             Some(composed),
@@ -4300,7 +4302,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             union,
             &format!("{hint}Union"),
             MetUnion::RefSibling,
-        )
+        )?;
+        // The keywords' own type is an input to the meet, lowered before any mark it takes, so it
+        // was emitted as a public type nothing referred to (#571). The same rule as the union's
+        // lowering withholds it: whatever the met type, a memo, or another schema names stays.
+        self.elide_unused_union_lowering(keywords_lowered);
+        Some(ty)
     }
 
     /// Lower `union`, with its own merge held back, meet it with an `allOf`'s `composed` members,
@@ -4415,7 +4422,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// holds the ids a union was lowered into, with its merge held back ([`Self::unmerged_union`]),
     /// before [`Self::meet_union_with_all_of`] or a `$ref`'s target met it. The pre-meet union
     /// itself and the branch types the meet replaced were emitted as public types nothing referred
-    /// to (#561).
+    /// to (#561). [`Self::meet_ref_union_sibling`] also passes the ids the keywords beside the
+    /// union were lowered into, an input to the same meet (#571).
     ///
     /// Unlike the meets' own inserts ([`Self::elide_meet_intermediates`]), these come from lowering
     /// a schema, so a memo may hold one: a component, remote or bundle target a branch `$ref`s and
