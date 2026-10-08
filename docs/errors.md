@@ -31,7 +31,7 @@ the library API.
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W005` | Warning | schema default not applied |
-| `W006` | Warning | unsupported XML hint ignored |
+| `W006` | Warning | XML hint not applied |
 | `W009` | Warning | construct omitted |
 | `W010` | Warning | non-sequential `itemSchema` ignored |
 | `W011` | Warning | declared construct has no effect |

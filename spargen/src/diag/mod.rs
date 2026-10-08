@@ -1,12 +1,14 @@
 //! # Subsystem: diag
 //! layer-deps:
 //!
-//! Diagnostic codes/severities, the JSON Pointer + span model, the `INT-###` interpretation
-//! registry, and the S/W/R disposition table as data.
+//! Diagnostic codes and severities, each code's title and `spargen explain` text, the JSON
+//! Pointer + span model, and the [`InterpId`] (`INT-###`) a code may name for the interpretation
+//! its behavior depends on.
 //! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
-//! construct, a [`Span`] (`file:line:column`), a one-line message, and an optional remedy.
+//! construct, a [`Span`] (`file:line:column`) when the construct's location is known, a one-line
+//! message, an optional remedy, and the [`OutcomeClaim`] its message makes.
 //! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
 //! at the first error; presentation belongs to the optional binary.
 

@@ -20,7 +20,7 @@ Rules:
 
 A `path`, operation `path`, component `name`, or `pointer` value that contains a glob
 metacharacter is matched as a glob and removes **every** matching construct (a bulk omit); a value
-with no metacharacter is an exact rule and behaves exactly as before. The matcher is `/`-aware:
+with no metacharacter is an exact rule. The matcher is `/`-aware:
 
 | Token  | Matches                                                          |
 | ------ | --------------------------------------------------------------- |
@@ -139,7 +139,7 @@ path = "/pets"
 
 [[omit]]
 component = "schema"                    # component + name → OmitRule::Component
-name = "LegacyPet"                      #   schema / response / parameter / requestBody / header / securityScheme
+name = "LegacyPet"                      #   schema / response / parameter / requestBody / header / securityScheme / pathItem / mediaType
 
 [[omit]]
 pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer

@@ -49,8 +49,9 @@ pub(crate) fn parse_json(
 
 /// Parse a YAML 1.2 document into a span-preserving [`SpannedValue`] tree.
 ///
-/// YAML is restricted to the JSON-compatible subset OAS 3.1 prescribes; constructs outside that
-/// subset (aliases, non-string keys, multiple documents) are diagnosed. The low-level event API
+/// YAML is restricted to the JSON-compatible subset OAS 3.1 prescribes: aliases expand to clones
+/// of their anchored nodes, and constructs outside that subset (non-string keys, multiple
+/// documents) are diagnosed. The low-level event API
 /// (`yaml_rust2::parser::Parser` + a [`MarkedEventReceiver`]) is used instead of `YamlLoader` so
 /// that each event's source [`Marker`] can be turned into a per-node span. Errors are reported
 /// through `diags`.
