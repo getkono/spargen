@@ -11165,7 +11165,9 @@ fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
 /// same members written inline are scoped refiners that leave `null` to the union. So the union
 /// decides it in either spelling, where it decides it at all: a `union` that states no `type` and
 /// whose every branch is untyped decides nothing either, and the meet keeps the non-null answer an
-/// `allOf` of untyped members alone gets. A composition some member decides, or a scalar one,
+/// `allOf` of untyped members alone gets. Nor does one whose only deciding branches deny `null`
+/// beside an untyped branch (#581): the untyped branch leaves `null` undecided, so the inline
+/// spelling of the same meet stays non-null. A composition some member decides, or a scalar one,
 /// keeps its nullability.
 fn undecided_admits_null(
     mut composed: Ty,
@@ -11182,19 +11184,36 @@ fn undecided_admits_null(
             }
         )
     });
+    let branches = || union.one_of.iter().chain(&union.any_of);
+    let decides = |branch: &SchemaOr| match branch {
+        SchemaOr::Bool(admits) => !admits,
+        SchemaOr::Schema(branch) => target_decides_null(branch),
+    };
+    // An untyped branch leaves `null` to the union's other branches (#581): beside one, branches
+    // that deny `null` by their own keywords decide nothing, as the same union met with the same
+    // members written inline keeps them non-null.
+    let has_undecided = branches().any(|branch| !decides(branch));
     let union_decides = stated_nullability(union).is_some()
-        || union
-            .one_of
-            .iter()
-            .chain(&union.any_of)
-            .any(|branch| match branch {
-                SchemaOr::Bool(admits) => !admits,
-                SchemaOr::Schema(branch) => target_decides_null(branch),
-            });
+        || branches().any(|branch| decides(branch) && !(has_undecided && denies_null(branch)));
     if has_object && !decided && union_decides {
         composed.nullable = true;
     }
     composed
+}
+
+/// Whether a union branch denies `null` by its own keywords alone: `false`, or a branch with no
+/// `$ref`, `allOf` or union of its own whose stated `type`, `enum` or `const` leaves `null` out
+/// ([`own_keywords_admit_null`]). A branch this cannot read so may admit `null`.
+fn denies_null(branch: &SchemaOr) -> bool {
+    match branch {
+        SchemaOr::Bool(admits) => !admits,
+        SchemaOr::Schema(branch) => {
+            branch.reference.is_none()
+                && branch.all_of.is_empty()
+                && !schema_has_union(branch)
+                && !own_keywords_admit_null(branch)
+        }
+    }
 }
 
 /// Whether a schema's own `type` admits `null`: `None` for an untyped schema, which states no
