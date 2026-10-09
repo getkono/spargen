@@ -155,10 +155,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             // A sibling carrying only object or only array applicators names no `type`, and
-            // `lower_schema` reaches its object and array arms through `type`, so it would lower to
-            // `TypeKind::Any` — which intersects as identity, discarding the keywords with no
-            // diagnostic (#140). The applicators establish the category they apply to, as an
-            // untyped `properties` already does, and say nothing about `null` (the same reading
+            // `lower_schema` reaches its array arm only through `type`, so an array sibling would
+            // lower to `TypeKind::Any` — which intersects as identity, discarding the keywords with
+            // no diagnostic (#140), and an object sibling would lower to an object that denies
+            // `null` (#613). The applicators establish the category they apply to, as an untyped
+            // `properties` already does, and say nothing about `null` (the same reading
             // `lower_union_sibling` takes), so the target's nullability survives the intersection.
             //
             // Against a union target that reading would drop every branch of another category in
@@ -481,6 +482,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(JsonType::Null) => self.insert_schema_type(schema, hint, TypeKind::Null),
             None if schema.types.types.contains(&JsonType::Null) => {
                 self.insert_schema_type(schema, hint, TypeKind::Null)
+            }
+            // Untyped `required` or `additionalProperties` alone are object applicators too, and
+            // establish the object category as untyped `properties` does above and as the same
+            // keywords do beside a `$ref`. Falling to `Any` dropped them with no diagnostic (#613).
+            None if matches!(
+                implied_applicator_category(schema),
+                Some(ImpliedCategory::Only(JsonType::Object))
+            ) =>
+            {
+                self.lower_object(schema, hint)?
             }
             None => self.insert_schema_type(schema, hint, TypeKind::Any),
         };
