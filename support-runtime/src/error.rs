@@ -12,10 +12,10 @@ use crate::{AuthError, ResponseValue};
 /// with full source chains, and `Debug` never leaks secrets.
 ///
 /// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new
-/// variant in `every_variant`, both in the test module of `support-runtime/src/error.rs`, for the
-/// reasons `request_variant_index` there sets out. That test module is stripped when this file is
-/// embedded into a generated client, so none of those three names exist in the copy a consumer
-/// reads.
+/// variant in `every_variant`, both in this file's test module
+/// `support-runtime/src/error/tests.rs`, for the reasons `request_variant_index` there sets out.
+/// That test module is stripped when this file is embedded into a generated client, so none of
+/// those three names exist in the copy a consumer reads.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
@@ -484,7 +484,8 @@ impl std::error::Error for MessageError {}
 /// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
 ///
 /// Adding a variant, in spargen's own sources: raise `REQUEST_VARIANTS` and list a value of the new
-/// variant in `every_request_variant`, both in the test module of `support-runtime/src/error.rs`.
+/// variant in `every_request_variant`, both in this file's test module
+/// `support-runtime/src/error/tests.rs`.
 /// The compiler will demand the classification arms on its own, but it cannot demand the value —
 /// `request_variant_index` there documents precisely why, and which ways of getting this wrong are
 /// caught. That test module is stripped when this file is embedded into a generated client, so
