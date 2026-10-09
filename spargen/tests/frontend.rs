@@ -3748,16 +3748,19 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
-/// Issue #586: a union of one typed branch that admits `null` (`type: [object, 'null']` or
-/// `type: 'null'`) beside an untyped object branch, met with the untyped object `U`, gets one
-/// answer per row across all six spellings: a `$ref` to `U` with the union as its sibling, `U` as
-/// an `allOf` member beside the union or with the union as a second member, and the same three
-/// with `U`'s body written inline, plus the `$ref` spelling with an untyped `required` beside the
-/// union, which meets it through the same target. `U` decides nothing about `null`, so an `anyOf`
-/// admits it through the typed branch. A `oneOf` denies it: the untyped branch beside the typed
-/// one is counted as accepting `null` too (#563), so `null` is in two branches and fails
-/// exactly-one. The `$ref`-sibling spellings denied `null` in the `anyOf` rows, and the inline
-/// spellings admitted it in the `oneOf` row with the nullable object branch.
+/// Issue #586: a union of one typed branch that admits `null` (`type: [object, 'null']`,
+/// `type: 'null'`, `enum: [x, null]` or `const: null`) beside an untyped object branch, met with
+/// the untyped object `U`, gets one answer per row across all six spellings: a `$ref` to `U` with
+/// the union as its sibling, `U` as an `allOf` member beside the union or with the union as a
+/// second member, and the same three with `U`'s body written inline, plus the `$ref` spelling with
+/// an untyped `required` beside the union, which meets it through the same target, and an
+/// array-only `items` sibling, which does not reach an object branch and so leaves `null` to the
+/// union as `U` does. `U` decides nothing about `null`, so an `anyOf` admits it through the typed
+/// branch. A `oneOf` denies it: the untyped branch beside the typed one is counted as accepting
+/// `null` too (#563), so `null` is in two branches and fails exactly-one; a `const: null` branch,
+/// whose exact-`null` variant is not a nullable `Ty`, is counted as one of them. The
+/// `$ref`-sibling spellings denied `null` in the `anyOf` rows, and the inline spellings admitted
+/// it in the `oneOf` row with the nullable object branch.
 #[test]
 fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings() {
     let u = "$ref: '#/components/schemas/U'";
@@ -3767,6 +3770,8 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
         for typed in [
             "{ type: [object, 'null'], properties: { a: { type: string } } }",
             "{ type: 'null' }",
+            "{ enum: [x, null] }",
+            "{ const: null }",
         ] {
             let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
             let admits = keyword == "anyOf";
@@ -3779,6 +3784,7 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
                     format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
                     format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
                     format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+                    format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
                 ]
                 .into_iter()
                 .map(|site| (site, admits)),

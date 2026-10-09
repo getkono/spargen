@@ -2487,6 +2487,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut variant_members: Vec<usize> = Vec::new();
         // How many variants accepted `null` before their nullability was hoisted to the union.
         let mut nullable_variants = 0usize;
+        // How many variants are the exact JSON `null` (`const: null`, `enum: [null]`), and whether
+        // an untyped branch took `null` from what the union is met with (#567, #586): each such
+        // variant is a branch `null` matches beside it, so a `oneOf` counts them together (#563).
+        let mut null_variants = 0usize;
+        let mut null_from_conjunct = false;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -2495,6 +2500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            let mut took_conjunct_null = false;
             // A variant that is a back-edge to *this* union — the member's type is the very
             // reservation this schema will occupy — is the whole union, so it constrains nothing and
             // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
@@ -2541,6 +2547,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && self.branch_leaves_null_undecided(member, ty)
             {
                 ty.nullable = true;
+                took_conjunct_null = true;
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
             // sibling meet so the other sibling keywords can still take it away, and is then
@@ -2559,6 +2566,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && self.branch_leaves_null_undecided(member, ty)
             {
                 ty.nullable = true;
+                took_conjunct_null = true;
             }
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
@@ -2617,6 +2625,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
             nullable_variants += usize::from(ty.nullable);
+            null_variants += usize::from(self.is_exact_null(ty));
+            null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
                 .clone()
@@ -2664,7 +2674,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
         // them. That meet removes `null` from a typed branch only; an untyped branch it gives
         // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
-        if mode == UnionMode::OneOf && null_members + nullable_variants > 1 {
+        // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
+        // (#586): elsewhere it stays the variant `null` decodes to, as it always has.
+        let null_variants = if null_from_conjunct { null_variants } else { 0 };
+        if mode == UnionMode::OneOf && null_members + nullable_variants + null_variants > 1 {
             nullable = false;
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
@@ -4310,6 +4323,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             SchemaOr::Schema(member) => self.all_of_decides_null(member, depth + 1),
             SchemaOr::Bool(_) => false,
         })
+    }
+
+    /// Whether `ty` is the exact JSON `null` (`()`), as a `const: null` or `enum: [null]` branch
+    /// lowers: a branch `null` matches without its `Ty` being nullable.
+    fn is_exact_null(&self, ty: Ty) -> bool {
+        matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Null)
+        )
     }
 
     /// Whether `member`, a union branch lowered to `ty`, is an object whose lowered non-null
@@ -6620,7 +6642,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .filter(|variant| variant.ty.nullable)
             .count();
-        if nullable_variants == 0 || usize::from(met.nullable) + nullable_variants < 2 {
+        // An exact-`null` variant (`const: null`) is a branch `null` matches too, counted beside a
+        // variant the meet left accepting it, as the inline union counts it (#586).
+        let null_variants = union
+            .variants
+            .iter()
+            .filter(|variant| self.is_exact_null(variant.ty))
+            .count();
+        if nullable_variants == 0
+            || usize::from(met.nullable) + nullable_variants + null_variants < 2
+        {
             return met;
         }
         let mut union = union.clone();
