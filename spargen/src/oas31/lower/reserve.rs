@@ -12,6 +12,55 @@ use super::shape::schema_has_shape_constraint;
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Lower the schema `$ref` `reference`, written at `at`, to its shared, cycle-safe type through
+    /// the memo its spelling routes to: a `#/components/schemas/<name>` to
+    /// [`Self::ensure_component`], a remote (`http`/`https`) reference to [`Self::ensure_remote`]
+    /// (keyed by `url#fragment`), and every other reference to [`Self::ensure_resolved`] (keyed by
+    /// the resolved `file#pointer`, which is why the ordinary spelling and the explicit
+    /// `./lib.yaml#/…` spelling of one target share one type rather than two). `hint` names a
+    /// bundle target that has no final pointer token of its own.
+    ///
+    /// [`Self::open_reservation_for_ref`] mirrors this dispatch for a question that lowers nothing.
+    pub(super) fn ensure_reference(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+        hint: &str,
+    ) -> Option<Ty> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            self.ensure_component(name, Some(reference), at)
+        } else if is_remote_ref(reference) {
+            self.ensure_remote(reference)
+        } else {
+            self.ensure_resolved(reference, at, hint)
+        }
+    }
+
+    /// The root component the schema at `pointer` in `file` is: `Some(name)` when `file` is the root
+    /// document and `pointer` is `/components/schemas/<name>` for a `name` the root declares.
+    ///
+    /// That map is such a schema's identity — [`Self::ensure_resolved`] routes a target there back
+    /// to [`Self::ensure_component`] — so every question asked by resolved `(file, pointer)` asks
+    /// this first. The name is the pointer token verbatim, never unescaped, as the component map's
+    /// own lookup by a reference's stripped fragment is. A deeper pointer (`Tree/properties/x`) or
+    /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
+    /// root component key, so neither could be declared, and the filter says so without relying on
+    /// it.
+    pub(super) fn root_component_at<'p>(
+        &self,
+        file: crate::diag::FileId,
+        pointer: &'p crate::diag::JsonPointer,
+    ) -> Option<&'p str> {
+        if file != self.resolver.root_id() {
+            return None;
+        }
+        pointer
+            .as_str()
+            .strip_prefix("/components/schemas/")
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+            .filter(|name| self.document.components.schemas.contains_key(*name))
+    }
+
     /// Lower `#/components/schemas/{name}` to its shared type, lowering it on first use and
     /// returning the cached type on every later one.
     ///
@@ -279,13 +328,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
-        let ty = if let Some(target) = reference.strip_prefix("#/components/schemas/") {
-            self.ensure_component(target, Some(reference), at)
-        } else if is_remote_ref(reference) {
-            self.ensure_remote(reference)
-        } else {
-            self.ensure_resolved(reference, at, name)
-        };
+        let ty = self.ensure_reference(reference, at, name);
         self.component_alias_stack.remove(name);
         if let Some(ty) = ty {
             self.components
@@ -486,20 +529,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let (file, pointer) = self.resolver.reference_identity(reference, at)?;
         // `ensure_resolved` routes a target inside the root's component map back to
         // `ensure_component`, whose identity is the name; ask the map that actually holds it.
-        if file == self.resolver.root_id() {
-            if let Some(name) = pointer
-                .as_str()
-                .strip_prefix("/components/schemas/")
-                .filter(|name| !name.is_empty() && !name.contains('/'))
-            {
-                if self.document.components.schemas.contains_key(name) {
-                    let entry = self.in_progress.get(name).copied();
-                    if entry.is_some() {
-                        self.guessed.insert(Reservation::Component(name.to_owned()));
-                    }
-                    return entry;
-                }
+        if let Some(name) = self.root_component_at(file, &pointer) {
+            let entry = self.in_progress.get(name).copied();
+            if entry.is_some() {
+                self.guessed.insert(Reservation::Component(name.to_owned()));
             }
+            return entry;
         }
         let key = format!("{}#{}", file.0, pointer);
         let entry = self.resolved_in_progress.get(&key).copied();
@@ -674,25 +709,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // one is worse. Every schema the parser produces carries a span, so this is defensive.
             return self.lower_schema(&schema, hint);
         };
-        // A resolved target that is a root component already has an identity — its name. The
-        // `contains_key` alone decides it: a pointer deeper than a component (`Tree/properties/x`)
-        // cannot equal a key, because structural validation rejects any root component key outside
-        // `^[a-zA-Z0-9._-]+$` before lowering runs.
-        if schema
+        // A resolved target that is a root component already has an identity — its name. An
+        // unspanned target was never read from a file (`key` above requires the span), so it is
+        // never one.
+        if let Some(name) = schema
             .provenance
             .span
-            .is_some_and(|span| span.file == self.resolver.root_id())
+            .and_then(|span| self.root_component_at(span.file, &schema.provenance.pointer))
         {
-            if let Some(name) = schema
-                .provenance
-                .pointer
-                .as_str()
-                .strip_prefix("/components/schemas/")
-            {
-                if self.document.components.schemas.contains_key(name) {
-                    return self.ensure_component(name, Some(reference), at);
-                }
-            }
+            return self.ensure_component(name, Some(reference), at);
         }
         if let Some(&(id, nullable)) = self.resolved_components.get(&key) {
             return Some(Ty {
@@ -889,16 +914,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A target inside the root document's component map has its identity there instead —
         // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
         // map too, or a root component addressed by file reference escapes the check.
-        if !provenance
-            .span
-            .is_some_and(|span| span.file == self.resolver.root_id())
-        {
-            return None;
-        }
         provenance
-            .pointer
-            .as_str()
-            .strip_prefix("/components/schemas/")
+            .span
+            .and_then(|span| self.root_component_at(span.file, &provenance.pointer))
             .and_then(|name| self.in_progress.get(name))
             .map(|&(id, _)| id)
     }

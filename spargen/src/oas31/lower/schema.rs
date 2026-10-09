@@ -90,19 +90,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if let Some(reference) = &schema.reference {
-            let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                self.ensure_component(name, Some(reference), &schema.provenance)?
-                // Remote refs go through the cycle-safe, deduped remote path (keyed by
-                // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
-                // through to `resolve`, which reports it (E003/E004).
-            } else if is_remote_ref(reference) {
-                self.ensure_remote(reference)?
-            } else {
-                // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
-                // `file#pointer`. That key is why the ordinary spelling and the explicit
-                // `./lib.yaml#/…` spelling of one target now share one type rather than two.
-                self.ensure_resolved(reference, &schema.provenance, hint)?
-            };
+            let referenced = self.ensure_reference(reference, &schema.provenance, hint)?;
 
             // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
             // schema. Intersect every shape-bearing sibling instead of silently discarding it.
@@ -630,19 +618,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
-    /// Lower a possibly-`$ref` schema. Component refs go through [`Self::ensure_component`] so
+    /// Lower a possibly-`$ref` schema. A reference goes through [`Self::ensure_reference`] so
     /// every use site shares one generated type instead of lowering a duplicate.
     pub(super) fn lower_schema_ref(&mut self, schema: &RefOr<Schema>, hint: &str) -> Option<Ty> {
         match schema {
             RefOr::Item(schema) => self.lower_schema(schema, hint),
             RefOr::Ref(reference) => {
-                if let Some(name) = reference.reference.strip_prefix("#/components/schemas/") {
-                    self.ensure_component(name, Some(&reference.reference), &reference.provenance)
-                } else if is_remote_ref(&reference.reference) {
-                    self.ensure_remote(&reference.reference)
-                } else {
-                    self.ensure_resolved(&reference.reference, &reference.provenance, hint)
-                }
+                self.ensure_reference(&reference.reference, &reference.provenance, hint)
             }
         }
     }
