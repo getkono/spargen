@@ -183,6 +183,7 @@ fn lower_pass(
         unmerged_union: None,
         unmerged_union_meets_null: false,
         untyped_beside_null_member: None,
+        stated_nothing_took_null: None,
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -871,6 +872,14 @@ struct LowerCtx<'a, 'doc> {
     /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
     /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
     untyped_beside_null_member: Option<Provenance>,
+    /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
+    /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
+    /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
+    /// `anyOf`, as an untyped object branch's is (#567), or counted by a `oneOf` that the count
+    /// makes refuse `null`. `Value` is the identity of the meet, so the meet hands the branch the
+    /// conjunct's `null` a second time, and the caller clears it there
+    /// ([`Self::clear_counted_null`]) so `null` is counted once per branch.
+    stated_nothing_took_null: Option<(Provenance, Vec<String>)>,
 }
 
 /// The options that change what lowering produces.
@@ -1887,6 +1896,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.unmerged_union_meets_null = enclosing_meets_null;
             let untyped_beside_null_member =
                 self.untyped_beside_null_member.take() == Some(schema.provenance.clone());
+            let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
             let sibling = sibling?;
             let mark = self.graph_mark();
             let Ok(intersection) =
@@ -1904,6 +1914,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
             let intersection = if has_union_sibling {
+                let intersection = self.clear_counted_null(
+                    intersection,
+                    referenced,
+                    &stated_nothing_took_null,
+                    &format!("{hint}ReferenceIntersection"),
+                );
                 let (collapsed, untyped_check) = self.collapse_met_union(
                     schema,
                     intersection,
@@ -2492,6 +2508,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // variant is a branch `null` matches beside it, so a `oneOf` counts them together (#563).
         let mut null_variants = 0usize;
         let mut null_from_conjunct = false;
+        // The variant hints of the branches that state nothing and took the conjunct's `null`, and
+        // how many of them a `oneOf` counts without hoisting (#592).
+        let mut stated_nothing_hints: Vec<String> = Vec::new();
+        let mut stated_nothing_nulls = 0usize;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -2541,13 +2561,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // with admits `null` ([`Self::unmerged_union_meets_null`]): met with untyped objects
             // alone, nothing does, and the branch stays the non-null struct every other spelling
             // of that composition gives it.
+            //
+            // A branch that states nothing (`true`, `{}`) accepts `null` there too, as it does
+            // beside untyped sibling keywords (#592), but `Value` is the identity of the meet, so
+            // the meet hands it the conjunct's `null` again. An `anyOf`, which needs one match,
+            // hoists it here, and the caller clears the meet's copy
+            // ([`Self::stated_nothing_took_null`]). A `oneOf` counts it here without hoisting it:
+            // where that puts `null` in two branches the caller clears the meet's copy too, and
+            // where it is the one branch `null` matches the meet's copy is its answer, as the
+            // `oneOf` counts after the meet read it ([`Self::collapse_met_union`]).
+            let mut stated_nothing_took_null = false;
             if sibling.is_none()
                 && self.unmerged_union.as_ref() == Some(&schema.provenance)
                 && self.unmerged_union_meets_null
-                && self.branch_leaves_null_undecided(member, ty)
+                && self.branch_takes_conjunct_null(member, ty)
             {
-                ty.nullable = true;
-                took_conjunct_null = true;
+                stated_nothing_took_null = !self.branch_leaves_null_undecided(member, ty);
+                if stated_nothing_took_null && mode == UnionMode::OneOf {
+                    stated_nothing_nulls += 1;
+                    null_from_conjunct = true;
+                } else {
+                    ty.nullable = true;
+                    took_conjunct_null = true;
+                }
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
             // sibling meet so the other sibling keywords can still take it away, and is then
@@ -2565,12 +2601,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if sibling.is_some_and(|sibling| {
                 !sibling.speaks_about_null && matches!(sibling.refiner, Refiner::Scoped(_))
             }) && union_branch_admits_null(schema)
-                && (self.branch_leaves_null_undecided(member, ty)
-                    || (!ty.nullable
-                        && self
-                            .graph
-                            .get(ty.id)
-                            .is_some_and(|def| matches!(def.kind, TypeKind::Any))))
+                && self.branch_takes_conjunct_null(member, ty)
             {
                 ty.nullable = true;
                 took_conjunct_null = true;
@@ -2646,6 +2677,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 name_hint = format!("{base_hint}{disambiguator}");
                 disambiguator += 1;
             }
+            if stated_nothing_took_null {
+                stated_nothing_hints.push(name_hint.clone());
+            }
             variants.push(UnionVariant { name_hint, ty });
             ref_names.push(ref_name);
             variant_members.push(index);
@@ -2682,10 +2716,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // them. That meet removes `null` from a typed branch only; an untyped branch it gives
         // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
         // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
-        // (#586): elsewhere it stays the variant `null` decodes to, as it always has.
+        // (#586): elsewhere it stays the variant `null` decodes to, as it always has. A branch that
+        // states nothing is counted where it took `null` from the conjunct (#592), and the meet's
+        // copy of that `null` is cleared where the count puts it in two branches, or where an
+        // `anyOf` hoisted it.
         let null_variants = if null_from_conjunct { null_variants } else { 0 };
-        if mode == UnionMode::OneOf && null_members + nullable_variants + null_variants > 1 {
+        let null_twice = mode == UnionMode::OneOf
+            && null_members + nullable_variants + null_variants + stated_nothing_nulls > 1;
+        if null_twice {
             nullable = false;
+        }
+        if !stated_nothing_hints.is_empty() && (mode == UnionMode::AnyOf || null_twice) {
+            self.stated_nothing_took_null = Some((schema.provenance.clone(), stated_nothing_hints));
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same
@@ -4365,6 +4407,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && !self.all_of_decides_null(member, 0)
     }
 
+    /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
+    /// union is met with admits it: an untyped object ([`Self::branch_leaves_null_undecided`]), or
+    /// a branch that states nothing and lowers to `Value` (`true`, `{}`), which the meet otherwise
+    /// leaves as it is (#588, #592). Either is then counted as a branch `null` matches.
+    fn branch_takes_conjunct_null(&self, member: &SchemaOr, ty: Ty) -> bool {
+        self.branch_leaves_null_undecided(member, ty)
+            || (!ty.nullable
+                && self
+                    .graph
+                    .get(ty.id)
+                    .is_some_and(|def| matches!(def.kind, TypeKind::Any)))
+    }
+
     /// Whether `member`, a union branch lowered to `ty`, takes the `null` its enclosing `type`
     /// array permits (#574): its own keywords leave `null` undecided, so `null` matches it
     /// wherever the union's other sibling keywords admit it. That is a branch lowering to `Value`,
@@ -4535,6 +4590,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.unmerged_union_meets_null = enclosing_meets_null;
         let untyped_beside_null_member =
             self.untyped_beside_null_member.take() == Some(union.provenance.clone());
+        let stated_nothing_took_null = self.take_stated_nothing_took_null(&union.provenance);
         let lowered = lowered?;
         let mark = self.graph_mark();
         let mut meet = lowered;
@@ -4542,7 +4598,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Ok(met) = self.intersect_types(composed, meet, &meet_hint) else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
-            meet = met;
+            meet = self.clear_counted_null(met, composed, &stated_nothing_took_null, &meet_hint);
         }
         // Collapsed before the refiners, which meet each branch apart and so would give branches
         // the composition left as one type distinct definitions of the same shape: the refiners
@@ -6684,6 +6740,54 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             None => (met, false),
         }
+    }
+
+    /// The variant hints [`Self::stated_nothing_took_null`] holds for the union lowered at `at`,
+    /// taken so an enclosing meet does not read them; empty for any other union.
+    fn take_stated_nothing_took_null(&mut self, at: &Provenance) -> Vec<String> {
+        match self.stated_nothing_took_null.take() {
+            Some((provenance, hints)) if provenance == *at => hints,
+            _ => Vec::new(),
+        }
+    }
+
+    /// `met`, the meet of a union held back for it ([`Self::unmerged_union`]), with the `null` the
+    /// meet handed again to the branches named by `hints` cleared (#592). Each is a branch that
+    /// states nothing and lowers to `Value`, whose `null` was settled before the meet
+    /// ([`Self::stated_nothing_took_null`]); `Value` is the identity of the meet, so the meet gave
+    /// it the conjunct's `null` a second time, which would leave an `anyOf` variant accepting the
+    /// `null` its union already holds, and which the `oneOf` counts after the meet
+    /// ([`Self::collapse_met_union`]) would read as `null` matching that branch only. The meet's
+    /// variants are the held-back union's only where `conjunct`, what it was met with, is no union
+    /// itself; otherwise, or where `met` is no union or none of its named variants accepts `null`,
+    /// `met` is returned as it is.
+    fn clear_counted_null(&mut self, met: Ty, conjunct: Ty, hints: &[String], hint: &str) -> Ty {
+        if hints.is_empty()
+            || matches!(
+                self.graph.get(conjunct.id).map(|def| &def.kind),
+                Some(TypeKind::Union(_))
+            )
+        {
+            return met;
+        }
+        let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) else {
+            return met;
+        };
+        let counted =
+            |variant: &UnionVariant| variant.ty.nullable && hints.contains(&variant.name_hint);
+        if !union.variants.iter().any(counted) {
+            return met;
+        }
+        let mut union = union.clone();
+        for variant in &mut union.variants {
+            if hints.contains(&variant.name_hint) {
+                variant.ty.nullable = false;
+            }
+        }
+        let mut ty = self.insert_type(hint, TypeKind::Union(union), Docs::default(), None);
+        ty.nullable = met.nullable;
+        ty.boxed = met.boxed;
+        ty
     }
 
     /// `met`, a `oneOf` meet whose variants all stay distinct, with `null` made invalid where two

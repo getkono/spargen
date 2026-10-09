@@ -3882,7 +3882,11 @@ components:
 /// `null` too (#563), so `null` is in two branches and fails exactly-one; a `const: null` branch,
 /// whose exact-`null` variant is not a nullable `Ty`, is counted as one of them. The
 /// `$ref`-sibling spellings denied `null` in the `anyOf` rows, and the inline spellings admitted
-/// it in the `oneOf` row with the nullable object branch.
+/// it in the `oneOf` row with the nullable object branch. A branch that states nothing (`true`,
+/// `{}`) in place of the untyped one gets the same answers (#592): the `$ref` and `allOf`
+/// spellings did not count it as taking `null` from the conjunct the union is met with, so an
+/// `anyOf` beside `const: null` denied `null` there, and a `oneOf` beside a nullable typed branch
+/// counted `null` in one branch alone and admitted it.
 #[test]
 fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings() {
     let u = "$ref: '#/components/schemas/U'";
@@ -3896,34 +3900,23 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
             "{ const: null }",
             "{ type: [string, 'null'] }",
         ] {
-            let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
             let admits = keyword == "anyOf";
-            rows.extend(
-                [
-                    format!("{{ {u}, {keyword}: {branches} }}"),
-                    format!("{{ {u}, required: [u], {keyword}: {branches} }}"),
-                    format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
-                    format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
-                    format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
-                    format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
-                    format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
-                    format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
-                    format!("{{ required: [u], {keyword}: {branches} }}"),
-                ]
-                .into_iter()
-                .map(|site| (site, admits)),
-            );
-            // A branch that states nothing (`true`, `{}`) in place of the untyped one takes
-            // `null` from the same untyped sibling keywords (#588), so the answers stand. Pinned
-            // in the inline-sibling spellings alone: the `$ref` and `allOf` spellings of these
-            // rows do not agree yet (#592).
-            for nothing in ["true", "{}"] {
-                let branches = format!("[ {typed}, {nothing} ]");
+            // A branch that states nothing (`true`, `{}`) in place of the untyped one accepts
+            // `null` wherever the untyped one does (#588, #592), so the answers stand in every
+            // spelling.
+            for other in ["{ properties: { b: { type: string } } }", "true", "{}"] {
+                let branches = format!("[ {typed}, {other} ]");
                 rows.extend(
                     [
+                        format!("{{ {u}, {keyword}: {branches} }}"),
+                        format!("{{ {u}, required: [u], {keyword}: {branches} }}"),
+                        format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                        format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
                         format!(
                             "{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
                         ),
+                        format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                        format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
                         format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
                         format!("{{ required: [u], {keyword}: {branches} }}"),
                     ]
@@ -3975,6 +3968,114 @@ components:
             let validity = if admits { "valid" } else { "invalid" };
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #592: a union branch that states nothing (`true`, `{}`), met with a conjunct that admits
+/// `null` (the nullable object `NB`) through a `$ref` sibling or an `allOf`, takes that `null`
+/// once. `Value` is the identity of the meet, so the meet hands the branch the conjunct's `null`
+/// after the union has already counted it: an `anyOf` keeps it on the union alone, so the
+/// position is `Option` and no variant is, and a `oneOf` whose `null` another branch also matches
+/// (`type: 'null'`) keeps it nowhere. A `oneOf` whose only branch `null` matches is that branch
+/// keeps it in that variant (`a_ref_sibling_one_of_whose_branches_differ_only_in_nullability_collapses`).
+/// A union the meet narrows to the branch alone, beside a `type: string` branch the object
+/// excludes, keeps the `anyOf`'s `null` on the position.
+#[test]
+fn a_stated_nothing_branch_met_with_a_nullable_conjunct_takes_its_null_once() {
+    let nb = "$ref: '#/components/schemas/NB'";
+    let c = "{ properties: { c: { type: string } } }";
+    let rows = [
+        (
+            format!("{{ {nb}, required: [a], anyOf: [ true, {c} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ {nb}, required: [a], anyOf: [ {{}}, {c} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }} ], anyOf: [ true, {c} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }}, {{ anyOf: [ true, {c} ] }} ] }}"),
+            true,
+        ),
+        (format!("{{ {nb}, anyOf: [ true, {c} ] }}"), true),
+        (
+            format!("{{ {nb}, required: [a], oneOf: [ {{ type: 'null' }}, true, {c} ] }}"),
+            false,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }} ], oneOf: [ {{ type: 'null' }}, true, {c} ] }}"),
+            false,
+        ),
+        (
+            format!("{{ {nb}, anyOf: [ {{}}, {{ type: string }} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }} ], anyOf: [ true, {{ type: string }} ] }}"),
+            true,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (site, admits) in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+        let union = pick
+            .strip_prefix("Option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(&pick);
+        let nullable_variants: Vec<String> = enum_variants(&types, union)
+            .into_iter()
+            .filter(|variant| variant.contains("(Option<"))
+            .collect();
+        if !nullable_variants.is_empty() {
+            mismatches.push(format!(
+                "{site}: `null` is the position's alone, but variants accept it: \
+                 {nullable_variants:?}"
             ));
         }
     }
