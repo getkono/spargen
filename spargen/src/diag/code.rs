@@ -508,9 +508,10 @@ mod tests {
     ///
     /// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten
     /// to say the opposite of what the generator does keeps every assertion green, so the prose is
-    /// reviewed by hand, as `docs/support-matrix.md` itself says. Where an `explain()` body is
-    /// pinned (see its rustdoc), the matrix row defers to `spargen explain` rather than restating
-    /// the body in words no test compares with it; the clauses `E023`'s row does quote are held
+    /// reviewed by hand, as `docs/support-matrix.md` itself says. A matrix cell names its
+    /// constructs and defers the cases reaching a code to `spargen explain`, the one copy of that
+    /// list, rather than restating an `explain()` body in words no test compares with it; the
+    /// clauses `E023`'s row does quote are held
     /// verbatim by `the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`.
     #[test]
     fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
