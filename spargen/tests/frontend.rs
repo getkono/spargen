@@ -3685,8 +3685,9 @@ fn a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided
             ),
         ] {
             let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
-            // The nullable control is pinned in the `anyOf` `allOf` spellings only: the others
-            // disagree among themselves already, which this change leaves alone.
+            // The nullable control is pinned in the `anyOf` `allOf` spellings only: every
+            // spelling of the nullable rows is pinned by
+            // `a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings`.
             if admits && keyword == "oneOf" {
                 continue;
             }
@@ -3739,6 +3740,91 @@ components:
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
         if pick.starts_with("Option<") != admits {
             let validity = if admits { "valid" } else { "undecided" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #586: a union of one typed branch that admits `null` (`type: [object, 'null']` or
+/// `type: 'null'`) beside an untyped object branch, met with the untyped object `U`, gets one
+/// answer per row across all six spellings: a `$ref` to `U` with the union as its sibling, `U` as
+/// an `allOf` member beside the union or with the union as a second member, and the same three
+/// with `U`'s body written inline, plus the `$ref` spelling with an untyped `required` beside the
+/// union, which meets it through the same target. `U` decides nothing about `null`, so an `anyOf`
+/// admits it through the typed branch. A `oneOf` denies it: the untyped branch beside the typed
+/// one is counted as accepting `null` too (#563), so `null` is in two branches and fails
+/// exactly-one. The `$ref`-sibling spellings denied `null` in the `anyOf` rows, and the inline
+/// spellings admitted it in the `oneOf` row with the nullable object branch.
+#[test]
+fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings() {
+    let u = "$ref: '#/components/schemas/U'";
+    let c = "{ properties: { u: { type: string } } }";
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        for typed in [
+            "{ type: [object, 'null'], properties: { a: { type: string } } }",
+            "{ type: 'null' }",
+        ] {
+            let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
+            let admits = keyword == "anyOf";
+            rows.extend(
+                [
+                    format!("{{ {u}, {keyword}: {branches} }}"),
+                    format!("{{ {u}, required: [u], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
+                    format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+                ]
+                .into_iter()
+                .map(|site| (site, admits)),
+            );
+        }
+    }
+    let mut mismatches = Vec::new();
+    for (site, admits) in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    U: {{ properties: {{ u: {{ type: string }} }} }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{site}, via {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "invalid" };
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is {validity} here"
             ));

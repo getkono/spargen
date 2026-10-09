@@ -1845,6 +1845,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 referenced
             };
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            // Beside a union sibling and no `type`, the untyped target leaves `null` to the
+            // union, as the same target written as an `allOf` member beside it does
+            // ([`undecided_admits_null`], #586): where a branch admits `null` itself
+            // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
+            // union's answer.
+            let referenced = if has_union_sibling
+                && schema.types.types.is_empty()
+                && !referenced.nullable
+                && matches!(
+                    self.graph.get(referenced.id).map(|def| &def.kind),
+                    Some(TypeKind::Struct(_))
+                )
+                && !self.ref_target_decides_null(reference, &schema.provenance)
+                && union_branch_admits_null(schema)
+            {
+                Ty {
+                    nullable: true,
+                    ..referenced
+                }
+            } else {
+                referenced
+            };
             if has_union_sibling {
                 let (keywords, union) = split_union_sibling(&sibling);
                 if schema_has_shape_constraint(&keywords) {
@@ -2525,6 +2547,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // counted as a branch `null` matches. Without a sibling to meet (a multi-type array
             // dropped for lowering) nothing else would give it the array's `null`.
             if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
+                ty.nullable = true;
+            }
+            // Untyped sibling keywords are a conjunct that leaves `null` to the union, as an
+            // untyped `allOf` member beside it does: they admit `null` where a branch admits it
+            // itself ([`union_branch_admits_null`]), and an untyped object branch then takes it
+            // from the meet, as it does in that spelling (#586).
+            if sibling.is_some_and(|sibling| {
+                !sibling.speaks_about_null && matches!(sibling.refiner, Refiner::Scoped(_))
+            }) && union_branch_admits_null(schema)
+                && self.branch_leaves_null_undecided(member, ty)
+            {
                 ty.nullable = true;
             }
             if let Some(sibling) = sibling {
@@ -4448,9 +4481,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
+        // With no composition, only untyped refiners meet the union: they leave `null` to it, as
+        // an untyped composition does ([`undecided_admits_null`]), so they admit it where a branch
+        // admits it itself ([`union_branch_admits_null`]), and its untyped branches take it there
+        // (#586).
         let enclosing_meets_null = std::mem::replace(
             &mut self.unmerged_union_meets_null,
-            composed.is_some_and(|composed| composed.nullable),
+            composed.map_or_else(
+                || union_branch_admits_null(union),
+                |composed| composed.nullable,
+            ),
         );
         let union_mark = self.graph_mark();
         let lowered = self.lower_schema(union, union_hint);
@@ -11199,6 +11239,27 @@ fn undecided_admits_null(
         composed.nullable = true;
     }
     composed
+}
+
+/// Whether a branch of `union` admits `null` by its own keywords: one with no `$ref`, `allOf` or
+/// union of its own whose stated `type`, `enum` or `const` admits it, such as
+/// `type: [object, 'null']` or `type: 'null'` (#586). An untyped conjunct leaves `null` to the
+/// union, so where such a branch admits it the conjunct does too, as [`undecided_admits_null`]
+/// makes an untyped `allOf` composition admit it: the `$ref`-sibling spelling's untyped target
+/// and the inline spellings' untyped refiners then admit `null`, and an untyped object branch
+/// takes it from the meet as it does in the `allOf` spellings. The `true` schema states nothing,
+/// and a branch whose `null` lies behind a `$ref` or a composition is not read here.
+fn union_branch_admits_null(union: &Schema) -> bool {
+    union.one_of.iter().chain(&union.any_of).any(|branch| {
+        matches!(branch, SchemaOr::Schema(branch)
+            if branch.reference.is_none()
+                && branch.all_of.is_empty()
+                && !schema_has_union(branch)
+                && (stated_nullability(branch).is_some()
+                    || branch.enum_values.is_some()
+                    || branch.const_value.is_some())
+                && own_keywords_admit_null(branch))
+    })
 }
 
 /// Whether a union branch denies `null` by its own keywords alone: `false`, or a branch with no
