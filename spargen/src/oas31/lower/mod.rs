@@ -47,7 +47,7 @@ use crate::name::synth_operation_id;
 
 use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema, SchemaOr};
 
-use combine::Contribution;
+use combine::{Gathering, RecordedContribution};
 use defaults::retype_field_defaults;
 use reference::resolve_path_item;
 use security::{
@@ -224,6 +224,7 @@ fn lower_pass(
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
+        gatherings: Vec::new(),
         target_decides_null_memo: RefCell::new(HashMap::new()),
         resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
         settled,
@@ -782,7 +783,12 @@ struct LowerCtx<'a, 'doc> {
     /// A contribution is recorded only once its expansion succeeds; one that failed re-expands, and
     /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
     /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
-    resolved_contributions: HashMap<String, Vec<Contribution>>,
+    ///
+    /// Each recorded contribution carries the nested bundle target it came from (`None`: the
+    /// target's own), so a replay adds each target's contribution to a composition once, however
+    /// many paths reach it ([`Self::gatherings`]). Replaying every copy doubled a target's record
+    /// at each level of a branching graph, which the memo alone left exponential (#616).
+    resolved_contributions: HashMap<String, Vec<RecordedContribution>>,
     /// The bundle-`$ref` `allOf` member targets being expanded right now, outermost first, each
     /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`
     /// and `allOf` rather than lowered to a reserved type, so nothing else notices when that
@@ -792,6 +798,12 @@ struct LowerCtx<'a, 'doc> {
     /// reservation, and a target reached through one sits on the stack of the type it was
     /// reached from only.
     resolved_member_stack: Vec<(String, bool)>,
+    /// One [`Gathering`] per composition being gathered right now, innermost last: each `allOf`
+    /// lowering opens one, and so does each bundle-`$ref` target expansion
+    /// [`Self::gather_ref_target`] records, so the record does not depend on the use that first
+    /// reached it. `allOf` is idempotent under a repeated conjunct, so a bundle target whose
+    /// contribution the innermost gathering already holds adds nothing more to it.
+    gatherings: Vec<Gathering>,
     /// [`Self::ref_target_decides_null_within`]'s answer for each `$ref` target `allOf` body it
     /// has read, keyed by the body's own `file#pointer` ([`resolved_identity`]). That read and
     /// [`Self::all_of_decides_null`] call each other through every `$ref` an `allOf` names, so

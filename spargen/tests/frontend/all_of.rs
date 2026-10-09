@@ -544,6 +544,83 @@ components:
     }
 }
 
+/// A bundle-`$ref` `allOf` member is expanded in place, once per target, and each target counts
+/// once per composition however many paths reach it (#616). `D<i>` is `allOf: [$ref D<i+1>, $ref
+/// D<i+1>]` under `#/x-defs`, outside `#/components`, so its contribution is flattened rather than
+/// shared as a type; replaying every recorded copy doubled the contribution at each level, and
+/// generation exhausted memory near depth 22. `E<i>` reaches `E<i+1>` through two *distinct*
+/// targets, `A<i+1>` and `B<i+1>`, so it doubles even when no target is named twice in one
+/// `allOf`, unless what a recorded expansion holds of each nested target is replayed once. The
+/// typed leaves still decide the merge: their fields, `required`, and types survive.
+#[test]
+fn a_branching_bundle_all_of_graph_contributes_each_target_once() {
+    const DEPTH: usize = 40;
+    let mut defs = String::new();
+    for level in 0..DEPTH {
+        let next = level + 1;
+        defs.push_str(&format!(
+            "  D{level}: {{ allOf: [{{ $ref: '#/x-defs/D{next}' }}, {{ $ref: '#/x-defs/D{next}' }}] }}\n\
+             \x20 E{level}: {{ allOf: [{{ $ref: '#/x-defs/A{next}' }}, {{ $ref: '#/x-defs/B{next}' }}] }}\n\
+             \x20 A{next}: {{ allOf: [{{ $ref: '#/x-defs/E{next}' }}] }}\n\
+             \x20 B{next}: {{ allOf: [{{ $ref: '#/x-defs/E{next}' }}, {{ type: object }}] }}\n"
+        ));
+    }
+    defs.push_str(&format!(
+        "  D{DEPTH}: {{ type: object, required: [a], properties: {{ a: {{ type: string }}, b: {{ type: integer }} }} }}\n\
+         \x20 E{DEPTH}: {{ type: object, required: [e], properties: {{ e: {{ type: string }} }} }}\n"
+    ));
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [doubled, diamond]
+      properties:
+        doubled: {{ allOf: [{{ $ref: '#/x-defs/D0' }}, {{ $ref: '#/x-defs/D0' }}] }}
+        diamond: {{ allOf: [{{ $ref: '#/x-defs/E0' }}, {{ $ref: '#/x-defs/A1' }}] }}
+x-defs:
+{defs}"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    let types = types_module(&code);
+    for (field, required, alias) in [
+        ("pub a:", true, "String"),
+        ("pub b:", false, "i64"),
+        ("pub e:", true, "String"),
+    ] {
+        let ty = field_type(&types, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
+        let named = match ty.strip_prefix("Option<") {
+            Some(inner) => inner.trim_end_matches('>'),
+            None => ty.as_str(),
+        };
+        assert_eq!(
+            ty.starts_with("Option<"),
+            !required,
+            "`{field}` is `{ty}`: {code}"
+        );
+        assert!(
+            types.contains(&format!("pub type {named} = {alias};")),
+            "`{field}` is `{ty}`, not `{alias}`: {code}"
+        );
+    }
+}
+
 /// `allOf: [{$ref: T}, {oneOf/anyOf: […]}]` describes exactly the instances `{$ref: T,
 /// oneOf/anyOf: […]}` does, and so does the union written beside the `allOf`: all three are one
 /// conjunction, and must agree (#463). The `allOf`-member spelling used to read the union as a

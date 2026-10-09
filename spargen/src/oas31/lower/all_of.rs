@@ -43,7 +43,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Struct`]: crate::ir::Struct
     pub(super) fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut contributions = Vec::new();
-        self.gather_all_of(schema, hint, &mut contributions)?;
+        self.in_composition(|ctx| ctx.gather_all_of(schema, hint, &mut contributions))?;
         self.combine_all_of(schema, hint, &contributions)
     }
 
@@ -87,7 +87,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let composition_hint = format!("{hint}Composition");
         let mut contributions = Vec::new();
-        self.gather_all_of(&composition, &composition_hint, &mut contributions)?;
+        self.in_composition(|ctx| {
+            ctx.gather_all_of(&composition, &composition_hint, &mut contributions)
+        })?;
         let nested = take_refiners(&mut contributions);
         if contributions.is_empty() && scoped.is_empty() && nested.is_empty() {
             return self.lower_union(&union, hint);
@@ -157,21 +159,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut contributions = Vec::new();
         // Where the union's contribution goes when it is combined as a scalar member below.
         let mut union_slot = 0;
-        for (index, member) in schema.all_of.iter().enumerate() {
-            if index == union_index {
-                union_slot = contributions.len();
-                continue;
+        self.in_composition(|ctx| {
+            for (index, member) in schema.all_of.iter().enumerate() {
+                if index == union_index {
+                    union_slot = contributions.len();
+                    continue;
+                }
+                if matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
+                {
+                    scoped.push(member.clone());
+                    continue;
+                }
+                ctx.gather_member(member, &format!("{hint}Member{index}"), &mut contributions)?;
             }
-            if matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
-            {
-                scoped.push(member.clone());
-                continue;
-            }
-            self.gather_member(member, &format!("{hint}Member{index}"), &mut contributions)?;
-        }
-        let mut composition = schema.clone();
-        composition.all_of.clear();
-        self.gather_all_of(&composition, hint, &mut contributions)?;
+            let mut composition = schema.clone();
+            composition.all_of.clear();
+            ctx.gather_all_of(&composition, hint, &mut contributions)
+        })?;
         // With no object member, the union meets the other members as the scalar it is, in its
         // place among them, exactly as an `allOf` of scalars always met one: the scalar meet
         // already intersects a union branch by branch, and it keeps the narrowing `open_narrowing`
