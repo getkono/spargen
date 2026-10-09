@@ -9928,11 +9928,6 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
     )
 }
 
-/// Lower one Server Object, parsing its URL template and validating its variables.
-///
-/// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
-/// actually sent when the caller supplies no alternative, so it changes the wire and must be
-/// modeled rather than documented.
 /// Resolve the base-URL override an Operation or Path Item Object declares, rendered with every
 /// server variable at its declared default.
 ///
@@ -9976,6 +9971,11 @@ fn render_server_url(server: &Server) -> String {
     url
 }
 
+/// Lower one Server Object, parsing its URL template and validating its variables.
+///
+/// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
+/// actually sent when the caller supplies no alternative, so it changes the wire and must be
+/// modeled rather than documented.
 fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Server> {
     let segments = parse_url_template(&server.url);
     let mut seen: HashSet<&str> = HashSet::new();
@@ -11310,8 +11310,6 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
     }
 }
 
-/// Decide whether a classified `default` is representable against the field's lowered type: a
-/// `Primitive` of the matching scalar kind, or a `ScalarEnum` value that is one of its variants.
 /// The `deprecated`/`readOnly`/`writeOnly` annotations of one *property* subschema.
 ///
 /// These are per-property annotations. Reading them from the enclosing object would both ignore a
@@ -11325,6 +11323,8 @@ fn field_flags(child: &SchemaOr) -> (bool, bool, bool) {
     }
 }
 
+/// Decide whether a classified `default` is representable against the field's lowered type: a
+/// `Primitive` of the matching scalar kind, or a `ScalarEnum` value that is one of its variants.
 fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<DefaultValue> {
     let kind = kind?;
     match (raw, kind) {
@@ -11443,10 +11443,6 @@ fn append_doc_note(docs: &mut Docs, note: String) {
     }
 }
 
-/// Whether a schema accepts `null`: a `"null"` member of its type array, or a `null` `enum` member
-/// or `const`. Computed at component reserve time so `$ref` consumers wrap the type in `Option`,
-/// and it agrees with the `nullable` that [`LowerCtx::lower_schema`]/[`LowerCtx::lower_enum`]
-/// compute from the same schema.
 /// One `allOf` member's contribution to the merged type: either a set of object fields (with its
 /// `additionalProperties` policy and its own `required` names) to flatten, or a scalar/leaf type.
 /// `Clone` so a bundle-`$ref` member's contribution can be recorded once and replayed at every use
@@ -11916,6 +11912,10 @@ fn member_is_null_only(member: &SchemaOr) -> bool {
         && schema.properties.is_empty()
 }
 
+/// Whether a schema accepts `null`: a `"null"` member of its type array, or a `null` `enum` member
+/// or `const`. Computed at component reserve time so `$ref` consumers wrap the type in `Option`,
+/// and it agrees with the `nullable` that [`LowerCtx::lower_schema`]/[`LowerCtx::lower_enum`]
+/// compute from the same schema.
 fn schema_is_nullable(schema: &Schema) -> bool {
     schema.types.types.contains(&JsonType::Null)
         || schema
