@@ -10,8 +10,9 @@ use crate::oas31::Schema;
 /// True for any `type` (including `null` and `array`), an `enum` or `const`, `contentEncoding`,
 /// `format: binary`, or a `oneOf`/`anyOf` (which the member's own object keywords then refine
 /// rather than turn it into an object). Untyped array applicators (`items`, `prefixItems`) alone
-/// answer `false`: the `allOf` paths beside a union route such a member to the scoped refiners
-/// before this is asked, but a plain `allOf` then reads it as an annotation (#607).
+/// answer `false`: they constrain only arrays, so the `allOf` paths beside a union route such a
+/// member to the scoped refiners before this is asked, and a plain `allOf` reads it as one after
+/// (`Contribution::Refiner`, #607).
 pub(super) fn schema_imposes_scalar(schema: &Schema) -> bool {
     !schema.types.types.is_empty()
         || schema.enum_values.is_some()

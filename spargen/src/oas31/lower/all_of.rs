@@ -4,7 +4,7 @@
 use crate::ir::{Ty, TypeKind};
 use crate::oas31::{Schema, SchemaOr};
 
-use super::combine::{schema_has_union, Contribution};
+use super::combine::{schema_has_union, take_refiners, Contribution};
 use super::nullability::{undecided_admits_null, union_branch_admits_null};
 use super::refiner::implied_applicator_category;
 use super::{LowerCtx, MetUnion, Refiner};
@@ -29,6 +29,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   policies merged by [`Self::merge_additional`], whose irreconcilable pair is `E013`;
     /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
     ///   narrowing, arrays/objects/unions, and exact nullability; no typed intersection → `E013`;
+    ///   a member of untyped `items`/`prefixItems` alone then refines that intersection's arrays
+    ///   (with no scalar member, it establishes the array), and beside object members it
+    ///   constrains nothing (#607);
     /// * an **object/scalar mix** → `E013`.
     ///
     /// Each `E013` returns `None`, as does a member that fails to lower for its own reason.
@@ -85,7 +88,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let composition_hint = format!("{hint}Composition");
         let mut contributions = Vec::new();
         self.gather_all_of(&composition, &composition_hint, &mut contributions)?;
-        if contributions.is_empty() && scoped.is_empty() {
+        let nested = take_refiners(&mut contributions);
+        if contributions.is_empty() && scoped.is_empty() && nested.is_empty() {
             return self.lower_union(&union, hint);
         }
         let composed = if contributions.is_empty() {
@@ -107,7 +111,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 |branch| self.branch_denies_null(branch),
             ))
         };
-        let refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        refiners.extend(
+            nested
+                .iter()
+                .map(|(member, refiner)| (member.as_ref(), *refiner)),
+        );
         self.meet_union_with_all_of(
             schema,
             hint,
@@ -175,6 +184,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             contributions.insert(union_slot, Contribution::Scalar(ty));
             return self.combine_all_of(schema, hint, &contributions);
         }
+        let nested = take_refiners(&mut contributions);
         let composed = if contributions.is_empty() {
             None
         } else {
@@ -189,7 +199,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 |branch| self.branch_denies_null(branch),
             ))
         };
-        let refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
+        refiners.extend(
+            nested
+                .iter()
+                .map(|(member, refiner)| (member.as_ref(), *refiner)),
+        );
         let mut ty = self.meet_union_with_all_of(
             schema,
             hint,
