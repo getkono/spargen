@@ -73,8 +73,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .graph
                 .get(intersection.id)
                 .map(|def| def.kind.clone())?;
-            self.discard_meet_intermediates(mark, &kind);
-            let mut ty = self.insert_schema_type(schema, hint, kind);
+            let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
             return Some(self.with_all_of_nullability(schema, ty));
         }

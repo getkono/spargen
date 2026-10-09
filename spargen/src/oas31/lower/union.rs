@@ -286,8 +286,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The meet's result is re-emitted under this schema's name, so the meet's own inserts
             // (`…Constrained`, and whatever it built on the way) are unused unless `kind` reaches
             // them (#462). Without a sibling nothing was inserted since `mark`.
-            self.discard_meet_intermediates(mark, &kind);
-            let mut ty = self.insert_schema_type(schema, hint, kind);
+            let mut ty = self.reemit_meet(schema, hint, mark, kind);
             // A `null` member beside a member that accepts `null` itself puts `null` in two
             // branches, which fails a `oneOf`'s exactly-one rule (#563), counted after the meet
             // like the multi-member path's variants.

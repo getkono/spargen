@@ -303,8 +303,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The met union is re-emitted under this schema's name, so its own def
         // (`…ReferenceIntersection`) is unused; the branches it met stay where `kind` reaches
         // them (#462).
-        self.discard_meet_intermediates(mark, &kind);
-        let mut ty = self.insert_schema_type(schema, hint, kind);
+        let mut ty = self.reemit_meet(schema, hint, mark, kind);
         ty.nullable = nullable;
         ty.boxed = met.boxed;
         Some(ty)

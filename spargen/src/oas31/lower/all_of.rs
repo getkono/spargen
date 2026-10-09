@@ -417,8 +417,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.warn_untyped_met_variants(schema, meet, spelling);
         }
         let kind = self.graph.get(meet.id)?.kind.clone();
-        self.discard_meet_intermediates(mark, &kind);
-        let mut ty = self.insert_schema_type(schema, hint, kind);
+        let mut ty = self.reemit_meet(schema, hint, mark, kind);
         // The meets gave the untyped member `null` exactly where they kept the `null` member's, so
         // `null` is in two branches or none.
         ty.nullable = meet.nullable && !untyped_beside_null_member;

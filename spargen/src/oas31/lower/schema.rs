@@ -325,8 +325,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      but for the target's nullability",
                 );
             }
-            self.discard_meet_intermediates(mark, &kind);
-            let mut ty = self.insert_schema_type(schema, hint, kind);
+            let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;
             // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
