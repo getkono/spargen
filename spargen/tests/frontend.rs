@@ -3662,6 +3662,10 @@ components:
 /// member, and the same three with `U`'s body written inline. The `allOf` spellings over `U` read
 /// the typed branch as the union deciding `null`, made the composition nullable for it, and
 /// generated `Option<Pick>` where the others generate `Pick`.
+/// A branch that states nothing (`true`, `{}`, annotations alone) leaves `null` undecided as the
+/// untyped branch does (#588): the inline spelling, and the untyped sibling keywords `items` or
+/// `required` alone, met its `Value` with the sibling's object half, took that half's `null` as
+/// the branch's own, and generated `Option<Pick>`.
 /// A typed branch that admits `null` (`type: [object, 'null']`) still decides it in the `anyOf`
 /// `allOf` spellings, which stay `Option`.
 #[test]
@@ -3679,6 +3683,12 @@ fn a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided
             ("false", false),
             ("{ enum: [x, y] }", false),
             ("{ const: x }", false),
+            // A branch that states nothing (#588): the `true` schema, `{}`, and a branch of
+            // annotations alone accept `null` as the untyped branch beside them does, and decide
+            // it no more than it does.
+            ("true", false),
+            ("{}", false),
+            ("{ description: d }", false),
             (
                 "{ type: [object, 'null'], properties: { a: { type: string } } }",
                 true,
@@ -3702,6 +3712,12 @@ fn a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided
                 sites.push(format!(
                     "{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
                 ));
+                // Untyped sibling keywords alone leave `null` to the union as `U` does: an
+                // array-only `items`, and an object-only `required` that `null` satisfies.
+                sites.push(format!(
+                    "{{ items: {{ type: string }}, {keyword}: {branches} }}"
+                ));
+                sites.push(format!("{{ required: [u], {keyword}: {branches} }}"));
             }
             rows.extend(sites.into_iter().map(|site| (site, admits)));
         }
@@ -3792,6 +3808,24 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
                 .into_iter()
                 .map(|site| (site, admits)),
             );
+            // A branch that states nothing (`true`, `{}`) in place of the untyped one takes
+            // `null` from the same untyped sibling keywords (#588), so the answers stand. Pinned
+            // in the inline-sibling spellings alone: the `$ref` and `allOf` spellings of these
+            // rows do not agree yet (#592).
+            for nothing in ["true", "{}"] {
+                let branches = format!("[ {typed}, {nothing} ]");
+                rows.extend(
+                    [
+                        format!(
+                            "{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
+                        ),
+                        format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
+                        format!("{{ required: [u], {keyword}: {branches} }}"),
+                    ]
+                    .into_iter()
+                    .map(|site| (site, admits)),
+                );
+            }
         }
     }
     let mut mismatches = Vec::new();
@@ -3836,6 +3870,100 @@ components:
             let validity = if admits { "valid" } else { "invalid" };
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #588's other spellings of a branch that states nothing, met with an untyped object
+/// composition: a union of that branch alone (`[ true ]`, `[ {} ]`, `[ $ref ]` to a `true`
+/// component), and of that branch beside a typed branch that denies `null` (`type: string`,
+/// `type: integer`). Nothing here decides `null`, so every spelling keeps the non-null struct, as
+/// the `$ref`-sibling spelling over `U` already did. The inline-sibling spellings (`properties`,
+/// `items`, `required`) met the branch's `Value` with the sibling's object half, took that half's
+/// `null` as the branch's own, and generated `Option<Pick>`; so did the inline `allOf`-member
+/// spellings of a union of that branch alone, which collapses to the branch.
+#[test]
+fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null_undecided() {
+    let u = "$ref: '#/components/schemas/U'";
+    let c = "{ properties: { u: { type: string } } }";
+    let t = "{ $ref: '#/components/schemas/T' }";
+    let mut rows: Vec<String> = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        for branches in [
+            "[ true ]".to_owned(),
+            "[ {} ]".to_owned(),
+            format!("[ {t} ]"),
+            "[ { type: string }, true ]".to_owned(),
+            "[ { type: string }, {} ]".to_owned(),
+            "[ { type: integer }, true ]".to_owned(),
+            format!("[ {t}, {{ properties: {{ b: {{ type: string }} }} }} ]"),
+        ] {
+            // The `allOf` spellings over `U` of a `$ref` branch to the `true` component generate
+            // `Option<Pick>`, before this fix as after it: `target_decides_null` counts any `$ref`
+            // branch as deciding `null`. They are left out until that is fixed (#594). The `oneOf`
+            // beside an untyped branch is pinned: `null` is in both branches and fails
+            // exactly-one, so it keeps the non-null struct already.
+            let two_branch_one_of = keyword == "oneOf" && branches != format!("[ {t} ]");
+            if !branches.contains(t) || two_branch_one_of {
+                rows.extend([
+                    format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
+                ]);
+            }
+            rows.extend([
+                format!("{{ {u}, {keyword}: {branches} }}"),
+                format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+                format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
+                format!("{{ required: [u], {keyword}: {branches} }}"),
+            ]);
+        }
+    }
+    let mut mismatches = Vec::new();
+    for site in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    T: true
+    U: {{ properties: {{ u: {{ type: string }} }} }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{site}, via {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") {
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is undecided here"
             ));
         }
     }

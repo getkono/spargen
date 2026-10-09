@@ -2559,11 +2559,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Untyped sibling keywords are a conjunct that leaves `null` to the union, as an
             // untyped `allOf` member beside it does: they admit `null` where a branch admits it
             // itself ([`union_branch_admits_null`]), and an untyped object branch then takes it
-            // from the meet, as it does in that spelling (#586).
+            // from the meet, as it does in that spelling (#586). So does a branch that states
+            // nothing and lowers to `Value` (`true`, `{}`), which the meet otherwise leaves as it
+            // is (#588).
             if sibling.is_some_and(|sibling| {
                 !sibling.speaks_about_null && matches!(sibling.refiner, Refiner::Scoped(_))
             }) && union_branch_admits_null(schema)
-                && self.branch_leaves_null_undecided(member, ty)
+                && (self.branch_leaves_null_undecided(member, ty)
+                    || (!ty.nullable
+                        && self
+                            .graph
+                            .get(ty.id)
+                            .is_some_and(|def| matches!(def.kind, TypeKind::Any))))
             {
                 ty.nullable = true;
                 took_conjunct_null = true;
@@ -3174,7 +3181,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     reach.array = true;
                 }
-                Some(half)
+                // The half's `null` is the sibling not denying it, which refines nothing: `Value`
+                // is the identity of the meet, so the meet would take the half's `null` as the
+                // branch's own. The branch keeps its own answer instead, as an untyped object
+                // branch does against the same half (#588).
+                let mut met = self.intersect_types(branch, half, hint)?;
+                met.nullable = branch.nullable && scoped.admits_null;
+                return Ok(met);
             }
             // A placeholder's body is not known yet, so nothing can be said of its category. The
             // callers refuse a reservation before they get here; this keeps the refusal for one
