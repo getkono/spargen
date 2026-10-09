@@ -5357,9 +5357,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::branch_decides_null`] of a schema node reached `depth` `$ref` steps from the
     /// branch: a `$ref` node decides `null` where its own sibling keywords do or its target does,
-    /// read the same way; any other node is [`target_decides_null`]. A target that cannot be
-    /// read, or a chain past the bound, decides, which keeps the lowered nullability.
+    /// read the same way; any other node is [`target_decides_null`]. A boolean target (a `false`
+    /// or `true` component) is read as the inline boolean branch is: `false` decides, `true` does
+    /// not. A target that cannot be read, or a chain past the bound, decides, which keeps the
+    /// lowered nullability.
     fn ref_schema_decides_null(&self, schema: &Schema, depth: u32) -> bool {
+        if let Some(admits) = schema.boolean {
+            return !admits;
+        }
         let Some(reference) = &schema.reference else {
             return target_decides_null(schema);
         };
@@ -5389,9 +5394,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::branch_denies_null`] of a schema node reached `depth` `$ref` steps from the branch:
     /// a `$ref` node denies `null` where its own sibling keywords do or its target does, read
-    /// the same way; any other node is [`schema_denies_null`]. Lowering already refused a `$ref`
-    /// cycle; the bound only keeps this total.
+    /// the same way; any other node is [`schema_denies_null`]. A boolean target is read as the
+    /// inline boolean branch is ([`denies_null`]): a `$ref` to a `false` component denies `null`,
+    /// so beside an untyped branch it decides nothing, as the inline `false` does, now that
+    /// [`Self::branch_decides_null`] reads that target as deciding (#594). Lowering already
+    /// refused a `$ref` cycle; the bound only keeps this total.
     fn ref_schema_denies_null(&self, schema: &Schema, depth: u32) -> bool {
+        if let Some(admits) = schema.boolean {
+            return !admits;
+        }
         let Some(reference) = &schema.reference else {
             return schema_denies_null(schema);
         };
