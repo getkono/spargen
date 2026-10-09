@@ -3764,6 +3764,107 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// Issue #590: a union of a `$ref` branch to the non-null object `Y` beside an untyped object
+/// branch, met with the untyped object `U`, keeps the non-null struct in all six spellings of the
+/// meet, as the same branch written inline does
+/// (`a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided`): a `$ref` to
+/// `U` with the union as its sibling, `U` as an `allOf` member beside the union or with the union
+/// as a second member, and the same three with `U`'s body written inline. The `allOf` spellings
+/// over `U` read the `$ref` branch as the union deciding `null` without following it to `Y`, made
+/// the composition nullable for it, and generated `Option<Pick>`. The branch reached through the
+/// alias `Z` of `Y`, and a `$ref` to the untyped `U` whose sibling `type: object` denies `null`,
+/// agree with the plain `$ref` to `Y`. A `$ref` branch to the nullable
+/// `N` still decides `null` in the `anyOf` `allOf` spellings, which stay `Option`.
+#[test]
+fn a_union_of_a_ref_branch_to_a_non_null_object_beside_an_untyped_one_keeps_null_undecided() {
+    let u = "$ref: '#/components/schemas/U'";
+    let c = "{ properties: { u: { type: string } } }";
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        // `Y` itself, the alias `Z` of it, and the untyped `U` under a sibling `type: object`,
+        // which denies `null` by the branch's own keyword whatever its target says.
+        for denying in [
+            "{ $ref: '#/components/schemas/Y' }",
+            "{ $ref: '#/components/schemas/Z' }",
+            "{ $ref: '#/components/schemas/U', type: object }",
+        ] {
+            let branches = format!("[ {denying}, {{ properties: {{ b: {{ type: string }} }} }} ]");
+            rows.extend(
+                [
+                    format!("{{ {u}, {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
+                    format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                    format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+                ]
+                .into_iter()
+                .map(|site| (site, false)),
+            );
+        }
+    }
+    // The nullable control: a `$ref` branch whose target admits `null` decides it.
+    let nullable =
+        "[ { $ref: '#/components/schemas/N' }, { properties: { b: { type: string } } } ]";
+    rows.push((
+        format!("{{ allOf: [ {{ {u} }} ], anyOf: {nullable} }}"),
+        true,
+    ));
+    rows.push((
+        format!("{{ allOf: [ {{ {u} }}, {{ anyOf: {nullable} }} ] }}"),
+        true,
+    ));
+    let mut mismatches = Vec::new();
+    for (site, admits) in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    U: {{ properties: {{ u: {{ type: string }} }} }}
+    Y: {{ type: object, properties: {{ y: {{ type: string }} }} }}
+    Z: {{ $ref: '#/components/schemas/Y' }}
+    N: {{ type: [object, 'null'], properties: {{ n: {{ type: string }} }} }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{site}, via {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "undecided" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Issue #586: a union of one typed branch that admits `null` (`type: [object, 'null']`,
 /// `type: 'null'`, `enum: [x, null]`, `const: null` or `type: [string, 'null']`) beside an
 /// untyped object branch, met with the untyped object `U`, gets one answer per row across all six
