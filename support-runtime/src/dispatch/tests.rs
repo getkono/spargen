@@ -161,8 +161,9 @@ fn empty_alternative_marks_security_optional() {
 /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
 /// and succeeds. Without the early return an empty slice falls through the selection loop
 /// without choosing anything, and the call would fail as `MissingCredential` naming no
-/// schemes — the degenerate rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
-/// the call when an operation declares no `security`), but the function is public.
+/// schemes — the degenerate rendering `Display` was made total for. Generated output cannot reach
+/// this (`codegen/dispatch.rs` omits the call when an operation declares no `security`), but the
+/// function is public.
 #[test]
 fn no_requirement_attaches_nothing() {
     let mut core = core();
