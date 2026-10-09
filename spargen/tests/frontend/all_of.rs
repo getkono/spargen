@@ -3062,7 +3062,9 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
 /// target, and the array branch of a multi-type member; they establish the array category where
 /// no other member constrains; and they leave every other category as it is, so beside a string
 /// or an object member they change nothing. Beside a union, a nested member refines the union's
-/// array branch as the same member written directly does, rather than dropping its string branch.
+/// array branch as the same member written directly does, rather than dropping its string branch,
+/// and beside a union member with no array branch it is `W011`, nested or not. A memoised sub-file
+/// target first expanded inside a union branch the meet drops still replays at its next use.
 #[test]
 fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
     /// The right-hand side of `pub type ty = …;`, whitespace removed, which the formatter may have
@@ -3135,6 +3137,25 @@ fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
     assert_check_agrees(&generated, &checked);
     assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
     assert_eq!(element(&code, "Probe", "a sub-file target"), "String");
+
+    // The sub-file target's contribution is memoised where it is first expanded, here inside a
+    // union branch the composition beside it excludes, so the union's unused lowering is elided
+    // after the meet. Its refiner halves stay as prune roots: elided, the replay at `Zpet` met a
+    // missing type and was rejected (`E011`).
+    let root = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+                schemas:\n    Apet:\n      allOf: [ { type: string } ]\n      oneOf: [ { type: \
+                string }, { allOf: [ { type: array }, { $ref: './lib.yaml#/It' } ] } ]\n    \
+                Zpet:\n      allOf: [ { type: array }, { $ref: './lib.yaml#/It' } ]\n";
+    let (generated, checked, code) =
+        generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
+    assert_check_agrees(&generated, &checked);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert!(codes(&generated).is_empty(), "{generated:#?}");
+    assert_eq!(resolve(&code, "Apet"), "String", "{code}");
+    assert_eq!(
+        element(&code, "Zpet", "a replayed sub-file target"),
+        "String"
+    );
 
     // `prefixItems` narrows the array to the tuple it describes.
     let (report, code) = generate_with_code(&with_schemas(
