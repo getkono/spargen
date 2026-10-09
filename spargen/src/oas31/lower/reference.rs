@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::oas31::media::media_essence;
 use crate::oas31::resolve::reject_undeclared_component;
-use crate::oas31::{ParameterObject, PathItem, RefOr, RequestBodyObject, Resolver, ResponseObject};
+use crate::oas31::{
+    ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
+};
 use crate::source::SpannedValue;
 
 use super::LowerCtx;
@@ -17,166 +19,131 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         header: &RefOr<crate::oas31::HeaderObject>,
     ) -> Option<crate::oas31::HeaderObject> {
-        let mut current = header.clone();
-        let mut seen = HashSet::new();
-        loop {
-            match current {
-                RefOr::Item(header) => return Some(header),
-                RefOr::Ref(reference) => {
-                    self.note_reference_docs(&reference);
-                    if !seen.insert(self.hop_identity(&reference)) {
-                        return self.reject_alias_cycle(&reference.provenance, "header");
-                    }
-                    let alias = self
-                        .root_component_name(&reference, "#/components/headers/")
-                        .map(|name| self.document.components.headers.get(name).cloned());
-                    match alias {
-                        Some(Some(target)) => current = target,
-                        Some(None) => {
-                            return self.reject_component_alias(
-                                &reference.provenance,
-                                "header",
-                                &reference.reference,
-                            );
-                        }
-                        // Not a root component alias: a multi-file description may reference a
-                        // whole file, or a sub-file's own components, which resolve through the
-                        // input bundle exactly as a Parameter or Response Object reference already
-                        // does — and may itself be a Reference, followed from the file it is
-                        // written in.
-                        None => {
-                            current = self.follow_bundle_reference(
-                                &reference,
-                                "header",
-                                crate::oas31::deserialize::parse_header_object,
-                            )?;
-                        }
-                    }
-                }
-            }
-        }
+        self.follow_reference_chain(
+            header.clone(),
+            &ReferenceChain {
+                kind: "header",
+                cycle_kind: "header",
+                prefix: "#/components/headers/",
+                split: std::convert::identity,
+                declared: |components, name| components.headers.get(name).cloned(),
+                follow: |ctx, reference| {
+                    ctx.follow_bundle_reference(
+                        reference,
+                        "header",
+                        crate::oas31::deserialize::parse_header_object,
+                    )
+                },
+            },
+        )
     }
 
     pub(super) fn resolve_parameter(
         &mut self,
         parameter: &RefOr<ParameterObject>,
     ) -> Option<ParameterObject> {
-        let mut current = parameter.clone();
-        let mut seen = HashSet::new();
-        loop {
-            match current {
-                RefOr::Item(parameter) => return Some(parameter),
-                RefOr::Ref(reference) => {
-                    self.note_reference_docs(&reference);
-                    if !seen.insert(self.hop_identity(&reference)) {
-                        return self.reject_alias_cycle(&reference.provenance, "parameter");
-                    }
-                    let Some(name) =
-                        self.root_component_name(&reference, "#/components/parameters/")
-                    else {
-                        // Not a root component alias: a multi-file description may reference a
-                        // whole file, or a sub-file's own components, which resolve through the
-                        // input bundle like a schema `$ref` — and may itself be a Reference,
-                        // followed from the file it is written in.
-                        current = self.follow_bundle_reference(
-                            &reference,
-                            "parameter",
-                            crate::oas31::deserialize::parse_parameter,
-                        )?;
-                        continue;
-                    };
-                    let Some(target) = self.document.components.parameters.get(name) else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "parameter",
-                            &reference.reference,
-                        );
-                    };
-                    current = target.clone();
-                }
-            }
-        }
+        self.follow_reference_chain(
+            parameter.clone(),
+            &ReferenceChain {
+                kind: "parameter",
+                cycle_kind: "parameter",
+                prefix: "#/components/parameters/",
+                split: std::convert::identity,
+                declared: |components, name| components.parameters.get(name).cloned(),
+                follow: |ctx, reference| {
+                    ctx.follow_bundle_reference(
+                        reference,
+                        "parameter",
+                        crate::oas31::deserialize::parse_parameter,
+                    )
+                },
+            },
+        )
     }
 
     pub(super) fn resolve_request_body(
         &mut self,
         body: &RefOr<RequestBodyObject>,
     ) -> Option<RequestBodyObject> {
-        let mut current = body.clone();
-        let mut seen = HashSet::new();
-        loop {
-            match current {
-                RefOr::Item(body) => return Some(body),
-                RefOr::Ref(reference) => {
-                    self.note_reference_docs(&reference);
-                    if !seen.insert(self.hop_identity(&reference)) {
-                        return self.reject_alias_cycle(&reference.provenance, "request body");
-                    }
-                    let Some(name) =
-                        self.root_component_name(&reference, "#/components/requestBodies/")
-                    else {
-                        // Not a root component alias: a multi-file description may reference a
-                        // whole file, or a sub-file's own components, which resolve through the
-                        // input bundle like a schema `$ref` — and may itself be a Reference,
-                        // followed from the file it is written in.
-                        current = self.follow_bundle_reference(
-                            &reference,
-                            "request body",
-                            crate::oas31::deserialize::parse_request_body,
-                        )?;
-                        continue;
-                    };
-                    let Some(target) = self.document.components.request_bodies.get(name) else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "request body",
-                            &reference.reference,
-                        );
-                    };
-                    current = target.clone();
-                }
-            }
-        }
+        self.follow_reference_chain(
+            body.clone(),
+            &ReferenceChain {
+                kind: "request body",
+                cycle_kind: "request body",
+                prefix: "#/components/requestBodies/",
+                split: std::convert::identity,
+                declared: |components, name| components.request_bodies.get(name).cloned(),
+                follow: |ctx, reference| {
+                    ctx.follow_bundle_reference(
+                        reference,
+                        "request body",
+                        crate::oas31::deserialize::parse_request_body,
+                    )
+                },
+            },
+        )
     }
 
     pub(super) fn resolve_response(
         &mut self,
         response: &RefOr<ResponseObject>,
     ) -> Option<ResponseObject> {
-        let mut current = response.clone();
+        self.follow_reference_chain(
+            response.clone(),
+            &ReferenceChain {
+                kind: "response",
+                cycle_kind: "response",
+                prefix: "#/components/responses/",
+                split: std::convert::identity,
+                declared: |components, name| components.responses.get(name).cloned(),
+                follow: |ctx, reference| {
+                    ctx.follow_bundle_reference(
+                        reference,
+                        "response",
+                        crate::oas31::deserialize::parse_response,
+                    )
+                },
+            },
+        )
+    }
+
+    /// Follow a Reference Object chain from `start` to the object it ends at, hop by hop.
+    ///
+    /// Each hop documents its reference site's `summary`/`description` (`W011`), then refuses a
+    /// target it has already followed (`E004`, keyed on the `(file, pointer)` each hop resolves
+    /// to, so `#/components/<kind>/A` written in two files is two hops), then reads the root's own
+    /// `#/components/<kind>/<name>` declaration for a reference written in the root. Anything else
+    /// — a whole file, a pointer into one, or a sub-file's own components — resolves through the
+    /// input bundle from the file the reference is written in, and may itself be a Reference.
+    fn follow_reference_chain<S, T>(
+        &mut self,
+        start: S,
+        chain: &ReferenceChain<S, T>,
+    ) -> Option<T> {
+        let mut current = start;
         let mut seen = HashSet::new();
         loop {
-            match current {
-                RefOr::Item(response) => return Some(response),
-                RefOr::Ref(reference) => {
-                    self.note_reference_docs(&reference);
-                    if !seen.insert(self.hop_identity(&reference)) {
-                        return self.reject_alias_cycle(&reference.provenance, "response");
-                    }
-                    let Some(name) =
-                        self.root_component_name(&reference, "#/components/responses/")
-                    else {
-                        // Not a root component alias: a multi-file description may reference a
-                        // whole file, or a sub-file's own components, which resolve through the
-                        // input bundle like a schema `$ref` — and may itself be a Reference,
-                        // followed from the file it is written in.
-                        current = self.follow_bundle_reference(
-                            &reference,
-                            "response",
-                            crate::oas31::deserialize::parse_response,
-                        )?;
-                        continue;
-                    };
-                    let Some(target) = self.document.components.responses.get(name) else {
+            let reference = match (chain.split)(current) {
+                RefOr::Item(object) => return Some(object),
+                RefOr::Ref(reference) => reference,
+            };
+            self.note_reference_docs(&reference);
+            if !seen.insert(self.hop_identity(&reference)) {
+                return self.reject_alias_cycle(&reference.provenance, chain.cycle_kind);
+            }
+            current = match self.root_component_name(&reference, chain.prefix) {
+                Some(name) => match (chain.declared)(&self.document.components, name) {
+                    Some(target) => target,
+                    None => {
                         return self.reject_component_alias(
                             &reference.provenance,
-                            "response",
+                            chain.kind,
                             &reference.reference,
                         );
-                    };
-                    current = target.clone();
-                }
-            }
+                    }
+                },
+                None => (chain.follow)(self, &reference)?,
+            };
         }
     }
 
@@ -355,58 +322,44 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         object: &crate::oas31::MediaTypeObject,
         media_name: &str,
     ) -> Option<crate::oas31::MediaTypeObject> {
-        let mut current = object.clone();
-        let mut seen = HashSet::new();
-        while let Some(reference) = current.reference.clone() {
-            // A Reference Object's own `summary`/`description` documents this use site, which one
-            // generated item shared across every use cannot express — the same disposition the
-            // Parameter, Response, and Request Body paths already give it.
-            self.note_reference_docs(&reference);
-            // Keyed on the target each hop resolves to, as the Parameter, Response, Request Body
-            // and Header chains are: `#/components/mediaTypes/A` written in two files is two hops.
-            if !seen.insert(self.hop_identity(&reference)) {
-                return self.reject_alias_cycle(&reference.provenance, "media type");
-            }
-            let Some(name) = self.root_component_name(&reference, "#/components/mediaTypes/")
-            else {
-                // Not a root component alias: a multi-file description may reference a whole
-                // file, or a sub-file's own components, which resolve through the input bundle
-                // exactly as a Parameter or Response Object reference already does.
-                let from = self.resolver.written_in(&reference.provenance);
-                let resolved = self.resolver.resolve_component(
-                    &reference.reference,
-                    from,
-                    |value, pointer, diags| {
-                        Some(crate::oas31::deserialize::parse_media_type(
-                            value, pointer, diags,
-                        ))
-                    },
-                    self.diags,
-                );
-                match resolved {
-                    Ok(resolved) => {
-                        current = resolved;
-                        continue;
-                    }
-                    Err(miss) => {
-                        return self.reject_unfollowable_reference(
+        // A Media Type Object is not `Reference | Object` but an object that may carry a
+        // `$ref` of its own (OpenAPI 3.2), so it ends the chain when it carries none, and a hop
+        // through the bundle reads the object rather than another Reference.
+        let current = self.follow_reference_chain(
+            object.clone(),
+            &ReferenceChain {
+                kind: "Media Type Object",
+                cycle_kind: "media type",
+                prefix: "#/components/mediaTypes/",
+                split: |media| match media.reference.clone() {
+                    Some(reference) => RefOr::Ref(reference),
+                    None => RefOr::Item(media),
+                },
+                declared: |components, name| components.media_types.get(name).cloned(),
+                follow: |ctx, reference| {
+                    let from = ctx.resolver.written_in(&reference.provenance);
+                    let resolved = ctx.resolver.resolve_component(
+                        &reference.reference,
+                        from,
+                        |value, pointer, diags| {
+                            Some(crate::oas31::deserialize::parse_media_type(
+                                value, pointer, diags,
+                            ))
+                        },
+                        ctx.diags,
+                    );
+                    match resolved {
+                        Ok(resolved) => Some(resolved),
+                        Err(miss) => ctx.reject_unfollowable_reference(
                             &reference.provenance,
                             "Media Type Object",
                             &reference.reference,
                             miss,
-                        );
+                        ),
                     }
-                }
-            };
-            let Some(target) = self.document.components.media_types.get(name) else {
-                return self.reject_component_alias(
-                    &reference.provenance,
-                    "Media Type Object",
-                    &reference.reference,
-                );
-            };
-            current = target.clone();
-        }
+                },
+            },
+        )?;
         // Encoding is scoped to form and multipart content. The specification says it is simply
         // ignored elsewhere, so rejecting would refuse valid documents — but ignoring it silently
         // would be the fourth behavior this generator does not have. Acknowledge it instead. The
@@ -419,6 +372,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         Some(current)
     }
+}
+
+/// One kind of Reference Object chain [`LowerCtx::follow_reference_chain`] follows: a link `S`
+/// is either the object `T` the chain ends at or a Reference to the next link.
+struct ReferenceChain<S, T> {
+    /// The object's name in an undeclared-component or unfollowable-reference rejection.
+    kind: &'static str,
+    /// The object's name in a reference-cycle rejection.
+    cycle_kind: &'static str,
+    /// `#/components/<kind>/`, the root component map this kind of reference may name.
+    prefix: &'static str,
+    /// The object a link ends the chain at, or the Reference it holds instead.
+    split: fn(S) -> RefOr<T>,
+    /// The root document's own declaration of `name` in this kind's component map.
+    declared: fn(&crate::oas31::Components, &str) -> Option<S>,
+    /// One hop through the input bundle, reporting a miss itself.
+    follow: fn(&mut LowerCtx<'_, '_>, &Reference) -> Option<S>,
 }
 
 /// Resolve a Path Item `$ref`.
