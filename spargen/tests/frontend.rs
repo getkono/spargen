@@ -3902,8 +3902,11 @@ fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null
         ] {
             // The `allOf` spellings over `U` of a `$ref` branch to the `true` component generate
             // `Option<Pick>`, before this fix as after it: `target_decides_null` counts any `$ref`
-            // branch as deciding `null`. They are left out until that is fixed (#594).
-            if !branches.contains(t) {
+            // branch as deciding `null`. They are left out until that is fixed (#594). The `oneOf`
+            // beside an untyped branch is pinned: `null` is in both branches and fails
+            // exactly-one, so it keeps the non-null struct already.
+            let two_branch_one_of = keyword == "oneOf" && branches != format!("[ {t} ]");
+            if !branches.contains(t) || two_branch_one_of {
                 rows.extend([
                     format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
                     format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
