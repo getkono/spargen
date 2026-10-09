@@ -3654,13 +3654,14 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
-/// Issue #581: a union whose only typed branch denies `null` (`type: object` or `type: string`),
-/// beside an untyped object branch, met with an untyped object composition. The untyped branch
-/// leaves `null` undecided, so every spelling of the meet keeps the non-null struct: a `$ref` to
-/// the untyped `U` with the union as its sibling, `U` as an `allOf` member beside the union or
-/// with the union as a second member, and the same three with `U`'s body written inline. The
-/// `allOf` spellings over `U` read the typed branch as the union deciding `null`, made the
-/// composition nullable for it, and generated `Option<Pick>` where the others generate `Pick`.
+/// Issue #581: a union whose only typed branch denies `null` (`type: object`, `type: string`, the
+/// `false` schema, or an `enum` or `const` that leaves `null` out), beside an untyped object
+/// branch, met with an untyped object composition. The untyped branch leaves `null` undecided, so
+/// every spelling of the meet keeps the non-null struct: a `$ref` to the untyped `U` with the
+/// union as its sibling, `U` as an `allOf` member beside the union or with the union as a second
+/// member, and the same three with `U`'s body written inline. The `allOf` spellings over `U` read
+/// the typed branch as the union deciding `null`, made the composition nullable for it, and
+/// generated `Option<Pick>` where the others generate `Pick`.
 /// A typed branch that admits `null` (`type: [object, 'null']`) still decides it in the `anyOf`
 /// `allOf` spellings, which stay `Option`.
 #[test]
@@ -3675,6 +3676,9 @@ fn a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided
                 false,
             ),
             ("{ type: string }", false),
+            ("false", false),
+            ("{ enum: [x, y] }", false),
+            ("{ const: x }", false),
             (
                 "{ type: [object, 'null'], properties: { a: { type: string } } }",
                 true,
