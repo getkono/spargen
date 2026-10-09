@@ -3481,10 +3481,10 @@ components:
 /// beside it at all, over the nullable `N`, and a plain union's sole untyped branch beside a `null`
 /// branch, which takes the nullable `type`'s `null` as an untyped `Value` branch does (#563).
 ///
-/// Not pinned here: a `oneOf` written with the nullable `type` in the union's own schema (the
+/// The same `oneOf` written with the nullable `type` in the union's own schema (the
 /// `allOf`-member and inline spellings, and a plain `{type: [object, 'null'], oneOf: [...]}`)
-/// (#579). Its untyped branches now take that `type`'s `null` themselves (#574), and
-/// `a_union_admits_null_only_through_a_branch_that_accepts_it` pins the inline spelling.
+/// rejects `null` as well, and the plain `anyOf` keeps it (#579): the untyped branches take that
+/// `type`'s `null` themselves (#574), so `null` matches both and fails exactly-one.
 #[test]
 fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
     let branches =
@@ -3518,6 +3518,30 @@ fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
                 format!("{{ {target_ref}, type: {ty}, oneOf: {branches} }}"),
                 false,
             ));
+            // The same `oneOf` with the `type` in the union's own schema (#579): `null` matches
+            // both untyped branches there too, so the `oneOf` rejects it in every spelling.
+            rows.push((
+                target,
+                format!("{{ allOf: [ {{ {target_ref} }}, {{ type: {ty}, oneOf: {branches} }} ] }}"),
+                false,
+            ));
+            rows.push((
+                target,
+                format!(
+                    "{{ type: {ty}, properties: {{ u: {{ type: string }} }}, oneOf: {branches} }}"
+                ),
+                false,
+            ));
+            rows.push((
+                target,
+                format!("{{ type: {ty}, anyOf: {branches} }}"),
+                admits,
+            ));
+            rows.push((
+                target,
+                format!("{{ type: {ty}, oneOf: {branches} }}"),
+                false,
+            ));
             rows.push((
                 target,
                 format!("{{ {target_ref}, type: {ty}, anyOf: {beside_null} }}"),
@@ -3529,11 +3553,6 @@ fn a_ref_union_sibling_admits_the_null_its_sibling_type_admits() {
                 false,
             ));
         }
-        rows.push((
-            target,
-            format!("{{ allOf: [ {{ {target_ref} }}, {{ type: object, oneOf: {branches} }} ] }}"),
-            false,
-        ));
     }
     let n = "$ref: '#/components/schemas/N'";
     for (keyword, admits) in [("anyOf", true), ("oneOf", false)] {
