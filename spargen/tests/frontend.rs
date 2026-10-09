@@ -3654,6 +3654,95 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// Issue #581: a union whose only typed branch denies `null` (`type: object` or `type: string`),
+/// beside an untyped object branch, met with an untyped object composition. The untyped branch
+/// leaves `null` undecided, so every spelling of the meet keeps the non-null struct: a `$ref` to
+/// the untyped `U` with the union as its sibling, `U` as an `allOf` member beside the union or
+/// with the union as a second member, and the same three with `U`'s body written inline. The
+/// `allOf` spellings over `U` read the typed branch as the union deciding `null`, made the
+/// composition nullable for it, and generated `Option<Pick>` where the others generate `Pick`.
+/// A typed branch that admits `null` (`type: [object, 'null']`) still decides it in the `anyOf`
+/// `allOf` spellings, which stay `Option`.
+#[test]
+fn a_union_of_a_non_null_typed_branch_beside_an_untyped_one_keeps_null_undecided() {
+    let u = "$ref: '#/components/schemas/U'";
+    let c = "{ properties: { u: { type: string } } }";
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        for (typed, admits) in [
+            (
+                "{ type: object, properties: { a: { type: string } } }",
+                false,
+            ),
+            ("{ type: string }", false),
+            (
+                "{ type: [object, 'null'], properties: { a: { type: string } } }",
+                true,
+            ),
+        ] {
+            let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
+            // The nullable control is pinned in the `anyOf` `allOf` spellings only: the others
+            // disagree among themselves already, which this change leaves alone.
+            if admits && keyword == "oneOf" {
+                continue;
+            }
+            let mut sites = vec![
+                format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
+                format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+            ];
+            if !admits {
+                sites.push(format!("{{ {u}, {keyword}: {branches} }}"));
+                sites.push(format!(
+                    "{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
+                ));
+            }
+            rows.extend(sites.into_iter().map(|site| (site, admits)));
+        }
+    }
+    let mut mismatches = Vec::new();
+    for (site, admits) in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    U: {{ properties: {{ u: {{ type: string }} }} }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "undecided" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
 /// nest one union in another's branches, so the composition is rejected with the stable `E013` it
 /// has always drawn rather than emitting a union of identical variants (#463).
