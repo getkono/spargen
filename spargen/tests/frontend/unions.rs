@@ -1758,10 +1758,11 @@ components:
 }
 
 /// A union whose only branch is `false` admits no value, and so does every conjunction it is part
-/// of, however the conjunction is spelled: beside or inside an `allOf` over an object, beside
-/// `type: object` and a `$ref` to one, beside the same object written inline, beside
+/// of, however the conjunction is spelled: beside or inside an `allOf` over an object, beside a
+/// `$ref` to one (alone, with untyped object keywords, or with `type: object`), beside the same
+/// object written inline, beside
 /// `type: object`, or alone. Each spelling generates the uninhabited `Pick` with no `E013` or
-/// `E007` (#615). The `allOf`-over-`U` and `type: object` beside a `$ref` to `U` spellings were
+/// `E007` (#615). The `allOf`-over-`U` and `$ref`-to-`U` spellings were
 /// `E013` and the `type: object` ones `E007`, while the inline
 /// object spellings and the bare union generated the uninhabited type. The `false` branch is also
 /// written as a `$ref` to the `false` component `F` and to its alias `G`, and beside a `null`
@@ -1777,9 +1778,14 @@ fn a_union_of_a_false_branch_alone_is_uninhabited_in_every_spelling_of_its_conju
             "[ { $ref: '#/components/schemas/F' } ]",
             "[ { $ref: '#/components/schemas/G' } ]",
         ] {
-            // The bare `{ $ref: U, oneOf: [ false ] }` spelling, with no other sibling keyword, is
-            // met by the `$ref` arm in `lower/schema.rs`, which this fixture does not cover yet.
             rows.extend([
+                // The `$ref` arm alone, and beside the untyped object keywords that scope a
+                // refiner over the union (`meet_ref_union_sibling`).
+                format!("{{ {u}, {keyword}: {branches} }}"),
+                format!("{{ {u}, required: [u], {keyword}: {branches} }}"),
+                format!(
+                    "{{ {u}, properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
+                ),
                 format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
                 format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
                 format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
