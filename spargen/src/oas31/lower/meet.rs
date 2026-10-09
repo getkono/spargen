@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Docs, Field, FieldDefault, JsonCategory, Openness, Prim, ScalarEnum,
-    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind,
+    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind, Union,
 };
 
 use super::defaults::reclassify_default;
@@ -263,16 +263,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // it fails: `prefixItems` does not require the array to reach that position, so an
             // array shorter than it still satisfies both tuples.
             (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
-                let items = left
-                    .iter()
-                    .zip(right)
-                    .enumerate()
-                    .map(|(index, (left, right))| {
-                        self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
-                            .ok()
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or(NoMeet::Unrepresentable)?;
+                let items = self
+                    .intersect_positions(left.iter().copied().zip(right.iter().copied()), hint)?;
                 Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
             }
             // A homogeneous array against a tuple: every tuple position must also satisfy the
@@ -295,20 +287,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A union's variants stay closed for the reason `lower_union_closed` gives; a union
             // that narrows to one branch is no union, and `intersect_union` meets that branch where
             // the enclosing position's answer holds.
-            (TypeKind::Union(union), _) => {
-                let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| {
-                    let reach = &mut ScopeReach::default();
-                    ctx.intersect_union(a, union, Refiner::Whole(b), hint, enclosing, reach)
-                })
-            }
-            (_, TypeKind::Union(union)) => {
-                let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| {
-                    let reach = &mut ScopeReach::default();
-                    ctx.intersect_union(b, union, Refiner::Whole(a), hint, enclosing, reach)
-                })
-            }
+            (TypeKind::Union(union), _) => self.intersect_with_union(a, union, b, hint),
+            (_, TypeKind::Union(union)) => self.intersect_with_union(b, union, a, hint),
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
@@ -332,15 +312,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         tuple: Ty,
         hint: &str,
     ) -> Result<Ty, NoMeet> {
-        let items = positions
-            .iter()
-            .enumerate()
-            .map(|(index, position)| {
-                self.intersect_types(*position, item, &format!("{hint}Item{index}"))
-                    .ok()
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(NoMeet::Unrepresentable)?;
+        let items =
+            self.intersect_positions(positions.iter().map(|position| (*position, item)), hint)?;
         if items
             .iter()
             .zip(positions)
@@ -350,6 +323,94 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
         }
+    }
+
+    /// Merge `field` into `existing`, a property both sides of an intersection carry: the part the
+    /// `allOf` merge and [`Self::intersect_structs`] share, each keeping its own policy for a meet
+    /// that fails. Where one side carries the name only because it requires it,
+    /// [`take_declaration`] keeps the other side's declaration and nothing is met (`None`).
+    /// Otherwise the two types are met under `hint`, the field is required where either side
+    /// requires it, and a met field that is required drops its applied `default`. A failed meet
+    /// leaves `existing.ty` as it was for the caller to settle.
+    ///
+    /// `pairwise_defaults` merges the two sides' `default`s first (see [`merge_field_default`]),
+    /// for a caller that meets exactly two sides; the `allOf` merge gathers every member's before
+    /// deciding instead, and passes `false`.
+    pub(super) fn merge_repeated_field(
+        &mut self,
+        existing: &mut Field,
+        field: &Field,
+        hint: &str,
+        pairwise_defaults: bool,
+    ) -> Option<Result<(), NoMeet>> {
+        if take_declaration(existing, field) {
+            return None;
+        }
+        if pairwise_defaults {
+            // Either side's `default` is a default of the merged field, whichever side is the
+            // `$ref` (see `merge_field_default`).
+            let defaults = existing
+                .default
+                .take()
+                .into_iter()
+                .chain(field.default.clone())
+                .collect();
+            existing.default = merge_field_default(defaults, &field.name.wire, self.diags);
+        }
+        // A repeated property is an intersection, not an equality assertion: retain the narrower
+        // compatible type.
+        let intersection = self.intersect_types(existing.ty, field.ty, hint);
+        existing.required = existing.required || field.required;
+        Some(intersection.map(|met| {
+            existing.ty = met;
+            if existing.required {
+                if let Some(default) = &mut existing.default {
+                    default.applied = None;
+                }
+            }
+        }))
+    }
+
+    /// The meet of `union_ty`, whose kind is `union`, with `other`, branch by branch, under a
+    /// closed narrowing: the answer for a union on either side of [`Self::intersect_non_null`].
+    fn intersect_with_union(
+        &mut self,
+        union_ty: Ty,
+        union: &Union,
+        other: Ty,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        let enclosing = self.narrowing_opens;
+        self.closed_narrowing(|ctx| {
+            let reach = &mut ScopeReach::default();
+            ctx.intersect_union(
+                union_ty,
+                union,
+                Refiner::Whole(other),
+                hint,
+                enclosing,
+                reach,
+            )
+        })
+    }
+
+    /// Meet a tuple's positions pair by pair, position `index` under `{hint}Item{index}`: the
+    /// positions of two tuples, or of a tuple and an array's item. A position with no meet, empty or
+    /// not, leaves no tuple, and that is [`NoMeet::Unrepresentable`]: `prefixItems` does not
+    /// require an array to reach the position, so a shorter array still satisfies both sides.
+    fn intersect_positions(
+        &mut self,
+        pairs: impl Iterator<Item = (Ty, Ty)>,
+        hint: &str,
+    ) -> Result<Vec<Ty>, NoMeet> {
+        pairs
+            .enumerate()
+            .map(|(index, (left, right))| {
+                self.intersect_types(left, right, &format!("{hint}Item{index}"))
+                    .ok()
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or(NoMeet::Unrepresentable)
     }
 
     fn intersect_structs(
@@ -375,25 +436,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
-                    // A field one side carries only for its `required` gives way to the other
-                    // side's declaration of the property (see `take_declaration`).
-                    if take_declaration(existing, field) {
-                        continue;
-                    }
-                    // Either side's `default` is a default of the merged field, whichever side is
-                    // the `$ref` (see `merge_field_default`).
-                    let defaults = existing
-                        .default
-                        .take()
-                        .into_iter()
-                        .chain(field.default.clone())
-                        .collect();
-                    existing.default = merge_field_default(defaults, &field.name.wire, self.diags);
                     let field_hint = format!("{hint}{}", field.name.wire);
-                    let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
-                    let required = existing.required || field.required;
-                    existing.ty = match intersection {
-                        Ok(ty) => ty,
+                    match self.merge_repeated_field(existing, field, &field_hint, true) {
+                        None | Some(Ok(())) => {}
                         // Mirrors the array arm above, and for the same reason `E013`'s explain
                         // gives for it: a property NEITHER side requires does not empty the
                         // object when its two types cannot meet, because every instance that
@@ -403,27 +448,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // satisfies. An applied `default` is no value of the uninhabited type, and
                         // is left for `retype_field_defaults` to report (`W005`) where it was
                         // written and document as not applied (#453).
-                        Err(NoMeet::Empty) if !required => {
-                            self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
+                        Some(Err(NoMeet::Empty)) if !existing.required => {
+                            existing.ty = self.insert_type(
+                                &field_hint,
+                                TypeKind::Never,
+                                Docs::default(),
+                                None,
+                            );
                         }
                         // Required on one side or the other: every instance must carry a value no
                         // type admits, so the composition really is empty.
-                        Err(NoMeet::Empty) => {
-                            empty = true;
-                            continue;
-                        }
+                        Some(Err(NoMeet::Empty)) => empty = true,
                         // Values both sides admit exist, so an uninhabited field would refuse every
                         // object carrying one, required or not.
-                        Err(NoMeet::Unrepresentable) => {
-                            unrepresentable = true;
-                            continue;
-                        }
-                    };
-                    existing.required = required;
-                    if existing.required {
-                        if let Some(default) = &mut existing.default {
-                            default.applied = None;
-                        }
+                        Some(Err(NoMeet::Unrepresentable)) => unrepresentable = true,
                     }
                 }
                 None => {
@@ -442,16 +480,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !field.undeclared {
                 continue;
             }
-            let other = if left
-                .fields
-                .iter()
-                .any(|carried| carried.name.wire == field.name.wire)
-            {
-                if right
-                    .fields
-                    .iter()
-                    .any(|carried| carried.name.wire == field.name.wire)
-                {
+            let other = if carries_key(&left.fields, &field.name.wire) {
+                if carries_key(&right.fields, &field.name.wire) {
                     continue;
                 }
                 &right.additional
@@ -644,6 +674,14 @@ fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
         ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
         ScalarRepr::Bool => primitive == Prim::Bool,
     }
+}
+
+/// Whether one side of an intersection carries a field for the wire name `wire`, declared or only
+/// required. A [`Field::undeclared`] field the merged object carries is an undeclared key of each
+/// side that does not, so that side's `additionalProperties` value schema narrows it
+/// ([`LowerCtx::narrow_undeclared`]).
+pub(super) fn carries_key(fields: &[Field], wire: &str) -> bool {
+    fields.iter().any(|carried| carried.name.wire == wire)
 }
 
 /// Settle a property two sides of an intersection both carry when exactly one side declares it,

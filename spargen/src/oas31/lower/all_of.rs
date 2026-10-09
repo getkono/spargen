@@ -6,8 +6,8 @@ use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::{schema_has_union, Contribution};
 use super::nullability::{undecided_admits_null, union_branch_admits_null};
-use super::refiner::{implied_applicator_category, unreached_halves};
-use super::{LowerCtx, MetUnion, Refiner, ScopeReach};
+use super::refiner::implied_applicator_category;
+use super::{LowerCtx, MetUnion, Refiner};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
@@ -67,10 +67,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
         // schema's own object keywords and its `null`.
         composition.types = crate::oas31::TypeSet::default();
-        composition.properties.clear();
-        composition.pattern_properties.clear();
-        composition.additional_properties = None;
-        composition.required.clear();
+        composition.clear_object_keywords();
         let (scoped, combined): (Vec<SchemaOr>, Vec<SchemaOr>) =
             schema.all_of.iter().cloned().partition(|member| {
                 matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
@@ -385,30 +382,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.collapse_met_union(schema, meet, !union.one_of.is_empty(), &meet_hint, spelling);
         meet = collapsed;
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
-            let mut reach = ScopeReach::default();
-            let met = self.meet_scoped_refiner(
-                meet,
+            let refined_hint = format!("{hint}Refined{index}");
+            let met = self.meet_scoped_and_report(
                 refiner,
-                &format!("{hint}Refined{index}"),
-                &mut reach,
-            );
-            if met.is_err() && reach.uncategorised {
-                let message = format!(
-                    "a branch of {union_is} states no JSON category, and {refining} untyped \
-                     keywords are both object keywords and array keywords with no `type` to \
-                     choose between them, so no single Rust type represents what they constrain \
-                     of it"
-                );
-                return self.reject_unscoped_union_sibling(member, &message);
-            }
-            for keywords in unreached_halves(refiner, &reach) {
-                let message = format!(
-                    "{refining} untyped {keywords} constrain only the instances of \
-                     their own category, and no branch of {beside} has that category, so they \
-                     apply to no value the union accepts"
-                );
-                self.warn_unreached_union_sibling(member, message);
-            }
+                |ctx, reach| ctx.meet_scoped_refiner(meet, refiner, &refined_hint, reach),
+                |ctx| {
+                    let message = format!(
+                        "a branch of {union_is} states no JSON category, and {refining} untyped \
+                         keywords are both object keywords and array keywords with no `type` to \
+                         choose between them, so no single Rust type represents what they \
+                         constrain of it"
+                    );
+                    ctx.reject_unscoped_union_sibling(member, &message)
+                },
+                member,
+                |keywords| {
+                    format!(
+                        "{refining} untyped {keywords} constrain only the instances of their own \
+                         category, and no branch of {beside} has that category, so they apply to \
+                         no value the union accepts"
+                    )
+                },
+            )?;
             let Ok(met) = met else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
@@ -419,8 +414,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.warn_untyped_met_variants(schema, meet, spelling);
         }
         let kind = self.graph.get(meet.id)?.kind.clone();
-        self.discard_meet_intermediates(mark, &kind);
-        let mut ty = self.insert_schema_type(schema, hint, kind);
+        let mut ty = self.reemit_meet(schema, hint, mark, kind);
         // The meets gave the untyped member `null` exactly where they kept the `null` member's, so
         // `null` is in two branches or none.
         ty.nullable = meet.nullable && !untyped_beside_null_member;

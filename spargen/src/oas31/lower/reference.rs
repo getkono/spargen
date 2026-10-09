@@ -247,6 +247,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// A schema `$ref` resolved outside the components, whose chain of bare aliases returns to a
+    /// target it already passed through: the alias chain `ensure_resolved` follows, and the one an
+    /// `allOf` member's expansion walks, report it alike.
+    pub(super) fn reject_schema_alias_cycle<T>(
+        &mut self,
+        provenance: crate::diag::Provenance,
+        reference: &str,
+    ) -> Option<T> {
+        // E004 case: cycle
+        Diagnostic::error(Code::UnresolvedRef, provenance)
+            .message(format!(
+                "schema reference `{reference}` forms an alias cycle"
+            ))
+            .remedy(
+                "give one component in the cycle a schema body, or break the cycle at one of its \
+                 references",
+            )
+            .emit(self.diags);
+        None
+    }
+
     /// A reference outside `#/components/<kind>/` that the input bundle could not follow, reported
     /// in the words of the way it failed: the resolver separates a reference it cannot place from
     /// a pointer with nothing at it, and a target that exists but does not parse has already been

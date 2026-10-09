@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use crate::ir::{AdditionalProps, TypeDef, TypeGraph, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Ty, TypeDef, TypeGraph, TypeId, TypeKind};
+use crate::oas31::Schema;
 
 use super::combine::Contribution;
 use super::LowerCtx;
@@ -96,6 +97,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
             self.pop_last_type();
         }
+    }
+
+    /// Re-emit `kind`, the result of the meets since `mark`, as `schema`'s own type under `hint`,
+    /// first discarding the meets' inserts `kind` does not reach
+    /// ([`Self::discard_meet_intermediates`]). The returned type carries no nullability or
+    /// indirection of the meet's: each caller settles those itself.
+    pub(super) fn reemit_meet(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        mark: u32,
+        kind: TypeKind,
+    ) -> Ty {
+        self.discard_meet_intermediates(mark, &kind);
+        self.insert_schema_type(schema, hint, kind)
     }
 
     /// [Elide](TypeGraph::elide) every type inserted since `mark` that `kind` does not refer to,

@@ -745,17 +745,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
             if !self.resolved_alias_stack.insert(key.clone()) {
-                // E004 case: cycle
-                Diagnostic::error(Code::UnresolvedRef, at.clone())
-                    .message(format!(
-                        "schema reference `{reference}` forms an alias cycle"
-                    ))
-                    .remedy(
-                        "give one component in the cycle a schema body, or break the cycle at one \
-                         of its references",
-                    )
-                    .emit(self.diags);
-                return None;
+                return self.reject_schema_alias_cycle(at.clone(), reference);
             }
             let ty = self.lower_schema(&schema, &hint);
             self.resolved_alias_stack.remove(&key);

@@ -66,31 +66,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// An `allOf` that mixes object and scalar members, which no single type can be.
     pub(super) fn reject_all_of_object_scalar_mix<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: object-scalar-mix
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message("an `allOf` mixes object and scalar members, which cannot form one type")
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "an `allOf` mixes object and scalar members, which cannot form one type",
+            ALL_OF_REMEDY,
+        )
     }
 
     /// An all-scalar `allOf` whose members have no common value or no single representable type.
     pub(super) fn reject_all_of_scalars<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: scalar-members
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message("`allOf` scalar members have an empty or unrepresentable intersection")
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "`allOf` scalar members have an empty or unrepresentable intersection",
+            ALL_OF_REMEDY,
+        )
     }
 
     /// `allOf` members whose `additionalProperties` value schemas have no common type.
     pub(super) fn reject_all_of_additional<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: additional-values
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message("`allOf` members declare conflicting `additionalProperties`")
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "`allOf` members declare conflicting `additionalProperties`",
+            ALL_OF_REMEDY,
+        )
     }
 
     /// A property repeated across `allOf` members with types that cannot meet, which a member
@@ -101,14 +104,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         name: &str,
     ) -> Option<T> {
         // E013 case: required-property
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(format!(
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            format!(
                 "property `{name}` appears in multiple `allOf` members with conflicting types, and \
                  a member requires it"
-            ))
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+            ),
+            ALL_OF_REMEDY,
+        )
     }
 
     /// A required property no `allOf` member declares, whose members' `additionalProperties` value
@@ -119,14 +123,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         name: &str,
     ) -> Option<T> {
         // E013 case: required-property
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(format!(
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            format!(
                 "property `{name}` is required but no `allOf` member declares it, and the members' \
                  `additionalProperties` value schemas it must satisfy share no value"
-            ))
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+            ),
+            ALL_OF_REMEDY,
+        )
     }
 
     /// An `allOf` member that is the boolean schema `false`, which admits no value, so neither
@@ -136,11 +141,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         provenance: crate::diag::Provenance,
     ) -> Option<T> {
         // E013 case: false-member
-        Diagnostic::error(Code::AllOfIrreconcilable, provenance)
-            .message("an `allOf` member is `false`")
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            provenance,
+            "an `allOf` member is `false`",
+            ALL_OF_REMEDY,
+        )
     }
 
     /// An `allOf` whose merge would have to read a `$ref` target still being lowered: a member that
@@ -153,11 +159,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: cycle
-        Diagnostic::error(Code::AllOfIrreconcilable, provenance)
-            .message(message.to_owned())
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            provenance,
+            message,
+            ALL_OF_REMEDY,
+        )
     }
 
     /// Two sides that share values no single Rust type represents ([`NoMeet::Unrepresentable`]),
@@ -172,11 +179,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: unrepresentable-meet
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            message,
+            ALL_OF_REMEDY,
+        )
     }
 
     /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
@@ -187,14 +195,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// distinguishes no further than that.
     pub(super) fn reject_ref_sibling_intersection(&mut self, schema: &Schema) -> Option<Ty> {
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(
-                "the `$ref` target and this schema's own sibling keywords have an empty or \
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "the `$ref` target and this schema's own sibling keywords have an empty or \
                  unrepresentable intersection",
-            )
-            .remedy(REF_SIBLING_REMEDY)
-            .emit(self.diags);
-        None
+            REF_SIBLING_REMEDY,
+        )
     }
 
     /// Report that a schema's `allOf` composition and the `oneOf`/`anyOf` beside it, or among its
@@ -223,11 +230,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
         };
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message)
-            .remedy(remedy)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            message,
+            remedy,
+        )
     }
 
     /// Report that the category a `$ref`'s untyped sibling keywords establish (see
@@ -235,17 +243,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// empty result or a dropped target branch. `message` says which.
     ///
     /// [`implied_applicator_category`]: super::refiner::implied_applicator_category
-    pub(super) fn reject_ref_sibling_category(
+    pub(super) fn reject_ref_sibling_category<T>(
         &mut self,
         schema: &Schema,
         message: &str,
-    ) -> Option<Ty> {
+    ) -> Option<T> {
         // E013 case: inferred-category
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(REF_SIBLING_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            message,
+            REF_SIBLING_REMEDY,
+        )
     }
 
     /// Acknowledge that a union's untyped object or array sibling keywords (a [`Refiner::Scoped`]
@@ -272,11 +281,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: inferred-category
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(UNION_SIBLING_REMEDY)
-            .emit(self.diags);
-        None
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            message,
+            UNION_SIBLING_REMEDY,
+        )
     }
 
     /// Report that a `$ref` carrying shape-bearing siblings — or a union member, when the union
@@ -288,9 +298,50 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<Ty> {
         // E013 case: cycle
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(REF_SIBLING_REMEDY)
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            message,
+            REF_SIBLING_REMEDY,
+        )
+    }
+
+    /// [`Self::reject_ref_sibling_cycle`] for a union member whose `$ref` closes a reference cycle
+    /// back to the schema enclosing the union, in the one wording every spelling of that fact uses:
+    /// the document-half guard, and the reservation half on a sole member and on several.
+    pub(super) fn reject_union_member_cycle(&mut self, schema: &Schema) -> Option<Ty> {
+        self.reject_ref_sibling_cycle(
+            schema,
+            "this union member's `$ref` closes a reference cycle back to the schema that encloses \
+             it, so the enclosing schema's own sibling keywords would have to be intersected with \
+             a target whose definition depends on the result",
+        )
+    }
+
+    /// [`Self::reject_self_referential_union`] for a member that is a direct recursive `$ref` to
+    /// the union being lowered, on a sole member and on several alike.
+    pub(super) fn reject_union_member_is_the_union<T>(&mut self, schema: &Schema) -> Option<T> {
+        self.reject_self_referential_union(
+            schema,
+            "a union member is a direct recursive `$ref` to the union being lowered, so the member \
+             is the union itself and decoding it would never terminate",
+        )
+    }
+
+    /// Report an irreconcilable composition with `message` and `remedy`: the one body every `E013`
+    /// reporter above shares. `code` is always `E013`'s; it is the caller's argument so that each
+    /// reporter names the code beside its own `// E013 case:` marker, which is how `spargen explain
+    /// E013`'s case list is held to the sites that report each case.
+    fn reject_irreconcilable<T>(
+        &mut self,
+        code: Code,
+        provenance: crate::diag::Provenance,
+        message: impl Into<String>,
+        remedy: &str,
+    ) -> Option<T> {
+        Diagnostic::error(code, provenance)
+            .message(message)
+            .remedy(remedy)
             .emit(self.diags);
         None
     }

@@ -4,10 +4,11 @@
 use std::collections::HashSet;
 
 use crate::ir::{
-    AdditionalProps, DisjointFeature, JsonCategory, Prim, ScalarRepr, Struct, Ty, TypeId, TypeKind,
-    UnionMode, UnionStrategy, UnionVariant,
+    AdditionalProps, DisjointFeature, JsonCategory, Prim, Struct, Ty, TypeId, TypeKind, UnionMode,
+    UnionStrategy, UnionVariant,
 };
 
+use super::meet::value_category;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -113,22 +114,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The JSON primitive category a lowered variant type serializes as, or `None` when it cannot be
     /// statically categorized (an untyped `Any`, raw `Bytes`, or a nested union).
+    ///
+    /// This is [`value_category`] but for raw bytes, which a schema's instance holds as a (base64)
+    /// string but a union's dispatch does not categorise.
+    ///
+    /// [`value_category`]: super::meet::value_category
     pub(super) fn json_category(&self, ty: Ty) -> Option<JsonCategory> {
-        Some(match &self.graph.get(ty.id)?.kind {
-            TypeKind::Primitive(Prim::Bool) => JsonCategory::Boolean,
-            TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => JsonCategory::Number,
-            TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date) => {
-                JsonCategory::String
-            }
-            TypeKind::Struct(_) => JsonCategory::Object,
-            TypeKind::Array(_) | TypeKind::Tuple(_) => JsonCategory::Array,
-            TypeKind::Enum(enumeration) => match enumeration.repr {
-                ScalarRepr::String => JsonCategory::String,
-                ScalarRepr::Int => JsonCategory::Number,
-                ScalarRepr::Bool => JsonCategory::Boolean,
-            },
+        match &self.graph.get(ty.id)?.kind {
             // A reservation cannot be categorised — its body has not been lowered, so nothing is
-            // known about the JSON it serialises as. Uncategorisable, exactly like the others here.
+            // known about the JSON it serialises as. `value_category` answers the same; the arm is
+            // stated here because the answer matters here.
             //
             // This arm is **live** on documents that generate cleanly. `lower_union` refuses a
             // member that is *this* union's own reservation, but not one that is another open
@@ -139,13 +134,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // back edge by `value.is_object()`, and a `Tree` — an array — would then match no
             // variant at runtime. `None` sends the union to trial matching, which decodes it.
             // Pinned by `a_union_back_edge_to_an_open_component_is_not_categorised`.
-            TypeKind::Reserved
-            | TypeKind::Bytes
-            | TypeKind::Null
-            | TypeKind::Never
-            | TypeKind::Any
-            | TypeKind::Union(_) => return None,
-        })
+            TypeKind::Reserved | TypeKind::Bytes => None,
+            kind => value_category(kind),
+        }
     }
 
     /// If every variant lowers to a *closed* object (`additionalProperties: false`) with at least

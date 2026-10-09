@@ -97,6 +97,16 @@ pub(crate) struct XmlHints {
 }
 
 impl Schema {
+    /// Remove the object applicators: `properties`, `patternProperties`, `required` and
+    /// `additionalProperties`. Lowering does this where it splits a schema into conjuncts and the
+    /// object keywords belong to another one.
+    pub(crate) fn clear_object_keywords(&mut self) {
+        self.properties.clear();
+        self.pattern_properties.clear();
+        self.required.clear();
+        self.additional_properties = None;
+    }
+
     /// Whether this schema constrains a value at all — neither its storage shape nor its
     /// validation.
     ///
