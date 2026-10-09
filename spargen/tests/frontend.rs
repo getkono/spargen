@@ -4309,6 +4309,65 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A union of a `$ref` to the `true` component `T` beside an untyped object branch, met with the
+/// untyped sibling keyword `items` or `required` alone, generates `Pick`: neither the `T` branch
+/// nor the untyped one decides `null`, and the sibling keyword never adds it. `spargen-v0.5.0`
+/// generated `Option<Pick>` for every row here; #593 changed them, a released change of a
+/// generated field type, so this fixture pins the exact type rather than only "not optional" (#595).
+#[test]
+fn a_ref_to_a_true_component_beside_an_untyped_object_branch_under_items_or_required_is_not_optional(
+) {
+    let mut mismatches = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        for sibling in ["items: { type: string }", "required: [u]"] {
+            let site = format!(
+                "{{ {sibling}, {keyword}: [ {{ $ref: '#/components/schemas/T' }}, \
+                 {{ properties: {{ b: {{ type: string }} }} }} ] }}"
+            );
+            let spec = format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    T: true
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+            );
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{site}, via {entry}: {report:#?}"
+                );
+            }
+            let (_, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+            if pick != "Pick" {
+                mismatches.push(format!("{site}: `pick` is `{pick}`, expected `Pick`"));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
 /// nest one union in another's branches, so the composition is rejected with the stable `E013` it
 /// has always drawn rather than emitting a union of identical variants (#463).
