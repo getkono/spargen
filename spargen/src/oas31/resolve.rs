@@ -342,3 +342,101 @@ pub(super) fn schema_reference_identity(
     }
     resolver.reference_identity(reference, at)
 }
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8Path;
+
+    use crate::diag::{Diagnostics, FileId, JsonPointer};
+    use crate::oas31::{parse_document, Document};
+    use crate::source::InputBundle;
+
+    use super::{schema_reference_identity, Resolver};
+
+    /// A root document declaring components whose keys carry the characters a JSON Pointer
+    /// escapes, and a sub-file declaring one of its own. Lowering never sees such keys (structural
+    /// validation admits only `^[a-zA-Z0-9._-]+$`), but the identity functions are plain string
+    /// functions and are pinned here without that guard.
+    const ROOT: &str = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Plain: { type: string }
+    "a~0b": { type: string }
+    "a~1b": { type: string }
+    "a~b": { type: string }
+    Lib: { $ref: './lib.yaml#/components/schemas/Inner' }
+"#;
+
+    const LIB: &str = r#"
+components:
+  schemas:
+    Inner: { type: string }
+    Plain: { type: integer }
+"#;
+
+    fn load() -> (tempfile::TempDir, InputBundle) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("openapi.yaml"), ROOT).unwrap();
+        std::fs::write(dir.path().join("lib.yaml"), LIB).unwrap();
+        let path = dir.path().join("openapi.yaml");
+        let mut diags = Diagnostics::default();
+        let bundle = InputBundle::load(Utf8Path::from_path(&path).unwrap(), &mut diags).unwrap();
+        (dir, bundle)
+    }
+
+    /// FE-IMPL-005: the two root-component branches lowering spelled — the resolver's answer for
+    /// the fragment read from the root, and a pointer assembled from the stripped name — agree for
+    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. Both
+    /// read the reference's characters verbatim, so a `~0`/`~1` in the reference is neither
+    /// decoded nor re-encoded by either. A name only the sub-file declares is its own.
+    #[test]
+    fn root_component_identity_agrees_with_the_assembled_pointer_for_escaped_names() {
+        let (_dir, bundle) = load();
+        let mut diags = Diagnostics::default();
+        let document: Document = parse_document(&bundle, &mut diags).unwrap();
+        let resolver = Resolver::new(&document, &bundle);
+        let root = resolver.root_id();
+        let inner = resolver
+            .resolve(
+                "./lib.yaml#/components/schemas/Inner",
+                &document.provenance,
+                &mut diags,
+            )
+            .unwrap();
+        let in_lib = inner.schema.provenance.clone();
+        let lib: FileId = in_lib
+            .span
+            .expect("a parsed sub-file schema has a span")
+            .file;
+        assert_ne!(lib, root);
+        for at in [&document.provenance, &in_lib] {
+            for name in ["Plain", "a~0b", "a~1b", "a~b"] {
+                let reference = format!("#/components/schemas/{name}");
+                let assembled = (
+                    root,
+                    JsonPointer::from(format!("/components/schemas/{name}")),
+                );
+                assert_eq!(
+                    schema_reference_identity(&document, &resolver, &reference, at),
+                    Some(assembled.clone()),
+                    "`{reference}`"
+                );
+                assert_eq!(
+                    resolver.reference_identity_from(&reference, root),
+                    Some(assembled),
+                    "`{reference}`"
+                );
+            }
+        }
+        assert_eq!(
+            schema_reference_identity(&document, &resolver, "#/components/schemas/Inner", &in_lib),
+            Some((
+                lib,
+                JsonPointer::from("/components/schemas/Inner".to_owned())
+            )),
+        );
+    }
+}
