@@ -3749,13 +3749,14 @@ components:
 }
 
 /// Issue #586: a union of one typed branch that admits `null` (`type: [object, 'null']`,
-/// `type: 'null'`, `enum: [x, null]` or `const: null`) beside an untyped object branch, met with
-/// the untyped object `U`, gets one answer per row across all six spellings: a `$ref` to `U` with
-/// the union as its sibling, `U` as an `allOf` member beside the union or with the union as a
-/// second member, and the same three with `U`'s body written inline, plus the `$ref` spelling with
-/// an untyped `required` beside the union, which meets it through the same target, and an
-/// array-only `items` sibling, which does not reach an object branch and so leaves `null` to the
-/// union as `U` does. `U` decides nothing about `null`, so an `anyOf` admits it through the typed
+/// `type: 'null'`, `enum: [x, null]`, `const: null` or `type: [string, 'null']`) beside an
+/// untyped object branch, met with the untyped object `U`, gets one answer per row across all six
+/// spellings: a `$ref` to `U` with the union as its sibling, `U` as an `allOf` member beside the
+/// union or with the union as a second member, and the same three with `U`'s body written inline,
+/// plus the `$ref` spelling with an untyped `required` beside the union, which meets it through
+/// the same target, and two untyped sibling keywords alone, an array-only `items`, which does not
+/// reach an object branch, and an object-only `required`, which `null` satisfies: both leave
+/// `null` to the union as `U` does. `U` decides nothing about `null`, so an `anyOf` admits it through the typed
 /// branch. A `oneOf` denies it: the untyped branch beside the typed one is counted as accepting
 /// `null` too (#563), so `null` is in two branches and fails exactly-one; a `const: null` branch,
 /// whose exact-`null` variant is not a nullable `Ty`, is counted as one of them. The
@@ -3772,6 +3773,7 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
             "{ type: 'null' }",
             "{ enum: [x, null] }",
             "{ const: null }",
+            "{ type: [string, 'null'] }",
         ] {
             let branches = format!("[ {typed}, {{ properties: {{ b: {{ type: string }} }} }} ]");
             let admits = keyword == "anyOf";
@@ -3785,6 +3787,7 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
                     format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
                     format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
                     format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
+                    format!("{{ required: [u], {keyword}: {branches} }}"),
                 ]
                 .into_iter()
                 .map(|site| (site, admits)),
