@@ -283,9 +283,7 @@ impl Audit<'_, '_> {
 
     fn schema_key(&self, provenance: &Provenance) -> SchemaKey {
         (
-            provenance
-                .span
-                .map_or_else(|| self.resolver.root_id(), |span| span.file),
+            self.resolver.written_in(provenance),
             provenance.pointer.clone(),
         )
     }
@@ -436,9 +434,7 @@ impl Audit<'_, '_> {
     }
 
     fn resolve_unlowered_ref(&mut self, reference: &str, at: &Provenance) {
-        let from_root = at
-            .span
-            .is_none_or(|span| span.file == self.resolver.root_id());
+        let from_root = self.resolver.written_in(at) == self.resolver.root_id();
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             let components = &self.document.components.schemas;
             if components.contains_key(name) {
@@ -482,7 +478,6 @@ impl Audit<'_, '_> {
             );
         for (tag, target) in entries {
             super::discriminator::discriminator_target_identity(
-                self.document,
                 self.resolver,
                 self.diags,
                 &super::discriminator::discriminator_entry(tag),
@@ -541,11 +536,6 @@ fn consumed_sse_content(
     consumed
 }
 
-/// The file a reference written at `at` is resolved from: an unspanned one sits in the root.
-fn written_in(resolver: &Resolver<'_>, at: &Provenance) -> FileId {
-    at.span.map_or_else(|| resolver.root_id(), |span| span.file)
-}
-
 /// Follow a Parameter, Request Body or Response Reference Object, hop by hop, to the object its
 /// chain ends at, as lowering does (#495): through the input bundle, so a reference into another
 /// file — a whole file, or a pointer into one — reaches the object written there, and a root
@@ -571,7 +561,7 @@ fn follow_object<T>(
         let next = resolver
             .resolve_component_or_ref(
                 &reference.reference,
-                written_in(resolver, &reference.provenance),
+                resolver.written_in(&reference.provenance),
                 parse,
                 &mut discarded,
             )
@@ -601,7 +591,7 @@ fn follow_media<'a>(
         let next = resolver
             .resolve_component(
                 &reference.reference,
-                written_in(resolver, &reference.provenance),
+                resolver.written_in(&reference.provenance),
                 |value, pointer, diags| {
                     Some(super::deserialize::parse_media_type(value, pointer, diags))
                 },

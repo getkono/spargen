@@ -189,10 +189,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         kind: &str,
         parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
     ) -> Option<RefOr<T>> {
-        let from = reference
-            .provenance
-            .span
-            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        let from = self.resolver.written_in(&reference.provenance);
         match self
             .resolver
             .resolve_component_or_ref(&reference.reference, from, parse, self.diags)
@@ -233,9 +230,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: &'r crate::oas31::Reference,
         prefix: &str,
     ) -> Option<&'r str> {
-        let root = self.resolver.root_id();
-        let written_in = reference.provenance.span.map_or(root, |span| span.file);
-        if written_in != root {
+        if self.resolver.written_in(&reference.provenance) != self.resolver.root_id() {
             return None;
         }
         reference.reference.strip_prefix(prefix)
@@ -336,8 +331,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: &str,
     ) -> Option<String> {
         let root = self.resolver.root_id();
-        let written_in = provenance.span.map(|span| span.file)?;
-        if written_in == root || !reference.starts_with('#') {
+        if self.resolver.written_in(provenance) == root || !reference.starts_with('#') {
             return None;
         }
         let (file, pointer) = self.resolver.reference_identity_from(reference, root)?;
@@ -378,10 +372,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Not a root component alias: a multi-file description may reference a whole
                 // file, or a sub-file's own components, which resolve through the input bundle
                 // exactly as a Parameter or Response Object reference already does.
-                let from = reference
-                    .provenance
-                    .span
-                    .map_or_else(|| self.resolver.root_id(), |span| span.file);
+                let from = self.resolver.written_in(&reference.provenance);
                 let resolved = self.resolver.resolve_component(
                     &reference.reference,
                     from,
@@ -461,11 +452,7 @@ pub(super) fn resolve_path_item(
         return None;
     }
     // Relative refs inside the referenced item resolve against the file that declared the `$ref`.
-    let from = reference
-        .provenance
-        .span
-        .map(|span| span.file)
-        .unwrap_or(crate::diag::FileId(0));
+    let from = resolver.written_in(&reference.provenance);
     let mut target =
         resolver.resolve_path_item(&reference.reference, from, &reference.provenance, diags)?;
     // One level of indirection is what the specification requires implementations to support, and

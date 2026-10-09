@@ -89,8 +89,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // resolves today keeps selecting the same component and only a name the root does not
             // declare reaches the sub-file reading. Which namespace *should* win when both declare
             // the name is a separate question; this deliberately does not change the answer.
-            let from = at.span.map(|span| span.file);
-            if from.is_some_and(|file| file != self.resolver.root_id()) {
+            if self.resolver.written_in(at) != self.resolver.root_id() {
                 // The resolver reports its own failure, so a miss here is already diagnosed. Going
                 // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
                 // makes this re-entry safe *and* finite: see that method and the note above.
@@ -334,9 +333,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         {
             return;
         }
-        let Some(file) = at.span.map(|span| span.file) else {
-            return;
-        };
+        let file = self.resolver.written_in(at);
         if file == self.resolver.root_id() || !self.document.components.schemas.contains_key(name) {
             return;
         }
