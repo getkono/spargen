@@ -500,11 +500,7 @@ fn consumed_sse_content(
     let mut consumed = HashSet::new();
     let mut inspect = |content: &indexmap::IndexMap<String, MediaTypeObject>| {
         for (media_name, media) in content {
-            if media_name
-                .split(';')
-                .next()
-                .is_some_and(|name| name.trim().eq_ignore_ascii_case("text/event-stream"))
-            {
+            if super::media::media_essence(media_name).eq_ignore_ascii_case("text/event-stream") {
                 let media = follow_media(resolver, media, &HashSet::new());
                 if let Some(item) = media.as_ref().and_then(|media| media.item_schema.as_ref()) {
                     if let Some(json) = super::sse::json_data_schema(item, resolver, diags) {

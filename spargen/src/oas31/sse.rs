@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
 
+use super::media::media_essence;
 use super::{JsonType, RefOr, Resolver, Schema, SchemaOr};
 
 /// The typed JSON carried in the `data` field of an OpenAPI 3.2 SSE envelope.
@@ -108,8 +109,7 @@ fn collect_data_schema_node(
     let is_json = data
         .content_media_type
         .as_deref()
-        .and_then(|media| media.split(';').next())
-        .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"));
+        .is_some_and(|media| media_essence(media).eq_ignore_ascii_case("application/json"));
     if is_string && is_json {
         if let Some(schema) = data.content_schema.as_deref() {
             out.push(JsonDataSchema {
