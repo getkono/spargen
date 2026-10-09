@@ -39,8 +39,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// A member the sibling meet excludes drops out with `W011`; where that leaves no branch, the
     /// union is the exact null type if a null-only member remains and the sibling admits `null`,
-    /// and `E007` otherwise. A `oneOf` in which `null` matches more than one branch admits no
-    /// `null`. The union is rejected (`None`) with `E007` where one node declares both `oneOf` and
+    /// and `E007` otherwise. A sole member that is uninhabited on its own (`false`) is no branch the
+    /// sibling excludes: the union is that uninhabited type whatever the sibling is
+    /// ([`Self::uninhabited_union_meet`]). A `oneOf` in which `null` matches more than one branch
+    /// admits no `null`. The union is rejected (`None`) with `E007` where one node declares both `oneOf` and
     /// `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
     /// be met with a member that closes a reference cycle, with a member that states no category
     /// for untyped sibling keywords to establish, or with a member it shares values with that no
@@ -251,7 +253,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let constrained_hint = format!("{hint}Constrained");
                 let met = self.meet_scoped_and_report(
                     sibling.refiner,
-                    |ctx, reach| ctx.meet_refiner(inner, sibling.refiner, reach, &constrained_hint),
+                    |ctx, reach| {
+                        // A member uninhabited on its own leaves the union so whatever the
+                        // sibling is (#615), rather than an empty meet that rejects it below.
+                        let met =
+                            ctx.meet_refiner(inner, sibling.refiner, reach, &constrained_hint);
+                        ctx.uninhabited_union_meet(inner, met)
+                    },
                     |ctx| {
                         ctx.reject_unscoped_union_sibling(
                             schema,

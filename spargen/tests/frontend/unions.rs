@@ -1688,8 +1688,9 @@ fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null
             // `$ref` to the `false` component `F` (or its alias `G`) beside an untyped branch,
             // which denies `null` as the inline `false` does, and of a `$ref` to the `{ not: {} }`
             // component `X`, which states no type and so decides nothing, as inline. A union of a
-            // `false` branch alone is left out: its `$ref`-to-`U` and `allOf`-over-`U` spellings
-            // are `E013`, an empty meet.
+            // `false` branch alone is uninhabited, so it has no `null` to decide:
+            // `a_union_of_a_false_branch_alone_is_uninhabited_in_every_spelling_of_its_conjunction`
+            // pins its spellings (#615).
             rows.extend([
                 format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
                 format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
@@ -1750,6 +1751,106 @@ components:
         if pick.starts_with("Option<") {
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is undecided here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// A union whose only branch is `false` admits no value, and so does every conjunction it is part
+/// of, however the conjunction is spelled: beside or inside an `allOf` over an object, beside a
+/// `$ref` to one (alone, with untyped object keywords, or with `type: object`), beside the same
+/// object written inline, beside
+/// `type: object`, or alone. Each spelling generates the uninhabited `Pick` with no `E013` or
+/// `E007` (#615). The `allOf`-over-`U` and `$ref`-to-`U` spellings were
+/// `E013` and the `type: object` ones `E007`, while the inline
+/// object spellings and the bare union generated the uninhabited type. The `false` branch is also
+/// written as a `$ref` to the `false` component `F` and to its alias `G`, and beside a `null`
+/// member under a `type` that denies `null`, which leaves the same empty set.
+#[test]
+fn a_union_of_a_false_branch_alone_is_uninhabited_in_every_spelling_of_its_conjunction() {
+    let u = "$ref: '#/components/schemas/U'";
+    let c = "{ properties: { u: { type: string } } }";
+    let mut rows: Vec<String> = Vec::new();
+    for keyword in ["anyOf", "oneOf"] {
+        for branches in [
+            "[ false ]",
+            "[ { $ref: '#/components/schemas/F' } ]",
+            "[ { $ref: '#/components/schemas/G' } ]",
+        ] {
+            rows.extend([
+                // The `$ref` arm alone, and beside the untyped object keywords that scope a
+                // refiner over the union (`meet_ref_union_sibling`).
+                format!("{{ {u}, {keyword}: {branches} }}"),
+                format!("{{ {u}, required: [u], {keyword}: {branches} }}"),
+                format!(
+                    "{{ {u}, properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"
+                ),
+                format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
+                format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {c}, {{ {keyword}: {branches} }} ] }}"),
+                format!("{{ items: {{ type: string }}, {keyword}: {branches} }}"),
+                format!("{{ required: [u], {keyword}: {branches} }}"),
+                format!("{{ {keyword}: {branches} }}"),
+                format!("{{ type: object, {keyword}: {branches} }}"),
+                format!("{{ type: object, {u}, {keyword}: {branches} }}"),
+                format!("{{ type: object, allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+            ]);
+        }
+    }
+    rows.push("{ type: object, oneOf: [ false, { type: 'null' } ] }".to_owned());
+    rows.push("{ type: object, anyOf: [ false, { type: 'null' } ] }".to_owned());
+    let mut mismatches = Vec::new();
+    for site in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    F: false
+    G: {{ $ref: '#/components/schemas/F' }}
+    U: {{ properties: {{ u: {{ type: string }} }} }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        let mut verdicts = Vec::new();
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            if report.outcome() == Outcome::Rejected
+                || has_code(report, Code::AllOfIrreconcilable)
+                || has_code(report, Code::NonDisjointUnion)
+            {
+                verdicts.push(format!("via {entry}: {:?}", codes(report)));
+            }
+        }
+        if !verdicts.is_empty() {
+            mismatches.push(format!("{site}: {verdicts:?}"));
+            continue;
+        }
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick");
+        if pick.as_deref() != Some("Pick") || !types.contains("pub enum Pick {}") {
+            mismatches.push(format!(
+                "{site}: `pick` is {pick:?}, not the uninhabited `Pick`: {types}"
             ));
         }
     }

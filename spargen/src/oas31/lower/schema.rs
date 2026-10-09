@@ -255,9 +255,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
             let sibling = sibling?;
             let mark = self.graph_mark();
-            let Ok(intersection) =
-                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
-            else {
+            let intersection =
+                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"));
+            // A union sibling uninhabited on its own (a lone `false` branch) leaves the
+            // conjunction so (#615), as the `allOf` spellings of it do, rather than an empty meet
+            // that rejects it.
+            let intersection = if has_union_sibling {
+                self.uninhabited_union_meet(sibling, intersection)
+            } else {
+                intersection
+            };
+            let Ok(intersection) = intersection else {
                 // `$ref` is an applicator: the value must satisfy the target AND these siblings.
                 // `intersect_types` fails for two distinct conditions — the intersection is
                 // empty, so no value satisfies both, or it is inhabited but has no single Rust type
