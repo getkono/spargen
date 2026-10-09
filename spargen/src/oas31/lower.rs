@@ -5287,21 +5287,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// target (#590): the branch is its target met with its own sibling keywords, so it denies
     /// `null` where either does by its own keywords alone. A `$ref` to a non-null object
     /// component then decides nothing beside an untyped branch, as the same branch written
-    /// inline does. A target that cannot be read, or whose body is itself a `$ref` with shape
-    /// siblings, an `allOf` or a union, may admit `null`.
+    /// inline does. A target body that is itself a `$ref` with shape siblings is read the same
+    /// way, recursively, so `{ $ref: W }` with `W: { $ref: U, type: object }` denies `null` as the
+    /// inline `{ $ref: U, type: object }` does. A target that cannot be read, or whose body is an
+    /// `allOf` or a union, may admit `null`.
     fn branch_denies_null(&self, branch: &SchemaOr) -> bool {
-        let SchemaOr::Schema(schema) = branch else {
-            return denies_null(branch);
-        };
+        match branch {
+            SchemaOr::Schema(schema) => self.ref_schema_denies_null(schema, 0),
+            SchemaOr::Bool(_) => denies_null(branch),
+        }
+    }
+
+    /// [`Self::branch_denies_null`] of a schema node reached `depth` `$ref` steps from the branch:
+    /// a `$ref` node denies `null` where its own sibling keywords do or its target does, read
+    /// the same way; any other node is [`schema_denies_null`]. Lowering already refused a `$ref`
+    /// cycle; the bound only keeps this total.
+    fn ref_schema_denies_null(&self, schema: &Schema, depth: u32) -> bool {
         let Some(reference) = &schema.reference else {
-            return denies_null(branch);
+            return schema_denies_null(schema);
         };
-        let mut sibling = schema.as_ref().clone();
+        let mut sibling = schema.clone();
         sibling.reference = None;
         schema_denies_null(&sibling)
-            || self
-                .ref_target_body(reference, &schema.provenance)
-                .is_some_and(|target| schema_denies_null(&target))
+            || (depth < MAX_SCHEMA_DEPTH
+                && self
+                    .ref_target_body(reference, &schema.provenance)
+                    .is_some_and(|target| self.ref_schema_denies_null(&target, depth + 1)))
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component

@@ -3772,8 +3772,9 @@ components:
 /// as a second member, and the same three with `U`'s body written inline. The `allOf` spellings
 /// over `U` read the `$ref` branch as the union deciding `null` without following it to `Y`, made
 /// the composition nullable for it, and generated `Option<Pick>`. The branch reached through the
-/// alias `Z` of `Y`, and a `$ref` to the untyped `U` whose sibling `type: object` denies `null`,
-/// agree with the plain `$ref` to `Y`. A `$ref` branch to the nullable
+/// alias `Z` of `Y`, a `$ref` to the untyped `U` whose sibling `type: object` denies `null`, and
+/// a `$ref` to the component `W` that is that same `$ref`-with-sibling, agree with the plain
+/// `$ref` to `Y`. A `$ref` branch to the nullable
 /// `N` still decides `null` in the `anyOf` `allOf` spellings, which stay `Option`.
 #[test]
 fn a_union_of_a_ref_branch_to_a_non_null_object_beside_an_untyped_one_keeps_null_undecided() {
@@ -3781,12 +3782,14 @@ fn a_union_of_a_ref_branch_to_a_non_null_object_beside_an_untyped_one_keeps_null
     let c = "{ properties: { u: { type: string } } }";
     let mut rows: Vec<(String, bool)> = Vec::new();
     for keyword in ["anyOf", "oneOf"] {
-        // `Y` itself, the alias `Z` of it, and the untyped `U` under a sibling `type: object`,
-        // which denies `null` by the branch's own keyword whatever its target says.
+        // `Y` itself, the alias `Z` of it, the untyped `U` under a sibling `type: object`,
+        // which denies `null` by the branch's own keyword whatever its target says, and `W`,
+        // the component spelling of that same `$ref`-with-sibling branch.
         for denying in [
             "{ $ref: '#/components/schemas/Y' }",
             "{ $ref: '#/components/schemas/Z' }",
             "{ $ref: '#/components/schemas/U', type: object }",
+            "{ $ref: '#/components/schemas/W' }",
         ] {
             let branches = format!("[ {denying}, {{ properties: {{ b: {{ type: string }} }} }} ]");
             rows.extend(
@@ -3835,6 +3838,7 @@ components:
     U: {{ properties: {{ u: {{ type: string }} }} }}
     Y: {{ type: object, properties: {{ y: {{ type: string }} }} }}
     Z: {{ $ref: '#/components/schemas/Y' }}
+    W: {{ $ref: '#/components/schemas/U', type: object }}
     N: {{ type: [object, 'null'], properties: {{ n: {{ type: string }} }} }}
     Pick: {site}
     Holder:
