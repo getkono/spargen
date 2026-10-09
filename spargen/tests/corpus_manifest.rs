@@ -133,7 +133,7 @@ fn every_case_meets_its_declared_expectation() {
         // Every diagnostic's declared claim must be one the run's outcome admits (#413). This
         // checks the declared claim only, not the message prose: a message that states an outcome
         // its claim does not declare (#174's "is generated", which was built `Independent`) passes
-        // here. `frontend.rs`'s `claim_violations` reads the prose and is what catches that shape.
+        // here. `frontend/main.rs`'s `claim_violations` reads the prose and is what catches that shape.
         let contradicted: Vec<_> = report
             .diagnostics()
             .iter()

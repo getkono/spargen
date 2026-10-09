@@ -268,7 +268,7 @@ fn explain_rejects_an_unresolvable_code() {
 /// the bare `openapi.yaml` the root's directory is empty, so a `$ref` to `./openapi.yaml` resolved
 /// to a path that differed from the root's as written, loaded the root again, and `W011` reported
 /// the root as shadowing itself. Only a child process can be given its own working directory, which
-/// the bare spelling needs; `frontend.rs` covers the spellings an absolute root can reach.
+/// the bare spelling needs; `frontend/` covers the spellings an absolute root can reach.
 #[test]
 fn check_reports_the_same_for_every_spelling_of_the_spec_path() {
     let temp = tempfile::tempdir().unwrap();

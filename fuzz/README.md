@@ -42,5 +42,5 @@ cargo +nightly fuzz run frontend fuzz/artifacts/frontend/crash-<hash>
 
 A crash is a real bug: the frontend must reject or handle every input **gracefully**, with a
 diagnostic. Fix it in the frontend (source/oas31/ir), then add a regression fixture to
-`spargen/tests/frontend.rs` (or the relevant in-module test) so it cannot reappear silently,
+`spargen/tests/frontend/` (or the relevant in-module test) so it cannot reappear silently,
 per the repo's bug-fix discipline.

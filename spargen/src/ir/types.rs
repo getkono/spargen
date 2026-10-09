@@ -403,7 +403,7 @@ pub(crate) enum TypeKind {
     /// owning it. That argument holds only while the arm stays unreachable — an earlier revision of
     /// this record asserted the arm was unreachable and it was reachable seven ways, so the claim is
     /// stated here as a condition rather than as a fact, and the seven documents are fixtures in
-    /// `spargen/tests/frontend.rs` precisely so that it cannot quietly stop being true again.
+    /// `spargen/tests/frontend/` precisely so that it cannot quietly stop being true again.
     Reserved,
 }
 
@@ -985,7 +985,7 @@ mod tests {
     /// Two string enums listing one value set decode the same values only when they agree on
     /// openness (#492): an open set also decodes every unlisted string, so it never merges with a
     /// closed one, while `Locked` is closed and merges with `Closed`. Pinned here rather than in
-    /// `frontend.rs` because every `oneOf` branch is lowered closed, so no document reaches a
+    /// `frontend/` because every `oneOf` branch is lowered closed, so no document reaches a
     /// union with an open and a closed branch.
     #[test]
     fn string_enums_of_one_value_set_decode_the_same_values_only_at_one_openness() {

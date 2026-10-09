@@ -384,7 +384,7 @@ fn deps_reports_a_rejection_instead_of_a_block() {
 // --- Cargo-integration dispositions -------------------------------------------------------------
 //
 // `W012`, `W013`, and `E024` are the facade's own diagnostics rather than the frontend's, so they
-// have no inline-spec fixture in `frontend.rs`. `W013` and `E024` are reachable from any plain
+// have no inline-spec fixture in `frontend/`. `W013` and `E024` are reachable from any plain
 // process; `W012` needs a real build script and lives in `e2e.rs` for that reason.
 
 /// Generating outside a build script emits no rebuild triggers and skips the dependency audit.

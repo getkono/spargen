@@ -5231,7 +5231,7 @@ paths:
   # a JSON member, both ways, and a multipart part become `Option<bytes::Bytes>` whichever way the
   # `null` is spelled, and a query parameter an `Option<String>` (the binary parameter remap). The
   # `type: [string, 'null']` spelling used to lose its `null` here; a *raw* body admitting `null`
-  # is rejected instead (`E009`, pinned in `frontend.rs`).
+  # is rejected instead (`E009`, pinned in `frontend/bodies.rs`).
   /nullable-bytes:
     post:
       operationId: postNullableBytes
@@ -6051,7 +6051,7 @@ components:
     # shape of its own. The alias resolves to its target's still-open reservation, so the back-edge
     # must be BOXED — `Option<Box<AliasNode>>`. `Option<AliasNode>` is an infinitely sized type and
     # does not compile, and this suite is the only one in the repository that compiles generated
-    # output: a `frontend.rs` string assertion over the emitted source cannot be relied on to notice
+    # output: a `frontend/` string assertion over the emitted source cannot be relied on to notice
     # the difference, because the embedded runtime supplies `Option<Box<…>>` of its own. Two
     # separate mistakes in the alias's target selection each emitted that type with every other
     # suite green, which is why the shape lives here rather than only there.
