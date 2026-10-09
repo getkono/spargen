@@ -3,9 +3,15 @@
 
 use crate::oas31::Schema;
 
-/// Whether a non-object schema still imposes a scalar/leaf constraint (a non-null primitive type,
-/// an `enum`/`const`, or `contentEncoding`) — as opposed to a pure annotation member (`{}` /
+/// Whether an `allOf` member not read as an object still constrains its instances, so it is
+/// lowered whole as a scalar contribution — as opposed to a pure annotation member (`{}` /
 /// `{description: ...}`) that constrains nothing.
+///
+/// True for any `type` (including `null` and `array`), an `enum` or `const`, `contentEncoding`,
+/// `format: binary`, or a `oneOf`/`anyOf` (which the member's own object keywords then refine
+/// rather than turn it into an object). Untyped array applicators (`items`, `prefixItems`) alone
+/// answer `false`: the `allOf` paths beside a union route such a member to the scoped refiners
+/// before this is asked, but a plain `allOf` then reads it as an annotation (#607).
 pub(super) fn schema_imposes_scalar(schema: &Schema) -> bool {
     !schema.types.types.is_empty()
         || schema.enum_values.is_some()

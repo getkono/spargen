@@ -15,8 +15,12 @@ use super::{LowerCtx, Refiner, ScopeReach};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
-    /// value must satisfy every member, so any member denying unknown keys forbids them outright);
-    /// two typed value schemas must lower to the same type. Returns `None` when irreconcilable.
+    /// value must satisfy every member, so any member denying unknown keys forbids them outright),
+    /// whatever the other side's value schema is. Two typed value schemas merge to their typed
+    /// intersection ([`Self::intersect_types`], under `hint`), so they need not lower to the same
+    /// type; a typed one beside `Allow` is kept as it is, and two `Allow`s stay `Allow`. Returns
+    /// `None` only when the two typed value schemas have no typed intersection, empty or
+    /// unrepresentable alike.
     pub(super) fn merge_additional(
         &mut self,
         acc: &AdditionalProps,
@@ -526,12 +530,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
     /// overflow map. A bounded structural equivalence:
     ///
+    /// * different `nullable` — never the same;
     /// * equal `TypeId` (with equal `nullable`) — a shared `$ref` or the single-entry case;
     /// * otherwise, for distinct ids with equal `nullable`, compare the def kinds structurally but
     ///   only for *leaf* shapes that have no per-inline-schema identity: `Primitive` (same `Prim`),
-    ///   `Bytes`, `Any`, and `Array` (recursing on the element). Composite kinds
-    ///   (`Struct`/`Enum`/`Tuple`) generate a distinct named Rust type per inline schema, so two
-    ///   such inline shapes are treated as heterogeneous (→ `E005`) rather than silently merged.
+    ///   `Bytes`, `Null`, `Never`, `Any`, and `Array` (recursing on the element). Composite kinds
+    ///   (`Struct`/`Enum`/`Tuple`/`Union`) generate a distinct named Rust type per inline schema,
+    ///   so two such inline shapes are treated as heterogeneous (→ `E005`) rather than silently
+    ///   merged, and so is a pair either side of which is an unlowered reservation or has no def.
     ///
     /// `boxed` is deliberately ignored: it is a use-site indirection modifier, not part of the map
     /// value's emitted type (the map value is never boxed).
