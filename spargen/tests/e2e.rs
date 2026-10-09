@@ -8772,3 +8772,64 @@ fn the_problem_reader_reads_the_opened_type() {
         .unwrap();
     assert!(status.success(), "the open enums must decode as documented");
 }
+
+/// A response body that is `allOf: [{type: array}, member]`, where `member` refines the array's
+/// items with a string `enum` narrowed against a plain `string`, written in place or as `It`.
+fn array_refined_by(member: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: Refined, version: 1.0.0 }}
+paths:
+  /items:
+    get:
+      operationId: getItems
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {{ type: array }}
+                  - {member}
+components:
+  schemas:
+    It:
+      items:
+        allOf: [{{ type: string }}, {{ enum: [a, b] }}]
+"##
+    )
+}
+
+/// Under `open_narrowing`, a `$ref` member of untyped array applicators alone (#610) is lowered as
+/// the `$ref` target it is, where the option is out of effect, so its item set stays closed; the
+/// same member written in the response body is in the body's own position, so its set opens.
+#[test]
+fn a_ref_member_of_untyped_array_applicators_keeps_its_narrowing_closed() {
+    let inline = "{ items: { allOf: [{ type: string }, { enum: [a, b] }] } }";
+    let reference = "{ $ref: '#/components/schemas/It' }";
+    let open = |spec: Spec| spec.open_narrowing(true);
+    let catch_all = "Other(String)";
+
+    // The option off: neither spelling opens anything.
+    for member in [inline, reference] {
+        let module = spec_module("openapi.yaml", &array_refined_by(member), |spec| spec);
+        assert!(!module.contains(catch_all), "{member}:\n{module}");
+    }
+    // The option on: the inline member opens its set, the `$ref` member keeps it closed.
+    let module = spec_module("openapi.yaml", &array_refined_by(inline), open);
+    assert!(
+        module.contains(catch_all),
+        "the inline member opens:\n{module}"
+    );
+    let module = spec_module("openapi.yaml", &array_refined_by(reference), open);
+    assert!(
+        !module.contains(catch_all),
+        "the `$ref` member stays closed:\n{module}"
+    );
+    assert!(
+        module.contains("pub enum") && module.contains("    A,") && module.contains("    B,"),
+        "the `$ref` member still narrows the items to `[a, b]`:\n{module}"
+    );
+}
