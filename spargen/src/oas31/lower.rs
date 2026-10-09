@@ -4186,6 +4186,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 has_object,
                 &contributions,
                 &union,
+                |branch| self.branch_decides_null(branch),
                 |branch| self.branch_denies_null(branch),
             ))
         };
@@ -4267,6 +4268,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 has_object,
                 &contributions,
                 union,
+                |branch| self.branch_decides_null(branch),
                 |branch| self.branch_denies_null(branch),
             ))
         };
@@ -5339,6 +5341,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Whether a union branch decides `null` for [`undecided_admits_null`], reading a `$ref`
+    /// branch through its target (#594): `false` decides, `true` does not, and a schema branch
+    /// decides where [`target_decides_null`] of its own keywords does. A `$ref` branch is its
+    /// target met with its own sibling keywords, so it decides where either does; a `$ref` to a
+    /// `true` or `{}` component then leaves `null` undecided, as the same branch written inline
+    /// does. The target body is read as the inline branch is, not through an `allOf` walk, so a
+    /// `$ref` to an `allOf` component decides as the inline `allOf` branch does.
+    fn branch_decides_null(&self, branch: &SchemaOr) -> bool {
+        match branch {
+            SchemaOr::Bool(admits) => !admits,
+            SchemaOr::Schema(schema) => self.ref_schema_decides_null(schema, 0),
+        }
+    }
+
+    /// [`Self::branch_decides_null`] of a schema node reached `depth` `$ref` steps from the
+    /// branch: a `$ref` node decides `null` where its own sibling keywords do or its target does,
+    /// read the same way; any other node is [`target_decides_null`]. A boolean target (a `false`
+    /// or `true` component) is read as the inline boolean branch is: `false` decides, `true` does
+    /// not. A target that cannot be read, or a chain past the bound, decides, which keeps the
+    /// lowered nullability.
+    fn ref_schema_decides_null(&self, schema: &Schema, depth: u32) -> bool {
+        if let Some(admits) = schema.boolean {
+            return !admits;
+        }
+        let Some(reference) = &schema.reference else {
+            return target_decides_null(schema);
+        };
+        let mut sibling = schema.clone();
+        sibling.reference = None;
+        target_decides_null(&sibling)
+            || depth >= MAX_SCHEMA_DEPTH
+            || self
+                .ref_target_body(reference, &schema.provenance)
+                .is_none_or(|target| self.ref_schema_decides_null(&target, depth + 1))
+    }
+
     /// Whether a union branch denies `null` ([`denies_null`]), reading a `$ref` branch through its
     /// target (#590): the branch is its target met with its own sibling keywords, so it denies
     /// `null` where either does by its own keywords alone. A `$ref` to a non-null object
@@ -5356,9 +5394,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::branch_denies_null`] of a schema node reached `depth` `$ref` steps from the branch:
     /// a `$ref` node denies `null` where its own sibling keywords do or its target does, read
-    /// the same way; any other node is [`schema_denies_null`]. Lowering already refused a `$ref`
-    /// cycle; the bound only keeps this total.
+    /// the same way; any other node is [`schema_denies_null`]. A boolean target is read as the
+    /// inline boolean branch is ([`denies_null`]): a `$ref` to a `false` component denies `null`,
+    /// so beside an untyped branch it decides nothing, as the inline `false` does, now that
+    /// [`Self::branch_decides_null`] reads that target as deciding (#594). Lowering already
+    /// refused a `$ref` cycle; the bound only keeps this total.
     fn ref_schema_denies_null(&self, schema: &Schema, depth: u32) -> bool {
+        if let Some(admits) = schema.boolean {
+            return !admits;
+        }
         let Some(reference) = &schema.reference else {
             return schema_denies_null(schema);
         };
@@ -11403,13 +11447,16 @@ fn object_all_of_admits_null(contributions: &[Contribution]) -> bool {
 /// beside an untyped branch (#581): the untyped branch leaves `null` undecided, so the inline
 /// spelling of the same meet stays non-null. `denies_null` is [`LowerCtx::branch_denies_null`],
 /// which reads a `$ref` branch through its target (#590), so a `$ref` to a non-null object
-/// component denies `null` there as the same branch written inline does. A composition some
-/// member decides, or a scalar one, keeps its nullability.
+/// component denies `null` there as the same branch written inline does. `decides` is
+/// [`LowerCtx::branch_decides_null`], which reads a `$ref` branch through its target (#594), so a
+/// `$ref` to a `true` or `{}` component leaves `null` undecided as the inline `true` or `{}`
+/// branch does. A composition some member decides, or a scalar one, keeps its nullability.
 fn undecided_admits_null(
     mut composed: Ty,
     has_object: bool,
     contributions: &[Contribution],
     union: &Schema,
+    decides: impl Fn(&SchemaOr) -> bool,
     denies_null: impl Fn(&SchemaOr) -> bool,
 ) -> Ty {
     let decided = contributions.iter().any(|contribution| {
@@ -11422,10 +11469,6 @@ fn undecided_admits_null(
         )
     });
     let branches = || union.one_of.iter().chain(&union.any_of);
-    let decides = |branch: &SchemaOr| match branch {
-        SchemaOr::Bool(admits) => !admits,
-        SchemaOr::Schema(branch) => target_decides_null(branch),
-    };
     // An untyped branch leaves `null` to the union's other branches (#581): beside one, branches
     // that deny `null` (by their own keywords, or a `$ref` branch's target) decide nothing, as
     // the same union met with the same members written inline keeps them non-null.
