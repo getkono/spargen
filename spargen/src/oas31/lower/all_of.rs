@@ -6,8 +6,8 @@ use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::{schema_has_union, Contribution};
 use super::nullability::{undecided_admits_null, union_branch_admits_null};
-use super::refiner::{implied_applicator_category, unreached_halves};
-use super::{LowerCtx, MetUnion, Refiner, ScopeReach};
+use super::refiner::implied_applicator_category;
+use super::{LowerCtx, MetUnion, Refiner};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
@@ -385,30 +385,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.collapse_met_union(schema, meet, !union.one_of.is_empty(), &meet_hint, spelling);
         meet = collapsed;
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
-            let mut reach = ScopeReach::default();
-            let met = self.meet_scoped_refiner(
-                meet,
+            let refined_hint = format!("{hint}Refined{index}");
+            let met = self.meet_scoped_and_report(
                 refiner,
-                &format!("{hint}Refined{index}"),
-                &mut reach,
-            );
-            if met.is_err() && reach.uncategorised {
-                let message = format!(
-                    "a branch of {union_is} states no JSON category, and {refining} untyped \
-                     keywords are both object keywords and array keywords with no `type` to \
-                     choose between them, so no single Rust type represents what they constrain \
-                     of it"
-                );
-                return self.reject_unscoped_union_sibling(member, &message);
-            }
-            for keywords in unreached_halves(refiner, &reach) {
-                let message = format!(
-                    "{refining} untyped {keywords} constrain only the instances of \
-                     their own category, and no branch of {beside} has that category, so they \
-                     apply to no value the union accepts"
-                );
-                self.warn_unreached_union_sibling(member, message);
-            }
+                |ctx, reach| ctx.meet_scoped_refiner(meet, refiner, &refined_hint, reach),
+                |ctx| {
+                    let message = format!(
+                        "a branch of {union_is} states no JSON category, and {refining} untyped \
+                         keywords are both object keywords and array keywords with no `type` to \
+                         choose between them, so no single Rust type represents what they \
+                         constrain of it"
+                    );
+                    ctx.reject_unscoped_union_sibling(member, &message)
+                },
+                member,
+                |keywords| {
+                    format!(
+                        "{refining} untyped {keywords} constrain only the instances of their own \
+                         category, and no branch of {beside} has that category, so they apply to \
+                         no value the union accepts"
+                    )
+                },
+            )?;
             let Ok(met) = met else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };

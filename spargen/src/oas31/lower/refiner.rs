@@ -267,31 +267,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<Ty> {
         let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
         let refiner = Refiner::Scoped(scoped);
-        let mut reach = ScopeReach::default();
         let mark = self.graph_mark();
-        let met = self.meet_scoped_refiner_with_union(
-            referenced,
-            union,
+        let met_hint = format!("{hint}ReferenceIntersection");
+        let met = self.meet_scoped_and_report(
             refiner,
-            &format!("{hint}ReferenceIntersection"),
-            &mut reach,
-        );
-        if met.is_err() && reach.uncategorised {
-            return self.reject_ref_sibling_category(
-                schema,
-                "a branch of this `$ref`'s target union states no JSON category, and the untyped \
-                 sibling keywords are both object keywords and array keywords with no `type` to \
-                 choose between them, so no single Rust type represents what they constrain of it",
-            );
-        }
-        for keywords in unreached_halves(refiner, &reach) {
-            let message = format!(
-                "this `$ref`'s untyped sibling {keywords} constrain only the instances of their \
-                 own category, and no branch of its target union has that category, so they \
-                 constrain no value the target accepts"
-            );
-            self.warn_unreached_union_sibling(schema, message);
-        }
+            |ctx, reach| {
+                ctx.meet_scoped_refiner_with_union(referenced, union, refiner, &met_hint, reach)
+            },
+            |ctx| {
+                ctx.reject_ref_sibling_category(
+                    schema,
+                    "a branch of this `$ref`'s target union states no JSON category, and the \
+                     untyped sibling keywords are both object keywords and array keywords with no \
+                     `type` to choose between them, so no single Rust type represents what they \
+                     constrain of it",
+                )
+            },
+            schema,
+            |keywords| {
+                format!(
+                    "this `$ref`'s untyped sibling {keywords} constrain only the instances of \
+                     their own category, and no branch of its target union has that category, so \
+                     they constrain no value the target accepts"
+                )
+            },
+        )?;
         let Ok(met) = met else {
             return self.reject_ref_sibling_intersection(schema);
         };
@@ -313,6 +313,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Meet `target` with the untyped applicators `refiner` carries: branch by branch where
     /// `target` is a union, keeping every branch of another category, and as that one branch
     /// otherwise. [`Self::refine_union_target`]'s meet, for a target that need not be a union.
+    ///
+    /// That dispatch is [`Self::meet_refiner`]'s for a [`Refiner::Scoped`] `refiner`, which is the
+    /// only kind this is given: a union target goes to [`Self::meet_scoped_refiner_with_union`],
+    /// and a reservation is refused. What this adds is the narrowing: a target that is not a union
+    /// is met closed, as a union's meet closes it for its branches, while a union target's meet
+    /// reads the enclosing answer itself.
     pub(super) fn meet_scoped_refiner(
         &mut self,
         target: Ty,
@@ -320,16 +326,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
-        match self.graph.get(target.id).map(|def| &def.kind) {
-            Some(TypeKind::Union(union)) => {
-                let union = union.clone();
-                self.meet_scoped_refiner_with_union(target, &union, refiner, hint, reach)
-            }
-            // A placeholder's body is not known yet, so nothing can be said of its category,
-            // exactly as `meet_refiner` answers for one.
-            Some(TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
-            _ => self.closed_narrowing(|ctx| ctx.meet_refiner(target, refiner, reach, hint)),
+        debug_assert!(matches!(refiner, Refiner::Scoped(_)));
+        if matches!(
+            self.graph.get(target.id).map(|def| &def.kind),
+            Some(TypeKind::Union(_))
+        ) {
+            return self.meet_refiner(target, refiner, reach, hint);
         }
+        self.closed_narrowing(|ctx| ctx.meet_refiner(target, refiner, reach, hint))
+    }
+
+    /// Meet with a sibling, `refiner`, and report what the meet found besides its result: the
+    /// sequence a union's sole member, a `$ref` to a union and an `allOf`'s untyped members share.
+    /// Only a [`Refiner::Scoped`] sibling records anything to report; a [`Refiner::Whole`] one
+    /// leaves the meet as it is. `meet` runs with a fresh [`ScopeReach`]. Where it failed on a branch that
+    /// states no category with none to establish for it, `reject_uncategorised` reports that
+    /// (`E013`) and its `None` is returned. Otherwise each half of `refiner` that reached no branch
+    /// of its category is reported (`W011`) at `warned`, worded by `unreached`, and the meet is
+    /// returned for the caller to settle.
+    pub(super) fn meet_scoped_and_report(
+        &mut self,
+        refiner: Refiner,
+        meet: impl FnOnce(&mut Self, &mut ScopeReach) -> Result<Ty, NoMeet>,
+        reject_uncategorised: impl FnOnce(&mut Self) -> Option<Result<Ty, NoMeet>>,
+        warned: &Schema,
+        unreached: impl Fn(&str) -> String,
+    ) -> Option<Result<Ty, NoMeet>> {
+        let mut reach = ScopeReach::default();
+        let met = meet(self, &mut reach);
+        if met.is_err() && reach.uncategorised {
+            return reject_uncategorised(self);
+        }
+        for keywords in unreached_halves(refiner, &reach) {
+            self.warn_unreached_union_sibling(warned, unreached(keywords));
+        }
+        Some(met)
     }
 
     /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`. The meet admits `null`

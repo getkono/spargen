@@ -230,26 +230,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and it already reaches the intersection on the sibling side, where it belongs —
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
-                let mut reach = ScopeReach::default();
-                let met = self.meet_refiner(
-                    inner,
+                let constrained_hint = format!("{hint}Constrained");
+                let met = self.meet_scoped_and_report(
                     sibling.refiner,
-                    &mut reach,
-                    &format!("{hint}Constrained"),
-                );
-                if met.is_err() && reach.uncategorised {
-                    return self.reject_unscoped_union_sibling(
-                        schema,
-                        "the union's sole non-null member states no JSON category, and the \
-                         enclosing schema's untyped sibling keywords settle none for it — they are \
-                         both object keywords and array keywords, or its `type` array admits \
-                         another category beside theirs — so no single Rust type represents what \
-                         they constrain of it",
-                    );
-                }
-                for keywords in unreached_halves(sibling.refiner, &reach) {
-                    self.warn_unreached_union_sibling(schema, unreached_message(keywords));
-                }
+                    |ctx, reach| ctx.meet_refiner(inner, sibling.refiner, reach, &constrained_hint),
+                    |ctx| {
+                        ctx.reject_unscoped_union_sibling(
+                            schema,
+                            "the union's sole non-null member states no JSON category, and the \
+                             enclosing schema's untyped sibling keywords settle none for it — they \
+                             are both object keywords and array keywords, or its `type` array \
+                             admits another category beside theirs — so no single Rust type \
+                             represents what they constrain of it",
+                        )
+                    },
+                    schema,
+                    unreached_message,
+                )?;
                 let Ok(constrained) = met else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
                     // left to collapse to. The terminal code matches the multi-variant path below,

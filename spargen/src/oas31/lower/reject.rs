@@ -243,11 +243,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// empty result or a dropped target branch. `message` says which.
     ///
     /// [`implied_applicator_category`]: super::refiner::implied_applicator_category
-    pub(super) fn reject_ref_sibling_category(
+    pub(super) fn reject_ref_sibling_category<T>(
         &mut self,
         schema: &Schema,
         message: &str,
-    ) -> Option<Ty> {
+    ) -> Option<T> {
         // E013 case: inferred-category
         self.reject_irreconcilable(
             Code::AllOfIrreconcilable,
