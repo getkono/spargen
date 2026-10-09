@@ -562,7 +562,9 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
         "    NB:\n      type: [object, 'null']\n      properties:\n        a: { type: \
                          string }\n        b: { type: string }\n";
     let name = "    Name: { type: string }\n";
-    let required = "[ { required: [a] }, { required: [b] } ]";
+    // Branches that state nothing, so each meets the target to the target itself. Untyped
+    // `required` branches no longer do: each establishes an object that requires its key (#613).
+    let keywordless = "[ {}, {} ]";
     let enumerated = "[ { type: string, enum: [red, green] }, { type: integer } ]";
     let single =
         "[ { type: object, required: [a], properties: { c: { type: integer } } }, { type: \
@@ -576,18 +578,18 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     }
     let cases = [
         (
-            "required-only oneOf",
+            "keywordless oneOf",
             "Base",
             "oneOf",
-            required,
+            keywordless,
             vec![Code::ValidationKeywordIgnored],
             Shape::Fields(&["a", "b"], false),
         ),
         (
-            "required-only anyOf",
+            "keywordless anyOf",
             "Base",
             "anyOf",
-            required,
+            keywordless,
             vec![Code::ValidationKeywordIgnored],
             Shape::Fields(&["a", "b"], false),
         ),
@@ -595,7 +597,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             "nullable target, oneOf",
             "NB",
             "oneOf",
-            required,
+            keywordless,
             vec![Code::ValidationKeywordIgnored],
             Shape::Fields(&["a", "b"], false),
         ),
@@ -603,7 +605,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             "nullable target, anyOf",
             "NB",
             "anyOf",
-            required,
+            keywordless,
             vec![Code::ValidationKeywordIgnored],
             Shape::Fields(&["a", "b"], true),
         ),
@@ -682,7 +684,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
                 format!("nullable target, {form}, {keyword}"),
                 "NB",
                 keyword,
-                required,
+                keywordless,
                 vec![Code::ValidationKeywordIgnored],
                 Shape::Fields(fields, nullable),
                 Some(conjunct),
@@ -1154,12 +1156,11 @@ fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
 
 /// Issue #419, the `$ref` spelling of an `allOf` member beside a union (decision 10): the member
 /// is never a scoped refiner, so the union meets the target's lowered component type. A target
-/// holding only `required` lowers to an untyped schema, which excludes no branch, so the string
-/// branch and the `null` both survive, as with the inline spelling. A target holding `properties`
-/// lowers to an object, so the meet keeps only the object branch and the string branch drops, with
-/// no diagnostic. That target states no `type`, so it admits `null` without deciding it (#541),
-/// and the `null` branch survives as well: `p` is `Option<Pet>`. This pins today's behaviour of
-/// both, so a change to either is a visible diff.
+/// holding only `required` lowers to an object as one holding `properties` does (#613), so the
+/// meet keeps only the object branch and the string branch drops, with no diagnostic. Neither
+/// target states a `type`, so each admits `null` without deciding it (#541), and the `null` branch
+/// survives as well: `p` is `Option<Pet>`. This pins today's behaviour of both, so a change to
+/// either is a visible diff.
 #[test]
 fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
     let owner = "    Owner:\n      type: object\n      required: [p]\n      \
@@ -1173,7 +1174,7 @@ fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
             "    HasKind:\n      required: [kind]\n",
             with_string,
             "Option<Pet>",
-            2,
+            0,
         ),
         (
             "    HasKind:\n      required: [kind]\n",
@@ -1216,12 +1217,10 @@ fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
             variant_count,
             "{what}: {variants:?}\n{types}"
         );
-        if name == "HasName" {
-            assert!(
-                types.contains("pub struct Pet {"),
-                "{what}: the meet keeps only the object branch:\n{types}"
-            );
-        }
+        assert!(
+            types.contains("pub struct Pet {"),
+            "{what}: the meet keeps only the object branch:\n{types}"
+        );
         let checked = check(&spec);
         assert!(checked.diagnostics().is_empty(), "{what}: {checked:#?}");
     }

@@ -127,10 +127,7 @@ fn a_refined_untyped_one_of_branch_does_not_warn() {
 /// variant, which the merge already reports (#402).
 #[test]
 fn an_untyped_any_of_member_stays_silent() {
-    for schema in [
-        "anyOf: [{ type: string }, {}]",
-        "anyOf: [{ required: [a] }, { required: [b] }]",
-    ] {
+    for schema in ["anyOf: [{ type: string }, {}]", "anyOf: [{}, {}]"] {
         let (report, code) = generate_with_code(&format!(
             "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
              schemas:\n    U:\n      {schema}\n"
@@ -147,7 +144,7 @@ fn an_untyped_any_of_member_stays_silent() {
     }
     let (report, _) = generate_with_code(
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    \
-         U:\n      oneOf: [{ required: [a] }, { required: [b] }]\n",
+         U:\n      oneOf: [{}, {}]\n",
     );
     let messages: Vec<&str> = report
         .diagnostics()
@@ -183,11 +180,11 @@ paths:
 }
 
 /// A collapsed union keeps the nullability its keyword gives it. Beside a nullable target
-/// (`NB: type: [object, "null"]`), each required-only branch admits `null`, since `required` binds
-/// objects only. An `anyOf` needs just one branch to match, so `null` stays valid and the position
-/// is `Option<_>`. A `oneOf` needs exactly one, and `null` matches both, so `null` is invalid and
-/// the position is required and non-nullable. A `{type: 'null'}` member does not change either
-/// answer: under `oneOf`, `null` then matches that member *and* both required-only branches, so it
+/// (`NB: type: [object, "null"]`), each branch that states nothing admits `null`. An `anyOf` needs
+/// just one branch to match, so `null` stays valid and the position is `Option<_>`. A `oneOf`
+/// needs exactly one, and `null` matches both, so `null` is invalid and the position is required
+/// and non-nullable. A `{type: 'null'}` member does not change either answer: under `oneOf`,
+/// `null` then matches that member *and* both keywordless branches, so it
 /// still fails the exactly-one rule, while under `anyOf` it was already valid.
 #[test]
 fn a_collapsed_union_sibling_beside_a_nullable_target_keeps_its_keywords_nullability() {
@@ -198,7 +195,7 @@ fn a_collapsed_union_sibling_beside_a_nullable_target_keeps_its_keywords_nullabi
         ("oneOf", ", { type: 'null' }", false),
     ] {
         // The case label every assertion message carries.
-        let keyword = format!("{union_keyword}[required a, required b{null_member}]");
+        let keyword = format!("{union_keyword}[{{}}, {{}}{null_member}]");
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -225,7 +222,7 @@ components:
       properties:
         x:
           $ref: '#/components/schemas/NB'
-          {union_keyword}: [ {{ required: [a] }}, {{ required: [b] }}{null_member} ]
+          {union_keyword}: [ {{}}, {{}}{null_member} ]
       required: [x]
 "##
         );
@@ -257,7 +254,7 @@ components:
 }
 
 /// An inline `oneOf` whose branches lower to one and the same generated type is the `$ref`-sibling
-/// collapse above spelled without the `$ref` (#402). Branches of nothing but `required` beside
+/// collapse above spelled without the `$ref` (#402). Branches that state nothing beside
 /// `type: object` and `properties` each meet the sibling to the same object, and bare ones each
 /// lower to `serde_json::Value`; emitted as two variants, every value matches both, so the
 /// exactly-one check fails every decode. The position is that one type instead, and the branch
@@ -267,15 +264,20 @@ components:
 #[test]
 fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
     let props = "properties: { a: { type: string }, b: { type: string } }";
-    let required_branches = "oneOf: [ { required: [a] }, { required: [b] } ]";
+    let keywordless_branches = "oneOf: [ {}, {} ]";
     for (shape, body, expect_fields, expect_variants) in [
         (
             "beside type: object",
-            format!("      type: object\n      {props}\n      {required_branches}\n"),
+            format!("      type: object\n      {props}\n      {keywordless_branches}\n"),
             Some(["a", "b"]),
             None,
         ),
-        ("bare", format!("      {required_branches}\n"), None, None),
+        (
+            "bare",
+            format!("      {keywordless_branches}\n"),
+            None,
+            None,
+        ),
         (
             "partly shared",
             "      oneOf: [ { type: string, minLength: 1 }, { type: string, maxLength: 3 }, { \
@@ -325,8 +327,8 @@ fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
         );
     }
 
-    // Beside a nullable object, each `required`-only branch admits `null` (`required` binds objects
-    // only), so `null` matches both and the `oneOf` rejects it: the collapsed position is required
+    // Beside a nullable object, each branch that states nothing admits `null`, so `null` matches
+    // both and the `oneOf` rejects it: the collapsed position is required
     // and non-nullable, as the `$ref` spelling of the same document is.
     let spec = format!(
         r##"
@@ -350,7 +352,7 @@ components:
         x:
           type: [object, 'null']
           {props}
-          {required_branches}
+          {keywordless_branches}
       required: [x]
 "##
     );

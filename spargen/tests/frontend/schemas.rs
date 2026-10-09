@@ -904,3 +904,113 @@ components:
         assert_ne!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
     }
 }
+
+/// Untyped `required` or `additionalProperties` alone are object applicators, and establish the
+/// object category as untyped `properties` and the same keywords beside a `$ref` already do
+/// (#613). They used to fall to `serde_json::Value`, dropping the constraint with no diagnostic,
+/// standalone and as a `oneOf`/`anyOf` branch alike.
+#[test]
+fn untyped_required_or_additional_properties_alone_lower_to_an_object() {
+    for (case, body) in [
+        ("required", "      required: [id]\n"),
+        (
+            "additionalProperties",
+            "      additionalProperties: { type: string }\n",
+        ),
+        (
+            "additionalProperties: false",
+            "      additionalProperties: false\n",
+        ),
+        (
+            "required beside additionalProperties",
+            "      required: [id]\n      additionalProperties: { type: integer }\n",
+        ),
+        (
+            "an anyOf branch",
+            "      anyOf: [ { required: [id] }, { type: string } ]\n",
+        ),
+        (
+            "a oneOf branch",
+            "      oneOf: [ { required: [id] }, { type: string } ]\n",
+        ),
+    ] {
+        let spec = with_schemas("3.1.0", &format!("    U:\n{body}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
+        assert!(report.diagnostics().is_empty(), "{case}: {report:#?}");
+        let types = types_module(&code);
+        assert_eq!(alias_target(&types, "U"), None, "{case}: {types}");
+        if body.contains("Of:") {
+            assert_eq!(enum_variants(&types, "U").len(), 2, "{case}: {types}");
+        } else {
+            assert!(types.contains("pub struct U {"), "{case}: {types}");
+        }
+        if body.contains("required") {
+            // The required key is a required field of the object the keyword establishes.
+            let owner = field_owner(&types, "pub id:")
+                .unwrap_or_else(|| panic!("{case}: no `id` field: {types}"));
+            assert_eq!(declared_fields(&types, &owner)[0], "id", "{case}: {types}");
+            let id = field_type(&types, "pub id:").unwrap_or_default();
+            assert!(
+                !id.starts_with("Option<"),
+                "{case}: `id` is `{id}`: {types}"
+            );
+        }
+        if body.contains("{ type: string }\n") && !body.contains("Of:") {
+            // The undeclared keys are a typed map of the `additionalProperties` value.
+            let map = field_type(&types, "pub additional:").unwrap_or_default();
+            let value = map
+                .strip_prefix("BTreeMap<String, ")
+                .and_then(|rest| rest.strip_suffix('>'))
+                .unwrap_or_else(|| panic!("{case}: `additional` is `{map}`: {types}"));
+            assert_eq!(
+                alias_target(&types, value).as_deref(),
+                Some("String"),
+                "{case}: {types}"
+            );
+        }
+    }
+
+    // Distinct `required` branches are distinct objects in every spelling of the meet with an
+    // object target, so none collapses them (`W001`) into the target: each keeps two variants, one
+    // requiring each key.
+    let base =
+        "    Base:\n      type: object\n      properties:\n        a: { type: string }\n        \
+                b: { type: string }\n";
+    let branches = "oneOf: [ { required: [a] }, { required: [b] } ]";
+    for (spelling, site) in [
+        (
+            "$ref sibling",
+            format!("{{ $ref: '#/components/schemas/Base', {branches} }}"),
+        ),
+        (
+            "allOf member",
+            format!("{{ allOf: [ {{ $ref: '#/components/schemas/Base' }}, {{ {branches} }} ] }}"),
+        ),
+        (
+            "beside allOf",
+            format!("{{ allOf: [ {{ $ref: '#/components/schemas/Base' }} ], {branches} }}"),
+        ),
+        (
+            "inline",
+            format!(
+                "{{ type: object, properties: {{ a: {{ type: string }}, b: {{ type: string }} }}, \
+                 {branches} }}"
+            ),
+        ),
+    ] {
+        let spec = with_schemas("3.1.0", &format!("{base}    Pick: {site}\n"));
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
+        );
+        assert!(report.diagnostics().is_empty(), "{spelling}: {report:#?}");
+        assert_eq!(
+            enum_variants(&types_module(&code), "Pick").len(),
+            2,
+            "{spelling}: {code}"
+        );
+    }
+}

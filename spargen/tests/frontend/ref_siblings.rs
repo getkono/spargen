@@ -208,7 +208,7 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
 }
 
 /// A union sibling whose branches intersect with the target to one and the same type — here
-/// branches of nothing but `required`, which lower to no shape of their own (#140) — must not be
+/// branches that state nothing, which lower to no shape of their own — must not be
 /// emitted as a union. Every branch would be the target, so a `oneOf` of them rejects every value
 /// and an `anyOf` of them is the target itself. The position keeps the target's shape and the
 /// branch distinctions it cannot carry are reported as `W001` at the `$ref`, through `generate` and
@@ -216,10 +216,7 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
 #[test]
 fn a_ref_with_a_union_sibling_whose_branches_collapse_keeps_the_target_and_warns() {
     for keyword in ["oneOf", "anyOf"] {
-        let site = format!(
-            "{{ $ref: '#/components/schemas/Base', {keyword}: [ {{ required: [a] }}, {{ required: \
-             [b] }} ] }}"
-        );
+        let site = format!("{{ $ref: '#/components/schemas/Base', {keyword}: [ {{}}, {{}} ] }}");
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -357,7 +354,7 @@ components:
 }
 
 /// The partly shared `$ref`-sibling merge keeps the `oneOf` null rule (#402). Beside a nullable
-/// object `NB`, `required: [a]` and `required: [b]` each meet `NB` to one nullable struct, and the
+/// object `NB`, two branches that state nothing each meet `NB` to one nullable struct, and the
 /// third branch's extra property `c` makes a second, so the union keeps two variants. `null` then
 /// matches both merged branches and fails exactly-one, so it is invalid: the merged variant does
 /// not carry `Option<_>`, and neither does the position. The third branch is written once
@@ -393,8 +390,8 @@ components:
         x:
           $ref: '#/components/schemas/NB'
           oneOf:
-            - {{ required: [a] }}
-            - {{ required: [b] }}
+            - {{}}
+            - {{}}
             - {{ type: {third}, properties: {{ c: {{ type: integer }} }} }}
       required: [x]
 "##
@@ -827,10 +824,10 @@ components:
     );
 
     // Untyped array keywords beside object branches refine none of them (`W011`), and the met
-    // branches, alike once `required` is not carried, collapse with `W001`. `null` matches both
-    // branches, so the `oneOf` rejects it.
+    // branches, alike, collapse with `W001`. `null` matches both branches, so the `oneOf` rejects
+    // it.
     let spec_text = spec(&format!(
-        "{{ {nb}, items: {{ type: string }}, oneOf: [ {{ required: [a] }}, {{ required: [b] }} ] }}"
+        "{{ {nb}, items: {{ type: string }}, oneOf: [ {{ required: [a] }}, {{ required: [a] }} ] }}"
     ));
     let (report, code) = generate_with_code(&spec_text);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
@@ -860,8 +857,7 @@ components:
     // its `null` without deciding it (#562), so the `anyOf`, whose branches all accept `null`,
     // keeps it once its branches collapse.
     let spec_text = spec(&format!(
-        "{{ {nb}, allOf: [ {{ required: [a] }} ], anyOf: [ {{ required: [a] }}, {{ required: [b] \
-         }} ] }}"
+        "{{ {nb}, allOf: [ {{ required: [a] }} ], anyOf: [ {{}}, {{}} ] }}"
     ));
     let (report, code) = generate_with_code(&spec_text);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
