@@ -58,7 +58,7 @@ recipes, the only `$ref` with a sibling other than an annotation (`description`,
 until [#279](https://github.com/getkono/spargen/issues/279) was fixed, and since then this member
 reaches the intersection too. Every other intersection behaviour — an empty intersection, a
 recursive target, and a non-empty one of any other shape — is pinned only by inline fixtures:
-those in `spargen/tests/frontend.rs`, and the two `--compat` carve fixtures in
+those in `spargen/tests/frontend/`, and the two `--compat` carve fixtures in
 `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected` and
 `carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
 `E013`.
@@ -107,9 +107,9 @@ Which statements each description evaluates was read from source-based coverage
 (`cargo +stable llvm-cov`) of `spargen check --batch-cap 1000000` over each case and recipe on its
 own, and of the `corpus_manifest`, `snapshot` and `recipes` suites; the two agree on every site.
 Real mutations run through the three suites checked the method. Forcing seven sites marked not
-noticed, all at once, left all three green (`frontend.rs` failed under the same mutations, so they
-were live). Forcing a noticed site failed exactly the tests of the descriptions listed as
-reaching it, for each of four: `W002` for `callbacks` (five snapshots and the `aide` recipe),
+noticed, all at once, left all three green (the frontend suite, then the single file `frontend.rs`
+and now `spargen/tests/frontend/`, failed under the same mutations, so they were live). Forcing a
+noticed site failed exactly the tests of the descriptions listed as reaching it, for each of four: `W002` for `callbacks` (five snapshots and the `aide` recipe),
 `E004` for a Path Item `$ref` hop (`openapi-boilerplate` in `corpus_manifest` and `snapshot`),
 `W011` for a second per-operation `servers` entry (the `github-api-3-1` snapshot), and the
 `$ref`-sibling `E013` above (`mastodon-openapi` and `openai-openapi`). The `E004` and `W011`
@@ -159,10 +159,10 @@ so removing or re-pinning it would leave them unguarded:
 - `github-api-3-1`: `W011`'s `extra-servers`.
 
 The sites listed as not reached get no evidence at all from a green corpus run, in either direction;
-only `frontend.rs` and the other inline fixtures pin them. Re-measure this table when a case is
-added or re-pinned, and when a change moves a site or its gate.
+only `spargen/tests/frontend/` and the other inline fixtures pin them. Re-measure this table when a
+case is added or re-pinned, and when a change moves a site or its gate.
 
 Before relying on a green corpus run for a change to a construct, check that some pinned
 description contains that construct in a position that reaches the code. If none does, the
-evidence has to come from `frontend.rs`, `carve.rs`, and `e2e.rs` fixtures, or from a new corpus
-case.
+evidence has to come from `spargen/tests/frontend/`, `carve.rs`, and `e2e.rs` fixtures, or from a
+new corpus case.
