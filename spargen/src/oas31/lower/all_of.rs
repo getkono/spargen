@@ -16,16 +16,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Members are gathered in a deterministic order — every `allOf` entry in source order, then the
     /// enclosing schema's own object siblings — flattening `$ref` members by *copying* their fields
     /// (the referenced component still exists as its own named type) and recursing into nested
-    /// `allOf`. The gathered members are then combined:
+    /// `allOf`. A member that constrains nothing (`true`, `{}`, an annotation) contributes nothing;
+    /// a `false` member, and a member that closes a reference cycle back to the schema being
+    /// lowered, are `E013`. A `$ref` member's own shape-bearing siblings are a further member. The
+    /// gathered members are then combined ([`Self::combine_all_of`]):
     ///
+    /// * **no constraining member** → an open, field-less [`Struct`];
     /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
     ///   order, recursive typed intersections for properties declared by several members (an empty
     ///   one types the field uninhabited unless some member requires it, which is `E013` — the rule
-    ///   `intersect_structs` applies), the union of `required`, and a conservatively intersected
-    ///   `additionalProperties` policy;
+    ///   `intersect_structs` applies), the union of `required`, and the `additionalProperties`
+    ///   policies merged by [`Self::merge_additional`], whose irreconcilable pair is `E013`;
     /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
-    ///   narrowing, arrays/objects/unions, and exact nullability; an empty intersection → `E013`;
+    ///   narrowing, arrays/objects/unions, and exact nullability; no typed intersection → `E013`;
     /// * an **object/scalar mix** → `E013`.
+    ///
+    /// Each `E013` returns `None`, as does a member that fails to lower for its own reason.
     ///
     /// Every path inserts its result type as the *final* graph insert (all member/property/component
     /// types insert first), so an `allOf` used as a component body still satisfies the

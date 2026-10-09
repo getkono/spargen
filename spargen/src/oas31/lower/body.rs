@@ -63,22 +63,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // document declined to say — so it is rejected rather than guessed at. `choose_media`
         // selects a range for a request only once no concrete key beside it classifies, so this
         // fires only when the document offers nothing else spargen can send.
-        if classify_media_range(media_essence(media_name)).is_some() {
-            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
-                .message(format!(
-                    "media type `{media_name}` is a media range, which describes a family rather \
-                     than the concrete `Content-Type` a request must send"
-                ))
-                .remedy(
-                    "name the concrete media type the request body is sent as, or omit this API \
-                     segment with spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
-        }
+        //
         // A structured-suffix range such as `application/*+json` is a range for the same reason,
         // even though the suffix arms classify it as the codec its suffix names.
-        if media_essence_is_suffix_range(media_essence(media_name)) {
+        if classify_media_range(media_essence(media_name)).is_some()
+            || media_essence_is_suffix_range(media_essence(media_name))
+        {
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
                     "media type `{media_name}` is a media range, which describes a family rather \
@@ -128,26 +118,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // rather than silently degrade. A schema that *failed* to lower for its own reason (`ty` is
         // `None` though a schema was declared) has already emitted that diagnostic — don't pile a
         // misleading "must be an object" E009 on top of it.
-        if media == MediaType::Multipart {
-            let is_struct = matches!(
-                ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            );
-            let schema_failed_to_lower = object.schema.is_some() && ty.is_none();
-            if !is_struct && !schema_failed_to_lower {
-                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
-                    .message(
-                        "a `multipart/form-data` request body must be an object schema; its \
-                         properties are the form parts, so a non-object multipart body is not \
-                         representable",
-                    )
-                    .remedy(
-                        "give the multipart body an object schema with a property per form part, \
-                         or omit this API segment with spargen::omit!",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
+        if media == MediaType::Multipart
+            && self.form_body_is_not_object(ty, object.schema.is_some())
+        {
+            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                .message(
+                    "a `multipart/form-data` request body must be an object schema; its \
+                     properties are the form parts, so a non-object multipart body is not \
+                     representable",
+                )
+                .remedy(
+                    "give the multipart body an object schema with a property per form part, \
+                     or omit this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
         }
         let ty = if media == MediaType::OctetStream {
             self.opaque_octets("RequestBody", ty, object.schema.is_some(), &body.provenance)
@@ -155,15 +140,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty
         };
         if let Some(ty) = ty {
-            let compatible = match media {
-                MediaType::Text => raw_text_type_supported(&self.graph, ty),
-                MediaType::OctetStream => matches!(
-                    self.graph.get(ty.id).map(|definition| &definition.kind),
-                    Some(TypeKind::Bytes)
-                ),
-                _ => true,
-            };
-            if !compatible {
+            if !self.raw_body_compatible(media, ty) {
                 Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                     .message(format!(
                         "media type `{media_name}` requires a string-like or binary schema that can be sent as a raw body"
@@ -193,25 +170,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A form-urlencoded body is rendered property by property, so it needs properties. Without
         // this gate a non-object body compiled and then failed at runtime inside the form encoder.
-        if media == MediaType::FormUrlEncoded {
-            let is_struct = matches!(
-                ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            );
-            let schema_failed_to_lower = object.schema.is_some() && ty.is_none();
-            if !is_struct && !schema_failed_to_lower {
-                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
-                    .message(
-                        "an `application/x-www-form-urlencoded` request body must be an object \
-                         schema; its properties are the form fields",
-                    )
-                    .remedy(
-                        "give the body an object schema with a property per form field, or omit \
-                         this API segment with spargen::omit!",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
+        if media == MediaType::FormUrlEncoded
+            && self.form_body_is_not_object(ty, object.schema.is_some())
+        {
+            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                .message(
+                    "an `application/x-www-form-urlencoded` request body must be an object \
+                     schema; its properties are the form fields",
+                )
+                .remedy(
+                    "give the body an object schema with a property per form field, or omit \
+                     this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
         }
         let encoding = self.lower_body_encoding(media, media_name, ty, &object)?;
         Some(RequestBody {
@@ -297,9 +269,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(TypeKind::Bytes)
         )
     }
+
+    /// Whether a lowered body type can travel as `media`'s raw content: under raw text it must be
+    /// proved string-like ([`raw_text_type_supported`]), under `application/octet-stream` it must
+    /// be [`TypeKind::Bytes`], and under every other media any type is accepted here. Shared by the
+    /// request and response body gates, which refuse with their own `E009` wording.
+    pub(super) fn raw_body_compatible(&self, media: MediaType, ty: Ty) -> bool {
+        match media {
+            MediaType::Text => raw_text_type_supported(&self.graph, ty),
+            MediaType::OctetStream => self.is_bytes(ty),
+            _ => true,
+        }
+    }
+
+    /// Whether a `multipart/form-data` or form-urlencoded request body lacks the object schema
+    /// whose properties are its parts or fields. `ty` is the lowered body type and `declared`
+    /// whether a schema was written; a declared schema that failed to lower (`ty` is `None`) has
+    /// already reported why, so it answers `false` rather than stacking a second `E009` on it.
+    fn form_body_is_not_object(&self, ty: Option<Ty>, declared: bool) -> bool {
+        let is_struct = matches!(
+            ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
+            Some(TypeKind::Struct(_))
+        );
+        let schema_failed_to_lower = declared && ty.is_none();
+        !is_struct && !schema_failed_to_lower
+    }
 }
 
-pub(super) fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
+fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
     fn visit(graph: &TypeGraph, ty: Ty, seen: &mut HashSet<TypeId>) -> bool {
         if !seen.insert(ty.id) {
             return true;

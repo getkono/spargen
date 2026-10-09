@@ -17,16 +17,34 @@ use super::shape::schema_has_shape_constraint;
 use super::{LowerCtx, Refiner, ScopeReach, StatedNothingNull};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    /// Lower a `oneOf`/`anyOf` union. `null` members are stripped and make the union `nullable`
-    /// (`Option<Union>`), exactly like a `"null"` in a type array; a 2-member union whose other
-    /// member is null collapses to `Option<TheOtherType>` with no enum. The remaining variants are
-    /// represented WITHOUT `serde(untagged)` and without degrading to `serde_json::Value`:
+    /// Lower a `oneOf`/`anyOf` union, with `open_narrowing` out of effect.
     ///
-    /// * a `discriminator` dispatches object variants by tag and uniquely categorized non-object
-    ///   variants by JSON category;
-    /// * statically disjoint variants dispatch by JSON category or unique required key;
-    /// * overlapping variants use typed trial matching with exact-one (`oneOf`) or deterministic
-    ///   most-specific (`anyOf`) semantics, including serialization revalidation.
+    /// Null-only members ([`member_is_null_only`]) are stripped, and each is a branch `null`
+    /// matches, so it makes the union `nullable` (`Option<Union>`). A `"null"` in the enclosing
+    /// `type` array only *permits* `null`: it reaches a branch whose own keywords leave `null`
+    /// undecided, and adds no branch of its own. The schema's sibling keywords
+    /// ([`Self::lower_union_sibling`]) are met with every remaining member. Then:
+    ///
+    /// * with only null-only members, the union is the exact JSON null type;
+    /// * with one real member, it collapses to that member's type (`Option<T>` beside a `null`
+    ///   member, however many there are) with no enum — a member that is a cycle-closing `$ref`
+    ///   stays the boxed reference itself;
+    /// * otherwise the variants are represented WITHOUT `serde(untagged)` and without degrading to
+    ///   `serde_json::Value`: a `discriminator` dispatches object variants by tag and uniquely
+    ///   categorized non-object variants by JSON category; statically disjoint variants dispatch
+    ///   by JSON category or unique required key; overlapping variants use typed trial matching
+    ///   with exact-one (`oneOf`) or deterministic most-specific (`anyOf`) semantics, including
+    ///   serialization revalidation. A `oneOf`'s variants that lower to one generated type merge
+    ///   into one variant, with `W001`.
+    ///
+    /// A member the sibling meet excludes drops out with `W011`; where that leaves no branch, the
+    /// union is the exact null type if a null-only member remains and the sibling admits `null`,
+    /// and `E007` otherwise. A `oneOf` in which `null` matches more than one branch admits no
+    /// `null`. The union is rejected (`None`) with `E007` where one node declares both `oneOf` and
+    /// `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
+    /// be met with a member that closes a reference cycle, with a member that states no category
+    /// for untyped sibling keywords to establish, or with a member it shares values with that no
+    /// single Rust type represents.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union

@@ -42,8 +42,17 @@ pub(super) struct ChosenMedia<'a, T> {
     pub(super) narrowing: Option<Diagnostic>,
 }
 
-/// `opaque` answers, without lowering anything, whether an entry's body constrains nothing — the
-/// proof that an ignored alternative would decode exactly like the selection.
+/// Select the one `content` entry a body is generated from, among the keys that classify as a
+/// supported media type: the best-ranked, and the first in source order on a tie. In a request
+/// a media range ranks after every concrete key, since `Content-Type` must be concrete; one that
+/// is still selected is refused by the caller. A key that does not classify is skipped.
+///
+/// `None` with nothing reported for an empty `content`, and `None` with an `E009` naming the first
+/// key when no key classifies. Otherwise the selection, with the `W014` naming every other key
+/// built but not emitted ([`ChosenMedia::narrowing`]); `None` there when nothing else is offered.
+/// A response that selects `application/octet-stream` leaves out of that `W014` each other
+/// octet-stream alternative `opaque` proves constrains nothing, since it would decode exactly
+/// like the selection. `opaque` answers that without lowering anything.
 pub(super) fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,

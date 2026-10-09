@@ -14,12 +14,21 @@ use super::strategy::retain_strategy;
 use super::{CategoryMask, LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
-    /// them. A multi-non-null `type` array is already expressed by the union members and is removed
-    /// here. Its `null` only permits `null`: the union admits it through a branch `null` matches
-    /// (#574), which a branch whose own keywords leave `null` undecided takes from the array
+    /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` (the schema without its union and
+    /// `discriminator`) so every branch is intersected with them. A multi-non-null `type` array is
+    /// already expressed by the union members and is removed here. Its `null` only permits
+    /// `null`: the union admits it through a branch `null` matches (#574), which a branch whose own
+    /// keywords leave `null` undecided takes from the array
     /// ([`Self::branch_takes_permitted_null`]), and which [`Self::lower_type_array`] spells as a
     /// `null` member of the union it synthesizes.
+    ///
+    /// Answers `Some(None)` when what is left carries no shape constraint, so there is nothing to
+    /// meet. Untyped object or array applicators (one [`implied_applicator_category`] answers for)
+    /// lower to a [`Refiner::Scoped`] sibling that refines only the branches of its own category,
+    /// limited to the categories a removed `type` array names and admitting `null` unless that
+    /// array omits it. Any other sibling lowers whole to a [`Refiner::Whole`], which takes back the
+    /// removed array's `null`. The answer carries whether the sibling's own keywords say anything
+    /// about `null`. `None` where the sibling fails to lower, which has reported why.
     pub(super) fn lower_union_sibling(
         &mut self,
         schema: &Schema,
@@ -142,15 +151,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
-    /// Meet one union branch with `refiner`. A [`Refiner::Whole`] sibling is intersected with it.
+    /// Meet one union branch with `refiner`. A [`Refiner::Whole`] sibling is intersected with it
+    /// ([`Self::intersect_types`]).
+    ///
     /// A [`Refiner::Scoped`] one meets an object branch with its object half and an array branch
     /// with its array half, recording in `reach` which half reached one; a branch of another
-    /// category is left as it is, but for a `null` the sibling denies. A nested union is met
-    /// branch by branch. A branch of a category [`ScopedRefiners::allowed`] omits is excluded. A
-    /// branch that states no category (`{}`) takes the one the sibling establishes, as an untyped
-    /// `$ref` target does; where the sibling carries both kinds, or `allowed` admits another
-    /// category too, there is none to establish, and the meet is [`NoMeet::Unrepresentable`] with
-    /// `reach.uncategorised` set.
+    /// category (a scalar, an enum, bytes, `null`, or an uninhabited type), or of a category whose
+    /// half the sibling lacks, is left as it is, but for a `null` the sibling denies. A nested
+    /// union is met branch by branch ([`Self::meet_scoped_refiner_with_union`]). A branch of a
+    /// category [`ScopedRefiners::allowed`] omits is excluded: it is the exact null type where
+    /// both it and the sibling admit `null`, and [`NoMeet::Empty`] otherwise. A branch that
+    /// states no category (`{}`) takes the one the sibling establishes, as an untyped `$ref`
+    /// target does, keeping its own `null` only where the sibling admits it; where the sibling
+    /// carries both kinds, or `allowed` admits another category too, there is none to establish,
+    /// and the meet is [`NoMeet::Unrepresentable`] with `reach.uncategorised` set. A branch whose
+    /// definition is missing or still a reservation is [`NoMeet::Unrepresentable`] as well.
     pub(super) fn meet_refiner(
         &mut self,
         branch: Ty,
@@ -315,14 +330,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Meet `target` with the untyped applicators `refiner` carries: branch by branch where
-    /// `target` is a union, keeping every branch of another category, and as that one branch
-    /// otherwise. [`Self::refine_union_target`]'s meet, for a target that need not be a union.
+    /// `target` is a union, and as that one branch otherwise. [`Self::refine_union_target`]'s
+    /// meet, for a target that need not be a union.
     ///
     /// That dispatch is [`Self::meet_refiner`]'s for a [`Refiner::Scoped`] `refiner`, which is the
-    /// only kind this is given: a union target goes to [`Self::meet_scoped_refiner_with_union`],
-    /// and a reservation is refused. What this adds is the narrowing: a target that is not a union
-    /// is met closed, as a union's meet closes it for its branches, while a union target's meet
-    /// reads the enclosing answer itself.
+    /// only kind this is given, so its cases are this one's: a union target goes to
+    /// [`Self::meet_scoped_refiner_with_union`]; a branch of another category is kept, but one
+    /// [`ScopedRefiners::allowed`] omits is excluded; a target that states no category with none
+    /// to establish for it, and a reservation, are refused as [`NoMeet::Unrepresentable`]. What
+    /// this adds is the narrowing: a target that is not a union is met closed, as a union's meet
+    /// closes it for its branches, while a union target's meet reads the enclosing answer itself.
     pub(super) fn meet_scoped_refiner(
         &mut self,
         target: Ty,
@@ -510,13 +527,18 @@ pub(super) enum ImpliedCategory {
     Conflicting,
 }
 
-/// The category a `$ref` sibling's applicators establish when the sibling names no `type` and
-/// carries no other keyword that lowers to a shape of its own (`enum`, `const`, a composition, a
-/// binary encoding, a `$ref`).
+/// The category a schema's applicators establish when it names no `type` and carries no other
+/// keyword that lowers to a shape of its own: `enum`, `const`, `allOf`, `oneOf`, `anyOf`,
+/// `contentEncoding`, `format: binary`, or a `$ref`. Asked of a `$ref`'s siblings, of a union's
+/// siblings ([`LowerCtx::lower_union_sibling`]), of an `allOf`'s members beside a union, and of
+/// the keywords beside a `$ref` and a union together: beside a single schema the applicators
+/// establish this category for it, and beside a union they refine only its branches of this
+/// category.
 ///
 /// The object applicators are `properties`, `patternProperties`, `required` and
-/// `additionalProperties`; the array applicators are `items` and `prefixItems`. `None` when the
-/// schema carries neither kind, or already names or implies its shape some other way.
+/// `additionalProperties`; the array applicators are `items` and `prefixItems`.
+/// [`ImpliedCategory::Conflicting`] when the schema carries both kinds. `None` when it carries
+/// neither, or already names or implies its shape some other way.
 pub(super) fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCategory> {
     let establishes_elsewhere = !schema.types.types.is_empty()
         || schema.reference.is_some()

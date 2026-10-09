@@ -593,9 +593,15 @@ fn target_decides_null(schema: &Schema) -> bool {
 }
 
 /// Whether a union member is a null-only schema (`{type: "null"}`) — stripped from the union and
-/// folded into its nullability, exactly like a `"null"` in a type array. A bare `$ref` member is
-/// never null-only here (it names a component with its own shape); only an inline `type: null`
-/// node with no other constraints counts.
+/// folded into its nullability as a branch `null` matches. A `$ref` member, with or without
+/// siblings, is never null-only here (it names a schema with its own shape), and neither is a
+/// boolean member.
+///
+/// The member must be inline, its `type` exactly `null`, and carry no `oneOf`, `anyOf`, `allOf`,
+/// `enum`, `const` or `properties`. Nothing else it carries is read: every other keyword
+/// (`required`, `items`, `additionalProperties`, `format`, a validation keyword, an annotation)
+/// either is vacuous for a `null` instance in 2020-12 or constrains nothing the generated type
+/// carries, so `{type: "null", required: [a]}` counts as null-only too.
 pub(super) fn member_is_null_only(member: &SchemaOr) -> bool {
     let SchemaOr::Schema(schema) = member else {
         return false;

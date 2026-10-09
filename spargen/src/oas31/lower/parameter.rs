@@ -8,7 +8,7 @@ use crate::ir::{
     AdditionalProps, Delimiter, Docs, MediaType, ParamLoc, ParamStyle, Parameter, Prim, Ty,
     TypeGraph, TypeId, TypeKind,
 };
-use crate::oas31::ParameterObject;
+use crate::oas31::{ParameterObject, RefOr, Schema};
 
 use super::content::lower_media_type;
 use super::LowerCtx;
@@ -126,17 +126,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
                 return None;
             }
-            return Some(Parameter {
-                name: parameter.name.clone(),
+            return Some(self.lowered_parameter(
+                parameter,
                 location,
                 ty,
-                required: parameter.required,
-                style: ParamStyle::Content(media),
-                allow_reserved: false,
-                explode: true,
-                deprecated: parameter.deprecated,
-                default_display: self.param_default_display(object.schema.as_ref(), ty),
-            });
+                ParamStyle::Content(media),
+                true,
+                object.schema.as_ref(),
+            ));
         }
         let style_name = parameter.style.as_deref().unwrap_or(match location {
             ParamLoc::Path | ParamLoc::Header => "simple",
@@ -238,18 +235,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .as_ref()
                 .and_then(|schema| self.lower_schema_ref(schema, &parameter.name))?;
             let ty = self.remap_binary_param(ty, &parameter.name);
-            let default_display = self.param_default_display(object.schema.as_ref(), ty);
-            return Some(Parameter {
-                name: parameter.name.clone(),
+            return Some(self.lowered_parameter(
+                parameter,
                 location,
                 ty,
-                required: parameter.required || location == ParamLoc::Path,
-                style: ParamStyle::Content(media),
-                allow_reserved: false,
-                explode: false,
-                deprecated: parameter.deprecated,
-                default_display,
-            });
+                ParamStyle::Content(media),
+                false,
+                object.schema.as_ref(),
+            ));
         } else {
             self.insert_type(
                 &parameter.name,
@@ -326,18 +319,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .emit(self.diags);
             return None;
         }
-        let default_display = self.param_default_display(parameter.schema.as_ref(), ty);
-        Some(Parameter {
+        Some(self.lowered_parameter(
+            parameter,
+            location,
+            ty,
+            style,
+            explode,
+            parameter.schema.as_ref(),
+        ))
+    }
+
+    /// Assemble the lowered [`Parameter`] once its location, type, style and `explode` are
+    /// settled. A path parameter is always required, whatever `required` says. `allowReserved`
+    /// is carried only for a styled parameter: a `content` or `querystring` parameter is
+    /// rendered by its media codec, which does not consult it. `schema` is the Schema Object
+    /// whose `default` the parameter documents — the parameter's own, or its media's.
+    fn lowered_parameter(
+        &self,
+        parameter: &ParameterObject,
+        location: ParamLoc,
+        ty: Ty,
+        style: ParamStyle,
+        explode: bool,
+        schema: Option<&RefOr<Schema>>,
+    ) -> Parameter {
+        Parameter {
             name: parameter.name.clone(),
             location,
             ty,
             required: parameter.required || location == ParamLoc::Path,
+            allow_reserved: parameter.allow_reserved && !matches!(style, ParamStyle::Content(_)),
             style,
-            allow_reserved: parameter.allow_reserved,
             explode,
             deprecated: parameter.deprecated,
-            default_display,
-        })
+            default_display: self.param_default_display(schema, ty),
+        }
     }
 }
 

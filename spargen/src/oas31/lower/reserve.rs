@@ -814,13 +814,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
-    /// Whether a schema the bundle resolver just produced is the very schema whose body is being
-    /// lowered. The inlining arm of [`Self::gather_member`] has no shared `Ty` to test against
-    /// [`Self::is_in_progress_root`], so it tests the resolved target's identity instead.
-    pub(super) fn resolved_target_in_progress(&self, provenance: &Provenance) -> bool {
-        self.reservation_at(provenance).is_some()
-    }
-
     /// The reserved id of the schema *at* `provenance`, when that schema is one whose body is
     /// currently being lowered.
     ///
