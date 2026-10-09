@@ -79,9 +79,15 @@ A description that narrows the problem `type` per status (`allOf: [$ref: Problem
 path above. The opt-in `open_narrowing` (`Spec::open_narrowing(true)`, `open_narrowing = true` in
 `spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
 in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
-more (`Other(String)`) holds any other string, and the response decodes into `Error::Api`, where
-`problem()` reads it like any other. The [support matrix](./support-matrix.md)'s Responses row
-states exactly which positions it opens.
+more (`Other(String)`, renamed when a listed value takes that name) holds any other string, and
+the response decodes into `Error::Api`, where `problem()` reads it like any other.
+
+Only that position opens. A narrowing written inside a `$ref` target (a component, a sub-file
+schema) or inside a `oneOf`/`anyOf` stays closed, because a target is shared by every use and a
+union's variants are told apart by what each refuses. A narrowing whose value set is itself a
+`$ref` target opens a copy and leaves the target closed. Request bodies, parameters, and a
+non-`string` or formatted (`uuid`, date) base stay closed. `spargen diff` reads the catch-all as a
+variant: `variant-added` when a set opens, `variant-removed` when it closes or is renamed.
 
 ## Middleware
 

@@ -188,7 +188,7 @@ pub async fn attach_auth(
     // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
     // would fall through the loop below without choosing anything, and the call would fail as
     // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
-    // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
+    // — `codegen/dispatch.rs` omits it for an operation with no `security` — but this function
     // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
     // a generated client, so this is a contract, not dead code, and spargen's own runtime tests
     // (which are not embedded) hold it to that.
