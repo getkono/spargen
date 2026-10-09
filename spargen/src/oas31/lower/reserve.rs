@@ -1,6 +1,8 @@
 //! Component, remote and bundle-target reservations: typing a `$ref` target once, and the
 //! back-edges and multi-pass nullability settlement a recursive reference needs.
 
+use std::collections::HashMap;
+
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{Ty, TypeId, TypeKind};
 use crate::oas31::{RefOr, Schema, SchemaOr};
@@ -11,7 +13,59 @@ use super::nullability::{member_is_null_only, schema_is_nullable};
 use super::shape::schema_has_shape_constraint;
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
+/// One of a reservation frame's two memos: a key to its root id and nullability.
+type ReservationMemo = HashMap<String, (TypeId, bool)>;
+
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Lower the schema `$ref` `reference`, written at `at`, to its shared, cycle-safe type through
+    /// the memo its spelling routes to: a `#/components/schemas/<name>` to
+    /// [`Self::ensure_component`], a remote (`http`/`https`) reference to [`Self::ensure_remote`]
+    /// (keyed by `url#fragment`), and every other reference to [`Self::ensure_resolved`] (keyed by
+    /// the resolved `file#pointer`, which is why the ordinary spelling and the explicit
+    /// `./lib.yaml#/…` spelling of one target share one type rather than two). `hint` names a
+    /// bundle target that has no final pointer token of its own.
+    ///
+    /// [`Self::open_reservation_for_ref`] mirrors this dispatch for a question that lowers nothing.
+    pub(super) fn ensure_reference(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+        hint: &str,
+    ) -> Option<Ty> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            self.ensure_component(name, Some(reference), at)
+        } else if is_remote_ref(reference) {
+            self.ensure_remote(reference)
+        } else {
+            self.ensure_resolved(reference, at, hint)
+        }
+    }
+
+    /// The root component the schema at `pointer` in `file` is: `Some(name)` when `file` is the root
+    /// document and `pointer` is `/components/schemas/<name>` for a `name` the root declares.
+    ///
+    /// That map is such a schema's identity — [`Self::ensure_resolved`] routes a target there back
+    /// to [`Self::ensure_component`] — so every question asked by resolved `(file, pointer)` asks
+    /// this first. The name is the pointer token verbatim, never unescaped, as the component map's
+    /// own lookup by a reference's stripped fragment is. A deeper pointer (`Tree/properties/x`) or
+    /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
+    /// root component key, so neither could be declared, and the filter says so without relying on
+    /// it.
+    pub(super) fn root_component_at<'p>(
+        &self,
+        file: crate::diag::FileId,
+        pointer: &'p crate::diag::JsonPointer,
+    ) -> Option<&'p str> {
+        if file != self.resolver.root_id() {
+            return None;
+        }
+        pointer
+            .as_str()
+            .strip_prefix("/components/schemas/")
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+            .filter(|name| self.document.components.schemas.contains_key(*name))
+    }
+
     /// Lower `#/components/schemas/{name}` to its shared type, lowering it on first use and
     /// returning the cached type on every later one.
     ///
@@ -53,24 +107,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         at: &crate::diag::Provenance,
     ) -> Option<Ty> {
         self.warn_if_root_shadows_the_referring_file(name, reference, at);
-        if let Some(&(id, nullable)) = self.components.get(name) {
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: false,
-            });
-        }
-        if let Some(&(id, nullable)) = self.in_progress.get(name) {
-            // Re-entered while still lowering this component: a cycle-closing `$ref` back-edge.
-            // Box the reference so the recursive type has a finite size instead of rejecting it;
-            // the reserved id will hold the root def once the in-progress body finishes. The
-            // nullability is provisional, so say it was read: the body checks it when it finishes.
-            self.guessed.insert(Reservation::Component(name.to_owned()));
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: true,
-            });
+        if let Some(ty) = self.reserved_type(Reservation::Component(name.to_owned())) {
+            return Some(ty);
         }
         // No such component. Report it against the referring site rather than dropping the
         // construct that named it: a silently-dropped `$ref` takes its request body, response, or
@@ -89,8 +127,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // resolves today keeps selecting the same component and only a name the root does not
             // declare reaches the sub-file reading. Which namespace *should* win when both declare
             // the name is a separate question; this deliberately does not change the answer.
-            let from = at.span.map(|span| span.file);
-            if from.is_some_and(|file| file != self.resolver.root_id()) {
+            if self.resolver.written_in(at) != self.resolver.root_id() {
                 // The resolver reports its own failure, so a miss here is already diagnosed. Going
                 // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
                 // makes this re-entry safe *and* finite: see that method and the note above.
@@ -181,6 +218,77 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(schema) {
             return Some(alias);
         }
+        self.lower_into_reservation(Reservation::Component(name.to_owned()), schema, name)
+    }
+
+    /// The two memos `reservation`'s frame keeps, each keyed by [`Reservation::key`]: the types it
+    /// has finished, and the reserved ids (with their provisional nullability) of the bodies it is
+    /// still lowering.
+    fn reservation_memos(
+        &mut self,
+        reservation: &Reservation,
+    ) -> (&mut ReservationMemo, &mut ReservationMemo) {
+        match reservation {
+            Reservation::Component(_) => (&mut self.components, &mut self.in_progress),
+            Reservation::Remote(_) => (&mut self.remote_components, &mut self.remote_in_progress),
+            Reservation::Resolved(_) => (
+                &mut self.resolved_components,
+                &mut self.resolved_in_progress,
+            ),
+        }
+    }
+
+    /// The reserved id and provisional nullability of `reservation` when its body is being
+    /// lowered right now, recording that the provisional value was read: a body that then decides
+    /// otherwise makes this pass stale ([`Self::settle_reservation`]).
+    fn read_open_reservation(&mut self, reservation: Reservation) -> Option<(TypeId, bool)> {
+        let entry = self
+            .reservation_memos(&reservation)
+            .1
+            .get(reservation.key())
+            .copied();
+        if entry.is_some() {
+            self.guessed.insert(reservation);
+        }
+        entry
+    }
+
+    /// The type `reservation` already answers with, before anything is lowered for it: its
+    /// finished type, or — when it is re-entered while its own body is still being lowered — a
+    /// cycle-closing back-edge. The back-edge is boxed so the recursive type has a finite size
+    /// instead of being rejected; the reserved id holds the root def once the in-progress body
+    /// finishes, and its nullability is provisional, so the read is recorded for the body to check
+    /// when it finishes. `None` for a reservation never opened.
+    fn reserved_type(&mut self, reservation: Reservation) -> Option<Ty> {
+        if let Some(&(id, nullable)) = self
+            .reservation_memos(&reservation)
+            .0
+            .get(reservation.key())
+        {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: false,
+            });
+        }
+        let (id, nullable) = self.read_open_reservation(reservation)?;
+        Some(Ty {
+            id,
+            nullable,
+            boxed: true,
+        })
+    }
+
+    /// Lower `schema`, the body `reservation` names, once: reserve its root id, lower the body
+    /// against that reservation, lift the root def into the reserved slot, and record the finished
+    /// type in the frame's memo. The one lifecycle a root component, a remote target and a bundle
+    /// target share; `hint` names the root def.
+    fn lower_into_reservation(
+        &mut self,
+        reservation: Reservation,
+        schema: &Schema,
+        hint: &str,
+    ) -> Option<Ty> {
         // A PROVISIONAL answer, needed before the body finishes so a back-edge encountered mid-body
         // has something to carry. It is not the final one: `schema_is_nullable` is three disjuncts
         // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
@@ -189,36 +297,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // a named component — the dominant spelling in real descriptions. A guess a back-edge read
         // and the body then contradicted is reported by `settle_reservation`, and the next pass
         // opens this reservation with the body's answer instead (see [`lower`]).
-        let reservation = Reservation::Component(name.to_owned());
         let provisional_nullable = self.provisional_nullability(&reservation, schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
-        self.in_progress
-            .insert(name.to_owned(), (root_id, provisional_nullable));
-        let lowered = self.lower_reserved_body(schema, name);
-        self.in_progress.remove(name);
+        self.reservation_memos(&reservation).1.insert(
+            reservation.key().to_owned(),
+            (root_id, provisional_nullable),
+        );
+        let lowered = self.lower_reserved_body(schema, hint);
+        self.reservation_memos(&reservation)
+            .1
+            .remove(reservation.key());
         self.settle_reservation(
-            reservation,
+            reservation.clone(),
             provisional_nullable,
             lowered.map(|ty| ty.nullable),
         );
         let mut ty = lowered?;
-        let (popped_id, mut def) = self.pop_last_type().expect("component root def");
-        // Hard invariant (release too): a component root's def is always the last graph insert
+        let noun = reservation.noun();
+        let (popped_id, mut def) = self
+            .pop_last_type()
+            .unwrap_or_else(|| panic!("{noun} root def"));
+        // Hard invariant (release too): a reserved root's def is always the last graph insert
         // during its own body lowering (children insert first). If future lowering (allOf/union
         // wrappers) ever inserts a derived type *after* the root, this fails loudly here instead
-        // of silently relocating the wrong def and dangling `components[name]`.
+        // of silently relocating the wrong def and dangling the memo's entry.
         assert_eq!(
             popped_id, ty.id,
-            "component root was not the last inserted def"
+            "{noun} root was not the last inserted def"
         );
-        // A `default` on the component schema itself has no field to carry it; document it on the
+        // A `default` on the reserved schema itself has no field to carry it; document it on the
         // named type's rustdoc rather than dropping it. (A component that is a bare `$ref`+`default`
         // never reaches here — it parses to `RefOr::Ref` and is acknowledged as W005 at parse time
-        // — so this only sees inline component schemas.) Pure pop-then-mutate: no graph insert
-        // happens here, so the last-insert invariant asserted above still holds.
+        // — so this only sees inline schemas.) Pure pop-then-mutate: no graph insert happens here,
+        // so the last-insert invariant asserted above still holds.
         if let Some(raw) = &schema.default {
             let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
             append_doc_note(&mut def.docs, note);
@@ -229,8 +343,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `schema_is_nullable` cannot see, and naming a schema must not change what it means. Cached
         // under the same value, so a direct return and a later cache hit still yield an identical
         // `Ty`.
-        let nullable = ty.nullable;
-        self.components.insert(name.to_owned(), (root_id, nullable));
+        let key = reservation.key().to_owned();
+        self.reservation_memos(&reservation)
+            .0
+            .insert(key, (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -280,13 +396,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
-        let ty = if let Some(target) = reference.strip_prefix("#/components/schemas/") {
-            self.ensure_component(target, Some(reference), at)
-        } else if is_remote_ref(reference) {
-            self.ensure_remote(reference)
-        } else {
-            self.ensure_resolved(reference, at, name)
-        };
+        let ty = self.ensure_reference(reference, at, name);
         self.component_alias_stack.remove(name);
         if let Some(ty) = ty {
             self.components
@@ -334,9 +444,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         {
             return;
         }
-        let Some(file) = at.span.map(|span| span.file) else {
-            return;
-        };
+        let file = self.resolver.written_in(at);
         if file == self.resolver.root_id() || !self.document.components.schemas.contains_key(name) {
             return;
         }
@@ -463,53 +571,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // a finished or not-yet-started root component is exactly the case the ordinary
                 // `ensure_component` path handles, and the case in which it must, because that is
                 // where the shadowing warning is raised.
-                let entry = self.in_progress.get(name).copied();
+                //
+                // Reading it here is also answering instead of `ensure_component`'s back-edge arm,
+                // which is where a read of the provisional nullability is otherwise recorded.
+                let entry = self.read_open_reservation(Reservation::Component(name.to_owned()));
                 if entry.is_some() {
                     // Answering here is answering *instead of* `ensure_component`, which is where
                     // the shadowing is acknowledged. Say it on the way past, or a reference the
                     // root wins silently retargets a sub-file's own declaration — supported as the
                     // matrix describes, but unreported, which the matrix also promises against.
                     self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
-                    // And instead of `ensure_component`'s back-edge arm, which is where a read of
-                    // the provisional nullability is otherwise recorded.
-                    self.guessed.insert(Reservation::Component(name.to_owned()));
                 }
                 return entry;
             }
         } else if is_remote_ref(reference) {
             // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document
             // has already been rewritten absolute, so the reference *is* the key.
-            let entry = self.remote_in_progress.get(reference).copied();
-            if entry.is_some() {
-                self.guessed
-                    .insert(Reservation::Remote(reference.to_owned()));
-            }
-            return entry;
+            return self.read_open_reservation(Reservation::Remote(reference.to_owned()));
         }
         let (file, pointer) = self.resolver.reference_identity(reference, at)?;
         // `ensure_resolved` routes a target inside the root's component map back to
         // `ensure_component`, whose identity is the name; ask the map that actually holds it.
-        if file == self.resolver.root_id() {
-            if let Some(name) = pointer
-                .as_str()
-                .strip_prefix("/components/schemas/")
-                .filter(|name| !name.is_empty() && !name.contains('/'))
-            {
-                if self.document.components.schemas.contains_key(name) {
-                    let entry = self.in_progress.get(name).copied();
-                    if entry.is_some() {
-                        self.guessed.insert(Reservation::Component(name.to_owned()));
-                    }
-                    return entry;
-                }
-            }
+        if let Some(name) = self.root_component_at(file, &pointer) {
+            return self.read_open_reservation(Reservation::Component(name.to_owned()));
         }
-        let key = format!("{}#{}", file.0, pointer);
-        let entry = self.resolved_in_progress.get(&key).copied();
-        if entry.is_some() {
-            self.guessed.insert(Reservation::Resolved(key));
-        }
-        entry
+        self.read_open_reservation(Reservation::Resolved(format!("{}#{}", file.0, pointer)))
     }
 
     /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
@@ -524,21 +610,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::ensure_remote`]'s body, run with `open_narrowing` out of effect, as for a component.
     fn ensure_remote_closed(&mut self, reference: &str) -> Option<Ty> {
-        if let Some(&(id, nullable)) = self.remote_components.get(reference) {
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: false,
-            });
-        }
-        if let Some(&(id, nullable)) = self.remote_in_progress.get(reference) {
-            self.guessed
-                .insert(Reservation::Remote(reference.to_owned()));
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: true,
-            });
+        if let Some(ty) = self.reserved_type(Reservation::Remote(reference.to_owned())) {
+            return Some(ty);
         }
         let resolved = self
             .resolver
@@ -572,40 +645,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(&schema) {
             return Some(alias);
         }
-
-        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
-        // body has one, and `schema_is_nullable` cannot see a composed body's null.
-        let reservation = Reservation::Remote(reference.to_owned());
-        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
-        let root_id = self.graph.reserve();
-        self.remote_in_progress
-            .insert(reference.to_owned(), (root_id, provisional_nullable));
-        let lowered = self.lower_reserved_body(&schema, reference);
-        self.remote_in_progress.remove(reference);
-        self.settle_reservation(
-            reservation,
-            provisional_nullable,
-            lowered.map(|ty| ty.nullable),
-        );
-        let mut ty = lowered?;
-        let (popped_id, mut def) = self.pop_last_type().expect("remote root def");
-        // Same last-insert invariant as `ensure_component`: the remote type's root is the final
-        // graph insert during its own body lowering (children insert first).
-        assert_eq!(
-            popped_id, ty.id,
-            "remote root was not the last inserted def"
-        );
-        if let Some(raw) = &schema.default {
-            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
-            append_doc_note(&mut def.docs, note);
-        }
-        self.graph.fill(root_id, def);
-        ty.id = root_id;
-        // The body's answer, cached under the same value so a direct return and a later cache hit
-        // yield an identical `Ty` — see `ensure_component`.
-        self.remote_components
-            .insert(reference.to_owned(), (root_id, ty.nullable));
-        Some(ty)
+        self.lower_into_reservation(
+            Reservation::Remote(reference.to_owned()),
+            &schema,
+            reference,
+        )
     }
 
     /// Lower a `$ref` the bundle resolver has to follow — a relative-file reference, a whole-file
@@ -677,40 +721,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // one is worse. Every schema the parser produces carries a span, so this is defensive.
             return self.lower_schema(&schema, hint);
         };
-        // A resolved target that is a root component already has an identity — its name. The
-        // `contains_key` alone decides it: a pointer deeper than a component (`Tree/properties/x`)
-        // cannot equal a key, because structural validation rejects any root component key outside
-        // `^[a-zA-Z0-9._-]+$` before lowering runs.
-        if schema
+        // A resolved target that is a root component already has an identity — its name. An
+        // unspanned target was never read from a file (`key` above requires the span), so it is
+        // never one.
+        if let Some(name) = schema
             .provenance
             .span
-            .is_some_and(|span| span.file == self.resolver.root_id())
+            .and_then(|span| self.root_component_at(span.file, &schema.provenance.pointer))
         {
-            if let Some(name) = schema
-                .provenance
-                .pointer
-                .as_str()
-                .strip_prefix("/components/schemas/")
-            {
-                if self.document.components.schemas.contains_key(name) {
-                    return self.ensure_component(name, Some(reference), at);
-                }
-            }
+            return self.ensure_component(name, Some(reference), at);
         }
-        if let Some(&(id, nullable)) = self.resolved_components.get(&key) {
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: false,
-            });
-        }
-        if let Some(&(id, nullable)) = self.resolved_in_progress.get(&key) {
-            self.guessed.insert(Reservation::Resolved(key));
-            return Some(Ty {
-                id,
-                nullable,
-                boxed: true,
-            });
+        if let Some(ty) = self.reserved_type(Reservation::Resolved(key.clone())) {
+            return Some(ty);
         }
         // Name the type for the schema it came from, not for whichever use site reached it first:
         // once one type serves every site, a per-site hint would make the generated name depend on
@@ -745,39 +767,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(&schema) {
             return Some(alias);
         }
-
-        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
-        // body has one, and `schema_is_nullable` cannot see a composed body's null.
-        let reservation = Reservation::Resolved(key.clone());
-        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
-        let root_id = self.graph.reserve();
-        self.resolved_in_progress
-            .insert(key.clone(), (root_id, provisional_nullable));
-        let lowered = self.lower_reserved_body(&schema, &hint);
-        self.resolved_in_progress.remove(&key);
-        self.settle_reservation(
-            reservation,
-            provisional_nullable,
-            lowered.map(|ty| ty.nullable),
-        );
-        let mut ty = lowered?;
-        let (popped_id, mut def) = self.pop_last_type().expect("resolved root def");
-        // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is
-        // the final graph insert during its own body lowering (children insert first).
-        assert_eq!(
-            popped_id, ty.id,
-            "resolved root was not the last inserted def"
-        );
-        if let Some(raw) = &schema.default {
-            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
-            append_doc_note(&mut def.docs, note);
-        }
-        self.graph.fill(root_id, def);
-        ty.id = root_id;
-        // The body's answer, cached under the same value so a direct return and a later cache hit
-        // yield an identical `Ty` — see `ensure_component`.
-        self.resolved_components.insert(key, (root_id, ty.nullable));
-        Some(ty)
+        self.lower_into_reservation(Reservation::Resolved(key), &schema, &hint)
     }
 
     /// Whether this definition is a named component root — reachable by name from anywhere else in
@@ -892,16 +882,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A target inside the root document's component map has its identity there instead —
         // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
         // map too, or a root component addressed by file reference escapes the check.
-        if !provenance
-            .span
-            .is_some_and(|span| span.file == self.resolver.root_id())
-        {
-            return None;
-        }
         provenance
-            .pointer
-            .as_str()
-            .strip_prefix("/components/schemas/")
+            .span
+            .and_then(|span| self.root_component_at(span.file, &provenance.pointer))
             .and_then(|name| self.in_progress.get(name))
             .map(|&(id, _)| id)
     }

@@ -1,12 +1,11 @@
 //! A union's Discriminator Object: resolving its `mapping` against the union's members, the
 //! standalone-discriminator warning, and the discriminated dispatch strategy.
 
-use crate::diag::{Code, Diagnostic, Provenance};
+use crate::diag::{Code, Diagnostic};
 use crate::ir::{JsonCategory, TypeKind, UnionMode, UnionStrategy, UnionVariant};
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
 };
-use crate::oas31::resolve::schema_reference_identity;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::{DiscriminatorMembers, LowerCtx};
@@ -19,7 +18,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// that could be either as a name, and a name is exactly a Components Object key, so a value
     /// made only of key characters is `#/components/schemas/<value>` and anything else is a
     /// reference, written relative to the file the discriminator sits in. The two sides are compared
-    /// by resolved `file#pointer` ([`Self::schema_reference_identity`]), never by spelling, so
+    /// by resolved `file#pointer` ([`crate::oas31::Resolver::schema_reference_identity`]), never by spelling, so
     /// `Cat`, `#/components/schemas/Cat` and `./openapi.yaml#/components/schemas/Cat` all name one
     /// member. Only `$ref` members can be named: the specification excludes inline members from
     /// name mapping.
@@ -38,7 +37,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .map(|member| match member {
                 SchemaOr::Schema(schema) => schema.reference.as_deref().and_then(|reference| {
-                    self.schema_reference_identity(reference, &schema.provenance)
+                    self.resolver.schema_reference_identity(
+                        reference,
+                        self.resolver.written_in(&schema.provenance),
+                    )
                 }),
                 SchemaOr::Bool(_) => None,
             })
@@ -101,7 +103,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         entry: &str,
         target: &crate::oas31::schema::DiscriminatorTarget,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        discriminator_target_identity(self.document, self.resolver, self.diags, entry, target)
+        discriminator_target_identity(self.resolver, self.diags, entry, target)
     }
 
     /// Give a `discriminator` on a schema with no `oneOf`/`anyOf` of its own a disposition (#264).
@@ -153,15 +155,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
              the discriminator",
         )
         .emit(self.diags);
-    }
-
-    /// [`schema_reference_identity`] against this lowering's document and resolver.
-    fn schema_reference_identity(
-        &self,
-        reference: &str,
-        at: &Provenance,
-    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        schema_reference_identity(self.document, self.resolver, reference, at)
     }
 
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its

@@ -173,6 +173,24 @@ enum Reservation {
     Resolved(String),
 }
 
+impl Reservation {
+    /// The key both of its frame's memos hold it under: the name, the URL, or the `file#pointer`.
+    fn key(&self) -> &str {
+        match self {
+            Self::Component(key) | Self::Remote(key) | Self::Resolved(key) => key,
+        }
+    }
+
+    /// What its frame calls the root it reserves, in the invariant messages.
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Component(_) => "component",
+            Self::Remote(_) => "remote",
+            Self::Resolved(_) => "resolved",
+        }
+    }
+}
+
 /// One lowering pass. `settled` holds the nullability an earlier pass's bodies decided for the
 /// reservations whose back-edges read a guess that turned out wrong; the second value returned is
 /// every such reservation this pass found (see [`lower`]).

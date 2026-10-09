@@ -91,11 +91,7 @@ impl<'doc> Resolver<'doc> {
         reference: &str,
         at: &Provenance,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        let from = at
-            .span
-            .map(|span| span.file)
-            .unwrap_or_else(|| self.bundle.root_id());
-        self.bundle.reference_target(reference, from)
+        self.bundle.reference_target(reference, self.written_in(at))
     }
 
     /// [`Self::reference_identity`] for a `$ref` written anywhere in `from`, when the caller holds
@@ -108,6 +104,34 @@ impl<'doc> Resolver<'doc> {
         from: crate::diag::FileId,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
         self.bundle.reference_target(reference, from)
+    }
+
+    /// The `(file, pointer)` a **schema** `$ref` written in `from` lowers to, with lowering's own
+    /// precedence: a `#/components/schemas/<name>` the root document declares is the root's
+    /// component wherever it is written — `LowerCtx::ensure_component` consults the root map
+    /// first — and every other reference is the bundle's own answer from the file it is written
+    /// in. Reads no schema and emits nothing.
+    ///
+    /// The root's answer is the bundle's reading of the fragment from the root, which keeps the
+    /// fragment's characters verbatim: a `~0`/`~1` escape is neither decoded nor re-encoded, so it
+    /// equals the pointer assembled from the stripped name (pinned by this file's tests).
+    pub(super) fn schema_reference_identity(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        let root_component = reference
+            .strip_prefix("#/components/schemas/")
+            .is_some_and(|name| self.document.components.schemas.contains_key(name));
+        let from = if root_component { self.root_id() } else { from };
+        self.reference_identity_from(reference, from)
+    }
+
+    /// The file a reference or schema at `at` is written in: an unspanned provenance sits in the
+    /// root document, which is where every reference with no span to say otherwise is resolved
+    /// from.
+    pub(super) fn written_in(&self, at: &Provenance) -> crate::diag::FileId {
+        at.span.map_or_else(|| self.root_id(), |span| span.file)
     }
 
     /// The raw node at `pointer` in `file`, before it is parsed into a [`Schema`]. What a
@@ -156,10 +180,7 @@ impl<'doc> Resolver<'doc> {
         at: &Provenance,
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
-        let from = at
-            .span
-            .map(|span| span.file)
-            .unwrap_or_else(|| self.bundle.root_id());
+        let from = self.written_in(at);
 
         // Root component refs borrow the already-parsed component so named types and recursion are
         // shared. Every other JSON Pointer (including local relative files) is parsed from its
@@ -324,21 +345,100 @@ pub(super) fn reject_undeclared_component(
         .emit(diags);
 }
 
-/// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
-/// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
-/// component wherever it is written — `LowerCtx::ensure_component` consults the root map first —
-/// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
-pub(super) fn schema_reference_identity(
-    document: &Document,
-    resolver: &Resolver<'_>,
-    reference: &str,
-    at: &Provenance,
-) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-    let root_component = reference
-        .strip_prefix("#/components/schemas/")
-        .is_some_and(|name| document.components.schemas.contains_key(name));
-    if root_component {
-        return resolver.reference_identity_from(reference, resolver.root_id());
+#[cfg(test)]
+mod tests {
+    use camino::Utf8Path;
+
+    use crate::diag::{Diagnostics, FileId, JsonPointer};
+    use crate::oas31::{parse_document, Document};
+    use crate::source::InputBundle;
+
+    use super::Resolver;
+
+    /// A root document declaring components whose keys carry the characters a JSON Pointer
+    /// escapes, and a sub-file declaring one of its own. Lowering never sees such keys (structural
+    /// validation admits only `^[a-zA-Z0-9._-]+$`), but the identity functions are plain string
+    /// functions and are pinned here without that guard.
+    const ROOT: &str = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Plain: { type: string }
+    "a~0b": { type: string }
+    "a~1b": { type: string }
+    "a~b": { type: string }
+    Lib: { $ref: './lib.yaml#/components/schemas/Inner' }
+"#;
+
+    const LIB: &str = r#"
+components:
+  schemas:
+    Inner: { type: string }
+    Plain: { type: integer }
+"#;
+
+    fn load() -> (tempfile::TempDir, InputBundle) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("openapi.yaml"), ROOT).unwrap();
+        std::fs::write(dir.path().join("lib.yaml"), LIB).unwrap();
+        let path = dir.path().join("openapi.yaml");
+        let mut diags = Diagnostics::default();
+        let bundle = InputBundle::load(Utf8Path::from_path(&path).unwrap(), &mut diags).unwrap();
+        (dir, bundle)
     }
-    resolver.reference_identity(reference, at)
+
+    /// FE-IMPL-005: the two root-component branches lowering spelled — the resolver's answer for
+    /// the fragment read from the root, and a pointer assembled from the stripped name — agree for
+    /// every declared key, `~`-escaped spellings included, from the root and from a sub-file. Both
+    /// read the reference's characters verbatim, so a `~0`/`~1` in the reference is neither
+    /// decoded nor re-encoded by either. A name only the sub-file declares is its own.
+    #[test]
+    fn root_component_identity_agrees_with_the_assembled_pointer_for_escaped_names() {
+        let (_dir, bundle) = load();
+        let mut diags = Diagnostics::default();
+        let document: Document = parse_document(&bundle, &mut diags).unwrap();
+        let resolver = Resolver::new(&document, &bundle);
+        let root = resolver.root_id();
+        let inner = resolver
+            .resolve(
+                "./lib.yaml#/components/schemas/Inner",
+                &document.provenance,
+                &mut diags,
+            )
+            .unwrap();
+        let in_lib = inner.schema.provenance.clone();
+        let lib: FileId = in_lib
+            .span
+            .expect("a parsed sub-file schema has a span")
+            .file;
+        assert_ne!(lib, root);
+        for at in [&document.provenance, &in_lib] {
+            for name in ["Plain", "a~0b", "a~1b", "a~b"] {
+                let reference = format!("#/components/schemas/{name}");
+                let assembled = (
+                    root,
+                    JsonPointer::from(format!("/components/schemas/{name}")),
+                );
+                assert_eq!(
+                    resolver.schema_reference_identity(&reference, resolver.written_in(at)),
+                    Some(assembled.clone()),
+                    "`{reference}`"
+                );
+                assert_eq!(
+                    resolver.reference_identity_from(&reference, root),
+                    Some(assembled),
+                    "`{reference}`"
+                );
+            }
+        }
+        assert_eq!(
+            resolver.schema_reference_identity("#/components/schemas/Inner", lib),
+            Some((
+                lib,
+                JsonPointer::from("/components/schemas/Inner".to_owned())
+            )),
+        );
+    }
 }

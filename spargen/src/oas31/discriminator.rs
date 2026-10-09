@@ -3,8 +3,7 @@
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::resolve::schema_reference_identity;
-use super::{Document, Resolver};
+use super::Resolver;
 
 /// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
 /// non-empty string of the characters a Components Object key may hold (`^[a-zA-Z0-9.\-_]+$`).
@@ -37,7 +36,6 @@ pub(super) fn discriminator_entry(tag: Option<&String>) -> String {
 /// made only of key characters is `#/components/schemas/<value>` and anything else is a
 /// reference, written relative to the file the discriminator sits in.
 pub(super) fn discriminator_target_identity(
-    document: &Document,
     resolver: &Resolver<'_>,
     diags: &mut Diagnostics,
     entry: &str,
@@ -49,7 +47,8 @@ pub(super) fn discriminator_target_identity(
     } else {
         value.clone()
     };
-    let identity = schema_reference_identity(document, resolver, &reference, &target.provenance)
+    let identity = resolver
+        .schema_reference_identity(&reference, resolver.written_in(&target.provenance))
         .filter(|(file, pointer)| resolver.node_at(*file, pointer).is_some());
     if identity.is_none() {
         // E004 case: discriminator-target

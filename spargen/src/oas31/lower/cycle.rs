@@ -26,10 +26,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// matched a sub-file component's name against the root's map — a sub-file `Item` sharing its
     /// name with a root `Item` in a cycle was reported as closing that cycle.
     pub(super) fn ref_closes_a_cycle(&self, reference: &str, at: &Provenance) -> bool {
-        let site_file = at
-            .span
-            .map_or_else(|| self.resolver.root_id(), |span| span.file);
-        let Some(start) = self.schema_ref_identity(reference, site_file) else {
+        let site_file = self.resolver.written_in(at);
+        let Some(start) = self
+            .resolver
+            .schema_reference_identity(reference, site_file)
+        else {
             // Not a target this bundle knows; the lowering reports it in its own words.
             return false;
         };
@@ -48,32 +49,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut references = Vec::new();
             collect_node_refs(node, &mut references);
             stack.extend(
-                references
-                    .into_iter()
-                    .filter_map(|reference| self.schema_ref_identity(reference, file)),
+                references.into_iter().filter_map(|reference| {
+                    self.resolver.schema_reference_identity(reference, file)
+                }),
             );
         }
         false
-    }
-
-    /// The `(file, pointer)` a schema `$ref` written in `from` lowers to, with the lowering's own
-    /// precedence: `#/components/schemas/<name>` is the ROOT document's component whenever the root
-    /// declares `name`, from whichever file it is written in (see [`Self::ensure_component`]), and
-    /// every other reference resolves against the file it is written in.
-    fn schema_ref_identity(
-        &self,
-        reference: &str,
-        from: crate::diag::FileId,
-    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-            if self.document.components.schemas.contains_key(name) {
-                return Some((
-                    self.resolver.root_id(),
-                    crate::diag::JsonPointer::from(format!("/components/schemas/{name}")),
-                ));
-            }
-        }
-        self.resolver.reference_identity_from(reference, from)
     }
 
     /// Whether a union member is a `$ref` that closes a reference cycle back through the component
@@ -115,11 +96,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(reference) = member.reference.as_deref() else {
             return false;
         };
-        let site_file = at
-            .span
-            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        let site_file = self.resolver.written_in(at);
         if self
-            .schema_ref_identity(reference, site_file)
+            .resolver
+            .schema_reference_identity(reference, site_file)
             .is_some_and(|(file, pointer)| file == site_file && pointer == at.pointer)
         {
             return true;

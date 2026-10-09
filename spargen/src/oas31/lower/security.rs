@@ -52,10 +52,7 @@ pub(super) fn resolve_external_security_schemes(
             None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
             None => continue,
         };
-        let from = at
-            .span
-            .map(|span| span.file)
-            .unwrap_or(crate::diag::FileId(0));
+        let from = resolver.written_in(&at);
         let Ok(object) = resolver.resolve_component(
             &reference,
             from,
