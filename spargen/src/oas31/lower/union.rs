@@ -119,13 +119,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if self.member_closes_a_cycle(member, &schema.provenance)
                     && !self.member_is_this_union(member, &schema.provenance)
                 {
-                    return self.reject_ref_sibling_cycle(
-                        schema,
-                        "this union member's `$ref` closes a reference cycle back to the schema \
-                         that encloses it, so the enclosing schema's own sibling keywords would \
-                         have to be intersected with a target whose definition depends on the \
-                         result",
-                    );
+                    return self.reject_union_member_cycle(schema);
                 }
             }
         }
@@ -170,11 +164,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
             // `tests/frontend/recursion.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
-                return self.reject_self_referential_union(
-                    schema,
-                    "a union member is a direct recursive `$ref` to the union being lowered, so \
-                     the member is the union itself and decoding it would never terminate",
-                );
+                return self.reject_union_member_is_the_union(schema);
             }
             // The reservation half of the cycle test, on the sole real member. The document half
             // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
@@ -182,12 +172,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // cannot compose with one. Reported with the same wording the other two spellings use,
             // because it is the same fact about the same document.
             if sibling.is_some() && self.is_in_progress_root(inner.id) {
-                return self.reject_ref_sibling_cycle(
-                    schema,
-                    "this union member's `$ref` closes a reference cycle back to the schema that \
-                     encloses it, so the enclosing schema's own sibling keywords would have to be \
-                     intersected with a target whose definition depends on the result",
-                );
+                return self.reject_union_member_cycle(schema);
             }
             // The member is some *other* type's still-open reservation — the cycle-closing
             // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
@@ -367,23 +352,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the member is a *different* type — and rejecting it refuses the most common recursive
             // construct there is, which `docs/support-matrix.md` lists as supported.
             if self.reservation_at(&schema.provenance) == Some(ty.id) {
-                return self.reject_self_referential_union(
-                    schema,
-                    "a union member is a direct recursive `$ref` to the union being lowered, so \
-                     the member is the union itself and decoding it would never terminate",
-                );
+                return self.reject_union_member_is_the_union(schema);
             }
             // The reservation half of the cycle test again, on a multi-variant union. Same fact,
             // same wording, same place in the order: before anything tries to intersect against the
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
             // `oneOf` still boxes its back-edge and generates.
             if sibling.is_some() && self.is_in_progress_root(ty.id) {
-                return self.reject_ref_sibling_cycle(
-                    schema,
-                    "this union member's `$ref` closes a reference cycle back to the schema that \
-                     encloses it, so the enclosing schema's own sibling keywords would have to be \
-                     intersected with a target whose definition depends on the result",
-                );
+                return self.reject_union_member_cycle(schema);
             }
             // Held back for a meet with nothing of its own to meet first, an untyped object branch
             // accepts `null` wherever what it is met with does (#567), as an untyped `allOf` member
