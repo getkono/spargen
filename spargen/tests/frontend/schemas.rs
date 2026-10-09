@@ -1014,3 +1014,150 @@ fn untyped_required_or_additional_properties_alone_lower_to_an_object() {
         );
     }
 }
+
+/// Untyped `items` or `prefixItems` alone are array applicators, and establish the array category
+/// as the same keywords beside a `$ref` or as an `allOf` member already do, and as untyped object
+/// applicators alone do (#613). They used to fall to `serde_json::Value`, dropping the item types
+/// with no diagnostic, standalone and as a `oneOf`/`anyOf` branch alike (#614). The untyped
+/// spelling reads as `type: array` does: the same element types, and the same rejection of a typed
+/// tuple remainder.
+#[test]
+fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
+    // The type an element alias names, or the element itself where it is no alias.
+    fn element(types: &str, ty: &str) -> String {
+        alias_target(types, ty).unwrap_or_else(|| ty.to_owned())
+    }
+    for (case, body, expected) in [
+        ("items", "      items: { type: string }\n", vec!["String"]),
+        (
+            "prefixItems closed by items: false",
+            "      prefixItems: [ { type: string }, { type: integer } ]\n      items: false\n",
+            vec!["String", "i64"],
+        ),
+        (
+            "prefixItems alone",
+            "      prefixItems: [ { type: boolean } ]\n",
+            vec!["bool"],
+        ),
+    ] {
+        for ty in ["", "      type: array\n"] {
+            let what = format!("{case}, {ty:?}");
+            let spec = with_schemas("3.1.0", &format!("    U:\n{ty}{body}"));
+            let (report, code) = generate_with_code(&spec);
+            assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+            assert!(report.diagnostics().is_empty(), "{what}: {report:#?}");
+            let types = types_module(&code);
+            let target = alias_target(&types, "U").unwrap_or_else(|| panic!("{what}: {types}"));
+            let elements: Vec<String> = if let Some(inner) = target
+                .strip_prefix("Vec<")
+                .and_then(|rest| rest.strip_suffix('>'))
+            {
+                vec![element(&types, inner)]
+            } else {
+                target
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .unwrap_or_else(|| panic!("{what}: `U` is `{target}`: {types}"))
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| element(&types, part))
+                    .collect()
+            };
+            assert_eq!(elements, expected, "{what}: {types}");
+        }
+    }
+
+    // As a union branch the array keeps its element type beside the other branch.
+    for keyword in ["anyOf", "oneOf"] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!("    U:\n      {keyword}: [ {{ items: {{ type: string }} }}, {{ type: integer }} ]\n"),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{keyword}: {report:#?}"
+        );
+        assert!(report.diagnostics().is_empty(), "{keyword}: {report:#?}");
+        let types = types_module(&code);
+        assert_eq!(enum_variants(&types, "U").len(), 2, "{keyword}: {types}");
+        assert_eq!(
+            alias_target(&types, "Uvariant0").as_deref(),
+            Some("Vec<Uvariant0Item>"),
+            "{keyword}: {types}"
+        );
+        assert_eq!(
+            alias_target(&types, "Uvariant0Item").as_deref(),
+            Some("String"),
+            "{keyword}: {types}"
+        );
+    }
+
+    // A typed remainder beside `prefixItems` is the variable-length tuple `type: array` rejects,
+    // and the untyped spelling is rejected with the same code.
+    for ty in ["", "      type: array\n"] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    U:\n{ty}      prefixItems: [ {{ type: string }} ]\n      items: {{ type: \
+                 integer }}\n"
+            ),
+        );
+        let (report, _) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{ty:?}: {report:#?}");
+        assert!(
+            has_code(&report, Code::TupleRestNotRepresentable),
+            "{ty:?}: {report:#?}"
+        );
+    }
+
+    // The component is an array wherever it is used, so a property referencing it is that array,
+    // and a `$ref` to it beside a scalar `type` meets an array, as a `$ref` to its `type: array`
+    // spelling does: the intersection is empty (`E013`). An `allOf` member referencing it still
+    // reads it by its keywords, vacuous beside the scalar (#612).
+    let names = "    Names: { items: { type: string } }\n";
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        &format!(
+            "    Owner:\n      type: object\n      properties:\n        a: {{ $ref: \
+             '#/components/schemas/Names' }}\n{names}"
+        ),
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let types = types_module(&code);
+    assert_eq!(
+        field_type(&types, "pub a:").as_deref(),
+        Some("Option<Names>"),
+        "{types}"
+    );
+    assert_eq!(
+        alias_target(&types, "Names").as_deref(),
+        Some("Vec<NamesItem>"),
+        "{types}"
+    );
+    for (spelling, expected) in [
+        (
+            "{ $ref: '#/components/schemas/Names', type: string }",
+            Outcome::Rejected,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/Names' }, { type: string } ] }",
+            Outcome::Generated,
+        ),
+    ] {
+        let spec = with_schemas("3.1.0", &format!("    X: {spelling}\n{names}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), expected, "{spelling}: {report:#?}");
+        if expected == Outcome::Rejected {
+            assert_eq!(codes(&report), ["E013"], "{spelling}: {report:#?}");
+        } else {
+            assert_eq!(
+                alias_target(&types_module(&code), "X").as_deref(),
+                Some("String"),
+                "{spelling}: {code}"
+            );
+        }
+    }
+}

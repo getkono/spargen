@@ -621,12 +621,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(TypeKind::Reserved) => {
                 return self.reject_all_of_cycle(provenance.clone(), recursive)
             }
-            // Untyped array applicators lower standalone to `Value`, which met the merge as its
-            // identity and dropped their `items` with no diagnostic (#610). Their target is read
-            // by its keywords instead, as an inline member and a sub-file target are (#607): it
-            // refines the merge's arrays and constrains nothing else. It is a `$ref` target, so
-            // `open_narrowing` is out of effect for it.
-            Some(TypeKind::Any) => {
+            // A target of untyped array applicators alone lowered standalone to `Value`, which met
+            // the merge as its identity and dropped its `items` with no diagnostic (#610); it now
+            // lowers standalone to an array (#614), which would deny the merge's other categories.
+            // Either way the target is read by its keywords, as an inline member and a sub-file
+            // target are (#607): it refines the merge's arrays and constrains nothing else. It is a
+            // `$ref` target, so `open_narrowing` is out of effect for it.
+            Some(TypeKind::Any | TypeKind::Array(_) | TypeKind::Tuple(_)) => {
                 let target = self
                     .ref_target_body(reference, provenance)
                     .filter(|target| {
