@@ -4083,7 +4083,7 @@ components:
 }
 
 /// Issue #588's other spellings of a branch that states nothing, met with an untyped object
-/// composition: a union of that branch alone (`[ true ]`, `[ {} ]`, `[ $ref ]` to a `true`
+/// composition: a union of that branch alone (`[ true ]`, `[ {} ]`, `[ $ref ]` to a `true` or `{}`
 /// component), and of that branch beside a typed branch that denies `null` (`type: string`,
 /// `type: integer`). Nothing here decides `null`, so every spelling keeps the non-null struct, as
 /// the `$ref`-sibling spelling over `U` already did. The inline-sibling spellings (`properties`,
@@ -4095,30 +4095,29 @@ fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null
     let u = "$ref: '#/components/schemas/U'";
     let c = "{ properties: { u: { type: string } } }";
     let t = "{ $ref: '#/components/schemas/T' }";
+    let e = "{ $ref: '#/components/schemas/E' }";
     let mut rows: Vec<String> = Vec::new();
     for keyword in ["anyOf", "oneOf"] {
         for branches in [
             "[ true ]".to_owned(),
             "[ {} ]".to_owned(),
             format!("[ {t} ]"),
+            format!("[ {e} ]"),
             "[ { type: string }, true ]".to_owned(),
             "[ { type: string }, {} ]".to_owned(),
             "[ { type: integer }, true ]".to_owned(),
             format!("[ {t}, {{ properties: {{ b: {{ type: string }} }} }} ]"),
+            format!("[ {e}, {{ properties: {{ b: {{ type: string }} }} }} ]"),
+            "[ { $ref: '#/components/schemas/R' } ]".to_owned(),
+            "[ { $ref: '#/components/schemas/V' }, { type: string } ]".to_owned(),
         ] {
-            // The `allOf` spellings over `U` of a `$ref` branch to the `true` component generate
-            // `Option<Pick>`, before this fix as after it: `target_decides_null` counts any `$ref`
-            // branch as deciding `null`. They are left out until that is fixed (#594). The `oneOf`
-            // beside an untyped branch is pinned: `null` is in both branches and fails
-            // exactly-one, so it keeps the non-null struct already.
-            let two_branch_one_of = keyword == "oneOf" && branches != format!("[ {t} ]");
-            if !branches.contains(t) || two_branch_one_of {
-                rows.extend([
-                    format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
-                    format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
-                ]);
-            }
+            // The `allOf` spellings over `U` of a `$ref` branch to the `true` or `{}` component
+            // generated `Option<Pick>` until a `$ref` branch was read through its target (#594),
+            // as did those of a `$ref` to an alias `R` of `T`, and of a `$ref` to the untyped
+            // object `V` beside a branch that denies `null` (the inline `V` is undecided, #581).
             rows.extend([
+                format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
                 format!("{{ {u}, {keyword}: {branches} }}"),
                 format!("{{ properties: {{ u: {{ type: string }} }}, {keyword}: {branches} }}"),
                 format!("{{ allOf: [ {c} ], {keyword}: {branches} }}"),
@@ -4147,6 +4146,9 @@ paths:
 components:
   schemas:
     T: true
+    E: {{}}
+    R: {{ $ref: '#/components/schemas/T' }}
+    V: {{ properties: {{ v: {{ type: string }} }} }}
     U: {{ properties: {{ u: {{ type: string }} }} }}
     Pick: {site}
     Holder:
