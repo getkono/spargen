@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {
-        // `frontend.rs` holds every claim to its run's outcome. If every diagnostic were built
+        // `tests/frontend/` holds every claim to its run's outcome. If every diagnostic were built
         // `Independent`, that check would pass on every run and hold nothing, including that an
         // error only ever reaches a rejected run.
         let at = || Provenance::new(JsonPointer::root(), None);

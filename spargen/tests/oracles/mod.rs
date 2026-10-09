@@ -1,5 +1,5 @@
 //! Oracles over a run's report and emitted module that hold for every input, shared by the
-//! fixture suite (`frontend.rs`), the fuzz harness (`fuzz_frontend.rs`) and the lowering
+//! fixture suite (`frontend/`), the fuzz harness (`fuzz_frontend.rs`) and the lowering
 //! properties (`lowering_props.rs`), so each holds every run it makes to the same bar (#475):
 //!
 //! * [`location_violations`]: every diagnostic names a real location (#454);
@@ -9,7 +9,7 @@
 //!
 //! Each oracle reports the defects it finds that an open issue already tracks as known, carrying
 //! the issue number, so a caller can let them through while the issue is open. The fixtures in
-//! `frontend.rs` that pin each known entry fail once the issue's fix lands, and the entry goes with
+//! `frontend/` that pin each known entry fail once the issue's fix lands, and the entry goes with
 //! them, so the set of known gaps can only shrink.
 
 // Each test crate that declares this module uses the part of it its runs need.

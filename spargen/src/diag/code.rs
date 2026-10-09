@@ -1271,13 +1271,13 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend.rs`", enforced by tests
+    /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
     /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
     /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
     /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce them, and each
     /// must say so here. A new code that lands in neither place fails, which is the point. The
-    /// owning suite must assert the code in a positive form ([`asserts_variant`]); frontend.rs
-    /// must not name an elsewhere-owned code at all, not even negatively.
+    /// owning suite must assert the code in a positive form ([`asserts_variant`]); the frontend
+    /// suite must not name an elsewhere-owned code at all, not even negatively.
     #[test]
     fn every_code_is_asserted_by_the_suite_that_owns_it() {
         const OWNED_ELSEWHERE: &[(&str, &str)] = &[
@@ -1289,7 +1289,7 @@ mod tests {
             ("RuntimeDependencyContract", "e2e.rs"),
             ("RuntimeAuditSkipped", "e2e.rs"),
             // The Cargo-integration policy is a property of the build environment, not of the
-            // spec; `frontend.rs` deliberately runs every fixture with the integration off.
+            // spec; `frontend/` deliberately runs every fixture with the integration off.
             ("CargoIntegrationDegraded", "config.rs"),
             ("CargoIntegrationRequired", "config.rs"),
             // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
@@ -1306,7 +1306,30 @@ mod tests {
                 .unwrap_or_else(|error| panic!("spargen/tests/{name} must be readable: {error}"))
         };
 
-        let frontend = read("frontend.rs");
+        // The frontend suite is a directory test crate: `main.rs` holds the harness and each
+        // family module beside it holds fixtures, so every source file in it is read. A missing
+        // module would let a code pass unasserted, so the scan must find `main.rs` and at least
+        // one module beside it.
+        let frontend_dir = tests.join("frontend");
+        let mut frontend_files: Vec<_> = std::fs::read_dir(&frontend_dir)
+            .unwrap_or_else(|error| panic!("spargen/tests/frontend/ must be readable: {error}"))
+            .map(|entry| entry.expect("readable directory entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .collect();
+        frontend_files.sort();
+        assert!(
+            frontend_files.len() > 1 && frontend_files.iter().any(|path| path.ends_with("main.rs")),
+            "spargen/tests/frontend/ holds {frontend_files:?}; expected main.rs and its family \
+             modules"
+        );
+        let frontend = frontend_files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         for code in Code::all() {
             let variant = variant_name(*code);
             match OWNED_ELSEWHERE.iter().find(|(owned, _)| *owned == variant) {
@@ -1319,7 +1342,7 @@ mod tests {
                     );
                     assert!(
                         !mentions_variant(&frontend, variant),
-                        "{} is listed in OWNED_ELSEWHERE but frontend.rs now asserts it too — \
+                        "{} is listed in OWNED_ELSEWHERE but spargen/tests/frontend/ now asserts it too — \
                          drop the entry so one suite owns it",
                         code.as_str()
                     );
@@ -1327,7 +1350,7 @@ mod tests {
                 None => assert!(
                     asserts_variant(&frontend, variant),
                     "{} has no fixture: `Code::{variant}` appears nowhere in \
-                     spargen/tests/frontend.rs outside a comment or an assertion of its \
+                     spargen/tests/frontend/ outside a comment or an assertion of its \
                      absence. Add one, or add the code to OWNED_ELSEWHERE naming the suite that \
                      asserts it.",
                     code.as_str()

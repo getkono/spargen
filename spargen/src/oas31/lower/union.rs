@@ -167,8 +167,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // keywords. It excludes a member that is this union's own reservation
             // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
             // without siblings, and with one member or several.
-            // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in `tests/frontend.rs`
-            // asserts the reported error codes are **exactly** `[E007]` on both its spellings.
+            // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
+            // `tests/frontend/recursion.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
                 return self.reject_self_referential_union(
                     schema,
