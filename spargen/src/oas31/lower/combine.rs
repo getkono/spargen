@@ -10,7 +10,7 @@ use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind
 use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
-use super::meet::{merge_field_default, take_declaration, NoMeet};
+use super::meet::{carries_key, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability};
 use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
 use super::{member_provenance, resolved_hint, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
@@ -146,22 +146,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // A field one side carries only because it requires the name is not a
                         // declaration of the property, so it does not intersect with one: the
                         // declaring member supplies the type and the metadata, and the requirement
-                        // survives (see `take_declaration`).
-                        if take_declaration(existing, field) {
-                            continue;
-                        }
-                        // A repeated property is an intersection, not an equality assertion: retain
-                        // the narrower compatible type.
+                        // survives (see `merge_repeated_field`). Every member's `default` is
+                        // decided after the loop, so none is merged pair by pair here.
                         let field_hint = format!("{hint}{}Intersection", field.name.wire);
-                        let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
-                        existing.required = existing.required || field.required;
-                        existing.ty = match intersection {
-                            Ok(ty) => ty,
+                        match self.merge_repeated_field(existing, field, &field_hint, false) {
+                            None | Some(Ok(())) => {}
                             // A reservation's body is not known yet, so the failure here says
                             // nothing about whether the property's types meet; typing the field
                             // uninhabited would be a guess. Refuse it, naming the cycle rather
                             // than a conflict nobody wrote.
-                            Err(_)
+                            Some(Err(_))
                                 if self.is_reservation(existing.ty.id)
                                     || self.is_reservation(field.ty.id) =>
                             {
@@ -184,18 +178,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             // applied `default` is left for `retype_field_defaults`, which finds
                             // it no value of the uninhabited type and reports it (`W005`) where it
                             // was written, documenting it as not applied (#453).
-                            Err(NoMeet::Empty) => {
+                            Some(Err(NoMeet::Empty)) => {
                                 uninhabited.insert(field.name.wire.clone());
-                                self.insert_type(
+                                existing.ty = self.insert_type(
                                     &field_hint,
                                     TypeKind::Never,
                                     Docs::default(),
                                     None,
-                                )
+                                );
                             }
                             // Only an empty meet is uninhabited: these two types share values, and
                             // an uninhabited field would refuse every object carrying one.
-                            Err(NoMeet::Unrepresentable) => {
+                            Some(Err(NoMeet::Unrepresentable)) => {
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members has types that \
                                      share values no single Rust type represents",
@@ -203,7 +197,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 );
                                 return self.reject_unrepresentable_meet(schema, &message);
                             }
-                        };
+                        }
                     }
                     None => {
                         fields.insert(field.name.wire.clone(), field.clone());
@@ -234,11 +228,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 continue;
             };
             for field in fields.values_mut() {
-                if !field.undeclared
-                    || member_fields
-                        .iter()
-                        .any(|member| member.name.wire == field.name.wire)
-                {
+                if !field.undeclared || carries_key(member_fields, &field.name.wire) {
                     continue;
                 }
                 let field_hint = format!("{hint}{}Intersection", field.name.wire);
