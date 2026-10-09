@@ -308,3 +308,37 @@ impl<'doc> Resolver<'doc> {
         })
     }
 }
+
+/// `E004` for a reference into `#/components/<kind>/` naming an entry the document does not
+/// declare. Shared by lowering and the audit's walk of subschemas lowering never reads, so both
+/// report the miss in one wording.
+pub(super) fn reject_undeclared_component(
+    diags: &mut Diagnostics,
+    provenance: &Provenance,
+    kind: &str,
+    reference: &str,
+) {
+    // E004 case: undeclared-component
+    Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+        .message(format!("unresolved {kind} reference `{reference}`"))
+        .emit(diags);
+}
+
+/// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
+/// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
+/// component wherever it is written — `LowerCtx::ensure_component` consults the root map first —
+/// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
+pub(super) fn schema_reference_identity(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    reference: &str,
+    at: &Provenance,
+) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+    let root_component = reference
+        .strip_prefix("#/components/schemas/")
+        .is_some_and(|name| document.components.schemas.contains_key(name));
+    if root_component {
+        return resolver.reference_identity_from(reference, resolver.root_id());
+    }
+    resolver.reference_identity(reference, at)
+}

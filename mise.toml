@@ -185,7 +185,7 @@ description = "Mutation testing over the runtime, the response partition and the
 # CI's `mutants` job in `mutants.yml` runs this command byte for byte, weekly and on
 # `workflow_dispatch` (`every_mise_task_runs_exactly_what_its_ci_job_runs`): it takes well over the
 # time a pull request should wait, so no hook or pull request runs it. The scope is the embedded
-# runtime, `ir/media.rs`'s success/error partition, and the name allocator; `oas31/lower.rs` is
+# runtime, `ir/media.rs`'s success/error partition, and the name allocator; `oas31/lower/` is
 # left out until its rework settles, and then needs `--shard` (#490).
 # - `--config` names `.cargo/mutants.toml` rather than relying on its default location, so a
 #   missing file fails the run instead of silently dropping every exclusion. That file lists each

@@ -13,8 +13,10 @@
 
 mod audit;
 mod deserialize;
+mod discriminator;
 mod document;
 mod lower;
+mod media;
 mod metaschema;
 mod resolve;
 mod schema;

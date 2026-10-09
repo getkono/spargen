@@ -9563,8 +9563,8 @@ components:
             );
             // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
             // shape passes through are ordered deliberately, the cycle question before the
-            // sibling-intersection question, and `lower.rs` records at that site that a reordering
-            // turns this fixture red. A disjunction would not: it is satisfied by either verdict,
+            // sibling-intersection question, and `oas31/lower/union.rs` records at that site that
+            // a reordering turns this fixture red. A disjunction would not: it is satisfied by either verdict,
             // so the ordering it claims to protect would be free to flip in silence. The `with
             // siblings` spelling is the one that carries the difference, because it is the only one
             // the sibling guard can answer at all.
@@ -28559,7 +28559,7 @@ fn a_union_sibling_without_a_type_does_not_decide_nullability() {
 /// Accept-versus-reject must not key on `components.schemas` map order.
 ///
 /// The round-2 guard tested `in_progress` membership, which is a property of *when* lowering
-/// happens: `lower.rs` pre-lowers components in map iteration order, so for mutual recursion it
+/// happens: `oas31::lower` pre-lowers components in map iteration order, so for mutual recursion it
 /// fired on whichever entry was declared first. Two documents identical but for the order of two
 /// map entries — a no-op in OpenAPI, and a routine difference between description generators — got
 /// opposite verdicts: one `Rejected`, one `Generated`.
@@ -28910,9 +28910,9 @@ fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
 /// `collect_schema_refs` chained `schema.defs` and `schema.validation_children`, so `$defs`, `not`,
 /// `if`/`then`/`else`, `contains`, `propertyNames`, `unevaluated*` and `dependentSchemas` were all
 /// treated as cycle edges. **Lowering never descends into any of them** — `.defs` and
-/// `validation_children` appear exactly once each in the whole of `lower.rs`, inside that walk — so
-/// a `$ref` reachable only that way can never put a component mid-flight and can never yield a
-/// placeholder. The guard rejected anyway, asserting a dependence that does not exist.
+/// `validation_children` appeared exactly once each in the whole of the lowering pass (then
+/// `lower.rs`, now `oas31/lower/`), inside that walk — so a `$ref` reachable only that way can
+/// never put a component mid-flight and can never yield a placeholder. The guard rejected anyway, asserting a dependence that does not exist.
 ///
 /// The consequence is sharp: adding **unreferenced `$defs`** to a document, which contributes zero
 /// emitted bytes and does not change the instance set by a single value, turned `Generated` into a

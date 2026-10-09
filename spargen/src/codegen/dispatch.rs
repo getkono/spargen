@@ -434,8 +434,9 @@ fn response_media_for_spec(
 }
 
 /// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
-/// only the definition's kind, which is sound because `oas31::lower::lower_response` refuses a
-/// nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>` body reaches these decode sites.
+/// only the definition's kind, which is sound because `LowerCtx::lower_response` (in
+/// `oas31/lower/response.rs`) refuses a nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>`
+/// body reaches these decode sites.
 pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
     matches!(
         api.types.get(ty.id).map(|definition| &definition.kind),
