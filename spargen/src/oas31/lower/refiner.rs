@@ -123,10 +123,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let array = if array_like {
             let mut half = sibling.clone();
-            half.properties.clear();
-            half.pattern_properties.clear();
-            half.required.clear();
-            half.additional_properties = None;
+            half.clear_object_keywords();
             half.types.types = category(JsonType::Array);
             let name = if object_like {
                 "ArrayConstraint"
@@ -171,11 +168,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A branch of a category the deleted `type` array omits is excluded, as against the array.
         if let (Some(allowed), Some(category)) = (scoped.allowed, value_category(&kind)) {
             if !allowed.admits(category) {
-                return if branch.nullable && scoped.admits_null {
-                    Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
-                } else {
-                    Err(NoMeet::Empty)
-                };
+                return self.excluded_branch(branch, scoped.admits_null, hint);
             }
         }
         let half = match &kind {
@@ -210,11 +203,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         return Err(NoMeet::Unrepresentable);
                     }
                     Some(allowed) if !allowed.admits(category) => {
-                        return if branch.nullable && scoped.admits_null {
-                            Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
-                        } else {
-                            Err(NoMeet::Empty)
-                        };
+                        return self.excluded_branch(branch, scoped.admits_null, hint);
                     }
                     _ => {}
                 }
@@ -248,6 +237,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty.nullable = branch.nullable && scoped.admits_null;
                 Ok(ty)
             }
+        }
+    }
+
+    /// A union branch of a category the sibling's deleted `type` array omits: no value of it
+    /// satisfies the sibling but `null`, which is left where both the branch and the sibling admit
+    /// it (the exact JSON null type under `hint`), and otherwise the meet is empty.
+    fn excluded_branch(
+        &mut self,
+        branch: Ty,
+        sibling_admits_null: bool,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        if branch.nullable && sibling_admits_null {
+            Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+        } else {
+            Err(NoMeet::Empty)
         }
     }
 

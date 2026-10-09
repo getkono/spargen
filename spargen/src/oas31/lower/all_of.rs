@@ -67,10 +67,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
         // schema's own object keywords and its `null`.
         composition.types = crate::oas31::TypeSet::default();
-        composition.properties.clear();
-        composition.pattern_properties.clear();
-        composition.additional_properties = None;
-        composition.required.clear();
+        composition.clear_object_keywords();
         let (scoped, combined): (Vec<SchemaOr>, Vec<SchemaOr>) =
             schema.all_of.iter().cloned().partition(|member| {
                 matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())

@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Docs, Field, FieldDefault, JsonCategory, Openness, Prim, ScalarEnum,
-    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind,
+    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind, Union,
 };
 
 use super::defaults::reclassify_default;
@@ -263,16 +263,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // it fails: `prefixItems` does not require the array to reach that position, so an
             // array shorter than it still satisfies both tuples.
             (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
-                let items = left
-                    .iter()
-                    .zip(right)
-                    .enumerate()
-                    .map(|(index, (left, right))| {
-                        self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
-                            .ok()
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or(NoMeet::Unrepresentable)?;
+                let items = self
+                    .intersect_positions(left.iter().copied().zip(right.iter().copied()), hint)?;
                 Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
             }
             // A homogeneous array against a tuple: every tuple position must also satisfy the
@@ -295,20 +287,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A union's variants stay closed for the reason `lower_union_closed` gives; a union
             // that narrows to one branch is no union, and `intersect_union` meets that branch where
             // the enclosing position's answer holds.
-            (TypeKind::Union(union), _) => {
-                let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| {
-                    let reach = &mut ScopeReach::default();
-                    ctx.intersect_union(a, union, Refiner::Whole(b), hint, enclosing, reach)
-                })
-            }
-            (_, TypeKind::Union(union)) => {
-                let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| {
-                    let reach = &mut ScopeReach::default();
-                    ctx.intersect_union(b, union, Refiner::Whole(a), hint, enclosing, reach)
-                })
-            }
+            (TypeKind::Union(union), _) => self.intersect_with_union(a, union, b, hint),
+            (_, TypeKind::Union(union)) => self.intersect_with_union(b, union, a, hint),
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
@@ -332,15 +312,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         tuple: Ty,
         hint: &str,
     ) -> Result<Ty, NoMeet> {
-        let items = positions
-            .iter()
-            .enumerate()
-            .map(|(index, position)| {
-                self.intersect_types(*position, item, &format!("{hint}Item{index}"))
-                    .ok()
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(NoMeet::Unrepresentable)?;
+        let items =
+            self.intersect_positions(positions.iter().map(|position| (*position, item)), hint)?;
         if items
             .iter()
             .zip(positions)
@@ -396,6 +369,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }))
+    }
+
+    /// The meet of `union_ty`, whose kind is `union`, with `other`, branch by branch, under a
+    /// closed narrowing: the answer for a union on either side of [`Self::intersect_non_null`].
+    fn intersect_with_union(
+        &mut self,
+        union_ty: Ty,
+        union: &Union,
+        other: Ty,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        let enclosing = self.narrowing_opens;
+        self.closed_narrowing(|ctx| {
+            let reach = &mut ScopeReach::default();
+            ctx.intersect_union(
+                union_ty,
+                union,
+                Refiner::Whole(other),
+                hint,
+                enclosing,
+                reach,
+            )
+        })
+    }
+
+    /// Meet a tuple's positions pair by pair, position `index` under `{hint}Item{index}`: the
+    /// positions of two tuples, or of a tuple and an array's item. A position with no meet, empty or
+    /// not, leaves no tuple, and that is [`NoMeet::Unrepresentable`]: `prefixItems` does not
+    /// require an array to reach the position, so a shorter array still satisfies both sides.
+    fn intersect_positions(
+        &mut self,
+        pairs: impl Iterator<Item = (Ty, Ty)>,
+        hint: &str,
+    ) -> Result<Vec<Ty>, NoMeet> {
+        pairs
+            .enumerate()
+            .map(|(index, (left, right))| {
+                self.intersect_types(left, right, &format!("{hint}Item{index}"))
+                    .ok()
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or(NoMeet::Unrepresentable)
     }
 
     fn intersect_structs(
