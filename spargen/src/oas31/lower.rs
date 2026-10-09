@@ -1845,6 +1845,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 referenced
             };
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            // Beside a union sibling and no `type`, the untyped target leaves `null` to the
+            // union, as the same target written as an `allOf` member beside it does
+            // ([`undecided_admits_null`], #586): where a branch admits `null` itself
+            // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
+            // union's answer.
+            let referenced = if has_union_sibling
+                && schema.types.types.is_empty()
+                && !referenced.nullable
+                && matches!(
+                    self.graph.get(referenced.id).map(|def| &def.kind),
+                    Some(TypeKind::Struct(_))
+                )
+                && !self.ref_target_decides_null(reference, &schema.provenance)
+                && union_branch_admits_null(schema)
+            {
+                Ty {
+                    nullable: true,
+                    ..referenced
+                }
+            } else {
+                referenced
+            };
             if has_union_sibling {
                 let (keywords, union) = split_union_sibling(&sibling);
                 if schema_has_shape_constraint(&keywords) {
@@ -2465,6 +2487,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut variant_members: Vec<usize> = Vec::new();
         // How many variants accepted `null` before their nullability was hoisted to the union.
         let mut nullable_variants = 0usize;
+        // How many variants are the exact JSON `null` (`const: null`, `enum: [null]`), and whether
+        // an untyped branch took `null` from what the union is met with (#567, #586): each such
+        // variant is a branch `null` matches beside it, so a `oneOf` counts them together (#563).
+        let mut null_variants = 0usize;
+        let mut null_from_conjunct = false;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -2473,6 +2500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            let mut took_conjunct_null = false;
             // A variant that is a back-edge to *this* union — the member's type is the very
             // reservation this schema will occupy — is the whole union, so it constrains nothing and
             // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
@@ -2519,6 +2547,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && self.branch_leaves_null_undecided(member, ty)
             {
                 ty.nullable = true;
+                took_conjunct_null = true;
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
             // sibling meet so the other sibling keywords can still take it away, and is then
@@ -2526,6 +2555,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // dropped for lowering) nothing else would give it the array's `null`.
             if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
                 ty.nullable = true;
+            }
+            // Untyped sibling keywords are a conjunct that leaves `null` to the union, as an
+            // untyped `allOf` member beside it does: they admit `null` where a branch admits it
+            // itself ([`union_branch_admits_null`]), and an untyped object branch then takes it
+            // from the meet, as it does in that spelling (#586).
+            if sibling.is_some_and(|sibling| {
+                !sibling.speaks_about_null && matches!(sibling.refiner, Refiner::Scoped(_))
+            }) && union_branch_admits_null(schema)
+                && self.branch_leaves_null_undecided(member, ty)
+            {
+                ty.nullable = true;
+                took_conjunct_null = true;
             }
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
@@ -2584,6 +2625,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
             nullable_variants += usize::from(ty.nullable);
+            null_variants += usize::from(self.is_exact_null(ty));
+            null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
                 .clone()
@@ -2631,7 +2674,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
         // them. That meet removes `null` from a typed branch only; an untyped branch it gives
         // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
-        if mode == UnionMode::OneOf && null_members + nullable_variants > 1 {
+        // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
+        // (#586): elsewhere it stays the variant `null` decodes to, as it always has.
+        let null_variants = if null_from_conjunct { null_variants } else { 0 };
+        if mode == UnionMode::OneOf && null_members + nullable_variants + null_variants > 1 {
             nullable = false;
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
@@ -4279,6 +4325,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
+    /// Whether `ty` is the exact JSON `null` (`()`), as a `const: null` or `enum: [null]` branch
+    /// lowers: a branch `null` matches without its `Ty` being nullable.
+    fn is_exact_null(&self, ty: Ty) -> bool {
+        matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Null)
+        )
+    }
+
     /// Whether `member`, a union branch lowered to `ty`, is an object whose lowered non-null
     /// struct decides nothing about `null`: no `type`, and nothing else
     /// [`Self::all_of_decides_null`] reads as deciding, so `null` satisfies it wherever the
@@ -4448,9 +4503,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
+        // With no composition, only untyped refiners meet the union: they leave `null` to it, as
+        // an untyped composition does ([`undecided_admits_null`]), so they admit it where a branch
+        // admits it itself ([`union_branch_admits_null`]), and its untyped branches take it there
+        // (#586).
         let enclosing_meets_null = std::mem::replace(
             &mut self.unmerged_union_meets_null,
-            composed.is_some_and(|composed| composed.nullable),
+            composed.map_or_else(
+                || union_branch_admits_null(union),
+                |composed| composed.nullable,
+            ),
         );
         let union_mark = self.graph_mark();
         let lowered = self.lower_schema(union, union_hint);
@@ -6580,7 +6642,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .filter(|variant| variant.ty.nullable)
             .count();
-        if nullable_variants == 0 || usize::from(met.nullable) + nullable_variants < 2 {
+        // An exact-`null` variant (`const: null`) is a branch `null` matches too, counted beside a
+        // variant the meet left accepting it, as the inline union counts it (#586).
+        let null_variants = union
+            .variants
+            .iter()
+            .filter(|variant| self.is_exact_null(variant.ty))
+            .count();
+        if nullable_variants == 0
+            || usize::from(met.nullable) + nullable_variants + null_variants < 2
+        {
             return met;
         }
         let mut union = union.clone();
@@ -11199,6 +11270,27 @@ fn undecided_admits_null(
         composed.nullable = true;
     }
     composed
+}
+
+/// Whether a branch of `union` admits `null` by its own keywords: one with no `$ref`, `allOf` or
+/// union of its own whose stated `type`, `enum` or `const` admits it, such as
+/// `type: [object, 'null']` or `type: 'null'` (#586). An untyped conjunct leaves `null` to the
+/// union, so where such a branch admits it the conjunct does too, as [`undecided_admits_null`]
+/// makes an untyped `allOf` composition admit it: the `$ref`-sibling spelling's untyped target
+/// and the inline spellings' untyped refiners then admit `null`, and an untyped object branch
+/// takes it from the meet as it does in the `allOf` spellings. The `true` schema states nothing,
+/// and a branch whose `null` lies behind a `$ref` or a composition is not read here.
+fn union_branch_admits_null(union: &Schema) -> bool {
+    union.one_of.iter().chain(&union.any_of).any(|branch| {
+        matches!(branch, SchemaOr::Schema(branch)
+            if branch.reference.is_none()
+                && branch.all_of.is_empty()
+                && !schema_has_union(branch)
+                && (stated_nullability(branch).is_some()
+                    || branch.enum_values.is_some()
+                    || branch.const_value.is_some())
+                && own_keywords_admit_null(branch))
+    })
 }
 
 /// Whether a union branch denies `null` by its own keywords alone: `false`, or a branch with no
