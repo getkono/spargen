@@ -4082,6 +4082,117 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// Issue #597: a `oneOf` whose only branch `null` matches states nothing (`true`, `{}`), beside a
+/// `type: string` branch the nullable object `NB` excludes, met with `NB` through a `$ref`
+/// sibling or an `allOf`. The meet narrows the union to that branch alone, and `null` is valid
+/// there, since `NB` admits it and exactly one branch matches it, so every spelling generates
+/// `Option<Pick>`, as the inline spelling does. Where another branch matches `null` too
+/// (`type: 'null'`, `type: [string, 'null']`) it matches two, and where the conjunct (`N`) denies
+/// it nothing admits it, so those stay `Pick`.
+#[test]
+fn a_one_of_narrowed_to_its_stated_nothing_branch_keeps_the_conjuncts_null() {
+    let nb = "$ref: '#/components/schemas/NB'";
+    let rows = [
+        (format!("{{ {nb}, oneOf: [ {{}}, {{ type: string }} ] }}"), true),
+        (format!("{{ {nb}, oneOf: [ true, {{ type: string }} ] }}"), true),
+        (
+            format!("{{ allOf: [ {{ {nb} }} ], oneOf: [ true, {{ type: string }} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }} ], oneOf: [ {{}}, {{ type: string }} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ {nb} }}, {{ oneOf: [ true, {{ type: string }} ] }} ] }}"),
+            true,
+        ),
+        (
+            "{ type: [object, 'null'], properties: { a: { type: string } }, \
+             oneOf: [ true, { type: string } ] }"
+                .to_owned(),
+            true,
+        ),
+        (
+            format!("{{ {nb}, oneOf: [ {{ type: 'null' }}, true, {{ type: string }} ] }}"),
+            false,
+        ),
+        (
+            format!(
+                "{{ allOf: [ {{ {nb} }} ], oneOf: [ {{ type: 'null' }}, {{}}, {{ type: string }} ] }}"
+            ),
+            false,
+        ),
+        (
+            format!("{{ {nb}, oneOf: [ {{}}, {{ type: [string, 'null'] }} ] }}"),
+            false,
+        ),
+        (
+            "{ $ref: '#/components/schemas/N', oneOf: [ {}, { type: string } ] }".to_owned(),
+            false,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/N' } ], oneOf: [ true, { type: string } ] }"
+                .to_owned(),
+            false,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (site, admits) in rows {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    N:
+      type: object
+      properties:
+        a: {{ type: string }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{site}, via {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != admits {
+            let validity = if admits { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Issue #588's other spellings of a branch that states nothing, met with an untyped object
 /// composition: a union of that branch alone (`[ true ]`, `[ {} ]`, `[ $ref ]` to a `true` or `{}`
 /// component), and of that branch beside a typed branch that denies `null` (`type: string`,
