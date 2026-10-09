@@ -3242,4 +3242,38 @@ fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
             .unwrap_or_else(|| panic!("{what}: no array branch: {code}"));
         assert_eq!(element(&code, array, what), "String", "{what}");
     }
+
+    // Beside a union member with no array branch, the member reaches nothing the union accepts:
+    // `W011` at the member, written directly or nested, and the union generates as it is. The
+    // nested spelling took the scalar shortcut and was met silently.
+    for (what, refiner, pointer) in [
+        (
+            "written directly",
+            "{ items: { type: string } }",
+            "/components/schemas/Probe/allOf/1",
+        ),
+        (
+            "nested",
+            "{ allOf: [ { items: { type: string } } ] }",
+            "/components/schemas/Probe/allOf/1/allOf/0",
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Probe:\n      allOf: [ {{ oneOf: [ {{ type: string }}, {{ type: integer }} \
+                 ] }}, {refiner} ]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect && d.pointer.as_str() == pointer),
+            "{what}: W011 must sit at `{pointer}`: {report:#?}"
+        );
+        assert_eq!(enum_variants(&code, "Probe").len(), 2, "{what}: {code}");
+    }
 }
