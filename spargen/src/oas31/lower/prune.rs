@@ -51,6 +51,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     roots.extend(fields.iter().map(|field| field.ty.id).filter(inside));
                 }
                 Contribution::Scalar(ty) => roots.extend(Some(ty.id).filter(inside)),
+                Contribution::Refiner { scoped, .. } => roots.extend(
+                    [scoped.object, scoped.array]
+                        .into_iter()
+                        .flatten()
+                        .map(|ty| ty.id)
+                        .filter(inside),
+                ),
             }
         }
         let reached = reachable_types(&self.graph, &roots);

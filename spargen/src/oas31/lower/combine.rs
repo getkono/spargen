@@ -12,8 +12,12 @@ use crate::source::is_remote_ref;
 
 use super::meet::{carries_key, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability};
+use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
-use super::{member_provenance, resolved_hint, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
+use super::{
+    member_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
+    ScopedRefiners, MAX_SCHEMA_DEPTH,
+};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Combine the gathered members of an `allOf` into its type; see [`Self::lower_all_of`].
@@ -30,7 +34,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .filter_map(|c| match c {
                 Contribution::Scalar(ty) => Some(*ty),
-                Contribution::Object { .. } => None,
+                Contribution::Object { .. } | Contribution::Refiner { .. } => None,
+            })
+            .collect();
+        // Untyped array applicators constrain only arrays: beside object members they are
+        // vacuous, and beside scalars they refine the scalars' meet below.
+        let refiners: Vec<Refiner> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Refiner { scoped, .. } => Some(Refiner::Scoped(*scoped)),
+                Contribution::Object { .. } | Contribution::Scalar(_) => None,
             })
             .collect();
 
@@ -42,7 +55,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // All-scalar allOf: recursively intersect compatible members (for example integer with
         // number, an enum with its underlying scalar, or arrays whose item constraints narrow).
         if !has_object {
-            let Some(mut intersection) = scalars.first().copied() else {
+            let mark = self.graph_mark();
+            // Untyped array applicators with no other constraining member: they establish the
+            // category they apply to, as beside a `$ref` to an untyped target and in a union
+            // branch that states none, so the meet starts from `Value`, the meet's identity.
+            let unconstrained = (scalars.is_empty() && !refiners.is_empty()).then(|| {
+                self.insert_type(
+                    &format!("{hint}Unconstrained"),
+                    TypeKind::Any,
+                    Docs::default(),
+                    None,
+                )
+            });
+            let Some(mut intersection) = scalars.first().copied().or(unconstrained) else {
                 // Only no-constraint members (`true`/`{}`) remained: a faithful open object.
                 let ty = self.insert_schema_type(
                     schema,
@@ -54,7 +79,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 return Some(self.with_all_of_nullability(schema, ty));
             };
-            let mark = self.graph_mark();
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
                 let Ok(merged) = self.intersect_types(
                     intersection,
@@ -64,6 +88,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     return self.reject_all_of_scalars(schema);
                 };
                 intersection = merged;
+            }
+            // Under the enclosing narrowing, as the scalar meets above: a refiner is one more
+            // member of the same `allOf`. Its array half meets the intersection's arrays (a
+            // union's array branches) and leaves every other category as it is; `Value` takes the
+            // array category from it.
+            for (index, refiner) in refiners.iter().copied().enumerate() {
+                let Ok(met) = self.meet_refiner(
+                    intersection,
+                    refiner,
+                    &mut ScopeReach::default(),
+                    &format!("{hint}Refined{index}"),
+                ) else {
+                    return self.reject_all_of_scalars(schema);
+                };
+                intersection = met;
             }
             // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
@@ -610,14 +649,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
             out.push(Contribution::Scalar(ty));
+        } else if matches!(
+            implied_applicator_category(schema),
+            Some(ImpliedCategory::Only(JsonType::Array))
+        ) {
+            // Untyped array applicators (`items`, `prefixItems`) name no `type`, so neither arm
+            // above reads them, and they were dropped as an annotation with no diagnostic (#607).
+            // In 2020-12 they constrain only arrays, so they refine the merge's array members and
+            // leave the rest, as the same member does beside a union.
+            let scoped = self.lower_scoped_refiners(schema, true, None, hint)?;
+            out.push(Contribution::Refiner {
+                scoped,
+                member: Box::new(schema.clone()),
+            });
         }
         // Otherwise the member is a pure annotation (`{description: ...}`): no constraint.
         Some(())
     }
 }
 
-/// One `allOf` member's contribution to the merged type: either a set of object fields (with its
-/// `additionalProperties` policy and its own `required` names) to flatten, or a scalar/leaf type.
+/// One `allOf` member's contribution to the merged type: a set of object fields (with its
+/// `additionalProperties` policy and its own `required` names) to flatten, a scalar/leaf type, or
+/// untyped array applicators that refine the merge's arrays alone.
 /// `Clone` so a bundle-`$ref` member's contribution can be recorded once and replayed at every use
 /// (see `LowerCtx::resolved_contributions`).
 #[derive(Clone)]
@@ -636,6 +689,33 @@ pub(super) enum Contribution {
         nullable: Option<bool>,
     },
     Scalar(Ty),
+    /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the
+    /// halves of a [`Refiner::Scoped`] sibling, with only the array half, met with the merge's
+    /// arrays and vacuous for every other category (#607). Where no other member constrains,
+    /// they establish the array category, as beside a `$ref` to an untyped target. `member` is the
+    /// member as written: beside a union it refines the union's branches instead
+    /// ([`take_refiners`]), and a half that reaches none is reported there (`W011`).
+    Refiner {
+        scoped: ScopedRefiners,
+        member: Box<Schema>,
+    },
+}
+
+/// Remove the [`Contribution::Refiner`]s from `contributions`, in order, as the members and
+/// refiners a union beside or inside the `allOf` is met with: gathered from a nested `allOf`, or
+/// a bundle `$ref`'s target, they refine the union's branches of their category, as the same
+/// member written directly in the `allOf` does, rather than establish the array category for
+/// the whole composition and drop every other branch.
+pub(super) fn take_refiners(contributions: &mut Vec<Contribution>) -> Vec<(Box<Schema>, Refiner)> {
+    let mut refiners = Vec::new();
+    contributions.retain(|contribution| match contribution {
+        Contribution::Refiner { scoped, member } => {
+            refiners.push((member.clone(), Refiner::Scoped(*scoped)));
+            false
+        }
+        Contribution::Object { .. } | Contribution::Scalar(_) => true,
+    });
+    refiners
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
