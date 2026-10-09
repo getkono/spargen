@@ -451,7 +451,7 @@ impl Audit<'_, '_> {
                 .split_once('/')
                 .is_some_and(|(root, _)| components.contains_key(root));
             if from_root && !into_a_declared_component {
-                super::lower::reject_undeclared_component(self.diags, at, "schema", reference);
+                super::resolve::reject_undeclared_component(self.diags, at, "schema", reference);
                 return;
             }
         }
@@ -481,11 +481,11 @@ impl Audit<'_, '_> {
                     .map(|target| (None, target)),
             );
         for (tag, target) in entries {
-            super::lower::discriminator_target_identity(
+            super::discriminator::discriminator_target_identity(
                 self.document,
                 self.resolver,
                 self.diags,
-                &super::lower::discriminator_entry(tag),
+                &super::discriminator::discriminator_entry(tag),
                 target,
             );
         }
