@@ -5,7 +5,6 @@ use crate::ir::{Docs, MediaType, Response, ResponseHeader, Responses, StatusSpec
 use crate::oas31::media::media_object_is_opaque;
 use crate::oas31::{MediaTypeObject, ResponseObject};
 
-use super::body::raw_text_type_supported;
 use super::content::{choose_media, lower_media_type, BodyPosition, ChosenMedia};
 use super::LowerCtx;
 
@@ -171,15 +170,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty
         };
         if let Some(ty) = ty {
-            let compatible = match media {
-                MediaType::Text => raw_text_type_supported(&self.graph, ty),
-                MediaType::OctetStream => matches!(
-                    self.graph.get(ty.id).map(|definition| &definition.kind),
-                    Some(TypeKind::Bytes)
-                ),
-                _ => true,
-            };
-            if !compatible {
+            if !self.raw_body_compatible(media, ty) {
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(format!(
                                 "media type `{media_name}` requires a string-like or binary response schema"

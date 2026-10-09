@@ -436,11 +436,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .ok()?;
         let target = resolved.schema.into_owned();
         // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
-        // test the target instead. Without this, a member that is the very schema being lowered
-        // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
-        // chain length for what is a cycle of length one. The component and remote arms above
-        // refuse to read an in-progress member; this one now does too.
-        if self.resolved_target_in_progress(&target.provenance) {
+        // test the target's identity (`reservation_at`) instead of `is_in_progress_root`. Without
+        // this, a member that is the very schema being lowered descends into its own body again
+        // and stops only at `MAX_SCHEMA_DEPTH`, reporting a chain length for what is a cycle of
+        // length one. The component and remote arms above refuse to read an in-progress member;
+        // this one now does too.
+        if self.reservation_at(&target.provenance).is_some() {
             return self.reject_all_of_cycle(
                 schema.provenance.clone(),
                 "an `allOf` member is a direct recursive `$ref` to the schema being lowered",

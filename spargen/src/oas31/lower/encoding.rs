@@ -114,7 +114,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (name, field_ty) in fields {
             let declared = object.encoding.get(&name);
             let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
-            let headers = self.encoding_headers(declared, media, &name, at);
+            let headers = self.encoding_headers(declared, media, &name);
             properties.push(PropertyEncoding {
                 name,
                 mode,
@@ -248,18 +248,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Only the essence can be a range; a `*` in a parameter value is an ordinary
                 // `tchar`.
                 if media_essence(&first).contains('*') {
-                    Diagnostic::error(
-                        Code::UnsupportedMediaType,
-                        declared
-                            .map(|encoding| encoding.provenance.clone())
-                            .unwrap_or_else(|| at.clone()),
-                    )
-                    .message(format!(
-                        "`encoding.{name}.contentType: {first}` is a wildcard; a client must send \
-                         one concrete media type"
-                    ))
-                    .remedy("name a concrete media type such as `image/png`")
-                    .emit(self.diags);
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                        .message(format!(
+                            "`encoding.{name}.contentType: {first}` is a wildcard; a client must \
+                             send one concrete media type"
+                        ))
+                        .remedy("name a concrete media type such as `image/png`")
+                        .emit(self.diags);
                     return None;
                 }
                 // The value is sent verbatim as the part's `Content-Type`, so it is held to the
@@ -267,17 +262,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // otherwise fall through to the natural codec below with nothing reported, and
                 // fail only when a request is built.
                 if !media_type_is_well_formed(media_essence(&first)) {
-                    Diagnostic::error(
-                        Code::UnsupportedMediaType,
-                        declared
-                            .map(|encoding| encoding.provenance.clone())
-                            .unwrap_or_else(|| at.clone()),
-                    )
-                    .message(format!(
-                        "`encoding.{name}.contentType: {first}` is not a media type"
-                    ))
-                    .remedy("name a media type such as `text/plain`, as `type/subtype`")
-                    .emit(self.diags);
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                        .message(format!(
+                            "`encoding.{name}.contentType: {first}` is not a media type"
+                        ))
+                        .remedy("name a media type such as `text/plain`, as `type/subtype`")
+                        .emit(self.diags);
                     return None;
                 }
                 // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
@@ -312,15 +302,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                  parameter",
                             ),
                         };
-                        Diagnostic::error(
-                            Code::UnsupportedMediaType,
-                            declared
-                                .map(|encoding| encoding.provenance.clone())
-                                .unwrap_or_else(|| at.clone()),
-                        )
-                        .message(message)
-                        .remedy(remedy)
-                        .emit(self.diags);
+                        Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                            .message(message)
+                            .remedy(remedy)
+                            .emit(self.diags);
                         return None;
                     }
                 }
@@ -362,60 +347,50 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && self.natural_codec(field_ty) == MediaType::Json
             && classified != Some(MediaType::Json)
         {
-            Diagnostic::error(
-                Code::UnsupportedMediaType,
-                declared
-                    .map(|encoding| encoding.provenance.clone())
-                    .unwrap_or_else(|| at.clone()),
-            )
-            .message(if media == MediaType::Multipart {
-                format!(
-                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
-                     scalar or binary value, so spargen can send it only as JSON; the part's bytes \
-                     would contradict its header"
-                )
-            } else {
-                format!(
-                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
-                     scalar value, so spargen can serialize it into a form field only as JSON; the \
-                     field would not be in the syntax the document declares"
-                )
-            })
-            .remedy(if media == MediaType::Multipart {
-                "declare `application/json` (or a `+json` type), make the property a string or \
-                 binary value, or omit this API segment with spargen::omit!"
-            } else {
-                "declare `application/json` (or a `+json` type), select RFC 6570 serialization \
-                 with `style`/`explode`, make the property a scalar, or omit this API segment with \
-                 spargen::omit!"
-            })
-            .emit(self.diags);
+            Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                .message(if media == MediaType::Multipart {
+                    format!(
+                        "property `{name}` declares `contentType: {content_type}`, but it is not \
+                         a scalar or binary value, so spargen can send it only as JSON; the \
+                         part's bytes would contradict its header"
+                    )
+                } else {
+                    format!(
+                        "property `{name}` declares `contentType: {content_type}`, but it is not \
+                         a scalar value, so spargen can serialize it into a form field only as \
+                         JSON; the field would not be in the syntax the document declares"
+                    )
+                })
+                .remedy(if media == MediaType::Multipart {
+                    "declare `application/json` (or a `+json` type), make the property a string \
+                     or binary value, or omit this API segment with spargen::omit!"
+                } else {
+                    "declare `application/json` (or a `+json` type), select RFC 6570 \
+                     serialization with `style`/`explode`, make the property a scalar, or omit \
+                     this API segment with spargen::omit!"
+                })
+                .emit(self.diags);
             return None;
         }
         // A form field is a single URL-encoded string; raw bytes have no representation there.
         if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
-            Diagnostic::error(
-                Code::UnsupportedMediaType,
-                declared
-                    .map(|encoding| encoding.provenance.clone())
-                    .unwrap_or_else(|| at.clone()),
-            )
-            // Name what the document wrote: a declared `contentType` is the reason a string
-            // property is binary here, while a property whose own schema is binary defaulted to
-            // octet-stream and never mentioned a `contentType` at all.
-            .message(if explicit.is_some() {
-                format!(
-                    "property `{name}` declares `contentType: {content_type}`, which is binary; a \
-                     form-urlencoded body cannot carry a binary part"
-                )
-            } else {
-                format!(
-                    "property `{name}` is binary, which has no \
-                     `application/x-www-form-urlencoded` representation"
-                )
-            })
-            .remedy("send the body as `multipart/form-data`, or encode the value as text")
-            .emit(self.diags);
+            Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                // Name what the document wrote: a declared `contentType` is the reason a string
+                // property is binary here, while a property whose own schema is binary defaulted to
+                // octet-stream and never mentioned a `contentType` at all.
+                .message(if explicit.is_some() {
+                    format!(
+                        "property `{name}` declares `contentType: {content_type}`, which is \
+                         binary; a form-urlencoded body cannot carry a binary part"
+                    )
+                } else {
+                    format!(
+                        "property `{name}` is binary, which has no \
+                         `application/x-www-form-urlencoded` representation"
+                    )
+                })
+                .remedy("send the body as `multipart/form-data`, or encode the value as text")
+                .emit(self.diags);
             return None;
         }
         Some(EncodingMode::Media {
@@ -467,7 +442,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         declared: Option<&EncodingObject>,
         media: MediaType,
         name: &str,
-        at: &Provenance,
     ) -> Vec<(String, String)> {
         let Some(encoding) = declared else {
             return Vec::new();
@@ -484,7 +458,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return Vec::new();
         }
-        let _ = at;
         let mut headers = Vec::new();
         for (header_name, header) in &encoding.headers {
             // `Content-Type` is described by `contentType`, not here.
@@ -577,4 +550,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
         }
     }
+}
+
+/// Where a refusal of one property's encoding points: the property's own Encoding Object when
+/// the document wrote one, else `at`, the body the property belongs to.
+fn encoding_site(declared: Option<&EncodingObject>, at: &Provenance) -> Provenance {
+    declared.map_or_else(|| at.clone(), |encoding| encoding.provenance.clone())
 }
