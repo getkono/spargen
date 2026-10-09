@@ -382,7 +382,7 @@ pub(super) fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// unsupported until a codec for the suffix exists in this position. The family is matched
 /// case-insensitively for the same reason the range is (RFC 9110 § 8.3.1): `IMAGE/*` and
 /// `IMAGE/JPEG` must agree.
-pub(super) fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
+fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
     let (family, subtype) = essence.split_once('/')?;
     if subtype.is_empty() || subtype.contains('*') || subtype.contains('+') {
         return None;
