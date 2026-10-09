@@ -336,7 +336,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// each of its `refiners`; the result is inserted as `schema`'s type under `hint`. The meet
     /// shared by [`Self::lower_all_of_beside_union`], [`Self::lower_all_of_with_union_member`] and
     /// [`Self::meet_ref_union_sibling`], whose `composed` is the `$ref` target met with the
-    /// keywords beside the union.
+    /// keywords beside the union. A union uninhabited on its own (a lone `false` branch) makes the
+    /// whole meet that uninhabited type ([`Self::uninhabited_union_meet`]), not `E013`.
     #[allow(clippy::too_many_arguments)]
     fn meet_union_with_all_of(
         &mut self,
@@ -390,7 +391,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mark = self.graph_mark();
         let mut meet = lowered;
         if let Some(composed) = composed {
-            let Ok(met) = self.intersect_types(composed, meet, &meet_hint) else {
+            // A union uninhabited on its own (a lone `false` branch) leaves the conjunction so
+            // (#615), rather than an empty meet that rejects it.
+            let met = self.intersect_types(composed, meet, &meet_hint);
+            let Ok(met) = self.uninhabited_union_meet(lowered, met) else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
             meet = self.clear_counted_null(

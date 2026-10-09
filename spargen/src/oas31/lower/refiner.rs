@@ -415,6 +415,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// The meet `met` of a union that lowered to `union` with what the union is a conjunct of,
+    /// where a union uninhabited on its own keeps its verdict (#615). A union whose only branch is
+    /// `false` (inline, or a `$ref` to a `false` component) admits no value, and neither does any
+    /// conjunction it is part of, so the conjunction is the uninhabited type the union already is,
+    /// as the bare union and its spellings beside untyped object keywords generate. The meet of
+    /// [`TypeKind::Never`] with anything is [`NoMeet::Empty`] (but for `null` both sides admit), and
+    /// read as an empty meet of two inhabited sides it rejected the same empty set as `E013` beside
+    /// a `$ref` or an `allOf` and as `E007` beside `type: object`. Any other answer is `met`.
+    pub(super) fn uninhabited_union_meet(
+        &self,
+        union: Ty,
+        met: Result<Ty, NoMeet>,
+    ) -> Result<Ty, NoMeet> {
+        match met {
+            Err(NoMeet::Empty)
+                if matches!(
+                    self.graph.get(union.id).map(|def| &def.kind),
+                    Some(TypeKind::Never)
+                ) =>
+            {
+                Ok(non_nullable(union))
+            }
+            met => met,
+        }
+    }
+
     /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
     /// real branch was excluded: the sibling's own answer.
     pub(super) fn refiner_accepts_null(&self, refiner: Refiner) -> bool {
