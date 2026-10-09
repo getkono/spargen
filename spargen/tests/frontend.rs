@@ -4089,7 +4089,9 @@ components:
 /// the `$ref`-sibling spelling over `U` already did. The inline-sibling spellings (`properties`,
 /// `items`, `required`) met the branch's `Value` with the sibling's object half, took that half's
 /// `null` as the branch's own, and generated `Option<Pick>`; so did the inline `allOf`-member
-/// spellings of a union of that branch alone, which collapses to the branch.
+/// spellings of a union of that branch alone, which collapses to the branch. A `false` branch
+/// beside an untyped one denies `null` and so decides nothing either (#581), whether written
+/// inline or as a `$ref` to a `false` component.
 #[test]
 fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null_undecided() {
     let u = "$ref: '#/components/schemas/U'";
@@ -4110,11 +4112,26 @@ fn a_union_of_a_stated_nothing_branch_alone_or_beside_a_non_null_type_keeps_null
             format!("[ {e}, {{ properties: {{ b: {{ type: string }} }} }} ]"),
             "[ { $ref: '#/components/schemas/R' } ]".to_owned(),
             "[ { $ref: '#/components/schemas/V' }, { type: string } ]".to_owned(),
+            "[ false, { properties: { b: { type: string } } } ]".to_owned(),
+            "[ { $ref: '#/components/schemas/F' }, { properties: { b: { type: string } } } ]"
+                .to_owned(),
+            "[ { $ref: '#/components/schemas/G' }, { properties: { b: { type: string } } } ]"
+                .to_owned(),
+            "[ { not: {} } ]".to_owned(),
+            "[ { $ref: '#/components/schemas/X' } ]".to_owned(),
+            "[ { not: {} }, { properties: { b: { type: string } } } ]".to_owned(),
+            "[ { $ref: '#/components/schemas/X' }, { properties: { b: { type: string } } } ]"
+                .to_owned(),
         ] {
             // The `allOf` spellings over `U` of a `$ref` branch to the `true` or `{}` component
             // generated `Option<Pick>` until a `$ref` branch was read through its target (#594),
-            // as did those of a `$ref` to an alias `R` of `T`, and of a `$ref` to the untyped
-            // object `V` beside a branch that denies `null` (the inline `V` is undecided, #581).
+            // as did those of a `$ref` to an alias `R` of `T`, of a `$ref` to the untyped object
+            // `V` beside a branch that denies `null` (the inline `V` is undecided, #581), of a
+            // `$ref` to the `false` component `F` (or its alias `G`) beside an untyped branch,
+            // which denies `null` as the inline `false` does, and of a `$ref` to the `{ not: {} }`
+            // component `X`, which states no type and so decides nothing, as inline. A union of a
+            // `false` branch alone is left out: its `$ref`-to-`U` and `allOf`-over-`U` spellings
+            // are `E013`, an empty meet.
             rows.extend([
                 format!("{{ allOf: [ {{ {u} }} ], {keyword}: {branches} }}"),
                 format!("{{ allOf: [ {{ {u} }}, {{ {keyword}: {branches} }} ] }}"),
@@ -4148,6 +4165,9 @@ components:
     T: true
     E: {{}}
     R: {{ $ref: '#/components/schemas/T' }}
+    F: false
+    G: {{ $ref: '#/components/schemas/F' }}
+    X: {{ not: {{}} }}
     V: {{ properties: {{ v: {{ type: string }} }} }}
     U: {{ properties: {{ u: {{ type: string }} }} }}
     Pick: {site}
