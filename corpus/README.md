@@ -64,7 +64,8 @@ those in `spargen/tests/frontend.rs`, and the two `--compat` carve fixtures in
 `E013`.
 
 Measured by running `spargen check` over every case and recipe that reaches lowering, with one
-mutation of `spargen/src/oas31/lower.rs` at a time:
+mutation of the lowering pass (then `spargen/src/oas31/lower.rs`, now the
+`spargen/src/oas31/lower/` modules) at a time:
 
 - Making every shape-bearing `$ref` sibling that reaches the intersection reject with `E013`
   rejects `mastodon-openapi` and adds an `E013` to the already-rejected

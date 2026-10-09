@@ -95,9 +95,9 @@ pub(super) fn body_send_tokens(
                         .body(#body_binding.to_string());
                 },
                 // An octet-stream request body's type definition always has kind `TypeKind::Bytes`
-                // (the gate in `oas31::lower::lower_request_body`, checked again by
-                // `ir::check_invariants`), so the `Bytes` branch above takes it and this arm is
-                // never reached. It sends the same tokens, so even a looser gate cannot drop the
+                // (the gate in `LowerCtx::lower_request_body` in `oas31/lower/body.rs`, checked
+                // again by `ir::check_invariants`), so the `Bytes` branch above takes it and this
+                // arm is never reached. It sends the same tokens, so even a looser gate cannot drop the
                 // header. Both also refuse a nullable body, which `.body(..)` could not accept.
                 MediaType::OctetStream => raw_bytes_send,
                 MediaType::Multipart => {
