@@ -442,10 +442,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
             // rather than being caught above; `push_ref_member` refuses to read it.
             return self.push_ref_member(
-                ty,
-                decides_null,
-                &schema.provenance,
-                RECURSIVE_COMPONENT_MEMBER,
+                RefMember {
+                    ty,
+                    decides_null,
+                    reference,
+                    provenance: &schema.provenance,
+                    recursive: RECURSIVE_COMPONENT_MEMBER,
+                },
+                hint,
                 out,
             );
         }
@@ -460,10 +464,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.ensure_remote(reference)?;
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
-                ty,
-                decides_null,
-                &schema.provenance,
-                RECURSIVE_REMOTE_MEMBER,
+                RefMember {
+                    ty,
+                    decides_null,
+                    reference,
+                    provenance: &schema.provenance,
+                    recursive: RECURSIVE_REMOTE_MEMBER,
+                },
+                hint,
                 out,
             );
         }
@@ -580,8 +588,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
-    /// contributes a *copy* of its fields/`additionalProperties`; any other lowered kind is a
-    /// scalar member.
+    /// contributes a *copy* of its fields/`additionalProperties`; a target of untyped array
+    /// applicators alone contributes the [`Contribution::Refiner`] the same member written inline
+    /// does, lowered on `hint`; any other lowered kind is a scalar member.
     ///
     /// A member whose body is still being lowered is refused here, with `recursive` as the
     /// message, rather than by each caller: a reservation's kind says nothing about the schema's
@@ -594,18 +603,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// non-null struct is not recorded as a decision.
     fn push_ref_member(
         &mut self,
-        ty: Ty,
-        decides_null: bool,
-        provenance: &Provenance,
-        recursive: &str,
+        member: RefMember<'_>,
+        hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
+        let RefMember {
+            ty,
+            decides_null,
+            reference,
+            provenance,
+            recursive,
+        } = member;
         // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
         // arm is the whole guard the callers used to hold.
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Reserved) => {
                 return self.reject_all_of_cycle(provenance.clone(), recursive)
+            }
+            // Untyped array applicators lower standalone to `Value`, which met the merge as its
+            // identity and dropped their `items` with no diagnostic (#610). Their target is read
+            // by its keywords instead, as an inline member and a sub-file target are (#607): it
+            // refines the merge's arrays and constrains nothing else. It is a `$ref` target, so
+            // `open_narrowing` is out of effect for it.
+            Some(TypeKind::Any) => {
+                let target = self
+                    .ref_target_body(reference, provenance)
+                    .filter(|target| {
+                        matches!(
+                            implied_applicator_category(target),
+                            Some(ImpliedCategory::Only(JsonType::Array))
+                        )
+                    })
+                    .map(std::borrow::Cow::into_owned);
+                let Some(target) = target else {
+                    out.push(Contribution::Scalar(ty));
+                    return Some(());
+                };
+                let scoped = self
+                    .closed_narrowing(|ctx| ctx.lower_scoped_refiners(&target, true, None, hint))?;
+                out.push(Contribution::Refiner {
+                    scoped,
+                    member: Box::new(target),
+                });
             }
             Some(TypeKind::Struct(structure)) => {
                 let fields = structure.fields.clone();
@@ -768,3 +808,18 @@ const RECURSIVE_COMPONENT_MEMBER: &str =
 /// [`RECURSIVE_COMPONENT_MEMBER`] for a remote `$ref` member.
 const RECURSIVE_REMOTE_MEMBER: &str =
     "an `allOf` member is a direct recursive remote `$ref` to the schema being lowered";
+
+/// A component or remote `$ref` `allOf` member, its target already lowered, as
+/// [`LowerCtx::push_ref_member`] reads it.
+struct RefMember<'r> {
+    /// The target's shared lowered type.
+    ty: Ty,
+    /// [`LowerCtx::ref_target_decides_null`] of the target.
+    decides_null: bool,
+    /// The `$ref` as written, read for the target's own keywords where its lowered type is `Value`.
+    reference: &'r str,
+    /// Where the `$ref` is written.
+    provenance: &'r Provenance,
+    /// The `E013` wording for a target still being lowered.
+    recursive: &'r str,
+}

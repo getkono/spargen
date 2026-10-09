@@ -3054,6 +3054,38 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
     }
 }
 
+/// The right-hand side of `pub type ty = …;`, whitespace removed, which the formatter may have
+/// broken across lines (a long element name does).
+fn alias(code: &str, ty: &str) -> Option<String> {
+    let head = format!("pub type {ty} = ");
+    let start = code.find(&head)? + head.len();
+    let end = start + code[start..].find(';')?;
+    Some(code[start..end].split_whitespace().collect::<String>())
+}
+
+/// The type `ty` names once every bare alias on the way is followed.
+fn resolve(code: &str, ty: &str) -> String {
+    let mut ty = ty.trim().to_owned();
+    while let Some(target) = alias(code, &ty) {
+        if target.contains(['<', '(']) {
+            return target;
+        }
+        ty = target;
+    }
+    ty
+}
+
+/// The element type of the `Vec` that `ty` resolves to, resolved in turn.
+fn element(code: &str, ty: &str, what: &str) -> String {
+    let vec = resolve(code, ty);
+    let inner = vec
+        .strip_prefix("Vec<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map(|inner| inner.trim_end_matches(','))
+        .unwrap_or_else(|| panic!("{what}: `{ty}` is `{vec}`, not a `Vec`: {code}"));
+    resolve(code, inner)
+}
+
 /// An `allOf` member of untyped array applicators alone (`items` or `prefixItems`, no `type`) was
 /// read as neither an object nor a scalar, so it was dropped as an annotation with no diagnostic:
 /// `allOf: [{type: array}, {items: {type: string}}]` generated `Vec<serde_json::Value>` (#607).
@@ -3067,35 +3099,6 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
 /// target first expanded inside a union branch the meet drops still replays at its next use.
 #[test]
 fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
-    /// The right-hand side of `pub type ty = …;`, whitespace removed, which the formatter may have
-    /// broken across lines (a long element name does).
-    fn alias(code: &str, ty: &str) -> Option<String> {
-        let head = format!("pub type {ty} = ");
-        let start = code.find(&head)? + head.len();
-        let end = start + code[start..].find(';')?;
-        Some(code[start..end].split_whitespace().collect::<String>())
-    }
-    /// The type `ty` names once every bare alias on the way is followed.
-    fn resolve(code: &str, ty: &str) -> String {
-        let mut ty = ty.trim().to_owned();
-        while let Some(target) = alias(code, &ty) {
-            if target.contains(['<', '(']) {
-                return target;
-            }
-            ty = target;
-        }
-        ty
-    }
-    /// The element type of the `Vec` that `ty` resolves to, resolved in turn.
-    fn element(code: &str, ty: &str, what: &str) -> String {
-        let vec = resolve(code, ty);
-        let inner = vec
-            .strip_prefix("Vec<")
-            .and_then(|rest| rest.strip_suffix('>'))
-            .map(|inner| inner.trim_end_matches(','))
-            .unwrap_or_else(|| panic!("{what}: `{ty}` is `{vec}`, not a `Vec`: {code}"));
-        resolve(code, inner)
-    }
     let narrowing = [
         (
             "the array member first",
@@ -3297,4 +3300,119 @@ fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
         );
         assert_eq!(enum_variants(&code, "Probe").len(), 2, "{what}: {code}");
     }
+}
+
+/// A `$ref` `allOf` member whose target is untyped array applicators alone contributed the
+/// target's standalone lowering, `serde_json::Value`, which met the array member as the identity
+/// and dropped the target's `items` with no diagnostic (#610). The target is now read by its
+/// keywords, as the same member written inline is (#607): it refines the merge's arrays in either
+/// member order, through a component, a bare alias to one, and a component subschema; it is
+/// vacuous beside a string or an object member; beside a union it refines the union's array
+/// branch, and beside a union with none it is `W011` at the target.
+#[test]
+fn a_ref_all_of_member_to_untyped_array_applicators_refines_the_merge_s_arrays() {
+    let narrowing = [
+        (
+            "the array member first",
+            "    Probe:\n      allOf: [ { type: array }, { $ref: '#/components/schemas/It' } ]\n    \
+             It: { items: { type: string } }\n",
+            "String",
+        ),
+        (
+            "the `$ref` member first",
+            "    Probe:\n      allOf: [ { $ref: '#/components/schemas/It' }, { type: array } ]\n    \
+             It: { items: { type: string } }\n",
+            "String",
+        ),
+        (
+            "a bare alias to the target",
+            "    Probe:\n      allOf: [ { type: array }, { $ref: '#/components/schemas/Alias' } \
+             ]\n    Alias: { $ref: '#/components/schemas/It' }\n    It: { items: { type: string } \
+             }\n",
+            "String",
+        ),
+        (
+            "a component subschema",
+            "    Probe:\n      allOf: [ { type: array }, { $ref: \
+             '#/components/schemas/Bag/properties/x' } ]\n    Bag: { type: object, properties: \
+             { x: { items: { type: integer } } } }\n",
+            "i64",
+        ),
+        (
+            "no other constraining member",
+            "    Probe:\n      allOf: [ { $ref: '#/components/schemas/It' }, { description: d } \
+             ]\n    It: { items: { type: string } }\n",
+            "String",
+        ),
+    ];
+    for (what, schemas, expected) in narrowing {
+        let spec = with_schemas("3.1.0", schemas);
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+        assert!(codes(&report).is_empty(), "{what}: {report:#?}");
+        assert_eq!(element(&code, "Probe", what), expected, "{what}: {code}");
+        assert_check_agrees(&report, &check(&spec));
+    }
+
+    // Beside members of another category the target constrains nothing: beside an object member
+    // its standalone `Value` was a scalar, so the mix was rejected (`E013`).
+    let vacuous = [
+        (
+            "a string member",
+            "    Probe:\n      allOf: [ { type: string }, { $ref: '#/components/schemas/It' } \
+             ]\n    It: { items: { type: string } }\n",
+        ),
+        (
+            "an object member",
+            "    Probe:\n      allOf: [ { type: object, properties: { a: { type: string } } }, \
+             { $ref: '#/components/schemas/It' } ]\n    It: { items: { type: string } }\n",
+        ),
+    ];
+    for (what, schemas) in vacuous {
+        let (report, code) = generate_with_code(&with_schemas("3.1.0", schemas));
+        assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+        assert!(codes(&report).is_empty(), "{what}: {report:#?}");
+        if what == "an object member" {
+            assert_eq!(declared_fields(&code, "Probe"), ["a"], "{what}: {code}");
+        } else {
+            assert_eq!(resolve(&code, "Probe"), "String", "{what}: {code}");
+        }
+    }
+
+    // Beside a union, the target refines the union's array branch and keeps its string branch.
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        "    Probe:\n      allOf: [ { $ref: '#/components/schemas/It' } ]\n      oneOf: [ { type: \
+         string }, { type: array } ]\n    It: { items: { type: string } }\n",
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let variants = enum_variants(&code, "Probe");
+    assert_eq!(variants.len(), 2, "the string branch must stay: {code}");
+    let array = variants
+        .iter()
+        .filter_map(|variant| {
+            variant
+                .split_once("(Box<")
+                .and_then(|(_, rest)| rest.strip_suffix(">)"))
+        })
+        .find(|inner| resolve(&code, inner) != "String")
+        .unwrap_or_else(|| panic!("no array branch: {code}"));
+    assert_eq!(element(&code, array, "the union's array branch"), "String");
+
+    // Beside a union member with no array branch, the target reaches nothing the union accepts.
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        "    Probe:\n      allOf: [ { oneOf: [ { type: string }, { type: integer } ] }, { $ref: \
+         '#/components/schemas/It' } ]\n    It: { items: { type: string } }\n",
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::DeclarationHasNoEffect
+                && d.pointer.as_str() == "/components/schemas/It"),
+        "W011 must sit at the target: {report:#?}"
+    );
+    assert_eq!(enum_variants(&code, "Probe").len(), 2, "{code}");
 }

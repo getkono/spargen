@@ -202,7 +202,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// from the root, and otherwise the referring file's target, with a bare alias (a `$ref` with
     /// no shape-bearing sibling) followed to the schema it names. `None` where the chain cannot be
     /// read, which reports nothing a second time.
-    fn ref_target_body(
+    pub(super) fn ref_target_body(
         &self,
         reference: &str,
         at: &Provenance,
