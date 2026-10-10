@@ -1214,6 +1214,29 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
              string } } }, { properties: { b: { type: integer } } } ] }",
             true,
         ),
+        // The same conjunction with the nullable category written as an `allOf` member beside
+        // the union member (#621).
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { anyOf: [ { items: { type: string } }, { \
+             items: { type: integer } } ] } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { anyOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { oneOf: [ { items: { type: string } }, { \
+             items: { type: integer } } ] } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { oneOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: array }, { anyOf: [ { items: { type: string } }, { items: { type: \
+             integer } } ] } ] }",
+            "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
     ] {
         for site in [array, object] {
             let spec = with_schemas(
