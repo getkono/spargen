@@ -1553,17 +1553,51 @@ mod tests {
         let ints = graph(vec![int_enum(), TypeKind::Primitive(Prim::I64)]);
         assert!(two_bodies(&ints, ty(0), ty(1)).is_some());
         assert!(two_bodies(&ints, ty(1), ty(0)).is_some());
-        // Containers compare their items, and a `$ref` cycle between arrays still terminates.
+        // Containers compare their items.
         let arrays = graph(vec![
             TypeKind::Primitive(Prim::String),
             TypeKind::Primitive(Prim::String),
             TypeKind::Array(Box::new(ty(0))),
             TypeKind::Array(Box::new(ty(1))),
-            TypeKind::Array(Box::new(ty(5))),
-            TypeKind::Array(Box::new(ty(4))),
         ]);
         assert!(two_bodies(&arrays, ty(2), ty(3)).is_some());
-        assert!(two_bodies(&arrays, ty(4), ty(5)).is_some());
+    }
+
+    /// An array or tuple that closes an alias cycle is emitted as a nominal newtype (#648), so as
+    /// a Rust type it matches only itself (#650): not a plain `Vec` alias over the same item, and
+    /// not another member of a cycle of arrays, however alike. Its transparent newtype still
+    /// decodes what its structure does, so `same_decoded_values` keeps comparing that.
+    #[test]
+    fn an_alias_cycle_member_shares_a_body_only_with_itself() {
+        let boxed = |id| Ty {
+            boxed: true,
+            ..ty(id)
+        };
+        let graph = graph(vec![
+            // `Node: [Node]`, a self-referential array.
+            TypeKind::Array(Box::new(boxed(0))),
+            // `Into: [Node]`, a plain `Vec<Node>` alias over it.
+            TypeKind::Array(Box::new(ty(0))),
+            // `A: [B]` and `B: [A]`, a two-member cycle of arrays.
+            TypeKind::Array(Box::new(boxed(3))),
+            TypeKind::Array(Box::new(boxed(2))),
+            // `Pair: (Pair,)`, a self-referential one-position tuple.
+            TypeKind::Tuple(vec![boxed(4)]),
+        ]);
+        for id in [0, 2, 3, 4] {
+            assert!(graph.closes_alias_cycle(TypeId(id)), "{id} closes a cycle");
+        }
+        assert!(!graph.closes_alias_cycle(TypeId(1)));
+        assert_eq!(
+            two_bodies(&graph, ty(0), ty(0)),
+            Some(ApiErrorBodyImpl::Body(ty(0)))
+        );
+        // A `Node` newtype beside a `Vec<Node>` alias: no single `Body`, either way round.
+        assert_eq!(two_bodies(&graph, ty(0), ty(1)), None);
+        assert_eq!(two_bodies(&graph, ty(1), ty(0)), None);
+        assert_eq!(two_bodies(&graph, ty(2), ty(3)), None);
+        assert!(!graph.same_generated_type(ty(4), ty(0)));
+        assert!(graph.same_decoded_values(ty(2), ty(3)));
     }
 
     #[test]

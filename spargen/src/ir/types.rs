@@ -122,13 +122,67 @@ impl TypeGraph {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
 
+    /// Whether the definition at `id` reaches itself again through definitions that are emitted as
+    /// aliases alone: an array or tuple whose items name `id`, or name another array or tuple that
+    /// does, whatever `Option`/`Box` wraps each reference. rustc expands a type alias in place, so
+    /// such a cycle of aliases has no finite expansion and is rejected (`E0391`); a reference that
+    /// passes through a struct, enum, or union stops there, because those are nominal. Every member
+    /// of the cycle answers `true`, independently of which one is visited first.
+    ///
+    /// Such a definition is emitted as a nominal `#[serde(transparent)]` newtype rather than an
+    /// alias (#648), so every reader that asks which Rust type a definition is — codegen, the
+    /// [`same_generated_type`](Self::same_generated_type) comparison, and the API surface — reads
+    /// it here, and none of them can disagree about which definitions are nominal.
+    pub(crate) fn closes_alias_cycle(&self, id: TypeId) -> bool {
+        /// The references an alias's expansion contains, or none for a definition that is not an
+        /// alias of a container (a nominal type, or a leaf alias such as a primitive).
+        fn alias_items(kind: &TypeKind) -> &[Ty] {
+            match kind {
+                TypeKind::Array(item) => std::slice::from_ref(&**item),
+                TypeKind::Tuple(items) => items,
+                TypeKind::Primitive(_)
+                | TypeKind::Struct(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Bytes
+                | TypeKind::Null
+                | TypeKind::Never
+                | TypeKind::Union(_)
+                | TypeKind::Any => &[],
+                TypeKind::Reserved => {
+                    unreachable!(
+                        "an alias cycle was asked of a reservation; `check_invariants` should have \
+                         rejected it"
+                    )
+                }
+            }
+        }
+        let Some(def) = self.get(id) else {
+            return false;
+        };
+        let mut pending: Vec<TypeId> = alias_items(&def.kind).iter().map(|ty| ty.id).collect();
+        let mut seen = BTreeSet::new();
+        while let Some(next) = pending.pop() {
+            if next == id {
+                return true;
+            }
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(def) = self.get(next) {
+                pending.extend(alias_items(&def.kind).iter().map(|ty| ty.id));
+            }
+        }
+        false
+    }
+
     /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
     /// means the generated types are one type, because every non-nominal definition is emitted as a
     /// transparent `pub type` alias of its structure. A nominal definition (a struct, string enum,
-    /// union, or `Never`) is its own item and matches only itself. Both use-site modifiers must
-    /// agree, so callers strip the top-level ones they absorb; nested ones are compared, because a
-    /// tuple item keeps its `Box`. Independent of the `uuid`/`time` features: a feature-mapped
-    /// primitive never equals `String`, even in a build where it would emit one.
+    /// union, `Never`, or an array or tuple that [closes an alias cycle](Self::closes_alias_cycle))
+    /// is its own item and matches only itself. Both use-site modifiers must agree, so callers
+    /// strip the top-level ones they absorb; nested ones are compared, because a tuple item keeps
+    /// its `Box`. Independent of the `uuid`/`time` features: a feature-mapped primitive never
+    /// equals `String`, even in a build where it would emit one.
     pub(crate) fn same_generated_type(&self, a: Ty, b: Ty) -> bool {
         self.same_generated_type_guarded(a, b, false, &mut Vec::new())
     }
@@ -173,6 +227,12 @@ impl TypeGraph {
         let (Some(a_def), Some(b_def)) = (self.get(a.id), self.get(b.id)) else {
             return false;
         };
+        // A cycle-member array or tuple is emitted as its own newtype, so as a Rust type it matches
+        // only itself, which the id comparison above already answered. Its transparent newtype
+        // decodes exactly what its structure does, so `structural` still compares that.
+        if !structural && (self.closes_alias_cycle(a.id) || self.closes_alias_cycle(b.id)) {
+            return false;
+        }
         visiting.push(pair);
         let same = match (&a_def.kind, &b_def.kind) {
             (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
