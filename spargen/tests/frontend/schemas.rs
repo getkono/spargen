@@ -1440,6 +1440,86 @@ fn a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// The rows of [`a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null`] whose
+/// `$ref` branch names an untyped component, written inside that component, where the `$ref`
+/// closes a cycle and lowers to the component's still-open reservation (#627): `Node.next` and
+/// `Holder.pick` carry the same union, and `null` is as invalid in one as in the other. A `oneOf`
+/// beside a `null` branch admits no `null`, with or without a typed branch beside the two, and so
+/// does one whose `$ref` names a component whose `type` lists `null`, which the reservation path
+/// counted no more than the untyped one; an `anyOf`, or a `$ref` to a non-null typed component,
+/// stays `Option` in both places.
+#[test]
+fn a_cycle_closing_untyped_ref_branch_beside_a_null_branch_matches_the_same_union_outside_it() {
+    let mut mismatches = Vec::new();
+    for (target, site, nullable) in [
+        (
+            "Node",
+            "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }",
+            false,
+        ),
+        (
+            "Node",
+            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/Node' } ] }",
+            false,
+        ),
+        (
+            "Node",
+            "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: integer }, { type: \
+             'null' } ] }",
+            false,
+        ),
+        (
+            "Node",
+            "{ anyOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }",
+            true,
+        ),
+        (
+            "TypedNode",
+            "{ oneOf: [ { $ref: '#/components/schemas/TypedNode' }, { type: 'null' } ] }",
+            true,
+        ),
+        (
+            "TypedNode",
+            "{ oneOf: [ { $ref: '#/components/schemas/TypedNode' }, { type: integer }, { type: \
+             'null' } ] }",
+            true,
+        ),
+        (
+            "NullableNode",
+            "{ oneOf: [ { $ref: '#/components/schemas/NullableNode' }, { type: 'null' } ] }",
+            false,
+        ),
+    ] {
+        let typed = match target {
+            "TypedNode" => "type: object, ",
+            "NullableNode" => "type: [object, 'null'], ",
+            _ => "",
+        };
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    {target}: {{ {typed}properties: {{ a: {{ type: string }}, next: {site} }}, \
+                 required: [next] }}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {site}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        for field in ["pub next", "pub pick"] {
+            let ty = field_type(&types, field)
+                .unwrap_or_else(|| panic!("{site}: no `{field}` field: {types}"));
+            if ty.starts_with("Option<") != nullable {
+                let validity = if nullable { "valid" } else { "invalid" };
+                mismatches.push(format!(
+                    "{site}: `{field}` is `{ty}`, but `null` is {validity} here"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// An `allOf` of a scalar member listing `null` beside a union whose untyped `items` branches
 /// leave `null` undecided, where the scalar's other category meets no branch: the union takes
 /// `null` from that member (#621), so `null` is the one value left and the schema is the null
