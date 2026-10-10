@@ -46,28 +46,57 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The `$ref` members gathered as the one scalar their target lowers to, by where it went.
         let mut ref_members = Vec::new();
         self.in_composition(|ctx| {
-            for (index, member) in schema.all_of.iter().enumerate() {
-                let slot = contributions.len();
-                ctx.gather_member(member, &format!("{hint}Member{index}"), &mut contributions)?;
-                if let SchemaOr::Schema(member) = member {
-                    if member.reference.is_some()
-                        && contributions.len() == slot + 1
-                        && matches!(contributions[slot], Contribution::Scalar(_))
-                    {
-                        ref_members.push((slot, member.as_ref()));
-                    }
-                }
-            }
-            let mut siblings = schema.clone();
-            siblings.all_of.clear();
-            ctx.gather_all_of(&siblings, hint, &mut contributions)
+            ctx.gather_all_of_recording_refs(schema, hint, &mut contributions, &mut ref_members)
         })?;
         // A `$ref` to a union takes `null` from the other members exactly where the same union
         // written inline does ([`Self::lower_all_of_with_union_member`]): lowered as its own
         // component, it denied `null` for want of a decision, and the meet denied it even beside
-        // `type: [array, 'null']` (#624).
+        // `type: [array, 'null']` (#624). One nested in an inner `allOf` is a member of this
+        // merge as well, flattened into it, so it takes `null` alike (#630).
         self.ref_union_members_take_scalar_null(&ref_members, &mut contributions);
         self.combine_all_of(schema, hint, &contributions)
+    }
+
+    /// [`Self::gather_all_of`] of `schema`, recording in `ref_members` each `$ref` member gathered
+    /// as the one scalar its target lowers to, by where it went, for
+    /// [`Self::ref_union_members_take_scalar_null`]. A member that is an inline `allOf` with no
+    /// union of its own is flattened into the same contributions, as [`Self::gather_member`]
+    /// flattens it, and its `$ref` members are recorded too: written there, they are members of
+    /// the merge as much as written in `schema.all_of` (#630).
+    fn gather_all_of_recording_refs<'s>(
+        &mut self,
+        schema: &'s Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+        ref_members: &mut Vec<(usize, &'s Schema)>,
+    ) -> Option<()> {
+        for (index, member) in schema.all_of.iter().enumerate() {
+            let member_hint = format!("{hint}Member{index}");
+            if let SchemaOr::Schema(nested) = member {
+                if nested.reference.is_none()
+                    && !nested.all_of.is_empty()
+                    && !schema_has_union(nested)
+                {
+                    // The check `gather_member` makes of a member it reads by its keywords.
+                    self.diagnose_standalone_discriminator(nested);
+                    self.gather_all_of_recording_refs(nested, &member_hint, out, ref_members)?;
+                    continue;
+                }
+            }
+            let slot = out.len();
+            self.gather_member(member, &member_hint, out)?;
+            if let SchemaOr::Schema(member) = member {
+                if member.reference.is_some()
+                    && out.len() == slot + 1
+                    && matches!(out[slot], Contribution::Scalar(_))
+                {
+                    ref_members.push((slot, member.as_ref()));
+                }
+            }
+        }
+        let mut siblings = schema.clone();
+        siblings.all_of.clear();
+        self.gather_all_of(&siblings, hint, out)
     }
 
     /// Lower a schema carrying `allOf` and `oneOf`/`anyOf` together (issue #419). Both apply to
