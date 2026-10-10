@@ -3316,3 +3316,132 @@ fn a_cycle_closing_ref_branch_to_an_untyped_array_all_of_matches_the_same_union_
         );
     }
 }
+
+/// An untyped `allOf` whose `items` member closes a cycle through a union, beside a member that
+/// constrains the items with no type of their own (`{items: {maxItems: 3}}`, inline or as a `$ref`
+/// to an `items`-only component), generates as the same `allOf` without that member does (#641).
+/// The second member's items lower to `Value`, and the merge meets the cycle-closing `Node` with
+/// it: `Node ∩ Value` is `Node` whatever `Node`'s body turns out to be, so the meet answers with
+/// the reservation, as it answers with a finished target outside the cycle. It used to refuse
+/// every reservation not met with itself, which was `E013` here while the spelling over a `$ref`
+/// outside the cycle generated. Both member orders, through `generate` and `check`.
+#[test]
+fn a_cycle_closing_item_met_with_untyped_items_generates_as_without_them() {
+    let site = "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }";
+    let cycle = format!("{{ items: {site} }}");
+    for other in [
+        "{ $ref: '#/components/schemas/Arr' }",
+        "{ items: { maxItems: 3 } }",
+    ] {
+        for members in [format!("{cycle}, {other}"), format!("{other}, {cycle}")] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Arr: {{ items: {{ maxItems: 3 }} }}\n    Node: {{ allOf: [ {members} ] \
+                     }}\n    Holder:\n      type: object\n      properties:\n        pick: \
+                     {site}\n      required: [pick]\n"
+                ),
+            );
+            let checked = check(&spec);
+            assert_ne!(
+                checked.outcome(),
+                Outcome::Rejected,
+                "check, {members}: {checked:#?}"
+            );
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{members}: {report:#?}"
+            );
+            assert!(
+                messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+                "{members}: {report:#?}"
+            );
+            let types = types_module(&code);
+            assert!(
+                types.contains("pub type Node = Vec<Node>;"),
+                "{members}: the merge is the cycle-closing `items` alone: {types}"
+            );
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{members}: no `pick` field: {types}"));
+            assert!(
+                !pick.starts_with("Option<"),
+                "{members}: `pick` is `{pick}`, as without the untyped member: {types}"
+            );
+        }
+    }
+}
+
+/// The other positions the same meet reaches (#641): a repeated `allOf` property typed by a
+/// cycle-closing `$ref` on one side and by an untyped schema on the other, and a tuple position
+/// that closes the cycle met with untyped `items`. `X ∩ Value` is `X` there too, so each generates
+/// with the cycle-closing reference — boxed where it is a struct field — rather than `E013`.
+#[test]
+fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a_tuple() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Node:\n      allOf:\n        - { type: object, properties: { next: { $ref: \
+         '#/components/schemas/Node' } } }\n        - { type: object, properties: { next: { \
+         maxLength: 3 } } }\n    Tup:\n      allOf:\n        - { type: array, prefixItems: [ { \
+         $ref: '#/components/schemas/Tup' } ] }\n        - { type: array, items: { maxItems: 3 } \
+         }\n",
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let next = field_type(&types, "pub next").unwrap_or_else(|| panic!("no `next`: {types}"));
+    assert!(
+        next.contains("Box<Node>"),
+        "`next` keeps the boxed cycle-closing `Node`: `{next}` in {types}"
+    );
+    // The meet is the `prefixItems` member alone, which lowers on its own as `TupMember0`.
+    let alias = |name: &str| {
+        types
+            .lines()
+            .map(str::trim_start)
+            .find_map(|line| line.strip_prefix(&format!("pub type {name} = ")))
+            .map(str::to_owned)
+    };
+    let tuple = alias("Tup").unwrap_or_else(|| panic!("no `Tup` alias: {types}"));
+    assert!(
+        tuple.contains("Box<Tup>"),
+        "`Tup` keeps the cycle-closing position: `{tuple}`"
+    );
+    assert_eq!(
+        Some(tuple),
+        alias("TupMember0"),
+        "`Tup` is its `prefixItems` member, as without the untyped `items`: {types}"
+    );
+}
+
+/// The `additionalProperties` position of the same meet (#641): two `allOf` members both constrain
+/// the value schema, one with a `$ref` that closes the cycle and the other untyped
+/// (`{maxLength: 3}`). `merge_additional` meets the two value types through `intersect_types`, so
+/// `A ∩ Value` is `A` here as well, and the map's values keep the cycle-closing reference rather
+/// than `E013`. A typed other side (`type: string`) is still refused, as
+/// `an_all_of_additional_properties_back_edge_says_why_it_cannot_merge` pins.
+#[test]
+fn a_cycle_closing_additional_properties_met_with_an_untyped_value_keeps_the_ref() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    A:\n      allOf:\n        - { type: object, additionalProperties: { $ref: \
+         '#/components/schemas/A' } }\n        - { type: object, additionalProperties: { \
+         maxLength: 3 } }\n",
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert!(
+        types.contains("BTreeMap<String, A>"),
+        "the map's values keep the cycle-closing `A`: {types}"
+    );
+}
