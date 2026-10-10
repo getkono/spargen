@@ -6,11 +6,13 @@ use std::collections::HashSet;
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant};
 use crate::oas31::discriminator::is_schema_component_name;
-use crate::oas31::{JsonType, Schema, SchemaOr};
+use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
 use super::meet::NoMeet;
-use super::nullability::{member_is_null_only, union_branch_admits_null};
+use super::nullability::{
+    member_is_null_only, own_keywords_admit_null, schema_is_nullable, union_branch_admits_null,
+};
 use super::prune::{kind_edges, reachable_types};
 use super::refiner::{unreached_halves, unreached_message};
 use super::shape::schema_has_shape_constraint;
@@ -46,7 +48,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
     /// be met with a member that closes a reference cycle, with a member that states no category
     /// for untyped sibling keywords to establish, or with a member it shares values with that no
-    /// single Rust type represents.
+    /// single Rust type represents, or where it meets every one of several `oneOf` members, or one
+    /// beside a `null` member, in `null` alone, which then matches them all.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
@@ -82,8 +85,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `null` to match and the schema admits nothing at all. Merging them made
         // `{type: [integer,'null'], oneOf: [{type: string}]}` — which nothing satisfies —
         // indistinguishable from the same document with a `{type: 'null'}` member, which only
-        // `null` satisfies.
-        let null_from_type_array = schema.types.types.contains(&JsonType::Null);
+        // `null` satisfies. A `const: null` or an `enum` listing `null` permits it as the `type`
+        // array does, where nothing else the schema states refuses it: an untyped branch, which
+        // decides nothing about `null`, takes it from either, as it does in the `allOf` spelling
+        // (#632).
+        let null_from_type_array = schema_is_nullable(schema) && own_keywords_admit_null(schema);
         let mut null_from_member = false;
         // How many null-only members there are: each is a branch `null` matches, which a `oneOf`
         // counts against its exactly-one rule beside the real branches that accept `null` too.
@@ -331,6 +337,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let null_twice = mode == UnionMode::OneOf
                 && null_members + usize::from(member_takes_null || member_leaves_null_undecided)
                     > 1;
+            // The sibling meet narrowed the member to the exact null type beside a `null` member:
+            // `null` matches both branches and fails exactly-one, and the member accepts nothing
+            // else, so nothing satisfies the schema, as the multi-member path below rejects for
+            // the same branches (#632).
+            if null_twice && sibling.is_some() && self.is_exact_null(inner) {
+                return self.reject_one_of_null_in_every_branch(schema);
+            }
             // Held back for a meet with no sibling here, an untyped member's `null` is not settled
             // yet: the caller counts it after the meet.
             if mode == UnionMode::OneOf
@@ -603,6 +616,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else if stated_nothing_nulls > 0 {
             self.stated_nothing_took_null =
                 Some((schema.provenance.clone(), StatedNothingNull::Sole));
+        }
+        // The sibling meet left every one of several `oneOf` branches the exact null type:
+        // `type: [string, 'null']` beside untyped `items` branches, which constrain arrays alone,
+        // meets each of them in `null` only. `null` then matches every branch, which fails the
+        // exactly-one rule, so nothing satisfies the schema, and its `allOf` spelling (the `type`
+        // as a member beside the union) is rejected for it (#632). Merged below, the branches
+        // were one `()` variant with `W001`, a type for a schema no value satisfies. The `anyOf`
+        // counterpart, which needs one match, is the null type below (#625). A `null` member is
+        // one more branch `null` matches, so a single variant met in `null` beside one is the
+        // same empty intersection.
+        if mode == UnionMode::OneOf
+            && sibling.is_some()
+            && variants.len() + null_members > 1
+            && variants
+                .iter()
+                .all(|variant| self.is_exact_null(variant.ty))
+        {
+            return self.reject_one_of_null_in_every_branch(schema);
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same
