@@ -566,7 +566,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn gathering<T>(&mut self, gather: impl FnOnce(&mut Self) -> T) -> (T, Gathering) {
         self.gatherings.push(Gathering::default());
         let gathered = gather(self);
-        let gathering = self.gatherings.pop().unwrap_or_default();
+        let gathering = self
+            .gatherings
+            .pop()
+            .expect("a gathering pops the frame it pushed");
         (gathered, gathering)
     }
 
@@ -575,18 +578,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// contribution but those of a nested target it already holds. A held target's own nested
     /// targets are held as well, since each was added with it or before it, so a replay never
     /// adds part of a target twice.
+    ///
+    /// Both lookups are invariants, not fallbacks: the caller replays `key` only once it is
+    /// recorded, and every gather runs inside a gathering ([`Self::in_composition`] at each `allOf`
+    /// entry point, [`Self::gathering`] around each expansion). Replaying with no gathering open
+    /// would append each copy flat, the exponential replay of #616, so it panics instead.
     fn replay_resolved(&mut self, key: &str, out: &mut Vec<Contribution>) {
-        let Some(recorded) = self.resolved_contributions.get(key) else {
-            return;
-        };
-        let Some(gathering) = self.gatherings.last_mut() else {
-            out.extend(
-                recorded
-                    .iter()
-                    .map(|(_, contribution)| contribution.clone()),
-            );
-            return;
-        };
+        let recorded = self
+            .resolved_contributions
+            .get(key)
+            .expect("a bundle target is replayed only once its contribution is recorded");
+        let gathering = self
+            .gatherings
+            .last_mut()
+            .expect("a bundle target is replayed only inside an open gathering");
         if gathering.seen.contains(key) {
             return;
         }
