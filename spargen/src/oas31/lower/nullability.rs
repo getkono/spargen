@@ -454,6 +454,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .get(ty.id)
             .is_some_and(|def| type_accepts_null(ty, &def.kind))
     }
+
+    /// The `union` member of an `allOf` of scalars, lowered on its own to `ty`, as it meets the
+    /// other members' `contributions` ([`Self::lower_all_of_with_union_member`]): admitting `null`
+    /// where the union's branches leave it undecided and still match it by the union's own rule
+    /// ([`Self::union_admits_null_undecided`]), such as untyped `items` branches of an `anyOf`, so
+    /// the meet admits `null` exactly where every other member does (#621). Lowered on its own,
+    /// such a union denies `null` for want of a decision, and the meet then denied it even beside
+    /// `type: [array, 'null']`, where the object spelling's meet keeps it. A member that lowers to
+    /// `Value` decides nothing, so with no member of any other type the union keeps the answer it
+    /// has on its own.
+    pub(super) fn union_member_takes_scalar_null(
+        &self,
+        mut ty: Ty,
+        union: &Schema,
+        contributions: &[Contribution],
+    ) -> Ty {
+        let decided = contributions.iter().any(|contribution| {
+            matches!(contribution, Contribution::Scalar(other)
+                if !self
+                    .graph
+                    .get(other.id)
+                    .is_some_and(|def| matches!(def.kind, TypeKind::Any)))
+        });
+        if decided && !ty.nullable && self.union_admits_null_undecided(union, 0) {
+            ty.nullable = true;
+        }
+        ty
+    }
 }
 
 pub(super) fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {

@@ -181,7 +181,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // already intersects a union branch by branch, and it keeps the narrowing `open_narrowing`
         // gives each member where it is written. A refiner gathered from a nested `allOf` or a
         // sub-file target refines the union's branches below, as the same member written here does,
-        // so a half that reaches none of them is reported (`W011`) rather than met silently.
+        // so a half that reaches none of them is reported (`W011`) rather than met silently. A
+        // union whose branches leave `null` undecided takes it from the other members there, as
+        // the object meet below gives it (#621).
         let has_object = contributions
             .iter()
             .any(|contribution| matches!(contribution, Contribution::Object { .. }));
@@ -190,6 +192,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .any(|contribution| matches!(contribution, Contribution::Refiner { .. }));
         if !has_object && !has_refiner && scoped.is_empty() {
             let ty = self.lower_schema(union, &union_hint)?;
+            let ty = self.union_member_takes_scalar_null(ty, union, &contributions);
             contributions.insert(union_slot, Contribution::Scalar(ty));
             return self.combine_all_of(schema, hint, &contributions);
         }

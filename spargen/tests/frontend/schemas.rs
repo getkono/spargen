@@ -1214,6 +1214,29 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
              string } } }, { properties: { b: { type: integer } } } ] }",
             true,
         ),
+        // The same conjunction with the nullable category written as an `allOf` member beside
+        // the union member (#621).
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { anyOf: [ { items: { type: string } }, { \
+             items: { type: integer } } ] } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { anyOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { oneOf: [ { items: { type: string } }, { \
+             items: { type: integer } } ] } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { oneOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: array }, { anyOf: [ { items: { type: string } }, { items: { type: \
+             integer } } ] } ] }",
+            "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
     ] {
         for site in [array, object] {
             let spec = with_schemas(
@@ -1239,4 +1262,50 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// An `allOf` of a scalar member listing `null` beside a union whose untyped `items` branches
+/// leave `null` undecided, where the scalar's other category meets no branch: the union takes
+/// `null` from that member (#621), so `null` is the one value left and the schema is the null
+/// type, as any other null-only `allOf` meet is, where it was `E013` before. Without `null` in
+/// the scalar member nothing is left, and that stays `E013`.
+#[test]
+fn an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type() {
+    let document = |site: &str| {
+        with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        )
+    };
+    let items_union = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
+    for site in [
+        format!("{{ allOf: [ {{ type: [string, 'null'] }}, {items_union} ] }}"),
+        format!("{{ allOf: [ {{ type: 'null' }}, {items_union} ] }}"),
+        format!("{{ allOf: [ {{ const: null }}, {items_union} ] }}"),
+        "{ allOf: [ { type: [integer, 'null'] }, { anyOf: [ { items: { type: string } }, { type: \
+         string } ] } ] }"
+            .to_owned(),
+    ] {
+        let (report, code) = generate_with_code(&document(&site));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{site}: {report:#?}"
+        );
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub type Pick = ();"),
+            "{site}: only `null` satisfies both members, so `Pick` is the null type: {types}"
+        );
+    }
+
+    let empty = document(&format!(
+        "{{ allOf: [ {{ type: string }}, {items_union} ] }}"
+    ));
+    let report = generate(&empty);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
