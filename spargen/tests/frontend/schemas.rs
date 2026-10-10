@@ -1268,7 +1268,8 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
 /// branch that states `null`: the untyped branch constrains objects or arrays alone, so `null`
 /// matches it as well as the `null` branch, which fails the exactly-one rule, and the union admits
 /// no `null` (#622), with or without a sibling keyword of the branch's category beside it, and
-/// beside a `null` member with or without a typed branch beside the two. A typed
+/// beside a `null` member with or without a typed branch beside the two, and spelled as a `$ref`
+/// to a component with no `type`, discriminated or not. A typed
 /// object or array branch denies `null`, which then matches the `null` branch alone, and an
 /// `anyOf` needs only one match, so both of those stay `Option`.
 #[test]
@@ -1322,12 +1323,56 @@ fn a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null() {
             "{ anyOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
             true,
         ),
+        // A `$ref` branch whose target component has no `type` is the same untyped branch.
+        (
+            "{ oneOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: [integer, \
+             'null'] } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { $ref: '#/components/schemas/UntypedArray' }, { type: [integer, \
+             'null'] } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/UntypedObject' } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: integer }, { \
+             type: 'null' } ] }",
+            false,
+        ),
+        // `null` carries no tag, so a discriminator does not exempt the count.
+        (
+            "{ oneOf: [ { $ref: '#/components/schemas/UntypedTagA' }, { $ref: \
+             '#/components/schemas/UntypedTagB' }, { type: 'null' } ], discriminator: { \
+             propertyName: kind } }",
+            false,
+        ),
+        // A `$ref` to a typed object component denies `null`, as an inline typed branch does.
+        (
+            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/TypedObject' } ] }",
+            true,
+        ),
+        (
+            "{ anyOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: [integer, \
+             'null'] } ] }",
+            true,
+        ),
     ] {
         let spec = with_schemas(
             "3.1.0",
             &format!(
                 "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
-                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n    \
+                 UntypedObject: {{ properties: {{ a: {{ type: string }} }} }}\n    \
+                 UntypedArray: {{ items: {{ type: string }} }}\n    \
+                 UntypedTagA: {{ required: [kind], properties: {{ kind: {{ type: string }}, a: \
+                 {{ type: string }} }} }}\n    \
+                 UntypedTagB: {{ required: [kind], properties: {{ kind: {{ type: string }}, b: \
+                 {{ type: integer }} }} }}\n    \
+                 TypedObject: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n"
             ),
         );
         let (report, code) = generate_with_code(&spec);
