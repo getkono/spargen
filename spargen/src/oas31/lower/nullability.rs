@@ -8,7 +8,7 @@ use crate::ir::{Ty, TypeKind};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
-use super::combine::{schema_has_union, Contribution};
+use super::combine::{schema_has_union, schema_is_object_like, Contribution};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::schema_has_shape_constraint;
 use super::{memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
@@ -90,17 +90,96 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let undecided_kind = match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_)) => true,
             Some(TypeKind::Reserved) => member.reference.as_deref().is_some_and(|reference| {
-                self.ref_target_body(reference, &member.provenance)
-                    .is_some_and(|target| {
-                        matches!(
-                            implied_applicator_category(&target),
-                            Some(ImpliedCategory::Only(_))
-                        )
-                    })
+                self.ref_target_is_untyped_shape(reference, &member.provenance, 0)
             }),
             _ => false,
         };
         !ty.nullable && undecided_kind && !self.all_of_decides_null(member, 0)
+    }
+
+    /// Whether the body the `$ref` written at `at` names ([`Self::ref_target_body`]) lowers to a
+    /// struct, `Vec` or tuple of untyped keywords, as [`Self::branch_leaves_null_undecided`] reads
+    /// a cycle-closing reservation ([`Self::schema_is_untyped_shape`]).
+    fn ref_target_is_untyped_shape(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
+        self.ref_target_body(reference, at)
+            .is_some_and(|target| self.schema_is_untyped_shape(&target, depth + 1))
+    }
+
+    /// Whether `schema`, which names no `type`, lowers to a struct, `Vec` or tuple: object or array
+    /// applicators that establish its category ([`implied_applicator_category`]), or an untyped
+    /// `allOf` whose members, and object keywords beside them, merge into a struct (#627). A
+    /// member counts when it is untyped object keywords, a nested such `allOf`, a `$ref` to either,
+    /// or a pure annotation, and at least one of them, or the keywords beside the `allOf`, is an
+    /// object. Anything else (an array member, a scalar keyword, a union) answers `false`, so a
+    /// shape this cannot read keeps the reservation's stated nullability. `depth` bounds the walk.
+    fn schema_is_untyped_shape(&self, schema: &Schema, depth: u32) -> bool {
+        if depth >= MAX_SCHEMA_DEPTH {
+            return false;
+        }
+        if matches!(
+            implied_applicator_category(schema),
+            Some(ImpliedCategory::Only(_))
+        ) {
+            return true;
+        }
+        let only_all_of = !schema.all_of.is_empty()
+            && schema.types.types.is_empty()
+            && schema.reference.is_none()
+            && schema.enum_values.is_none()
+            && schema.const_value.is_none()
+            && !schema_has_union(schema)
+            && schema.content_encoding.is_none()
+            && schema.format.as_deref() != Some("binary")
+            && schema.items.is_none()
+            && schema.prefix_items.is_empty();
+        if !only_all_of {
+            return false;
+        }
+        let mut object = schema_is_object_like(schema);
+        for member in &schema.all_of {
+            match member {
+                SchemaOr::Bool(true) => {}
+                SchemaOr::Bool(false) => return false,
+                SchemaOr::Schema(member) if !schema_has_shape_constraint(member) => {}
+                SchemaOr::Schema(member) => {
+                    let shaped = if let Some(reference) = member.reference.as_deref() {
+                        // A `$ref` member with siblings of its own is an intersection this does
+                        // not read.
+                        let mut sibling = member.as_ref().clone();
+                        sibling.reference = None;
+                        !schema_has_shape_constraint(&sibling)
+                            && self.ref_target_is_untyped_object(
+                                reference,
+                                &member.provenance,
+                                depth,
+                            )
+                    } else {
+                        self.schema_is_untyped_object(member, depth + 1)
+                    };
+                    if !shaped {
+                        return false;
+                    }
+                    object = true;
+                }
+            }
+        }
+        object
+    }
+
+    /// Whether `schema` is untyped object keywords, or an untyped `allOf` merging into a struct
+    /// ([`Self::schema_is_untyped_shape`]): the members that object `allOf` admits.
+    fn schema_is_untyped_object(&self, schema: &Schema, depth: u32) -> bool {
+        match implied_applicator_category(schema) {
+            Some(ImpliedCategory::Only(JsonType::Object)) => true,
+            Some(_) => false,
+            None => self.schema_is_untyped_shape(schema, depth),
+        }
+    }
+
+    /// [`Self::schema_is_untyped_object`] of the body the `$ref` written at `at` names.
+    fn ref_target_is_untyped_object(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
+        self.ref_target_body(reference, at)
+            .is_some_and(|target| self.schema_is_untyped_object(&target, depth + 1))
     }
 
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
