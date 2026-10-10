@@ -46,7 +46,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
     /// be met with a member that closes a reference cycle, with a member that states no category
     /// for untyped sibling keywords to establish, or with a member it shares values with that no
-    /// single Rust type represents.
+    /// single Rust type represents, or where it meets every one of several `oneOf` members in
+    /// `null` alone, which then matches them all.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
@@ -603,6 +604,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else if stated_nothing_nulls > 0 {
             self.stated_nothing_took_null =
                 Some((schema.provenance.clone(), StatedNothingNull::Sole));
+        }
+        // The sibling meet left every one of several `oneOf` branches the exact null type:
+        // `type: [string, 'null']` beside untyped `items` branches, which constrain arrays alone,
+        // meets each of them in `null` only. `null` then matches every branch, which fails the
+        // exactly-one rule, so nothing satisfies the schema, and its `allOf` spelling (the `type`
+        // as a member beside the union) is rejected for it (#632). Merged below, the branches
+        // were one `()` variant with `W001`, a type for a schema no value satisfies. The `anyOf`
+        // counterpart, which needs one match, is the null type below (#625).
+        if mode == UnionMode::OneOf
+            && sibling.is_some()
+            && variants.len() > 1
+            && variants
+                .iter()
+                .all(|variant| self.is_exact_null(variant.ty))
+        {
+            return self.reject_one_of_null_in_every_branch(schema);
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same

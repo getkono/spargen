@@ -287,3 +287,75 @@ fn flattened_own_keywords_excluding_null_withhold_it_from_a_ref_union_member() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// A nullable scalar `type` beside an untyped `items` (or untyped object) `oneOf` is rejected as
+/// its `allOf` spelling is, the `type` written as a member beside the union (#632). Spargen reads an
+/// untyped `items` branch as array-only (#614), so the scalar meets each branch in `null` alone:
+/// `null` then matches every branch, which fails the `oneOf`'s exactly-one rule, and no value
+/// satisfies the schema. The sibling spelling merged the `()` variants with `W001` and generated the
+/// null type for it. With one branch excluded (`W011`) and one met in `null`, `null` matches that
+/// branch alone, and both spellings stay the null type.
+#[test]
+fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spelling() {
+    let mut mismatches = Vec::new();
+    for (sibling, all_of, satisfiable) in [
+        (
+            "{ type: [string, 'null'], oneOf: [ { items: { type: string } }, { items: { type: \
+             integer } } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { oneOf: [ { items: { type: string } }, { \
+             items: { type: integer } } ] } ] }",
+            false,
+        ),
+        (
+            "{ type: 'null', oneOf: [ { items: { type: string } }, { items: { type: integer } } \
+             ] }",
+            "{ allOf: [ { type: 'null' }, { oneOf: [ { items: { type: string } }, { items: { \
+             type: integer } } ] } ] }",
+            false,
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { oneOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
+        (
+            "{ type: [integer, 'null'], oneOf: [ { items: { type: string } }, { type: string } ] }",
+            "{ allOf: [ { type: [integer, 'null'] }, { oneOf: [ { items: { type: string } }, { \
+             type: string } ] } ] }",
+            true,
+        ),
+    ] {
+        for site in [sibling, all_of] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            if satisfiable {
+                let types = types_module(&code);
+                let pick = field_type(&types, "pub pick");
+                if report.outcome() == Outcome::Rejected
+                    || !types.contains("pub type Pick = ();")
+                    || pick.as_deref() != Some("Pick")
+                {
+                    mismatches.push(format!(
+                        "{site}: only `null` satisfies it, but it is not the null type: \
+                         {report:#?} {types}"
+                    ));
+                }
+            } else if report.outcome() != Outcome::Rejected
+                || !has_code(&report, Code::AllOfIrreconcilable)
+            {
+                mismatches.push(format!(
+                    "{site}: nothing satisfies it, but it is not rejected with `E013`: {report:#?}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
