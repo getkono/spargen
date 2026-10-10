@@ -588,7 +588,7 @@ fn one_of_branches_of_one_structure_merge_and_warn() {
 /// after the meet with `NB`, which admits `null` too: `null` matches both branches and fails
 /// exactly-one, so the position is not `Option`, in the `allOf`-member spelling, in the
 /// `$ref`-sibling one, and inline with no meet at all, two nullable scalars or a `null` member
-/// beside a nullable branch. Where only one branch accepts `null`, or the union is an `anyOf`, it
+/// beside a nullable branch or an untyped object one (#622). Where only one branch accepts `null`, or the union is an `anyOf`, it
 /// stays valid.
 #[test]
 fn a_one_of_whose_null_matches_two_unmerged_branches_rejects_null() {
@@ -660,12 +660,12 @@ fn a_one_of_whose_null_matches_two_unmerged_branches_rejects_null() {
                 .to_owned(),
             false,
         ),
-        // Without a meet the untyped member is not counted, so `null` matches the `null` member
-        // alone.
+        // Without a meet the untyped member is counted all the same: `required` constrains
+        // objects alone, so `null` matches it and the `null` member (#622).
         (
-            "inline null member beside an untyped branch",
+            "inline null member beside an untyped branch, its only nullable branch",
             "oneOf: [ { type: 'null' }, { required: [a] } ]".to_owned(),
-            true,
+            false,
         ),
         // `null` carries no tag, so a discriminator does not exempt the count.
         (

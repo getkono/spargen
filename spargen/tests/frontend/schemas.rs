@@ -1264,6 +1264,87 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A `oneOf` of an untyped object or array branch (`properties` or `items` with no `type`) and a
+/// branch that states `null`: the untyped branch constrains objects or arrays alone, so `null`
+/// matches it as well as the `null` branch, which fails the exactly-one rule, and the union admits
+/// no `null` (#622), with or without a sibling keyword of the branch's category beside it, and
+/// beside a `null` member with or without a typed branch beside the two. A typed
+/// object or array branch denies `null`, which then matches the `null` branch alone, and an
+/// `anyOf` needs only one match, so both of those stay `Option`.
+#[test]
+fn a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null() {
+    let mut mismatches = Vec::new();
+    for (site, nullable) in [
+        (
+            "{ oneOf: [ { properties: { a: { type: string } } }, { type: [integer, 'null'] } ] }",
+            false,
+        ),
+        (
+            "{ maxProperties: 3, oneOf: [ { properties: { a: { type: string } } }, { type: \
+             [integer, 'null'] } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
+            false,
+        ),
+        (
+            "{ minItems: 1, oneOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { properties: { a: { type: string } } }, { type: integer }, { type: \
+             'null' } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { properties: { a: { type: string } } }, { type: 'null' } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { items: { type: string } }, { type: 'null' } ] }",
+            false,
+        ),
+        (
+            "{ oneOf: [ { type: object, properties: { a: { type: string } } }, { type: [integer, \
+             'null'] } ] }",
+            true,
+        ),
+        (
+            "{ oneOf: [ { type: array, items: { type: string } }, { type: [integer, 'null'] } ] }",
+            true,
+        ),
+        (
+            "{ anyOf: [ { properties: { a: { type: string } } }, { type: [integer, 'null'] } ] }",
+            true,
+        ),
+        (
+            "{ anyOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
+            true,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != nullable {
+            let validity = if nullable { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// An `allOf` of a scalar member listing `null` beside a union whose untyped `items` branches
 /// leave `null` undecided, where the scalar's other category meets no branch: the union takes
 /// `null` from that member (#621), so `null` is the one value left and the schema is the null

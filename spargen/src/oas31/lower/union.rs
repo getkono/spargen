@@ -162,12 +162,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the meet's answer for an untyped member, which takes `null` from a sibling that
             // accepts it (`Value` met with `type: [object, 'null']` is a nullable object), as each
             // variant of the multi-member path below is counted after its own meet. Without a
-            // meet an untyped member is not counted, as that path does not count one either.
+            // meet a member lowering to `Value` is not counted, as that path does not count one
+            // either.
             let mut member_takes_null = member_nullable;
             // An untyped object member's non-null struct decides nothing about `null` either
             // (#567), so it takes `null` from a sibling or a meet as `Value` does; so does any
             // other member whose own keywords leave `null` undecided (#574).
             let member_untyped = self.branch_takes_permitted_null(real_members[0], inner);
+            // An untyped object or array member constrains objects or arrays alone, so `null`
+            // matches it beside a `null` member, as the multi-member path counts it (#622).
+            let member_leaves_null_undecided =
+                self.branch_leaves_null_undecided(real_members[0], inner);
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -315,9 +320,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             // A `null` member beside a member that accepts `null` itself puts `null` in two
             // branches, which fails a `oneOf`'s exactly-one rule (#563), counted after the meet
-            // like the multi-member path's variants.
-            let null_twice =
-                mode == UnionMode::OneOf && null_members + usize::from(member_takes_null) > 1;
+            // like the multi-member path's variants. An untyped object or array member is such a
+            // branch whether or not it took `null` from anything (#622).
+            let null_twice = mode == UnionMode::OneOf
+                && null_members + usize::from(member_takes_null || member_leaves_null_undecided)
+                    > 1;
             // Held back for a meet with no sibling here, an untyped member's `null` is not settled
             // yet: the caller counts it after the meet.
             if mode == UnionMode::OneOf
@@ -351,6 +358,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // how many of them a `oneOf` counts without hoisting (#592).
         let mut stated_nothing_hints: Vec<String> = Vec::new();
         let mut stated_nothing_nulls = 0usize;
+        // How many variants are an untyped object or array branch that still leaves `null`
+        // undecided after its meet ([`Self::branch_leaves_null_undecided`]): its keywords constrain
+        // objects or arrays alone, so `null` matches it, and a `oneOf` counts it beside a branch
+        // that states `null` (#622). Counted for exactly-one alone: such a branch on its own is
+        // the non-null struct or array every other spelling gives it, so it hoists nothing.
+        let mut undecided_nulls = 0usize;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -376,6 +389,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if self.reservation_at(&schema.provenance) == Some(ty.id) {
                 return self.reject_union_member_is_the_union(schema);
             }
+            // Read before anything below gives the branch a conjunct's `null`, which would hide
+            // that its own keywords decide nothing.
+            let leaves_null_undecided = self.branch_leaves_null_undecided(member, ty);
             // The reservation half of the cycle test again, on a multi-variant union. Same fact,
             // same wording, same place in the order: before anything tries to intersect against the
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
@@ -494,6 +510,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
             nullable_variants += usize::from(ty.nullable);
+            undecided_nulls += usize::from(leaves_null_undecided && !ty.nullable);
             null_variants += usize::from(self.is_exact_null(ty));
             null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
@@ -550,10 +567,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // (#586): elsewhere it stays the variant `null` decodes to, as it always has. A branch that
         // states nothing is counted where it took `null` from the conjunct (#592), and the meet's
         // copy of that `null` is cleared where the count puts it in two branches, or where an
-        // `anyOf` hoisted it.
+        // `anyOf` hoisted it. An untyped object or array branch that hoisted nothing is counted
+        // too, since `null` matches it all the same (#622).
         let null_variants = if null_from_conjunct { null_variants } else { 0 };
         let null_twice = mode == UnionMode::OneOf
-            && null_members + nullable_variants + null_variants + stated_nothing_nulls > 1;
+            && null_members
+                + nullable_variants
+                + null_variants
+                + stated_nothing_nulls
+                + undecided_nulls
+                > 1;
         if null_twice {
             nullable = false;
         }
