@@ -500,3 +500,77 @@ fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refus
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// An `anyOf` branch the sibling meet narrows to the exact null type, beside branches it leaves
+/// typed, is a branch `null` matches, as a `null` member is: it is hoisted to the union's `Option`
+/// and the typed branches are the variants, as the `allOf` spelling (the `type` as a member beside
+/// the union) lowers it (#633). Spargen reads an untyped `items` or `properties` branch as
+/// array-only or object-only (#614, #613), so `type: [string, 'null']` meets it in `null` alone.
+/// With one typed branch left both spellings are `pub type Pick = String;` with
+/// `pub pick: Option<Pick>`; with two, an enum of them with no `()` arm. The sibling spelling was
+/// an enum carrying `null` as a `()` variant beside the string branch.
+#[test]
+fn an_anyof_branch_the_sibling_narrows_to_null_is_the_union_option() {
+    let mut mismatches = Vec::new();
+    for (sibling, all_of, single) in [
+        (
+            "{ type: [string, 'null'], anyOf: [ { items: { type: string } }, { type: string } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { items: { type: string } }, { \
+             type: string } ] } ] }",
+            true,
+        ),
+        (
+            "{ type: [string, 'null'], anyOf: [ { type: string }, { properties: { a: { type: \
+             string } } } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { type: string }, { properties: { \
+             a: { type: string } } } ] } ] }",
+            true,
+        ),
+        // A `null` member beside the branch narrowed to `null`: one more branch `null` matches.
+        (
+            "{ type: [string, 'null'], anyOf: [ { type: 'null' }, { items: { type: string } }, { \
+             type: string } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { type: 'null' }, { items: { \
+             type: string } }, { type: string } ] } ] }",
+            true,
+        ),
+        // Two typed branches stay the variants.
+        (
+            "{ type: [string, 'null'], anyOf: [ { items: { type: string } }, { type: string, \
+             enum: [a] }, { type: string, enum: [b] } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { items: { type: string } }, { \
+             type: string, enum: [a] }, { type: string, enum: [b] } ] } ] }",
+            false,
+        ),
+    ] {
+        for site in [sibling, all_of] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick");
+            let shape = if single {
+                types.contains("pub type Pick = String;")
+            } else {
+                types.contains("pub enum Pick {")
+            };
+            if report.outcome() == Outcome::Rejected
+                || pick.as_deref() != Some("Option<Pick>")
+                || !shape
+                || types.contains("= ();")
+                || types.contains("(())")
+            {
+                mismatches.push(format!(
+                    "{site}: strings and `null` satisfy it, but it is not an `Option` of the typed \
+                     branches with no `()` arm: {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
