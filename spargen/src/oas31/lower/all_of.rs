@@ -66,12 +66,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // written inline does ([`Self::lower_all_of_with_union_member`]): lowered as its own
         // component, it denied `null` for want of a decision, and the meet denied it even beside
         // `type: [array, 'null']` (#624).
-        for (slot, member) in ref_members {
-            if let Some(ty) = self.ref_union_member_takes_scalar_null(member, slot, &contributions)
-            {
-                contributions[slot] = Contribution::Scalar(ty);
-            }
-        }
+        self.ref_union_members_take_scalar_null(&ref_members, &mut contributions);
         self.combine_all_of(schema, hint, &contributions)
     }
 

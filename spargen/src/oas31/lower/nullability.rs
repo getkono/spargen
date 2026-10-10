@@ -483,36 +483,53 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty
     }
 
-    /// [`Self::union_member_takes_scalar_null`] of an `allOf` `member` that is a `$ref` to a union,
-    /// gathered as the scalar `contributions[slot]` its target lowered to, met with the other
-    /// contributions (#624). The target is read through [`Self::ref_target_body`], aliases
-    /// followed. `None` where `member` is not a bare `$ref` (its shape-bearing siblings are
-    /// further members, which the union's branches never saw), or its target is no union.
-    pub(super) fn ref_union_member_takes_scalar_null(
+    /// [`Self::union_member_takes_scalar_null`] of each `allOf` member in `ref_members` that is a
+    /// `$ref` to a union, gathered as the scalar `contributions[slot]` its target lowered to, met
+    /// with the other contributions (#624). The target is read through [`Self::ref_target_body`],
+    /// aliases followed. A member that is not a bare `$ref` (its shape-bearing siblings are
+    /// further members, which the union's branches never saw), or whose target is no union, keeps
+    /// its contribution.
+    ///
+    /// Another such member whose union leaves `null` undecided is not one of the members that
+    /// decide it: it is exactly a member this rule would hand `null` to, and it decides nothing
+    /// more written as a `$ref` than inline. So `allOf: [ { $ref: A }, { $ref: B } ]` of two such
+    /// unions, or the same `$ref` twice, stays non-null like the inline spelling, and only a
+    /// member that does decide `null`, such as `type: [array, 'null']`, gives it to them.
+    pub(super) fn ref_union_members_take_scalar_null(
         &self,
-        member: &Schema,
-        slot: usize,
-        contributions: &[Contribution],
-    ) -> Option<Ty> {
-        let reference = member.reference.as_deref()?;
-        let mut sibling = member.clone();
-        sibling.reference = None;
-        if schema_has_shape_constraint(&sibling) {
-            return None;
-        }
-        let Contribution::Scalar(ty) = contributions.get(slot)? else {
-            return None;
-        };
-        let target = self.ref_target_body(reference, &member.provenance)?;
-        if !schema_has_union(&target) {
-            return None;
-        }
-        let others = contributions
+        ref_members: &[(usize, &Schema)],
+        contributions: &mut [Contribution],
+    ) {
+        let unions: Vec<_> = ref_members
             .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != slot)
-            .map(|(_, contribution)| contribution);
-        Some(self.union_member_takes_scalar_null(*ty, &target, others))
+            .filter_map(|&(slot, member)| {
+                let reference = member.reference.as_deref()?;
+                let mut sibling = member.clone();
+                sibling.reference = None;
+                if schema_has_shape_constraint(&sibling) {
+                    return None;
+                }
+                let Contribution::Scalar(ty) = contributions.get(slot)? else {
+                    return None;
+                };
+                let target = self.ref_target_body(reference, &member.provenance)?;
+                schema_has_union(&target).then_some((slot, *ty, target))
+            })
+            .collect();
+        let undecided: Vec<usize> = unions
+            .iter()
+            .filter(|(_, ty, target)| !ty.nullable && self.union_admits_null_undecided(target, 0))
+            .map(|(slot, _, _)| *slot)
+            .collect();
+        for (slot, ty, target) in unions {
+            let others = contributions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != slot && !undecided.contains(index))
+                .map(|(_, contribution)| contribution);
+            let ty = self.union_member_takes_scalar_null(ty, &target, others);
+            contributions[slot] = Contribution::Scalar(ty);
+        }
     }
 }
 

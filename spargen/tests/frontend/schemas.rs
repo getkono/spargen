@@ -1251,6 +1251,31 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
              properties: { b: { type: integer } } } ] } ] }",
             false,
         ),
+        // Two such `$ref` union members, or the same one twice: each leaves `null` undecided, so
+        // neither decides it for the other, and the meet stays non-null as the inline spelling
+        // does. Beside a member that admits `null`, both take it.
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/ArrayAnyOf' }, { $ref: \
+             '#/components/schemas/ArrayAnyOfB' } ] }",
+            "{ allOf: [ { anyOf: [ { properties: { a: { type: string } } }, { properties: { b: { \
+             type: integer } } } ] }, { anyOf: [ { properties: { c: { type: string } } }, { \
+             properties: { d: { type: integer } } } ] } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/ArrayAnyOf' }, { $ref: \
+             '#/components/schemas/ArrayAnyOf' } ] }",
+            "{ allOf: [ { anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }, \
+             { anyOf: [ { items: { type: boolean } }, { items: { type: number } } ] } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' }, { \
+             $ref: '#/components/schemas/ArrayAnyOfB' } ] }",
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' }, { \
+             $ref: '#/components/schemas/ArrayAnyOf' } ] }",
+            true,
+        ),
         (
             "{ allOf: [ { type: array }, { anyOf: [ { items: { type: string } }, { items: { type: \
              integer } } ] } ] }",
@@ -1267,7 +1292,8 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
                      NullableObject: {{ type: [object, 'null'] }}\n    ArrayAnyOf: {{ anyOf: \
                      [ {{ items: {{ type: string }} }}, {{ items: {{ type: integer }} }} ] }}\n    \
                      ArrayOneOf: {{ oneOf: [ {{ items: {{ type: string }} }}, {{ items: {{ type: \
-                     integer }} }} ] }}\n    Holder:\n      type: \
+                     integer }} }} ] }}\n    ArrayAnyOfB: {{ anyOf: [ {{ items: {{ type: \
+                     boolean }} }}, {{ items: {{ type: number }} }} ] }}\n    Holder:\n      type: \
                      object\n      properties:\n        pick: {{ $ref: \
                      '#/components/schemas/Pick' }}\n      required: [pick]\n"
                 ),
