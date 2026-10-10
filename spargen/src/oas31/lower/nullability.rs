@@ -615,36 +615,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty
     }
 
-    /// [`Self::union_member_takes_scalar_null`] of each `allOf` member in `ref_members` that is a
-    /// `$ref` to a union, gathered as the scalar `contributions[slot]` its target lowered to, met
-    /// with the other contributions (#624). The target is read through [`Self::ref_target_body`],
-    /// aliases followed. A member that is not a bare `$ref` (its shape-bearing siblings are
-    /// further members, which the union's branches never saw), or whose target is no union, keeps
-    /// its contribution.
+    /// [`Self::union_member_takes_scalar_null`] of each `allOf` member in `members` that is a
+    /// union, gathered as the scalar `contributions[slot]` it lowered to, met with the other
+    /// contributions: a `$ref` to a union (#624), its target read through
+    /// [`Self::ref_target_body`], aliases followed, or an inline union (#631). A `$ref` member
+    /// that is not a bare `$ref` (its shape-bearing siblings are further members, which the
+    /// union's branches never saw), or whose target is no union, keeps its contribution. An
+    /// inline union's own keywords are its siblings, read by the union's own rule.
     ///
     /// Another such member whose union leaves `null` undecided is not one of the members that
-    /// decide it: it is exactly a member this rule would hand `null` to, and it decides nothing
-    /// more written as a `$ref` than inline. So `allOf: [ { $ref: A }, { $ref: B } ]` of two such
-    /// unions, or the same `$ref` twice, stays non-null like the inline spelling, and only a
-    /// member that does decide `null`, such as `type: [array, 'null']`, gives it to them.
-    pub(super) fn ref_union_members_take_scalar_null(
+    /// decide it: it is exactly a member this rule would hand `null` to, whether written as a
+    /// `$ref` or inline. So `allOf: [ { $ref: A }, { $ref: B } ]` of two such unions, the same
+    /// `$ref` twice, or two such unions inline or one of each, stays non-null, and only a member
+    /// that does decide `null`, such as `type: [array, 'null']`, gives it to them.
+    pub(super) fn union_members_take_scalar_null(
         &self,
-        ref_members: &[(usize, &Schema)],
+        members: &[(usize, &Schema)],
         contributions: &mut [Contribution],
     ) {
-        let unions: Vec<_> = ref_members
+        let unions: Vec<_> = members
             .iter()
             .filter_map(|&(slot, member)| {
-                let reference = member.reference.as_deref()?;
-                let mut sibling = member.clone();
-                sibling.reference = None;
-                if schema_has_shape_constraint(&sibling) {
-                    return None;
-                }
                 let Contribution::Scalar(ty) = contributions.get(slot)? else {
                     return None;
                 };
-                let target = self.ref_target_body(reference, &member.provenance)?;
+                let target = match member.reference.as_deref() {
+                    Some(reference) => {
+                        let mut sibling = member.clone();
+                        sibling.reference = None;
+                        if schema_has_shape_constraint(&sibling) {
+                            return None;
+                        }
+                        self.ref_target_body(reference, &member.provenance)?
+                    }
+                    None => std::borrow::Cow::Borrowed(member),
+                };
                 schema_has_union(&target).then_some((slot, *ty, target))
             })
             .collect();

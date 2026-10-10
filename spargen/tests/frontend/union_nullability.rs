@@ -1,6 +1,7 @@
 //! How a union counts the branches `null` matches: a `oneOf` admits `null` only where exactly one
 //! branch does, including branches whose own keywords leave `null` undecided; and where an `allOf`
-//! hands `null` to a `$ref` union member whose branches leave it undecided.
+//! hands `null` to a `$ref` union member, or to one of several inline union members, whose
+//! branches leave it undecided.
 
 use super::*;
 
@@ -148,6 +149,68 @@ fn a_oneof_nested_value_union_branch_met_with_a_null_conjunct_counts_null_once()
                     ));
                 }
             }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Two or more inline union members of an `allOf` beside a member that admits `null` take it as
+/// the same members written as `$ref`s to union components do (#624, #631): each union's untyped
+/// `items` branches leave `null` undecided, so the merge admits it where the other member does.
+/// Two such unions alone, inline or one of each spelling, decide nothing for each other and stay
+/// non-null; and the union's own `type`, or the `allOf` schema's, excluding `null` withholds it.
+#[test]
+fn several_inline_union_allof_members_take_null_from_a_member_admitting_it() {
+    let any_of_a = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
+    let any_of_b = "{ anyOf: [ { items: { type: boolean } }, { items: { type: number } } ] }";
+    let typed_b =
+        "{ type: array, anyOf: [ { items: { type: boolean } }, { items: { type: number } } ] }";
+    let union_ref = "{ $ref: '#/components/schemas/ArrayAnyOf' }";
+    let mut mismatches = Vec::new();
+    for (site, nullable) in [
+        (
+            format!("{{ allOf: [ {{ type: [array, 'null'] }}, {any_of_a}, {any_of_b} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {any_of_a}, {{ type: [array, 'null'] }}, {any_of_b} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ type: [array, 'null'] }}, {any_of_a}, {union_ref} ] }}"),
+            true,
+        ),
+        (format!("{{ allOf: [ {any_of_a}, {any_of_b} ] }}"), false),
+        (format!("{{ allOf: [ {any_of_a}, {union_ref} ] }}"), false),
+        (
+            format!("{{ allOf: [ {{ type: [array, 'null'] }}, {any_of_a}, {typed_b} ] }}"),
+            false,
+        ),
+        (
+            format!(
+                "{{ type: array, allOf: [ {{ type: [array, 'null'] }}, {any_of_a}, {any_of_b} ] }}"
+            ),
+            false,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    ArrayAnyOf: {any_of_b}\n    Holder:\n      type: object\n      \
+                 properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != nullable {
+            let validity = if nullable { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
