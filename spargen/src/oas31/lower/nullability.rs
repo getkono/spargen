@@ -140,20 +140,33 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Whether `schema`, which names no `type`, lowers to a struct, `Vec` or tuple: object or array
     /// applicators that establish its category ([`implied_applicator_category`]), or an untyped
-    /// `allOf` whose members, and object keywords beside them, merge into a struct (#627). A
-    /// member counts when it is untyped object keywords, a nested such `allOf`, a `$ref` to either,
-    /// or a pure annotation, and at least one of them, or the keywords beside the `allOf`, is an
-    /// object. Anything else (an array member, a scalar keyword, a union) answers `false`, so a
-    /// shape this cannot read keeps the reservation's stated nullability. `depth` bounds the walk.
+    /// `allOf` whose members, and object keywords beside them, merge into one (#627, #636); see
+    /// [`Self::untyped_shape_category`]. A shape this cannot read answers `false`, and keeps the
+    /// reservation's stated nullability.
     fn schema_is_untyped_shape(&self, schema: &Schema, depth: u32) -> bool {
+        self.untyped_shape_category(schema, depth).is_some()
+    }
+
+    /// The category of the struct, `Vec` or tuple `schema`, which names no `type`, lowers to, as
+    /// [`Self::schema_is_untyped_shape`] reads it: [`JsonType::Object`] or [`JsonType::Array`],
+    /// and `None` for a shape this cannot read.
+    ///
+    /// Untyped object or array applicators are their own category. An untyped `allOf` is read by
+    /// its members: one counts when it is untyped object keywords, untyped array applicators
+    /// alone, a nested such `allOf`, a `$ref` to any of them, or a pure annotation. The merge is a
+    /// struct where a member, or the keywords beside the `allOf`, is an object, untyped array
+    /// members being vacuous beside it (#636); an array where every constraining member is one,
+    /// since they then establish the array category; and `None` where no member constrains.
+    /// Anything else (a scalar keyword, a union, object and array applicators in one member)
+    /// answers `None`. `depth` bounds the walk.
+    fn untyped_shape_category(&self, schema: &Schema, depth: u32) -> Option<JsonType> {
         if depth >= MAX_SCHEMA_DEPTH {
-            return false;
+            return None;
         }
-        if matches!(
-            implied_applicator_category(schema),
-            Some(ImpliedCategory::Only(_))
-        ) {
-            return true;
+        match implied_applicator_category(schema) {
+            Some(ImpliedCategory::Only(category)) => return Some(category),
+            Some(ImpliedCategory::Conflicting) => return None,
+            None => {}
         }
         let only_all_of = !schema.all_of.is_empty()
             && schema.types.types.is_empty()
@@ -166,53 +179,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && schema.items.is_none()
             && schema.prefix_items.is_empty();
         if !only_all_of {
-            return false;
+            return None;
         }
         let mut object = schema_is_object_like(schema);
+        let mut array = false;
         for member in &schema.all_of {
             match member {
                 SchemaOr::Bool(true) => {}
-                SchemaOr::Bool(false) => return false,
+                SchemaOr::Bool(false) => return None,
                 SchemaOr::Schema(member) if !schema_has_shape_constraint(member) => {}
                 SchemaOr::Schema(member) => {
-                    let shaped = if let Some(reference) = member.reference.as_deref() {
+                    let category = if let Some(reference) = member.reference.as_deref() {
                         // A `$ref` member with siblings of its own is an intersection this does
                         // not read.
                         let mut sibling = member.as_ref().clone();
                         sibling.reference = None;
-                        !schema_has_shape_constraint(&sibling)
-                            && self.ref_target_is_untyped_object(
-                                reference,
-                                &member.provenance,
-                                depth,
-                            )
+                        if schema_has_shape_constraint(&sibling) {
+                            None
+                        } else {
+                            self.ref_target_body(reference, &member.provenance)
+                                .and_then(|target| self.untyped_shape_category(&target, depth + 1))
+                        }
                     } else {
-                        self.schema_is_untyped_object(member, depth + 1)
+                        self.untyped_shape_category(member, depth + 1)
                     };
-                    if !shaped {
-                        return false;
+                    match category {
+                        Some(JsonType::Object) => object = true,
+                        Some(_) => array = true,
+                        None => return None,
                     }
-                    object = true;
                 }
             }
         }
-        object
-    }
-
-    /// Whether `schema` is untyped object keywords, or an untyped `allOf` merging into a struct
-    /// ([`Self::schema_is_untyped_shape`]): the members that object `allOf` admits.
-    fn schema_is_untyped_object(&self, schema: &Schema, depth: u32) -> bool {
-        match implied_applicator_category(schema) {
-            Some(ImpliedCategory::Only(JsonType::Object)) => true,
-            Some(_) => false,
-            None => self.schema_is_untyped_shape(schema, depth),
+        if object {
+            Some(JsonType::Object)
+        } else if array {
+            Some(JsonType::Array)
+        } else {
+            None
         }
-    }
-
-    /// [`Self::schema_is_untyped_object`] of the body the `$ref` written at `at` names.
-    fn ref_target_is_untyped_object(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
-        self.ref_target_body(reference, at)
-            .is_some_and(|target| self.schema_is_untyped_object(&target, depth + 1))
     }
 
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
