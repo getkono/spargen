@@ -45,7 +45,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|&(id, _)| id)
                 .filter(inside),
         );
-        for contribution in self.resolved_contributions.values().flatten() {
+        for (_, contribution) in self.resolved_contributions.values().flatten() {
             match contribution {
                 Contribution::Object { fields, .. } => {
                     roots.extend(fields.iter().map(|field| field.ty.id).filter(inside));

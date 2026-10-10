@@ -1,7 +1,7 @@
 //! Flattening an `allOf` into one type: gathering each member's contribution, inline or through
 //! a `$ref`, and combining them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -503,8 +503,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // lowers un-deduplicated in the same case. The depth cap still bounds it.
             return self.gather_resolved_target(target, hint, out);
         };
-        if let Some(recorded) = self.resolved_contributions.get(&key) {
-            out.extend(recorded.iter().cloned());
+        if self.resolved_contributions.contains_key(&key) {
+            self.replay_resolved(&key, out);
             return Some(());
         }
         // The target's expansion follows its own `$ref` and `allOf` members, and nothing on that
@@ -537,15 +537,76 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // lowers a second copy of the body, and two copies on one hint would leave the bare
         // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
         let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
+        // The expansion is its own gathering, so what it records holds each nested target once
+        // and does not depend on what the use that first reached it had already gathered.
         let mut contributed = Vec::new();
         self.resolved_member_stack
             .push((key.clone(), target.reference.is_some()));
-        let expanded = self.gather_resolved_target(target, &hint, &mut contributed);
+        let (expanded, gathering) =
+            self.gathering(|ctx| ctx.gather_resolved_target(target, &hint, &mut contributed));
         self.resolved_member_stack.pop();
         expanded?;
-        self.resolved_contributions.insert(key, contributed.clone());
-        out.extend(contributed);
+        let recorded = contributed
+            .into_iter()
+            .enumerate()
+            .map(|(index, contribution)| (gathering.origins.get(&index).cloned(), contribution))
+            .collect();
+        self.resolved_contributions.insert(key.clone(), recorded);
+        self.replay_resolved(&key, out);
         Some(())
+    }
+
+    /// Run `gather` as one composition's gathering: the bundle targets it adds are counted once
+    /// within it, and not against the gathering it is nested in (see `LowerCtx::gatherings`).
+    pub(super) fn in_composition<T>(&mut self, gather: impl FnOnce(&mut Self) -> T) -> T {
+        self.gathering(gather).0
+    }
+
+    /// [`Self::in_composition`], also returning what the gathering recorded.
+    fn gathering<T>(&mut self, gather: impl FnOnce(&mut Self) -> T) -> (T, Gathering) {
+        self.gatherings.push(Gathering::default());
+        let gathered = gather(self);
+        let gathering = self
+            .gatherings
+            .pop()
+            .expect("a gathering pops the frame it pushed");
+        (gathered, gathering)
+    }
+
+    /// Add bundle target `key`'s recorded contribution to `out`, the innermost gathering's
+    /// contributions: nothing where that gathering already holds `key`, and otherwise each
+    /// contribution but those of a nested target it already holds. A held target's own nested
+    /// targets are held as well, since each was added with it or before it, so a replay never
+    /// adds part of a target twice.
+    ///
+    /// Both lookups are invariants, not fallbacks: the caller replays `key` only once it is
+    /// recorded, and every gather runs inside a gathering ([`Self::in_composition`] at each `allOf`
+    /// entry point, [`Self::gathering`] around each expansion). Replaying with no gathering open
+    /// would append each copy flat, the exponential replay of #616, so it panics instead.
+    fn replay_resolved(&mut self, key: &str, out: &mut Vec<Contribution>) {
+        let recorded = self
+            .resolved_contributions
+            .get(key)
+            .expect("a bundle target is replayed only once its contribution is recorded");
+        let gathering = self
+            .gatherings
+            .last_mut()
+            .expect("a bundle target is replayed only inside an open gathering");
+        if gathering.seen.contains(key) {
+            return;
+        }
+        let mut added = Vec::new();
+        for (origin, contribution) in recorded {
+            let origin = origin.as_deref().unwrap_or(key);
+            if origin != key && gathering.seen.contains(origin) {
+                continue;
+            }
+            gathering.origins.insert(out.len(), origin.to_owned());
+            out.push(contribution.clone());
+            added.push(origin);
+        }
+        gathering.seen.extend(added.into_iter().map(str::to_owned));
+        gathering.seen.insert(key.to_owned());
     }
 
     /// Expand a bundle-`$ref` `allOf` member's resolved target as [`Self::gather_member`] expands
@@ -739,6 +800,22 @@ pub(super) enum Contribution {
         scoped: ScopedRefiners,
         member: Box<Schema>,
     },
+}
+
+/// One contribution of a recorded bundle-`$ref` target expansion, with the nested bundle target
+/// whose own contribution it is: `None` for the expanded target's own (see
+/// `LowerCtx::resolved_contributions`).
+pub(super) type RecordedContribution = (Option<String>, Contribution);
+
+/// What one composition, or one bundle-`$ref` target expansion, has gathered of bundle targets
+/// (see `LowerCtx::gatherings`).
+#[derive(Default)]
+pub(super) struct Gathering {
+    /// The bundle targets whose contribution the gathering already holds.
+    seen: HashSet<String>,
+    /// The bundle target each replayed contribution came from, by its index in the gathering's
+    /// contributions, so the record of an expansion can say which nested target each is.
+    origins: HashMap<usize, String>,
 }
 
 /// Remove the [`Contribution::Refiner`]s from `contributions`, in order, as the members and
