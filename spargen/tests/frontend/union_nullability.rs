@@ -403,3 +403,100 @@ fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spell
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// A `type` array listing `null` permits `null` to an untyped branch only where the schema's own
+/// `enum` or `const` admits it too (#632). With `enum: [a]` or `const: a` the schema refuses
+/// `null`, so an untyped `items` branch, which spargen reads as array-only (#614), meets the
+/// sibling in nothing and is excluded (`W011`). Beside a `{type: string}` branch both spellings
+/// are the one-value enum `Pick { A }`, where the sibling spelling used to add a `()` arm for a
+/// `null` the schema refuses. With every branch excluded the sibling spelling is `E007`, as
+/// `{type: string, enum: [a]}` beside the same branches is, and the `allOf` spelling is `E013`,
+/// the codes the two spellings already give whenever a sibling excludes every branch.
+#[test]
+fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refuses() {
+    let only_a = "pub enum Pick {\n        #[serde(rename = \"a\")]\n        A,\n    }";
+    let mut mismatches = Vec::new();
+    for (site, rejected_with) in [
+        (
+            "{ type: [string, 'null'], enum: [a], oneOf: [ { items: { type: string } }, { type: \
+             string } ] }",
+            None,
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], enum: [a] }, { oneOf: [ { items: { type: \
+             string } }, { type: string } ] } ] }",
+            None,
+        ),
+        (
+            "{ type: [string, 'null'], const: a, oneOf: [ { items: { type: string } }, { type: \
+             string } ] }",
+            None,
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], const: a }, { oneOf: [ { items: { type: \
+             string } }, { type: string } ] } ] }",
+            None,
+        ),
+        (
+            "{ type: [string, 'null'], enum: [a], oneOf: [ { items: { type: string } }, { items: \
+             { type: integer } } ] }",
+            Some(Code::NonDisjointUnion),
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], enum: [a] }, { oneOf: [ { items: { type: \
+             string } }, { items: { type: integer } } ] } ] }",
+            Some(Code::AllOfIrreconcilable),
+        ),
+        (
+            "{ type: [string, 'null'], const: a, oneOf: [ { items: { type: string } }, { items: \
+             { type: integer } } ] }",
+            Some(Code::NonDisjointUnion),
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], const: a }, { oneOf: [ { items: { type: \
+             string } }, { items: { type: integer } } ] } ] }",
+            Some(Code::AllOfIrreconcilable),
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        match rejected_with {
+            None => {
+                let types = types_module(&code);
+                // The `allOf` spelling still makes the field `Option<Pick>` (#649), so only the
+                // sibling spelling's field is held to the non-optional type here.
+                let sibling = !site.starts_with("{ allOf");
+                if report.outcome() == Outcome::Rejected
+                    || !types.contains(only_a)
+                    || (sibling && field_type(&types, "pub pick").as_deref() != Some("Pick"))
+                {
+                    mismatches.push(format!(
+                        "{site}: only `\"a\"` satisfies it, but it is not `Pick {{ A }}`: \
+                         {report:#?} {types}"
+                    ));
+                }
+            }
+            Some(expected) => {
+                let errors: Vec<Code> = report
+                    .diagnostics()
+                    .iter()
+                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                    .map(|diagnostic| diagnostic.code)
+                    .collect();
+                if report.outcome() != Outcome::Rejected || errors != [expected] {
+                    mismatches.push(format!(
+                        "{site}: nothing satisfies it, but it is not rejected with exactly \
+                         `{expected:?}`: {report:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
