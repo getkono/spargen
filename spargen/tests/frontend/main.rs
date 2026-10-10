@@ -40,6 +40,7 @@ mod responses;
 mod schemas;
 mod security;
 mod servers;
+mod union_nullability;
 mod unions;
 mod xml;
 

@@ -97,6 +97,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         !ty.nullable && undecided_kind && !self.all_of_decides_null(member, 0)
     }
 
+    /// Whether `member`, a union branch lowered to `ty` that hoisted no `null`, is a branch `null`
+    /// matches although nothing in it states `null`, as a `oneOf` counts it beside a branch that
+    /// does: an untyped object or array ([`Self::branch_leaves_null_undecided`], #622), or a
+    /// nested union `null` matches through its own branches ([`Self::union_admits_null_undecided`]),
+    /// written inline or as a bare `$ref` to a union component (#628). A nested union is read by
+    /// its branches whatever it lowered to, as [`Self::branch_takes_permitted_null`] reads it.
+    pub(super) fn branch_matches_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
+        if self.branch_leaves_null_undecided(member, ty) {
+            return true;
+        }
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        if ty.nullable {
+            return false;
+        }
+        if schema_has_union(member) {
+            return self.union_admits_null_undecided(member, 0);
+        }
+        let Some(reference) = member.reference.as_deref() else {
+            return false;
+        };
+        // A `$ref` with siblings of its own is an intersection this does not read.
+        let mut sibling = member.as_ref().clone();
+        sibling.reference = None;
+        !schema_has_shape_constraint(&sibling)
+            && self
+                .ref_target_body(reference, &member.provenance)
+                .is_some_and(|target| {
+                    schema_has_union(&target) && self.union_admits_null_undecided(&target, 0)
+                })
+    }
+
     /// Whether the body the `$ref` written at `at` names ([`Self::ref_target_body`]) lowers to a
     /// struct, `Vec` or tuple of untyped keywords, as [`Self::branch_leaves_null_undecided`] reads
     /// a cycle-closing reservation ([`Self::schema_is_untyped_shape`]).
