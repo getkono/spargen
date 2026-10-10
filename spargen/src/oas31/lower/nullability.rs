@@ -502,7 +502,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(self.insert_schema_type(schema, hint, TypeKind::Null))
     }
 
-    /// [`own_keywords_admit_null`] over an object `allOf` schema and every schema
+    /// [`own_keywords_admit_null`] over an `allOf` schema and every schema
     /// [`Self::gather_member`] flattens into its meet: a member with an `allOf` and no union beside
     /// it, whether inline, as a `$ref`'s siblings, or as the resolved target of a non-component
     /// `$ref` member, which [`Self::gather_ref_target`] expands in place rather than lowering.
@@ -511,7 +511,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// (#569). Any other member is lowered or read as a contribution of its own, which carries its
     /// nullability already: a component or remote `$ref` lowers to a type, and a plain body is
     /// read by its keywords.
-    fn flattened_keywords_admit_null(&self, schema: &Schema) -> bool {
+    pub(super) fn flattened_keywords_admit_null(&self, schema: &Schema) -> bool {
         own_keywords_admit_null(schema)
             && self.flattened_members_admit_null(schema, &mut HashSet::new(), 0)
     }

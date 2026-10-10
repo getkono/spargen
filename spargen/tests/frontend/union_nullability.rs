@@ -1,5 +1,6 @@
 //! How a union counts the branches `null` matches: a `oneOf` admits `null` only where exactly one
-//! branch does, including branches whose own keywords leave `null` undecided.
+//! branch does, including branches whose own keywords leave `null` undecided; and where an `allOf`
+//! hands `null` to a `$ref` union member whose branches leave it undecided.
 
 use super::*;
 
@@ -147,6 +148,78 @@ fn a_oneof_nested_value_union_branch_met_with_a_null_conjunct_counts_null_once()
                     ));
                 }
             }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// An `allOf` `$ref` member to a union whose branches leave `null` undecided takes `null` from a
+/// member that admits it (#624, #630) only where `null` can satisfy the merge at all. The own
+/// `type`, `enum` or `const` of the `allOf` schema, or of an inner `allOf` flattened into it,
+/// contributes nothing to the meet, yet constrains every value of it: one that excludes `null`
+/// leaves the meet non-null, wherever the `$ref` member sits. Own keywords that admit `null` leave
+/// it to the members, so the nested `$ref` still takes it there.
+#[test]
+fn flattened_own_keywords_excluding_null_withhold_it_from_a_ref_union_member() {
+    let union = "{ $ref: '#/components/schemas/ArrayAnyOf' }";
+    let mut mismatches = Vec::new();
+    for (site, nullable) in [
+        (
+            format!(
+                "{{ allOf: [ {{ type: [array, 'null'] }}, {{ type: array, allOf: [ {union} ] }} \
+                 ] }}"
+            ),
+            false,
+        ),
+        (
+            format!(
+                "{{ allOf: [ {{ type: [array, 'null'] }}, {{ enum: [[1]], allOf: [ {union} ] }} \
+                 ] }}"
+            ),
+            false,
+        ),
+        (
+            format!("{{ type: array, allOf: [ {{ type: [array, 'null'] }}, {union} ] }}"),
+            false,
+        ),
+        (
+            format!(
+                "{{ allOf: [ {{ type: [array, 'null'] }}, {union}, {{ type: array, allOf: [ {{ \
+                 items: {{}} }} ] }} ] }}"
+            ),
+            false,
+        ),
+        (
+            format!(
+                "{{ allOf: [ {{ type: [array, 'null'] }}, {{ type: [array, 'null'], allOf: [ \
+                 {union} ] }} ] }}"
+            ),
+            true,
+        ),
+        (
+            format!("{{ type: [array, 'null'], allOf: [ {{ type: [array, 'null'] }}, {union} ] }}"),
+            true,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    ArrayAnyOf: {{ anyOf: [ {{ items: {{ type: string }} }}, \
+                 {{ items: {{ type: integer }} }} ] }}\n    Holder:\n      type: object\n      \
+                 properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != nullable {
+            let validity = if nullable { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");

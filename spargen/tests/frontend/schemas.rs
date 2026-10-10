@@ -1245,6 +1245,13 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
              } } }, { properties: { b: { type: integer } } } ] } ] }",
             false,
         ),
+        // The same `$ref` member nested in an inner `allOf`, which flattens into the outer (#630).
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { allOf: [ { $ref: \
+             '#/components/schemas/ArrayAnyOf' } ] } ] }",
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
+            true,
+        ),
         (
             "{ allOf: [ { type: array }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
             "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
