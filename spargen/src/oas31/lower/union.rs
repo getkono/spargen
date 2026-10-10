@@ -392,6 +392,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The ids each member's sibling meet inserted. They interleave with the members' own
         // lowered types, which stay, so a re-emit below elides the unused ones rather than popping.
         let mut meet_inserts: Vec<std::ops::Range<u32>> = Vec::new();
+        // The members the sibling meet narrowed to the exact null type, each typed before it: an
+        // `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
+        // null type on its own (`const: null`) is not one of them.
+        let mut met_into_null: HashSet<usize> = HashSet::new();
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
@@ -479,6 +483,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
+                let null_before = self.is_exact_null(ty);
                 let met = self.meet_refiner(
                     ty,
                     sibling.refiner,
@@ -487,7 +492,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 meet_inserts.push(mark..self.graph_mark());
                 ty = match met {
-                    Ok(intersection) => intersection,
+                    Ok(intersection) => {
+                        if !null_before && self.is_exact_null(intersection) {
+                            met_into_null.insert(index);
+                        }
+                        intersection
+                    }
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
@@ -683,12 +693,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // branches are the variants, as the `allOf` spelling lowers them (#633). Kept, it was a
         // `()` variant beside them, so one instance set had two public types by spelling. The
         // dropped branches' meet inserts (their `…Constrained` aliases) are elided unless a
-        // surviving variant reaches them.
+        // surviving variant reaches them. A branch that is the null type on its own (`const:
+        // null`) stays the `()` variant it is with no sibling and in the `allOf` spelling.
         if mode == UnionMode::AnyOf
-            && sibling.is_some()
-            && variants
+            && variant_members
                 .iter()
-                .any(|variant| self.is_exact_null(variant.ty))
+                .any(|member| met_into_null.contains(member))
             && !variants
                 .iter()
                 .all(|variant| self.is_exact_null(variant.ty))
@@ -699,7 +709,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .zip(std::mem::take(&mut ref_names))
                 .zip(std::mem::take(&mut variant_members));
             for ((variant, ref_name), member) in entries {
-                if self.is_exact_null(variant.ty) {
+                if met_into_null.contains(&member) {
                     dropped.push(member);
                 } else {
                     variants.push(variant);
