@@ -3305,7 +3305,7 @@ fn a_cycle_closing_ref_branch_to_an_untyped_array_all_of_matches_the_same_union_
         assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
         let types = types_module(&code);
         assert!(
-            types.contains("pub type Node = Vec<Node>;"),
+            types.contains("pub struct Node(pub Vec<Node>);"),
             "{body}: `null` is invalid in `Node`'s items, so they are not `Option`: {types}"
         );
         let pick = field_type(&types, "pub pick")
@@ -3314,6 +3314,47 @@ fn a_cycle_closing_ref_branch_to_an_untyped_array_all_of_matches_the_same_union_
             !pick.starts_with("Option<"),
             "{body}: `pick` is `{pick}`, but `null` is invalid here: {types}"
         );
+    }
+}
+
+/// Issue #648: an array or tuple component whose items reach that component again through other
+/// arrays and tuples alone was emitted as a type alias naming itself (`pub type Node = Vec<Node>;`),
+/// which rustc rejects (`E0391`, a cycle expanding the alias). Each member of such a cycle is a
+/// transparent newtype instead, whatever `Option`/`Box` wraps the reference, while an array that
+/// only points into the cycle, or one whose cycle passes through a struct, stays an alias.
+#[test]
+fn an_array_or_tuple_closing_an_alias_cycle_is_a_newtype() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Node: { type: array, items: { $ref: '#/components/schemas/Node' } }\n    \
+         Maybe: { type: array, items: { oneOf: [{ $ref: '#/components/schemas/Maybe' }, { type: \
+         'null' }] } }\n    \
+         Tup: { type: array, prefixItems: [{ $ref: '#/components/schemas/Tup' }], items: false }\n    \
+         Ping: { type: array, items: { $ref: '#/components/schemas/Pong' } }\n    \
+         Pong: { type: array, prefixItems: [{ $ref: '#/components/schemas/Ping' }], items: false }\n    \
+         Into: { type: array, items: { $ref: '#/components/schemas/Node' } }\n    \
+         Leaf: { type: object, properties: { kids: { $ref: '#/components/schemas/Kids' } } }\n    \
+         Kids: { type: array, items: { $ref: '#/components/schemas/Leaf' } }\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let types = types_module(&code);
+    for newtype in [
+        "pub struct Node(pub Vec<Node>);",
+        "pub struct Maybe(pub Vec<Option<Maybe>>);",
+        "pub struct Tup(pub (Box<Tup>,));",
+        "pub struct Ping(pub Vec<Pong>);",
+        "pub struct Pong(pub (Box<Ping>,));",
+    ] {
+        assert!(types.contains(newtype), "no `{newtype}`: {types}");
+    }
+    assert_eq!(
+        types.matches("#[serde(transparent)]").count(),
+        5,
+        "every newtype, and nothing else, is transparent on the wire: {types}"
+    );
+    for alias in ["pub type Into = Vec<Node>;", "pub type Kids = Vec<Leaf>;"] {
+        assert!(types.contains(alias), "no `{alias}`: {types}");
     }
 }
 
@@ -3360,8 +3401,9 @@ fn a_cycle_closing_item_met_with_untyped_items_generates_as_without_them() {
             );
             let types = types_module(&code);
             assert!(
-                types.contains("pub type Node = Vec<Node>;"),
-                "{members}: the merge is the cycle-closing `items` alone: {types}"
+                types.contains("pub struct Node(pub Vec<Node>);"),
+                "{members}: the merge is the cycle-closing `items` alone, a newtype as the array \
+                 closing its own cycle (#648): {types}"
             );
             let pick = field_type(&types, "pub pick")
                 .unwrap_or_else(|| panic!("{members}: no `pick` field: {types}"));
@@ -3397,22 +3439,26 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
         next.contains("Box<Node>"),
         "`next` keeps the boxed cycle-closing `Node`: `{next}` in {types}"
     );
-    // The meet is the `prefixItems` member alone, which lowers on its own as `TupMember0`.
-    let alias = |name: &str| {
+    // The meet is the `prefixItems` member alone, which lowers on its own as `TupMember0`. `Tup`
+    // closes its own cycle through that tuple, so it is a transparent newtype over it (#648), and
+    // `TupMember0`, which only points into the cycle, stays an alias.
+    let line_after = |prefix: &str| {
         types
             .lines()
             .map(str::trim_start)
-            .find_map(|line| line.strip_prefix(&format!("pub type {name} = ")))
+            .find_map(|line| line.strip_prefix(prefix))
             .map(str::to_owned)
     };
-    let tuple = alias("Tup").unwrap_or_else(|| panic!("no `Tup` alias: {types}"));
+    let tuple = line_after("pub struct Tup(pub ")
+        .and_then(|rest| rest.strip_suffix(");").map(|body| format!("{body};")))
+        .unwrap_or_else(|| panic!("no `Tup` newtype: {types}"));
     assert!(
         tuple.contains("Box<Tup>"),
         "`Tup` keeps the cycle-closing position: `{tuple}`"
     );
     assert_eq!(
         Some(tuple),
-        alias("TupMember0"),
+        line_after("pub type TupMember0 = "),
         "`Tup` is its `prefixItems` member, as without the untyped `items`: {types}"
     );
 }
