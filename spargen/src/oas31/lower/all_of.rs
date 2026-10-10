@@ -52,8 +52,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // written inline does ([`Self::lower_all_of_with_union_member`]): lowered as its own
         // component, it denied `null` for want of a decision, and the meet denied it even beside
         // `type: [array, 'null']` (#624). One nested in an inner `allOf` is a member of this
-        // merge as well, flattened into it, so it takes `null` alike (#630).
-        self.ref_union_members_take_scalar_null(&ref_members, &mut contributions);
+        // merge as well, flattened into it, so it takes `null` alike (#630). Only where `null`
+        // can satisfy the merge at all: the own `type`, `enum` or `const` of this schema, or of
+        // an `allOf` flattened into it, contributes nothing to the meet yet constrains every
+        // value of it, so one that excludes `null` leaves no `null` to take.
+        if self.flattened_keywords_admit_null(schema) {
+            self.ref_union_members_take_scalar_null(&ref_members, &mut contributions);
+        }
         self.combine_all_of(schema, hint, &contributions)
     }
 
