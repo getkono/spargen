@@ -105,3 +105,49 @@ fn a_oneof_nested_union_branch_admitting_null_beside_a_null_branch_admits_no_nul
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// A `oneOf` branch that is a nested union lowering to `Value` (`{anyOf: [true]}`,
+/// `{oneOf: [{}]}`), met with a conjunct that admits `null` (an `allOf` member or a `$ref` sibling
+/// naming `type: [object, 'null']`), takes the conjunct's `null` as a branch that states nothing,
+/// and is counted once for it: beside a branch that denies `null` it is the one branch `null`
+/// matches, so the union keeps `null`; beside a branch that states `null` too, `null` matches two
+/// branches and the union admits none.
+#[test]
+fn a_oneof_nested_value_union_branch_met_with_a_null_conjunct_counts_null_once() {
+    let mut mismatches = Vec::new();
+    for branch in ["{ anyOf: [ true ] }", "{ oneOf: [ {} ] }"] {
+        for (others, nullable) in [
+            ("{ type: integer }", true),
+            ("{ type: [integer, 'null'] }", false),
+        ] {
+            for site in [
+                format!(
+                    "{{ allOf: [ {{ $ref: '#/components/schemas/NB' }} ], oneOf: [ {branch}, \
+                     {others} ] }}"
+                ),
+                format!("{{ $ref: '#/components/schemas/NB', oneOf: [ {branch}, {others} ] }}"),
+            ] {
+                let spec = with_schemas(
+                    "3.1.0",
+                    &format!(
+                        "    Pick: {site}\n    NB: {{ type: [object, 'null'] }}\n    Holder:\n      \
+                         type: object\n      properties:\n        pick: {{ $ref: \
+                         '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                    ),
+                );
+                let (report, code) = generate_with_code(&spec);
+                assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+                let types = types_module(&code);
+                let pick = field_type(&types, "pub pick")
+                    .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+                if pick.starts_with("Option<") != nullable {
+                    let validity = if nullable { "valid" } else { "invalid" };
+                    mismatches.push(format!(
+                        "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

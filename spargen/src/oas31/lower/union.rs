@@ -519,7 +519,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
             nullable_variants += usize::from(ty.nullable);
-            undecided_nulls += usize::from(leaves_null_undecided && !ty.nullable);
+            // A branch already counted as stating nothing (a nested union lowering to `Value`
+            // that took the conjunct's `null`) is one branch `null` matches, not two.
+            undecided_nulls +=
+                usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
             null_variants += usize::from(self.is_exact_null(ty));
             null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
