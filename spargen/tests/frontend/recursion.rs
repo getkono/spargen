@@ -3196,3 +3196,73 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
     );
     assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
+
+/// The rows of `schemas::a_cycle_closing_untyped_ref_branch_beside_a_null_branch_matches_the_same_union_outside_it`
+/// for a component whose body is an untyped `allOf` rather than object keywords of its own, which
+/// lowers to the struct the members merge into (#627): `Node.next` sits in a member, `Holder.pick`
+/// carries the same union, and the two agree. A `oneOf` beside a `null` branch admits no `null`
+/// whether the members are inline, sit beside object keywords, or include a `$ref` to an untyped
+/// component; a member stating `type: object` decides `null`, and an `anyOf` admits it, so those
+/// stay `Option` in both places.
+#[test]
+fn a_cycle_closing_ref_branch_to_an_untyped_all_of_component_matches_the_same_union_outside_it() {
+    let one_of = "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }";
+    let any_of = "{ anyOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }";
+    let mut mismatches = Vec::new();
+    for (body, site, nullable) in [
+        (
+            "allOf: [ { properties: { a: { type: string } } }, { properties: { next: SITE }, \
+             required: [next] } ]",
+            one_of,
+            false,
+        ),
+        (
+            "properties: { a: { type: string } }, allOf: [ { properties: { next: SITE }, \
+             required: [next] } ]",
+            one_of,
+            false,
+        ),
+        (
+            "allOf: [ { $ref: '#/components/schemas/Base' }, { properties: { next: SITE }, \
+             required: [next] } ]",
+            one_of,
+            false,
+        ),
+        (
+            "allOf: [ { type: object, properties: { a: { type: string } } }, { properties: { \
+             next: SITE }, required: [next] } ]",
+            one_of,
+            true,
+        ),
+        (
+            "allOf: [ { properties: { a: { type: string } } }, { properties: { next: SITE }, \
+             required: [next] } ]",
+            any_of,
+            true,
+        ),
+    ] {
+        let body = body.replace("SITE", site);
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Base: {{ properties: {{ b: {{ type: string }} }} }}\n    Node: {{ {body} }}\n    \
+                 Holder:\n      type: object\n      properties:\n        pick: {site}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        let types = types_module(&code);
+        for field in ["pub next", "pub pick"] {
+            let ty = field_type(&types, field)
+                .unwrap_or_else(|| panic!("{body}: no `{field}` field: {types}"));
+            if ty.starts_with("Option<") != nullable {
+                let validity = if nullable { "valid" } else { "invalid" };
+                mismatches.push(format!(
+                    "{body}: `{field}` is `{ty}`, but `null` is {validity} here"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
