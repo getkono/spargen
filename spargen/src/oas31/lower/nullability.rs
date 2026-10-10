@@ -851,7 +851,7 @@ pub(super) fn schema_is_nullable(schema: &Schema) -> bool {
 /// Whether every one of a schema's own `type`, `enum` and `const` that it states admits `null`
 /// (vacuously so where it states none). Unlike [`schema_is_nullable`], which asks whether any of
 /// them lists `null`, this is their conjunction: `{type: string, enum: [null]}` admits no `null`.
-fn own_keywords_admit_null(schema: &Schema) -> bool {
+pub(super) fn own_keywords_admit_null(schema: &Schema) -> bool {
     let type_admits = stated_nullability(schema).unwrap_or(true);
     let enum_admits = schema
         .enum_values

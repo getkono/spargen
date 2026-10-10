@@ -187,18 +187,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
-    /// Report a `oneOf` whose sibling keywords meet every branch in the exact `null` alone (#632):
-    /// `null` then matches every branch and fails the exactly-one rule, so no value satisfies the
-    /// schema. The `allOf` spelling, the sibling written as a member beside the union, is the same
-    /// empty intersection of scalar members, and both are `E013`.
+    /// Report a `oneOf` whose sibling keywords leave every one of several branches accepting the
+    /// exact `null` alone, by meeting it in `null` or beside a `null` member (#632): `null` then
+    /// matches every branch and fails the exactly-one rule, so no value satisfies the schema. The
+    /// `allOf` spelling, the sibling written as a member beside the union, is the same empty
+    /// intersection of scalar members, and both are `E013`.
     pub(super) fn reject_one_of_null_in_every_branch<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: scalar-members
         self.reject_irreconcilable(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
-            "this schema's own sibling keywords meet every `oneOf` member in `null` alone, so \
-             `null` matches all of them and fails the exactly-one rule, and no value satisfies \
-             the schema",
+            "this schema's own sibling keywords leave every `oneOf` member accepting `null` \
+             alone, so `null` matches all of them and fails the exactly-one rule, and no value \
+             satisfies the schema",
             UNION_SIBLING_REMEDY,
         )
     }

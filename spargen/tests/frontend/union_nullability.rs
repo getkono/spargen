@@ -293,8 +293,11 @@ fn flattened_own_keywords_excluding_null_withhold_it_from_a_ref_union_member() {
 /// untyped `items` branch as array-only (#614), so the scalar meets each branch in `null` alone:
 /// `null` then matches every branch, which fails the `oneOf`'s exactly-one rule, and no value
 /// satisfies the schema. The sibling spelling merged the `()` variants with `W001` and generated the
-/// null type for it. With one branch excluded (`W011`) and one met in `null`, `null` matches that
-/// branch alone, and both spellings stay the null type.
+/// null type for it. A `null` member beside a branch met in `null` alone is the same empty
+/// intersection, and `const: null` or `enum: [null]` meets an untyped branch in `null` as
+/// `type: 'null'` does, where it excluded every branch with `E007` instead. With one branch excluded
+/// (`W011`) and one met in `null`, `null` matches that branch alone, and both spellings stay the
+/// null type, as an `anyOf` met in `null` is.
 #[test]
 fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spelling() {
     let mut mismatches = Vec::new();
@@ -324,6 +327,47 @@ fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spell
             "{ type: [integer, 'null'], oneOf: [ { items: { type: string } }, { type: string } ] }",
             "{ allOf: [ { type: [integer, 'null'] }, { oneOf: [ { items: { type: string } }, { \
              type: string } ] } ] }",
+            true,
+        ),
+        // A `null` member is a branch `null` matches beside the one the meet narrows to `null`.
+        (
+            "{ type: [string, 'null'], oneOf: [ { type: 'null' }, { items: { type: string } } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { oneOf: [ { type: 'null' }, { items: { \
+             type: string } } ] } ] }",
+            false,
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ { type: 'null' }, { items: { type: string } }, { \
+             type: integer } ] }",
+            "{ allOf: [ { type: [string, 'null'] }, { oneOf: [ { type: 'null' }, { items: { \
+             type: string } }, { type: integer } ] } ] }",
+            false,
+        ),
+        // `const: null` and `enum: [null]` permit `null` to an untyped branch as `type: 'null'`
+        // does.
+        (
+            "{ const: null, oneOf: [ { items: { type: string } }, { items: { type: integer } } ] }",
+            "{ allOf: [ { const: null }, { oneOf: [ { items: { type: string } }, { items: { \
+             type: integer } } ] } ] }",
+            false,
+        ),
+        (
+            "{ enum: [null], oneOf: [ { items: { type: string } }, { items: { type: integer } } \
+             ] }",
+            "{ allOf: [ { enum: [null] }, { oneOf: [ { items: { type: string } }, { items: { \
+             type: integer } } ] } ] }",
+            false,
+        ),
+        (
+            "{ const: null, oneOf: [ { items: { type: string } }, { type: string } ] }",
+            "{ allOf: [ { const: null }, { oneOf: [ { items: { type: string } }, { type: string \
+             } ] } ] }",
+            true,
+        ),
+        (
+            "{ const: null, anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }",
+            "{ allOf: [ { const: null }, { anyOf: [ { items: { type: string } }, { items: { \
+             type: integer } } ] } ] }",
             true,
         ),
     ] {
