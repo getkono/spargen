@@ -574,3 +574,56 @@ fn an_anyof_branch_the_sibling_narrows_to_null_is_the_union_option() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// An `anyOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`), not
+/// one the sibling meet narrows to it, stays the `()` variant it is with no sibling and in the
+/// `allOf` spelling, beside a sibling too (#633 changes only the branches the meet narrows). The
+/// union is that enum, not an `Option` of the typed branches, and every `()` alias it emits is the
+/// payload of an arm rather than an orphan left beside the enum.
+#[test]
+fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
+    let mut mismatches = Vec::new();
+    for branch in ["{ const: null }", "{ enum: [null] }"] {
+        let members =
+            format!("[ {branch}, {{ type: string, enum: [a] }}, {{ type: string, enum: [b] }} ]");
+        for site in [
+            format!("{{ type: [string, 'null'], anyOf: {members} }}"),
+            format!("{{ allOf: [ {{ type: [string, 'null'] }}, {{ anyOf: {members} }} ] }}"),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick");
+            let units: Vec<&str> = types
+                .lines()
+                .filter_map(|line| {
+                    line.trim()
+                        .strip_prefix("pub type ")?
+                        .strip_suffix(" = ();")
+                })
+                .collect();
+            let orphans: Vec<&&str> = units
+                .iter()
+                .filter(|unit| !types.contains(&format!("(Box<{unit}>)")))
+                .collect();
+            if report.outcome() == Outcome::Rejected
+                || pick.as_deref() != Some("Pick")
+                || !types.contains("pub enum Pick {")
+                || units.is_empty()
+                || !orphans.is_empty()
+            {
+                mismatches.push(format!(
+                    "{site}: not the enum with its `()` arm (orphaned aliases {orphans:?}): \
+                     {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
