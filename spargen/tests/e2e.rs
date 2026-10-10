@@ -436,6 +436,108 @@ fn a_one_element_array_decodes_into_a_one_position_tuple() {
     assert!(status.success(), "the tuple fixture must lint clean");
 }
 
+/// Arrays and tuples that reach themselves through aliases alone (issue #648): a self-referential
+/// array, one whose items are nullable, a self-referential one-position tuple, an array and a
+/// tuple that name each other, and an array that only points into a cycle.
+const ALIAS_CYCLE_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /node:
+    get:
+      operationId: getNode
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '404':
+          description: nf
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tup' }
+components:
+  schemas:
+    Node: { type: array, items: { $ref: '#/components/schemas/Node' } }
+    Maybe: { type: array, items: { oneOf: [{ $ref: '#/components/schemas/Maybe' }, { type: 'null' }] } }
+    Tup: { type: array, prefixItems: [{ $ref: '#/components/schemas/Tup' }], items: false }
+    Ping: { type: array, items: { $ref: '#/components/schemas/Pong' } }
+    Pong: { type: array, prefixItems: [{ $ref: '#/components/schemas/Ping' }], items: false }
+    Into: { type: array, items: { $ref: '#/components/schemas/Node' } }
+"#;
+
+/// Issue #648: a component closing an alias cycle was emitted as `pub type Node = Vec<Node>;`,
+/// which rustc rejects (`E0391`). Each is a transparent newtype instead, so the module compiles and
+/// lints clean, and the fixture's own test decodes and re-encodes each wire shape through it.
+#[test]
+fn an_array_or_tuple_closing_an_alias_cycle_compiles_and_round_trips() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, ALIAS_CYCLE_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "alias_cycle_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/alias_cycle.rs"),
+        r##"
+use alias_cycle_client::types::{Into, Maybe, Node, Ping, Pong, Tup};
+
+fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(wire: &str) -> T {
+    let value: T = serde_json::from_str(wire).unwrap();
+    assert_eq!(
+        serde_json::to_value(&value).unwrap(),
+        serde_json::from_str::<serde_json::Value>(wire).unwrap()
+    );
+    value
+}
+
+#[test]
+fn every_cycle_member_decodes_its_wire_shape() {
+    let node: Node = round_trip("[[], [[]]]");
+    assert_eq!(node.0.len(), 2);
+    assert_eq!(node.0[1].0.len(), 1);
+    assert!(serde_json::from_str::<Node>("[1]").is_err());
+
+    let maybe: Maybe = round_trip("[null, [null]]");
+    assert!(maybe.0[0].is_none());
+
+    assert!(serde_json::from_str::<Tup>("[]").is_err());
+    assert!(serde_json::from_str::<Tup>("[[]]").is_err());
+
+    let ping: Ping = round_trip("[[[]]]");
+    let Pong((inner,)) = &ping.0[0];
+    assert!(inner.0.is_empty());
+
+    let into: Into = round_trip("[[]]");
+    assert_eq!(into.len(), 1);
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "every alias-cycle member must decode its wire shape"
+    );
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the alias-cycle fixture must lint clean");
+}
+
 const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
