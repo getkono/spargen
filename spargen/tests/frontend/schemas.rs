@@ -1230,6 +1230,27 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
              } } }, { properties: { b: { type: integer } } } ] } ] }",
             false,
         ),
+        // The same union member written as a `$ref` to a union component (#624). Its object
+        // spelling, a `$ref` to an object union beside an object member, is still rejected as an
+        // object/scalar mix (#491), so the inline object spelling stands beside it.
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { anyOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayOneOf' } ] }",
+            "{ allOf: [ { type: [object, 'null'] }, { oneOf: [ { properties: { a: { type: string \
+             } } }, { properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: array }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
+            "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] } ] }",
+            false,
+        ),
         (
             "{ allOf: [ { type: array }, { anyOf: [ { items: { type: string } }, { items: { type: \
              integer } } ] } ] }",
@@ -1243,7 +1264,10 @@ fn an_untyped_array_applicator_branch_leaves_null_undecided() {
                 "3.1.0",
                 &format!(
                     "    Pick: {site}\n    NullableArray: {{ type: [array, 'null'] }}\n    \
-                     NullableObject: {{ type: [object, 'null'] }}\n    Holder:\n      type: \
+                     NullableObject: {{ type: [object, 'null'] }}\n    ArrayAnyOf: {{ anyOf: \
+                     [ {{ items: {{ type: string }} }}, {{ items: {{ type: integer }} }} ] }}\n    \
+                     ArrayOneOf: {{ oneOf: [ {{ items: {{ type: string }} }}, {{ items: {{ type: \
+                     integer }} }} ] }}\n    Holder:\n      type: \
                      object\n      properties:\n        pick: {{ $ref: \
                      '#/components/schemas/Pick' }}\n      required: [pick]\n"
                 ),
@@ -1394,25 +1418,29 @@ fn a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null() {
 /// leave `null` undecided, where the scalar's other category meets no branch: the union takes
 /// `null` from that member (#621), so `null` is the one value left and the schema is the null
 /// type, as any other null-only `allOf` meet is, where it was `E013` before. Without `null` in
-/// the scalar member nothing is left, and that stays `E013`.
+/// the scalar member nothing is left, and that stays `E013`. The union written as a `$ref` to a
+/// union component takes `null` the same way (#624).
 #[test]
 fn an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type() {
+    let items_union = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
     let document = |site: &str| {
         with_schemas(
             "3.1.0",
             &format!(
-                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
-                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                "    Pick: {site}\n    ItemsUnion: {items_union}\n    Holder:\n      type: \
+                 object\n      properties:\n        pick: {{ $ref: '#/components/schemas/Pick' \
+                 }}\n      required: [pick]\n"
             ),
         )
     };
-    let items_union = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
     for site in [
         format!("{{ allOf: [ {{ type: [string, 'null'] }}, {items_union} ] }}"),
         format!("{{ allOf: [ {{ type: 'null' }}, {items_union} ] }}"),
         format!("{{ allOf: [ {{ const: null }}, {items_union} ] }}"),
         "{ allOf: [ { type: [integer, 'null'] }, { anyOf: [ { items: { type: string } }, { type: \
          string } ] } ] }"
+            .to_owned(),
+        "{ allOf: [ { type: [string, 'null'] }, { $ref: '#/components/schemas/ItemsUnion' } ] }"
             .to_owned(),
     ] {
         let (report, code) = generate_with_code(&document(&site));
@@ -1428,10 +1456,15 @@ fn an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type(
         );
     }
 
-    let empty = document(&format!(
-        "{{ allOf: [ {{ type: string }}, {items_union} ] }}"
-    ));
-    let report = generate(&empty);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    for empty in [
+        format!("{{ allOf: [ {{ type: string }}, {items_union} ] }}"),
+        "{ allOf: [ { type: string }, { $ref: '#/components/schemas/ItemsUnion' } ] }".to_owned(),
+    ] {
+        let report = generate(&document(&empty));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{empty}: {report:#?}");
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{empty}: {report:#?}"
+        );
+    }
 }

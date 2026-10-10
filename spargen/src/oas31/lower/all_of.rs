@@ -43,7 +43,35 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Struct`]: crate::ir::Struct
     pub(super) fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut contributions = Vec::new();
-        self.in_composition(|ctx| ctx.gather_all_of(schema, hint, &mut contributions))?;
+        // The `$ref` members gathered as the one scalar their target lowers to, by where it went.
+        let mut ref_members = Vec::new();
+        self.in_composition(|ctx| {
+            for (index, member) in schema.all_of.iter().enumerate() {
+                let slot = contributions.len();
+                ctx.gather_member(member, &format!("{hint}Member{index}"), &mut contributions)?;
+                if let SchemaOr::Schema(member) = member {
+                    if member.reference.is_some()
+                        && contributions.len() == slot + 1
+                        && matches!(contributions[slot], Contribution::Scalar(_))
+                    {
+                        ref_members.push((slot, member.as_ref()));
+                    }
+                }
+            }
+            let mut siblings = schema.clone();
+            siblings.all_of.clear();
+            ctx.gather_all_of(&siblings, hint, &mut contributions)
+        })?;
+        // A `$ref` to a union takes `null` from the other members exactly where the same union
+        // written inline does ([`Self::lower_all_of_with_union_member`]): lowered as its own
+        // component, it denied `null` for want of a decision, and the meet denied it even beside
+        // `type: [array, 'null']` (#624).
+        for (slot, member) in ref_members {
+            if let Some(ty) = self.ref_union_member_takes_scalar_null(member, slot, &contributions)
+            {
+                contributions[slot] = Contribution::Scalar(ty);
+            }
+        }
         self.combine_all_of(schema, hint, &contributions)
     }
 
