@@ -154,11 +154,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     },
                 );
             }
-            // A sibling carrying only object or only array applicators names no `type`, and
-            // `lower_schema` reaches its array arm only through `type`, so an array sibling would
-            // lower to `TypeKind::Any` — which intersects as identity, discarding the keywords with
-            // no diagnostic (#140), and an object sibling would lower to an object that denies
-            // `null` (#613). The applicators establish the category they apply to, as an untyped
+            // A sibling carrying only object or only array applicators names no `type`, so
+            // `lower_schema` would lower it to an object or an array that denies `null` (#613,
+            // #614), and before those to `TypeKind::Any` — which intersects as identity,
+            // discarding the keywords with no diagnostic (#140). The applicators establish the category they apply to, as an untyped
             // `properties` already does, and say nothing about `null` (the same reading
             // `lower_union_sibling` takes), so the target's nullability survives the intersection.
             //
@@ -392,12 +391,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         let nullable = schema.types.types.contains(&JsonType::Null);
+        // Untyped `items` or `prefixItems` alone are array applicators, and establish the array
+        // category as the same keywords do beside a `$ref` or as an `allOf` member, and as untyped
+        // object applicators do below. Reading no `type` as no category fell to `Any`, dropping
+        // the item types with no diagnostic (#614).
         let primary = schema
             .types
             .types
             .iter()
             .find(|ty| **ty != JsonType::Null)
-            .copied();
+            .copied()
+            .or_else(|| {
+                matches!(
+                    implied_applicator_category(schema),
+                    Some(ImpliedCategory::Only(JsonType::Array))
+                )
+                .then_some(JsonType::Array)
+            });
 
         let mut ty = match primary {
             Some(JsonType::Boolean) => {
