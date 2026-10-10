@@ -1600,6 +1600,39 @@ mod tests {
         assert!(graph.same_decoded_values(ty(2), ty(3)));
     }
 
+    /// The cycle check never panics on a reservation (#655): a reservation, or an array or tuple
+    /// whose item is one, may fill to a nominal newtype, so `same_generated_type` answers the
+    /// sound "not proven one type" instead, the same `false` its `Reserved` arm gives.
+    #[test]
+    fn a_reservation_is_not_proven_one_type_by_the_cycle_check() {
+        let mut graph = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            // `[R]` twice and `(R,)`, over the reservation `R` reserved below as id 6.
+            TypeKind::Array(Box::new(ty(6))),
+            TypeKind::Array(Box::new(ty(6))),
+            TypeKind::Tuple(vec![ty(6)]),
+            // `[String]` and `(String,)`, plain aliases with no reservation in reach.
+            TypeKind::Array(Box::new(ty(0))),
+            TypeKind::Tuple(vec![ty(0)]),
+        ]);
+        assert_eq!(graph.reserve(), TypeId(6));
+        assert_eq!(graph.reserve(), TypeId(7));
+        // Directly, on either side, and against a second reservation.
+        assert!(!graph.same_generated_type(ty(6), ty(0)));
+        assert!(!graph.same_generated_type(ty(0), ty(6)));
+        assert!(!graph.same_generated_type(ty(6), ty(7)));
+        // Through an array or tuple item, on either side.
+        assert!(!graph.same_generated_type(ty(1), ty(2)));
+        assert!(!graph.same_generated_type(ty(1), ty(4)));
+        assert!(!graph.same_generated_type(ty(4), ty(1)));
+        assert!(!graph.same_generated_type(ty(3), ty(5)));
+        assert!(!graph.same_generated_type(ty(5), ty(3)));
+        assert_eq!(two_bodies(&graph, ty(1), ty(2)), None);
+        // The same reference is still one type, answered by id before the cycle check.
+        assert!(graph.same_generated_type(ty(6), ty(6)));
+        assert!(graph.same_generated_type(ty(1), ty(1)));
+    }
+
     #[test]
     fn different_rust_types_share_nothing() {
         let scalars = graph(vec![

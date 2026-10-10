@@ -133,13 +133,29 @@ impl TypeGraph {
     /// alias (#648), so every reader that asks which Rust type a definition is — codegen, the
     /// [`same_generated_type`](Self::same_generated_type) comparison, and the API surface — reads
     /// it here, and none of them can disagree about which definitions are nominal.
+    ///
+    /// Asked only after `check_invariants`, so it panics if the walk meets a reservation; a reader
+    /// that can run earlier asks [`alias_cycle`](Self::alias_cycle), which answers that unknown.
     pub(crate) fn closes_alias_cycle(&self, id: TypeId) -> bool {
-        /// The references an alias's expansion contains, or none for a definition that is not an
-        /// alias of a container (a nominal type, or a leaf alias such as a primitive).
-        fn alias_items(kind: &TypeKind) -> &[Ty] {
+        self.alias_cycle(id).unwrap_or_else(|| {
+            unreachable!(
+                "an alias cycle was asked of a reservation; `check_invariants` should have \
+                 rejected it"
+            )
+        })
+    }
+
+    /// [`closes_alias_cycle`](Self::closes_alias_cycle), or `None` where the walk reaches a
+    /// reservation — `id` itself, or an array or tuple item along the way — whose body is unknown,
+    /// so whether it closes the cycle is unknown too.
+    fn alias_cycle(&self, id: TypeId) -> Option<bool> {
+        /// The references an alias's expansion contains, none for a definition that is not an
+        /// alias of a container (a nominal type, or a leaf alias such as a primitive), or `None`
+        /// for a reservation, whose expansion is not known yet.
+        fn alias_items(kind: &TypeKind) -> Option<&[Ty]> {
             match kind {
-                TypeKind::Array(item) => std::slice::from_ref(&**item),
-                TypeKind::Tuple(items) => items,
+                TypeKind::Array(item) => Some(std::slice::from_ref(&**item)),
+                TypeKind::Tuple(items) => Some(items),
                 TypeKind::Primitive(_)
                 | TypeKind::Struct(_)
                 | TypeKind::Enum(_)
@@ -147,32 +163,27 @@ impl TypeGraph {
                 | TypeKind::Null
                 | TypeKind::Never
                 | TypeKind::Union(_)
-                | TypeKind::Any => &[],
-                TypeKind::Reserved => {
-                    unreachable!(
-                        "an alias cycle was asked of a reservation; `check_invariants` should have \
-                         rejected it"
-                    )
-                }
+                | TypeKind::Any => Some(&[]),
+                TypeKind::Reserved => None,
             }
         }
         let Some(def) = self.get(id) else {
-            return false;
+            return Some(false);
         };
-        let mut pending: Vec<TypeId> = alias_items(&def.kind).iter().map(|ty| ty.id).collect();
+        let mut pending: Vec<TypeId> = alias_items(&def.kind)?.iter().map(|ty| ty.id).collect();
         let mut seen = BTreeSet::new();
         while let Some(next) = pending.pop() {
             if next == id {
-                return true;
+                return Some(true);
             }
             if !seen.insert(next) {
                 continue;
             }
             if let Some(def) = self.get(next) {
-                pending.extend(alias_items(&def.kind).iter().map(|ty| ty.id));
+                pending.extend(alias_items(&def.kind)?.iter().map(|ty| ty.id));
             }
         }
-        false
+        Some(false)
     }
 
     /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
@@ -229,8 +240,13 @@ impl TypeGraph {
         };
         // A cycle-member array or tuple is emitted as its own newtype, so as a Rust type it matches
         // only itself, which the id comparison above already answered. Its transparent newtype
-        // decodes exactly what its structure does, so `structural` still compares that.
-        if !structural && (self.closes_alias_cycle(a.id) || self.closes_alias_cycle(b.id)) {
+        // decodes exactly what its structure does, so `structural` still compares that. A side
+        // whose walk reaches a reservation (itself, or an array or tuple item) may fill to such a
+        // newtype, so nothing proves it one type with the other: `false`, as the `Reserved` arm
+        // below answers, rather than a panic.
+        if !structural
+            && (self.alias_cycle(a.id) != Some(false) || self.alias_cycle(b.id) != Some(false))
+        {
             return false;
         }
         visiting.push(pair);
