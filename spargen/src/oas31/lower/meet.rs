@@ -108,7 +108,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // body, and it is how every ordinary recursive schema composes when two `allOf` members
         // repeat one construct. Refusing it rejected those documents with a false "conflicting
         // types" message. `intersect_non_null` answers it by its identity short-circuit.
+        //
+        // So is a reservation intersected with `Any`, for the same reason: `Any` is every JSON
+        // value, so `X ∩ Any = X` whatever `X`'s body turns out to be, and the answer is the
+        // reservation itself — a reference the fill completes, exactly as the non-cycle spelling
+        // answers with the finished target (#641). Refusing it rejected an untyped `items` beside
+        // a cycle-closing item (`allOf: [{items: {$ref: Node}}, {items: {maxItems: 3}}]`) with
+        // `E013` while the same document over a `$ref` outside the cycle generated. Nothing is
+        // read from the body: the answer's nullability is the reservation's own reference
+        // nullability, since `Any` admits `null`. The callers that would make a top-level meet's
+        // answer a body (`allOf` scalar members, a `$ref` with siblings) refuse a reservation
+        // before meeting, as they do for `X ∩ X`.
+        let top = matches!(a_kind, TypeKind::Any) || matches!(b_kind, TypeKind::Any);
         if a.id != b.id
+            && !top
             && (matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved))
         {
             return Err(NoMeet::Unrepresentable);
@@ -152,13 +165,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         match (a_kind, b_kind) {
-            // Nothing true can be said about intersecting an unlowered body with anything else
-            // (the identical reservation answered above by id). `intersect_types` refuses this
-            // before calling here; stating it again means a new caller inherits the refusal rather
-            // than reaching the `Any` arms below, which would answer with the placeholder itself.
-            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
+            // `Any` is the meet's identity, so it answers with the other side even where that is a
+            // reservation: `X ∩ Any = X` needs nothing of `X`'s body (#641, and see
+            // `intersect_types`, which lets exactly this pair through).
             (TypeKind::Any, _) => Ok(non_nullable(b)),
             (_, TypeKind::Any) => Ok(non_nullable(a)),
+            // Nothing true can be said about intersecting an unlowered body with anything else
+            // (the identical reservation answered above by id, `Any` just above). `intersect_types`
+            // refuses this before calling here; stating it again means a new caller inherits the
+            // refusal rather than reaching the arms below.
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
             (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
                 let Some(primitive) = intersect_primitives(*left, *right) else {
                     return Err(no_meet(a_kind, b_kind));
