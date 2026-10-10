@@ -614,6 +614,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut variant_members,
             );
         }
+        // The sibling meet left every branch the exact null type: `type: [string, 'null']` beside
+        // untyped `items` branches, which constrain arrays alone, meets each of them in `null`
+        // only. An `anyOf` needs one match, so `null` is the one value the union accepts and the
+        // union is the null type, as its `allOf` spelling (the `type` as a member beside the
+        // union) is (#625). Kept as an enum it was a union of `()` variants beside a `String`
+        // constraint, which read as a string-typed union.
+        if mode == UnionMode::AnyOf
+            && sibling.is_some()
+            && variants.len() > 1
+            && variants
+                .iter()
+                .all(|variant| self.is_exact_null(variant.ty))
+        {
+            variants.truncate(1);
+            ref_names.truncate(1);
+            variant_members.truncate(1);
+        }
         if variants.len() == 1 {
             let inner = variants[0].ty;
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
