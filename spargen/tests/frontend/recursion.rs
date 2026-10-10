@@ -3416,3 +3416,32 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
         "`Tup` is its `prefixItems` member, as without the untyped `items`: {types}"
     );
 }
+
+/// The `additionalProperties` position of the same meet (#641): two `allOf` members both constrain
+/// the value schema, one with a `$ref` that closes the cycle and the other untyped
+/// (`{maxLength: 3}`). `merge_additional` meets the two value types through `intersect_types`, so
+/// `A ∩ Value` is `A` here as well, and the map's values keep the cycle-closing reference rather
+/// than `E013`. A typed other side (`type: string`) is still refused, as
+/// `an_all_of_additional_properties_back_edge_says_why_it_cannot_merge` pins.
+#[test]
+fn a_cycle_closing_additional_properties_met_with_an_untyped_value_keeps_the_ref() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    A:\n      allOf:\n        - { type: object, additionalProperties: { $ref: \
+         '#/components/schemas/A' } }\n        - { type: object, additionalProperties: { \
+         maxLength: 3 } }\n",
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    assert!(
+        types.contains("BTreeMap<String, A>"),
+        "the map's values keep the cycle-closing `A`: {types}"
+    );
+}
