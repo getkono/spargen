@@ -170,9 +170,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // other member whose own keywords leave `null` undecided (#574).
             let member_untyped = self.branch_takes_permitted_null(real_members[0], inner);
             // An untyped object or array member constrains objects or arrays alone, so `null`
-            // matches it beside a `null` member, as the multi-member path counts it (#622).
+            // matches it beside a `null` member, as the multi-member path counts it (#622), and so
+            // does a nested union `null` matches through its own branches (#628).
             let member_leaves_null_undecided =
-                self.branch_leaves_null_undecided(real_members[0], inner);
+                self.branch_matches_null_undecided(real_members[0], inner);
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -366,8 +367,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // How many variants are an untyped object or array branch that still leaves `null`
         // undecided after its meet ([`Self::branch_leaves_null_undecided`]): its keywords constrain
         // objects or arrays alone, so `null` matches it, and a `oneOf` counts it beside a branch
-        // that states `null` (#622). Counted for exactly-one alone: such a branch on its own is
-        // the non-null struct or array every other spelling gives it, so it hoists nothing.
+        // that states `null` (#622). A nested union `null` matches through such branches of its
+        // own is counted alike ([`Self::branch_matches_null_undecided`], #628). Counted for
+        // exactly-one alone: such a branch on its own is the non-null struct, array or enum every
+        // other spelling gives it, so it hoists nothing.
         let mut undecided_nulls = 0usize;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
@@ -395,8 +398,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_union_member_is_the_union(schema);
             }
             // Read before anything below gives the branch a conjunct's `null`, which would hide
-            // that its own keywords decide nothing.
-            let leaves_null_undecided = self.branch_leaves_null_undecided(member, ty);
+            // that its own keywords decide nothing. A nested union `null` matches through its own
+            // branches is such a branch too (#628).
+            let leaves_null_undecided = self.branch_matches_null_undecided(member, ty);
             // The reservation half of the cycle test again, on a multi-variant union. Same fact,
             // same wording, same place in the order: before anything tries to intersect against the
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
@@ -573,7 +577,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // states nothing is counted where it took `null` from the conjunct (#592), and the meet's
         // copy of that `null` is cleared where the count puts it in two branches, or where an
         // `anyOf` hoisted it. An untyped object or array branch that hoisted nothing is counted
-        // too, since `null` matches it all the same (#622).
+        // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
+        // nothing and that `null` matches through its own branches (#628).
         let null_variants = if null_from_conjunct { null_variants } else { 0 };
         let null_twice = mode == UnionMode::OneOf
             && null_members
