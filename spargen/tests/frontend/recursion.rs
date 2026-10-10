@@ -3229,6 +3229,18 @@ fn a_cycle_closing_ref_branch_to_an_untyped_all_of_component_matches_the_same_un
             false,
         ),
         (
+            "allOf: [ { $ref: '#/components/schemas/Arr' }, { properties: { next: SITE }, \
+             required: [next] } ]",
+            one_of,
+            false,
+        ),
+        (
+            "allOf: [ { items: { type: string } }, { properties: { next: SITE }, required: \
+             [next] } ]",
+            one_of,
+            false,
+        ),
+        (
             "allOf: [ { type: object, properties: { a: { type: string } } }, { properties: { \
              next: SITE }, required: [next] } ]",
             one_of,
@@ -3245,7 +3257,8 @@ fn a_cycle_closing_ref_branch_to_an_untyped_all_of_component_matches_the_same_un
         let spec = with_schemas(
             "3.1.0",
             &format!(
-                "    Base: {{ properties: {{ b: {{ type: string }} }} }}\n    Node: {{ {body} }}\n    \
+                "    Base: {{ properties: {{ b: {{ type: string }} }} }}\n    Arr: {{ items: {{ \
+                 type: string }} }}\n    Node: {{ {body} }}\n    \
                  Holder:\n      type: object\n      properties:\n        pick: {site}\n      \
                  required: [pick]\n"
             ),
@@ -3265,4 +3278,41 @@ fn a_cycle_closing_ref_branch_to_an_untyped_all_of_component_matches_the_same_un
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The array counterpart of
+/// `a_cycle_closing_ref_branch_to_an_untyped_all_of_component_matches_the_same_union_outside_it`
+/// (#636): an untyped `allOf` whose only member is untyped `items` merges into a `Vec`, which
+/// leaves `null` undecided, so a `oneOf` beside a `null` branch admits no `null` both in the
+/// cycle-closing `items` and at `Holder.pick`, as the same `items` written without the `allOf`
+/// already lowered. The cycle site read the merge as a shape it could not read and kept the
+/// reservation's `Option`.
+#[test]
+fn a_cycle_closing_ref_branch_to_an_untyped_array_all_of_matches_the_same_union_outside_it() {
+    let site = "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }";
+    for body in [
+        format!("allOf: [ {{ items: {site} }} ]"),
+        format!("items: {site}"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Node: {{ {body} }}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {site}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub type Node = Vec<Node>;"),
+            "{body}: `null` is invalid in `Node`'s items, so they are not `Option`: {types}"
+        );
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{body}: no `pick` field: {types}"));
+        assert!(
+            !pick.starts_with("Option<"),
+            "{body}: `pick` is `{pick}`, but `null` is invalid here: {types}"
+        );
+    }
 }
