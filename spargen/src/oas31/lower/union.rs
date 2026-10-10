@@ -229,8 +229,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
                 // A sibling meet is refused above, so here the `type` array was dropped for
                 // lowering, and a target whose keywords decide nothing takes its `null` (#574).
-                inner.nullable =
-                    inner.nullable || nullable || (null_from_type_array && member_untyped);
+                let takes_null = inner.nullable || (null_from_type_array && member_untyped);
+                // A `null` member beside a member that accepts `null`, or whose untyped target
+                // leaves it undecided, puts `null` in two branches, as the collapse below counts
+                // it for a member that is no reservation (#627).
+                let null_twice = mode == UnionMode::OneOf
+                    && null_members + usize::from(takes_null || member_leaves_null_undecided) > 1;
+                inner.nullable = (takes_null || nullable) && !null_twice;
                 inner.boxed = true;
                 return Some(inner);
             }

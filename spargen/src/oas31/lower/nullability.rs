@@ -9,6 +9,7 @@ use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
 use super::combine::{schema_has_union, Contribution};
+use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::schema_has_shape_constraint;
 use super::{memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -76,16 +77,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// conjuncts the union is met with admit it. Untyped `items` or `prefixItems` alone lower to an
     /// array (#614) as untyped object applicators lower to a struct (#613), and leave `null`
     /// undecided alike.
+    ///
+    /// A cycle-closing `$ref` lowers to its target's still-open reservation, whose kind is not
+    /// known yet, so it is read from the target body instead: a target whose object or array
+    /// applicators establish its category ([`implied_applicator_category`]) is the struct, `Vec`
+    /// or tuple it will be filled with, and the same branch leaves `null` undecided inside the
+    /// cycle as outside it (#627).
     pub(super) fn branch_leaves_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
         let SchemaOr::Schema(member) = member else {
             return false;
         };
-        !ty.nullable
-            && matches!(
-                self.graph.get(ty.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_))
-            )
-            && !self.all_of_decides_null(member, 0)
+        let undecided_kind = match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_)) => true,
+            Some(TypeKind::Reserved) => member.reference.as_deref().is_some_and(|reference| {
+                self.ref_target_body(reference, &member.provenance)
+                    .is_some_and(|target| {
+                        matches!(
+                            implied_applicator_category(&target),
+                            Some(ImpliedCategory::Only(_))
+                        )
+                    })
+            }),
+            _ => false,
+        };
+        !ty.nullable && undecided_kind && !self.all_of_decides_null(member, 0)
     }
 
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
