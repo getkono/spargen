@@ -70,10 +70,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
-    /// Whether `member`, a union branch lowered to `ty`, is an object whose lowered non-null
-    /// struct decides nothing about `null`: no `type`, and nothing else
+    /// Whether `member`, a union branch lowered to `ty`, is an object or array whose lowered
+    /// non-null struct, `Vec` or tuple decides nothing about `null`: no `type`, and nothing else
     /// [`Self::all_of_decides_null`] reads as deciding, so `null` satisfies it wherever the
-    /// conjuncts the union is met with admit it.
+    /// conjuncts the union is met with admit it. Untyped `items` or `prefixItems` alone lower to an
+    /// array (#614) as untyped object applicators lower to a struct (#613), and leave `null`
+    /// undecided alike.
     pub(super) fn branch_leaves_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
         let SchemaOr::Schema(member) = member else {
             return false;
@@ -81,7 +83,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         !ty.nullable
             && matches!(
                 self.graph.get(ty.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
+                Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_))
             )
             && !self.all_of_decides_null(member, 0)
     }

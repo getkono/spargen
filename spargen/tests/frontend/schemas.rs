@@ -1161,3 +1161,82 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
         }
     }
 }
+
+/// An untyped `items` or `prefixItems` union branch, which now lowers to an array (#614), still
+/// leaves `null` undecided, as its `Value` did and as the untyped object branch beside it does
+/// (#574, #567): it takes the `null` a `type` array or a nullable `$ref` target permits, and
+/// counts as a branch `null` matches. Read as a typed array instead, it dropped that `null`, and a
+/// required field of the union went from `Option<Pick>` to `Pick`. Each row is pinned in its array
+/// and its untyped object spelling, which must agree.
+#[test]
+fn an_untyped_array_applicator_branch_leaves_null_undecided() {
+    let mut mismatches = Vec::new();
+    for (array, object, nullable) in [
+        (
+            "{ type: [array, 'null'], anyOf: [ { items: { type: string } }, { items: { type: \
+             integer } } ] }",
+            "{ type: [object, 'null'], anyOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] }",
+            true,
+        ),
+        (
+            "{ type: [array, 'null'], anyOf: [ { items: { type: string } }, { type: integer } ] }",
+            "{ type: [object, 'null'], anyOf: [ { properties: { a: { type: string } } }, { type: \
+             integer } ] }",
+            true,
+        ),
+        (
+            "{ type: [array, 'null'], oneOf: [ { prefixItems: [ { type: string } ] } ] }",
+            "{ type: [object, 'null'], oneOf: [ { required: [a] } ] }",
+            true,
+        ),
+        // `null` matches both untyped branches, which fails the `oneOf`'s exactly-one.
+        (
+            "{ type: [array, 'null'], oneOf: [ { items: { type: string } }, { items: { type: \
+             integer } } ] }",
+            "{ type: [object, 'null'], oneOf: [ { properties: { a: { type: string } } }, { \
+             properties: { b: { type: integer } } } ] }",
+            false,
+        ),
+        (
+            "{ type: [array, string, 'null'], oneOf: [ { items: { type: string } }, { type: \
+             string } ] }",
+            "{ type: [object, string, 'null'], oneOf: [ { properties: { a: { type: string } } }, \
+             { type: string } ] }",
+            true,
+        ),
+        // A nullable `$ref` target the union is met with permits `null`, and the untyped branches
+        // take it from the meet.
+        (
+            "{ $ref: '#/components/schemas/NullableArray', anyOf: [ { items: { type: string } }, \
+             { items: { type: integer } } ] }",
+            "{ $ref: '#/components/schemas/NullableObject', anyOf: [ { properties: { a: { type: \
+             string } } }, { properties: { b: { type: integer } } } ] }",
+            true,
+        ),
+    ] {
+        for site in [array, object] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    NullableArray: {{ type: [array, 'null'] }}\n    \
+                     NullableObject: {{ type: [object, 'null'] }}\n    Holder:\n      type: \
+                     object\n      properties:\n        pick: {{ $ref: \
+                     '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+            if pick.starts_with("Option<") != nullable {
+                let validity = if nullable { "valid" } else { "invalid" };
+                mismatches.push(format!(
+                    "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
