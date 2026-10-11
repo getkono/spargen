@@ -104,6 +104,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 intersection = met;
             }
+            // A `oneOf` the meets left with branches of one generated type collapses with `W001`,
+            // as the meet of a union member does (#643); an `anyOf` member met with a `oneOf`
+            // member left such `oneOf`s nested in its branches.
+            intersection = self.collapse_met_one_ofs(schema, intersection, mark);
             // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
             // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).

@@ -203,7 +203,9 @@ impl TypeGraph {
     /// when they declare the same wire names with the same `required` flags and XML hints, each
     /// field's type matches by this same test, and their `additionalProperties` policies match;
     /// two string enums match when they list the same value set and agree on whether they are
-    /// open. A union or `Never` still matches only itself. Sound rather than complete, like
+    /// open; two `Never` definitions match, since neither decodes any value (#643), so arrays of
+    /// two such items both decode only `[]`. A union still matches only itself. Sound rather than
+    /// complete, like
     /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s
     /// exactly-one rule needs, but not that they are one Rust type, so a caller that needs one type
     /// (a response body's) asks [`same_generated_type`] instead. Annotations a decode never reads
@@ -284,6 +286,8 @@ impl TypeGraph {
                         self.same_generated_type_guarded(*x, *y, structural, visiting)
                     })
             }
+            // Each `Never` is its own empty `pub enum`, but neither decodes a value.
+            (TypeKind::Never, TypeKind::Never) => structural,
             (TypeKind::Bytes, TypeKind::Bytes)
             | (TypeKind::Null, TypeKind::Null)
             | (TypeKind::Any, TypeKind::Any) => true,
@@ -1096,5 +1100,32 @@ mod tests {
         assert!(!graph.same_decoded_values(locked, open));
         // Two distinct string enums are never one generated type, whatever their values.
         assert!(!graph.same_generated_type(closed, reordered));
+    }
+
+    /// Two distinct `Never` definitions decode the same values, none (#643), and so do arrays of
+    /// them, which decode only `[]`; each is still its own nominal Rust item.
+    #[test]
+    fn two_never_definitions_decode_the_same_values_but_are_distinct_types() {
+        use super::{Ty, TypeKind};
+        let mut graph = super::TypeGraph::default();
+        let mut insert = |kind: TypeKind| {
+            let mut def = primitive("N");
+            def.kind = kind;
+            Ty {
+                id: graph.insert(def),
+                nullable: false,
+                boxed: false,
+            }
+        };
+        let first = insert(TypeKind::Never);
+        let second = insert(TypeKind::Never);
+        let first_array = insert(TypeKind::Array(Box::new(first)));
+        let second_array = insert(TypeKind::Array(Box::new(second)));
+        let string = insert(TypeKind::Primitive(super::Prim::String));
+        assert!(graph.same_decoded_values(first, second));
+        assert!(graph.same_decoded_values(first_array, second_array));
+        assert!(!graph.same_decoded_values(first, string));
+        assert!(!graph.same_generated_type(first, second));
+        assert!(!graph.same_generated_type(first_array, second_array));
     }
 }

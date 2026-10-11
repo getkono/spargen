@@ -216,6 +216,63 @@ fn several_inline_union_allof_members_take_null_from_a_member_admitting_it() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// An inline `oneOf` of untyped `items` branches as an `allOf` member beside an inline `anyOf` of
+/// the same kind, and a member admitting `null`, generates (#643): the meet of the two unions
+/// leaves `oneOf` variants that share one array shape, and they collapse with `W001`, as other
+/// met unions do, rather than reaching the generated enum as arms nothing can tell apart. `null`
+/// matches both untyped `oneOf` branches, so the `oneOf` rejects it and `pick` stays `Pick` (with
+/// both members written as `anyOf` it is `Option<Pick>`, as
+/// `several_inline_union_allof_members_take_null_from_a_member_admitting_it` pins). The same
+/// scalar meet of a lone `oneOf` member with a typed array member, whose item meets none of the
+/// branches' items, leaves two branches decoding only `[]`, and collapses alike. With the `oneOf`
+/// met first, it is the outer union, and its variants (each an `anyOf` met with one of its
+/// branches) stay distinct, so nothing collapses and nothing is reported.
+#[test]
+fn an_inline_oneof_allof_member_beside_an_anyof_collapses_its_met_variants() {
+    let any_of = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
+    let one_of = "{ oneOf: [ { items: { type: boolean } }, { items: { type: number } } ] }";
+    let mut mismatches = Vec::new();
+    for (site, collapses) in [
+        (
+            format!("{{ allOf: [ {{ type: [array, 'null'] }}, {any_of}, {one_of} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {any_of}, {{ type: [array, 'null'] }}, {one_of} ] }}"),
+            true,
+        ),
+        (
+            format!("{{ allOf: [ {{ type: [array, 'null'] }}, {one_of}, {any_of} ] }}"),
+            false,
+        ),
+        (
+            format!("{{ allOf: [ {{ type: array, items: {{ type: string }} }}, {one_of} ] }}"),
+            true,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick");
+        if report.outcome() == Outcome::Rejected
+            || has_code(&report, Code::ValidationKeywordIgnored) != collapses
+            || pick.as_deref() != Some("Pick")
+        {
+            let w001 = if collapses { "with" } else { "without" };
+            mismatches.push(format!(
+                "{site}: not `pub pick: Pick` {w001} `W001`: {report:#?} {types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// An inline union written as a member of an inner `allOf` that flattens into an outer one takes
 /// `null` from a member that admits it, as the same union written directly as an outer member
 /// (#631) or as a `$ref` at the same nested position (#630) does (#642): the inner `allOf` is

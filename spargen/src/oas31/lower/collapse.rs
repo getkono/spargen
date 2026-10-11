@@ -2,7 +2,7 @@
 //! a met union keeps or drops.
 
 use crate::diag::{Code, Diagnostic, Provenance};
-use crate::ir::{Docs, Ty, TypeKind, Union, UnionStrategy, UnionVariant};
+use crate::ir::{Docs, Ty, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant};
 use crate::oas31::Schema;
 
 use super::meet::same_ty;
@@ -123,6 +123,58 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             None => (met, false),
         }
+    }
+
+    /// `met`, the meet an `allOf`'s scalar members leave ([`Self::combine_all_of`]), with every
+    /// `oneOf` union that meet produced collapsed as [`Self::collapse_met_union`] collapses the
+    /// meet of a union member (#643). The scalar meet intersects a union branch by branch, so an
+    /// `anyOf` member met with a `oneOf` member is an `anyOf` of `oneOf`s, each the second union
+    /// met with one branch of the first; branches it leaves sharing one generated type are
+    /// indistinguishable, and were emitted as such with no diagnostic. A union is collapsed after
+    /// its variants are, so an outer `oneOf` compares the variants as they end up.
+    ///
+    /// Only types inserted since `mark`, which the meet made, are read: a union lowered before it
+    /// was already merged when it was lowered ([`Self::merge_indistinguishable_variants`]). A
+    /// discriminated or disjoint union is left as it is, since its variants are told apart by
+    /// construction, and so is an `anyOf`, which needs only one match.
+    pub(super) fn collapse_met_one_ofs(&mut self, schema: &Schema, met: Ty, mark: u32) -> Ty {
+        if met.id.0 < mark {
+            return met;
+        }
+        let Some(def) = self.graph.get(met.id) else {
+            return met;
+        };
+        let TypeKind::Union(union) = &def.kind else {
+            return met;
+        };
+        let hint = def.name_hint.clone();
+        let mut union = union.clone();
+        let mut changed = false;
+        for variant in &mut union.variants {
+            let collapsed = self.collapse_met_one_ofs(schema, variant.ty, mark);
+            if !same_ty(collapsed, variant.ty) {
+                variant.ty = collapsed;
+                changed = true;
+            }
+        }
+        let one_of = matches!(
+            union.strategy,
+            UnionStrategy::Trial {
+                mode: UnionMode::OneOf,
+                ..
+            }
+        );
+        let mut ty = met;
+        if changed {
+            ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
+            ty.nullable = met.nullable;
+            ty.boxed = met.boxed;
+        }
+        if !one_of {
+            return ty;
+        }
+        self.collapse_met_union(schema, ty, true, &hint, MetUnion::AllOfMember)
+            .0
     }
 
     /// What [`Self::stated_nothing_took_null`] holds for the union lowered at `at`, taken so an
