@@ -494,6 +494,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 meet_inserts.push(mark..self.graph_mark());
                 ty = match met {
+                    // A branch already the exact null type (`const: null`) is narrowed by nothing
+                    // the sibling admits `null` beside, so it stays its own `()` def; the meet's
+                    // copy (`…Constrained`) would leave that def an unused alias beside it (#653).
+                    Ok(intersection) if null_before && self.is_exact_null(intersection) => {
+                        for id in (mark..self.graph_mark()).map(TypeId) {
+                            self.graph.elide(id);
+                        }
+                        Ty {
+                            id: ty.id,
+                            ..intersection
+                        }
+                    }
                     Ok(intersection) => {
                         if !null_before && self.is_exact_null(intersection) {
                             met_into_null.insert(index);
