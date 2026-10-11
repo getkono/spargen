@@ -46,13 +46,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The union members gathered as the one scalar they lower to, by where it went.
         let mut union_members = Vec::new();
         self.in_composition(|ctx| {
-            ctx.gather_all_of_recording_unions(
-                schema,
-                hint,
-                &mut contributions,
-                &mut union_members,
-                true,
-            )
+            ctx.gather_all_of_recording_unions(schema, hint, &mut contributions, &mut union_members)
         })?;
         // A `$ref` to a union takes `null` from the other members exactly where the same union
         // written inline does ([`Self::lower_all_of_with_union_member`]): lowered as its own
@@ -60,7 +54,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `type: [array, 'null']` (#624). One nested in an inner `allOf` is a member of this
         // merge as well, flattened into it, so it takes `null` alike (#630). So does each of
         // several inline unions, which reach this arm rather than the sole-union one and were
-        // each gathered as the non-null scalar it lowers to alone (#631). Only where `null`
+        // each gathered as the non-null scalar it lowers to alone (#631), and so does an inline
+        // union nested in an inner `allOf` flattened into this one (#642). Only where `null`
         // can satisfy the merge at all: the own `type`, `enum` or `const` of this schema, or of
         // an `allOf` flattened into it, contributes nothing to the meet yet constrains every
         // value of it, so one that excludes `null` leaves no `null` to take.
@@ -71,24 +66,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// [`Self::gather_all_of`] of `schema`, recording in `union_members` each `$ref` member
-    /// gathered as the one scalar its target lowers to, by where it went, for
+    /// gathered as the one scalar its target lowers to, and each inline union member gathered as
+    /// the one scalar it lowers to (#631), by where it went, for
     /// [`Self::union_members_take_scalar_null`]. A member that is an inline `allOf` with no
     /// union of its own is flattened into the same contributions, as [`Self::gather_member`]
-    /// flattens it, and its `$ref` members are recorded too: written there, they are members of
-    /// the merge as much as written in `schema.all_of` (#630). Where `top`, an inline union
-    /// member of `schema.all_of` itself is recorded as well (#631); one nested in an inner `allOf`
-    /// is not (#642).
+    /// flattens it, and its `$ref` and inline union members are recorded too: written there, they
+    /// are members of the merge as much as written in `schema.all_of` (#630, #642).
     fn gather_all_of_recording_unions<'s>(
         &mut self,
         schema: &'s Schema,
         hint: &str,
         out: &mut Vec<Contribution>,
         union_members: &mut Vec<(usize, &'s Schema)>,
-        top: bool,
     ) -> Option<()> {
         for (index, member) in schema.all_of.iter().enumerate() {
             let member_hint = format!("{hint}Member{index}");
-            self.gather_member_recording_unions(member, &member_hint, out, union_members, top)?;
+            self.gather_member_recording_unions(member, &member_hint, out, union_members)?;
         }
         let mut siblings = schema.clone();
         siblings.all_of.clear();
@@ -97,34 +90,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::gather_member`] of one `allOf` member, as [`Self::gather_all_of_recording_unions`]
     /// gathers each: a nested inline `allOf` with no union of its own is flattened with its
-    /// `$ref` members recorded, and the member itself is recorded where it is gathered as one
-    /// scalar and is a `$ref`, or, where `top`, an inline union.
+    /// `$ref` and inline union members recorded, and the member itself is recorded where it is
+    /// gathered as one scalar and is a `$ref` or an inline union.
     fn gather_member_recording_unions<'s>(
         &mut self,
         member: &'s SchemaOr,
         hint: &str,
         out: &mut Vec<Contribution>,
         union_members: &mut Vec<(usize, &'s Schema)>,
-        top: bool,
     ) -> Option<()> {
         if let SchemaOr::Schema(nested) = member {
             if nested.reference.is_none() && !nested.all_of.is_empty() && !schema_has_union(nested)
             {
                 // The check `gather_member` makes of a member it reads by its keywords.
                 self.diagnose_standalone_discriminator(nested);
-                return self.gather_all_of_recording_unions(
-                    nested,
-                    hint,
-                    out,
-                    union_members,
-                    false,
-                );
+                return self.gather_all_of_recording_unions(nested, hint, out, union_members);
             }
         }
         let slot = out.len();
         self.gather_member(member, hint, out)?;
         if let SchemaOr::Schema(member) = member {
-            if (member.reference.is_some() || (top && schema_has_union(member)))
+            if (member.reference.is_some() || schema_has_union(member))
                 && out.len() == slot + 1
                 && matches!(out[slot], Contribution::Scalar(_))
             {
@@ -246,8 +232,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut contributions = Vec::new();
         // Where the union's contribution goes when it is combined as a scalar member below.
         let mut union_slot = 0;
-        // The `$ref` members gathered as the one scalar their target lowers to, by where it went,
-        // as [`Self::lower_all_of`] records them.
+        // The members gathered as one scalar, by where it went, as [`Self::lower_all_of`] records
+        // them: each `$ref` member, and each inline union nested in an inner `allOf`.
         let mut union_members = Vec::new();
         self.in_composition(|ctx| {
             for (index, member) in schema.all_of.iter().enumerate() {
@@ -265,7 +251,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     &format!("{hint}Member{index}"),
                     &mut contributions,
                     &mut union_members,
-                    false,
                 )?;
             }
             let mut composition = schema.clone();
@@ -279,9 +264,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // sub-file target refines the union's branches below, as the same member written here does,
         // so a half that reaches none of them is reported (`W011`) rather than met silently. A
         // union whose branches leave `null` undecided takes it from the other members there, as
-        // the object meet below gives it (#621), and so does a `$ref` member to such a union, by
-        // the rule [`Self::lower_all_of`] applies to it: neither decides `null` for the other
-        // (#631).
+        // the object meet below gives it (#621), and so does a `$ref` member to such a union, or
+        // an inline one nested in an inner `allOf`, by the rule [`Self::lower_all_of`] applies to
+        // it: neither decides `null` for the other (#631, #642).
         let has_object = contributions
             .iter()
             .any(|contribution| matches!(contribution, Contribution::Object { .. }));
