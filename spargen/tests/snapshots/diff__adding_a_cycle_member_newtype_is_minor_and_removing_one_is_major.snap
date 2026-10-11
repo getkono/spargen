@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-type-changed|Pet.owner|field type `String` -> `Node`
+minor|type-added|Node|new public type
+bump=major

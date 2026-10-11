@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-type-changed|Node.0|field type `Vec<Node>` -> `Vec<Other>`
+minor|type-added|Other|new public type
+bump=major
