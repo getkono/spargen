@@ -5,7 +5,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, Api, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph, TypeKind,
 };
 use crate::name::Names;
 
@@ -150,8 +150,8 @@ fn emit_open_string_enum(
 
 /// Emit the model for one definition: a struct, a string enum (closed or open), an integer or
 /// boolean enum's alias, an uninhabited enum, a union enum, an alias of the type it lowered to, or
-/// — for an array or tuple that [closes an alias cycle](closes_alias_cycle) — a transparent newtype
-/// over it.
+/// — for an array or tuple that [closes an alias cycle](TypeGraph::closes_alias_cycle) — a
+/// transparent newtype over it.
 fn emit_type_def(
     id: crate::ir::TypeId,
     def: &TypeDef,
@@ -294,7 +294,7 @@ fn emit_type_def(
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.
-        TypeKind::Array(_) | TypeKind::Tuple(_) if closes_alias_cycle(id, types) => {
+        TypeKind::Array(_) | TypeKind::Tuple(_) if types.closes_alias_cycle(id) => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
@@ -448,54 +448,6 @@ fn default_value_tokens(value: &crate::ir::DefaultValue, ty: Ty, names: &Names) 
             quote! { #enum_ident::#variant_ident }
         }
     }
-}
-
-/// Whether the definition at `id` reaches itself again through definitions that are emitted as
-/// aliases alone: an array or tuple whose items name `id`, or name another array or tuple that does,
-/// whatever `Option`/`Box` wraps each reference. rustc expands a type alias in place, so such a
-/// cycle of aliases has no finite expansion and is rejected (`E0391`); a reference that passes
-/// through a struct, enum, or union stops there, because those are nominal. Every member of the
-/// cycle answers `true`, so each is emitted as a newtype, independently of which one is visited
-/// first.
-fn closes_alias_cycle(id: TypeId, types: &TypeGraph) -> bool {
-    /// The references an alias's expansion contains, or none for a definition that is not an
-    /// alias of a container (a nominal type, or a leaf alias such as a primitive).
-    fn alias_items(kind: &TypeKind) -> &[Ty] {
-        match kind {
-            TypeKind::Array(item) => std::slice::from_ref(&**item),
-            TypeKind::Tuple(items) => items,
-            TypeKind::Primitive(_)
-            | TypeKind::Struct(_)
-            | TypeKind::Enum(_)
-            | TypeKind::Bytes
-            | TypeKind::Null
-            | TypeKind::Never
-            | TypeKind::Union(_)
-            | TypeKind::Any => &[],
-            TypeKind::Reserved => {
-                unreachable!(
-                    "a reservation reached codegen; `check_invariants` should have rejected it"
-                )
-            }
-        }
-    }
-    let Some(def) = types.get(id) else {
-        return false;
-    };
-    let mut pending: Vec<TypeId> = alias_items(&def.kind).iter().map(|ty| ty.id).collect();
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(next) = pending.pop() {
-        if next == id {
-            return true;
-        }
-        if !seen.insert(next) {
-            continue;
-        }
-        if let Some(def) = types.get(next) {
-            pending.extend(alias_items(&def.kind).iter().map(|ty| ty.id));
-        }
-    }
-    false
 }
 
 /// The type an unnamed definition (a primitive, array, tuple, bytes, null, or any) aliases.

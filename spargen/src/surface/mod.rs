@@ -870,6 +870,11 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
             ScalarRepr::Int => "i64".to_owned(),
             ScalarRepr::Bool => "bool".to_owned(),
         },
+        // A cycle-member array or tuple is a nominal newtype in the generated client (#648), and
+        // expanding its structure here would never terminate.
+        Some(TypeKind::Array(_) | TypeKind::Tuple(_)) if api.types.closes_alias_cycle(ty.id) => {
+            nominal_name(ty, names)
+        }
         Some(TypeKind::Array(inner)) => format!("Vec<{}>", canon_ty(**inner, api, names)),
         Some(TypeKind::Tuple(items)) => {
             let rendered: Vec<String> = items
