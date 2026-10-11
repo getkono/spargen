@@ -294,10 +294,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             })
             .count();
         if one_of {
+            // A branch whose `enum` or `const` lists `null` with no `type` (`const: null`,
+            // `enum: [null]`, or a bare `$ref` to one) decides `null`, so it gives the union
+            // nothing undecided to admit, but it is a second branch `null` matches beside an
+            // undecided one, which fails exactly-one (#657).
             matching == 1
+                && !members.iter().any(|member| match member {
+                    SchemaOr::Schema(member) => self.branch_lists_null_by_value(member),
+                    SchemaOr::Bool(_) => false,
+                })
         } else {
             matching > 0
         }
+    }
+
+    /// Whether `member`, a union branch, matches `null` through an `enum` or `const` that lists it,
+    /// with no `type` of its own and no composition: `const: null`, `enum: [null]`, `enum: [x,
+    /// null]`, or a bare `$ref` whose target, aliases followed, is one. Such a branch decides `null`,
+    /// so [`Self::union_admits_null_undecided`] does not count it among the branches whose
+    /// keywords leave `null` undecided; a branch with a `type` listing `null` is counted there.
+    fn branch_lists_null_by_value(&self, member: &Schema) -> bool {
+        let lists_null = |schema: &Schema| {
+            (schema.enum_values.is_some() || schema.const_value.is_some())
+                && stated_nullability(schema).is_none()
+                && schema.reference.is_none()
+                && schema.all_of.is_empty()
+                && !schema_has_union(schema)
+                && own_keywords_admit_null(schema)
+        };
+        let Some(reference) = member.reference.as_deref() else {
+            return lists_null(member);
+        };
+        let mut sibling = member.clone();
+        sibling.reference = None;
+        !schema_has_shape_constraint(&sibling)
+            && self
+                .ref_target_body(reference, &member.provenance)
+                .is_some_and(|target| lists_null(&target))
     }
 
     /// Whether `schema`, the body an `allOf` member names, is a union whose branches leave `null`

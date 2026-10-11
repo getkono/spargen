@@ -1070,6 +1070,93 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`, or a
+/// `$ref` to such a component), beside a branch the sibling meet narrows to the exact null type, is
+/// a second branch `null` matches (#657). `null` fails the exactly-one rule, so the union admits no
+/// `null` and the `const: null` branch accepts nothing the union does: it is no variant, and the
+/// typed branches are, in both spellings. Before, only the narrowed branch was counted (#645), so
+/// the field was `Option<Pick>` and `Pick` kept a `()` arm for the `const: null` branch. The same
+/// union with no `type` beside it counts the untyped `items` branch, which `null` matches (#622),
+/// and drops the arm alike. The `anyOf` counterpart keeps that arm
+/// (`an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant`).
+#[test]
+fn a_oneof_exact_null_branch_beside_a_branch_the_sibling_narrows_to_null_admits_no_null() {
+    let mut mismatches = Vec::new();
+    for (branch, component) in [
+        ("{ const: null }", ""),
+        ("{ enum: [null] }", ""),
+        (
+            "{ $ref: '#/components/schemas/Nothing' }",
+            "    Nothing: { const: null }\n",
+        ),
+    ] {
+        for (members, single) in [
+            // The issue's shape: only strings satisfy it.
+            (
+                format!("[ {{ items: {{ type: string }} }}, {branch}, {{ type: string }} ]"),
+                true,
+            ),
+            (
+                format!(
+                    "[ {branch}, {{ items: {{ type: string }} }}, {{ type: string, enum: [a] }}, \
+                     {{ type: string, enum: [b] }} ]"
+                ),
+                false,
+            ),
+        ] {
+            // With no `type` beside it, the untyped `items` branch is no narrowed branch, but `null`
+            // matches it all the same (#622): the `const: null` branch is the second branch, and
+            // the variants are the array and string branches.
+            for (site, single) in [
+                (
+                    format!("{{ type: [string, 'null'], oneOf: {members} }}"),
+                    single,
+                ),
+                (
+                    format!(
+                        "{{ allOf: [ {{ type: [string, 'null'] }}, {{ oneOf: {members} }} ] }}"
+                    ),
+                    single,
+                ),
+                (format!("{{ oneOf: {members} }}"), false),
+            ] {
+                let spec = with_schemas(
+                    "3.1.0",
+                    &format!(
+                        "{component}    Pick: {site}\n    Holder:\n      type: object\n      \
+                         properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                         required: [pick]\n"
+                    ),
+                );
+                let (report, code) = generate_with_code(&spec);
+                let types = types_module(&code);
+                let pick = field_type(&types, "pub pick");
+                let shape = if single {
+                    types.contains("pub type Pick = String;")
+                } else {
+                    types.contains("pub enum Pick {")
+                };
+                // A `$ref`'d `Nothing` component is emitted whatever the union does with it.
+                let units = types.matches("= ();").count();
+                if report.outcome() == Outcome::Rejected
+                    || has_code(&report, Code::ValidationKeywordIgnored)
+                    || pick.as_deref() != Some("Pick")
+                    || !shape
+                    || units != usize::from(!component.is_empty())
+                    || types.contains("(())")
+                    || types.contains("(Box<Nothing>)")
+                {
+                    mismatches.push(format!(
+                        "{site}: not the typed branches as `Pick` with no `()` arm: {report:#?} \
+                         {types}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Reading whether an `allOf` wraps a union that admits `null` undecided (#638) is done once per
 /// `$ref` target, not once per path. `W<i>` is `allOf: [$ref W<i-1>, $ref W<i-1>]` over the union
 /// `W0`, so the paths to it number 2^30; re-reading each target at every `$ref` (as the walk
