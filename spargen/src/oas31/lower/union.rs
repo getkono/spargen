@@ -396,6 +396,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
         // null type on its own (`const: null`) is not one of them.
         let mut met_into_null: HashSet<usize> = HashSet::new();
+        // How many variants are such a branch: each is one branch `null` matches (#645).
+        let mut met_nulls = 0usize;
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
@@ -543,12 +545,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
-            nullable_variants += usize::from(ty.nullable);
-            // A branch already counted as stating nothing (a nested union lowering to `Value`
-            // that took the conjunct's `null`) is one branch `null` matches, not two.
-            undecided_nulls +=
-                usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
-            null_variants += usize::from(self.is_exact_null(ty));
+            // A branch the meet narrowed to the exact null type is counted once, as itself, rather
+            // than again as an undecided or nullable branch (#645).
+            if met_into_null.contains(&index) {
+                met_nulls += 1;
+            } else {
+                nullable_variants += usize::from(ty.nullable);
+                // A branch already counted as stating nothing (a nested union lowering to `Value`
+                // that took the conjunct's `null`) is one branch `null` matches, not two.
+                undecided_nulls +=
+                    usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
+                null_variants += usize::from(self.is_exact_null(ty));
+            }
             null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
@@ -606,7 +614,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // copy of that `null` is cleared where the count puts it in two branches, or where an
         // `anyOf` hoisted it. An untyped object or array branch that hoisted nothing is counted
         // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
-        // nothing and that `null` matches through its own branches (#628).
+        // nothing and that `null` matches through its own branches (#628). A branch the sibling
+        // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a
+        // `null` member is (#645).
         let null_variants = if null_from_conjunct { null_variants } else { 0 };
         let null_twice = mode == UnionMode::OneOf
             && null_members
@@ -614,6 +624,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 + null_variants
                 + stated_nothing_nulls
                 + undecided_nulls
+                + met_nulls
                 > 1;
         if null_twice {
             nullable = false;
@@ -646,6 +657,55 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .all(|variant| self.is_exact_null(variant.ty))
         {
             return self.reject_one_of_null_in_every_branch(schema);
+        }
+        // The meet left only some branches the exact null type: `type: [string, 'null']` beside
+        // an untyped `items` branch and a `{type: string}` one. Each such branch is a branch `null`
+        // matches, as a `null` member is, so the typed branches are the variants, as the `allOf`
+        // spelling lowers them. An `anyOf` hoists `null` to the union's `Option` (#633); a `oneOf`
+        // does too where that branch is the only one `null` matches, and otherwise `null` fails
+        // its exactly-one rule and the union admits no `null` (#645). Kept, each was a `()`
+        // variant beside the typed ones — merged with `W001` where there were several — so one
+        // instance set had two public types by spelling. Dropped here, before the merge below, so
+        // the branches are not reported as indistinguishable variants of an enum that no longer
+        // has them. The dropped branches' meet inserts (their `…Constrained` aliases) are elided
+        // unless a surviving variant reaches them. A branch that is the null type on its own
+        // (`const: null`) stays the `()` variant it is with no sibling and in the `allOf` spelling.
+        if variant_members
+            .iter()
+            .any(|member| met_into_null.contains(member))
+            && !variants
+                .iter()
+                .all(|variant| self.is_exact_null(variant.ty))
+        {
+            let mut dropped: Vec<usize> = Vec::new();
+            let entries = std::mem::take(&mut variants)
+                .into_iter()
+                .zip(std::mem::take(&mut ref_names))
+                .zip(std::mem::take(&mut variant_members));
+            for ((variant, ref_name), member) in entries {
+                if met_into_null.contains(&member) {
+                    dropped.push(member);
+                } else {
+                    variants.push(variant);
+                    ref_names.push(ref_name);
+                    variant_members.push(member);
+                }
+            }
+            nullable = !null_twice;
+            if variants.len() > 1 {
+                let roots: Vec<TypeId> = variants.iter().map(|variant| variant.ty.id).collect();
+                let reached = reachable_types(&self.graph, &roots);
+                for member in dropped {
+                    let Some(range) = meet_inserts.get(member) else {
+                        continue;
+                    };
+                    for id in range.clone().map(TypeId) {
+                        if !reached.contains(&id) {
+                            self.graph.elide(id);
+                        }
+                    }
+                }
+            }
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
         // by which variants decode. Variants that lower to the same generated type decode the same
@@ -686,52 +746,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             variants.truncate(1);
             ref_names.truncate(1);
             variant_members.truncate(1);
-        }
-        // The meet left only some branches the exact null type: `type: [string, 'null']` beside
-        // an untyped `items` branch and a `{type: string}` one. Each such branch is a branch `null`
-        // matches, as a `null` member is, so it is hoisted to the union's `Option` and the typed
-        // branches are the variants, as the `allOf` spelling lowers them (#633). Kept, it was a
-        // `()` variant beside them, so one instance set had two public types by spelling. The
-        // dropped branches' meet inserts (their `…Constrained` aliases) are elided unless a
-        // surviving variant reaches them. A branch that is the null type on its own (`const:
-        // null`) stays the `()` variant it is with no sibling and in the `allOf` spelling.
-        if mode == UnionMode::AnyOf
-            && variant_members
-                .iter()
-                .any(|member| met_into_null.contains(member))
-            && !variants
-                .iter()
-                .all(|variant| self.is_exact_null(variant.ty))
-        {
-            let mut dropped: Vec<usize> = Vec::new();
-            let entries = std::mem::take(&mut variants)
-                .into_iter()
-                .zip(std::mem::take(&mut ref_names))
-                .zip(std::mem::take(&mut variant_members));
-            for ((variant, ref_name), member) in entries {
-                if met_into_null.contains(&member) {
-                    dropped.push(member);
-                } else {
-                    variants.push(variant);
-                    ref_names.push(ref_name);
-                    variant_members.push(member);
-                }
-            }
-            nullable = true;
-            if variants.len() > 1 {
-                let roots: Vec<TypeId> = variants.iter().map(|variant| variant.ty.id).collect();
-                let reached = reachable_types(&self.graph, &roots);
-                for member in dropped {
-                    let Some(range) = meet_inserts.get(member) else {
-                        continue;
-                    };
-                    for id in range.clone().map(TypeId) {
-                        if !reached.contains(&id) {
-                            self.graph.elide(id);
-                        }
-                    }
-                }
-            }
         }
         if variants.len() == 1 {
             let inner = variants[0].ty;
