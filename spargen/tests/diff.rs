@@ -533,7 +533,8 @@ fn cycle_schemas(items: &str) -> String {
 fn changing_what_a_cycle_member_newtype_wraps_is_major() {
     // Issue #654: `Node` is the newtype `pub struct Node(pub Vec<…>)` (#648), and every use site
     // renders it by name, so only its own surface entry can see the public `.0` field change type.
-    // `Other` closes a cycle only once `Node` names it, so it appears as a new type beside the change.
+    // `Other` closes a cycle only once `Node` names it: before that it is the alias
+    // `pub type Other = Vec<Node>`, so the same public name changes kind beside the field change.
     let node_ref = "{ $ref: '#/components/schemas/Node' }";
     let to_self = full(
         &pets_get("listPets", "", node_ref),
@@ -546,7 +547,7 @@ fn changing_what_a_cycle_member_newtype_wraps_is_major() {
     let report = diff(&to_self, &to_other);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::FieldTypeChanged, ChangeKind::TypeAdded],
+        vec![ChangeKind::FieldTypeChanged, ChangeKind::TypeKindChanged],
         "{:?}",
         report.changes
     );
@@ -555,15 +556,60 @@ fn changing_what_a_cycle_member_newtype_wraps_is_major() {
         report.changes[0].detail,
         "field type `Vec<Node>` -> `Vec<Other>`"
     );
+    assert_eq!(report.changes[1].location, "Other");
+    assert_eq!(report.changes[1].detail, "type kind `alias` -> `newtype`");
     assert_eq!(report.bump, Impact::Major);
 
     let back = diff(&to_other, &to_self);
     assert_eq!(
         kinds(&back),
-        vec![ChangeKind::FieldTypeChanged, ChangeKind::TypeRemoved],
+        vec![ChangeKind::FieldTypeChanged, ChangeKind::TypeKindChanged],
         "{:?}",
         back.changes
     );
+    assert_eq!(back.changes[1].detail, "type kind `newtype` -> `alias`");
+}
+
+#[test]
+fn an_array_alias_becoming_a_cycle_member_newtype_changes_its_kind() {
+    // Review of #656: `pub type Status = Vec<String>` turning into `pub struct Status(pub Vec<…>)`
+    // breaks code that names `Status` and uses it as a `Vec`, beyond the success type the use site
+    // already reports, so it is a Major kind change rather than a Minor `type-added` (and the
+    // reverse not a `type-removed`).
+    let alias = "    Status:
+      type: array
+      items: { type: string }
+";
+    let newtype = "    Status:
+      type: array
+      items: { $ref: '#/components/schemas/Status' }
+";
+    let report = diff(
+        &full(TWO_OPS, &with_status(alias)),
+        &full(TWO_OPS, &with_status(newtype)),
+    );
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::SuccessTypeChanged, ChangeKind::TypeKindChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.changes[1].location, "Status");
+    assert_eq!(report.changes[1].detail, "type kind `alias` -> `newtype`");
+    assert_eq!(report.bump, Impact::Major);
+
+    let back = diff(
+        &full(TWO_OPS, &with_status(newtype)),
+        &full(TWO_OPS, &with_status(alias)),
+    );
+    assert_eq!(
+        kinds(&back),
+        vec![ChangeKind::SuccessTypeChanged, ChangeKind::TypeKindChanged],
+        "{:?}",
+        back.changes
+    );
+    assert_eq!(back.changes[1].detail, "type kind `newtype` -> `alias`");
+    assert_eq!(back.bump, Impact::Major);
 }
 
 const PET_WITH_NODE_OWNER: &str = "    Pet:

@@ -48,6 +48,11 @@ pub(crate) struct Surface {
     operations: BTreeMap<String, OpSurface>,
     /// Public model types keyed by their generated type name.
     types: BTreeMap<String, TypeSurface>,
+    /// The generated names of the components emitted as a `pub type X = …;` alias. An alias has
+    /// no entry in `types` (its target is compared at every use site), but its name is public, so
+    /// a type that turns into one or out of one is a kind change rather than an addition or a
+    /// removal.
+    aliases: BTreeSet<String>,
 }
 
 /// One client method's surface: the generated method name, its parameters, request body, and the
@@ -186,8 +191,8 @@ pub enum ChangeKind {
     TypeAdded,
     /// A public type was removed. **Major**.
     TypeRemoved,
-    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union` ↔ `newtype`).
-    /// **Major**.
+    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union` ↔ `newtype`), or a
+    /// `pub type` alias of the same name became one of those, or the reverse. **Major**.
     TypeKindChanged,
     /// A new optional field was added to a struct. **Minor**.
     FieldAdded,
@@ -408,6 +413,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     }
 
     let mut types = BTreeMap::new();
+    let mut aliases = BTreeSet::new();
     // An elided type has a name but no item, so it is no part of the surface.
     for (id, def) in api.types.emitted() {
         let name = match names.types.get(&id) {
@@ -471,12 +477,22 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             TypeKind::Reserved => unreachable!(
                 "a reservation reached the surface; `check_invariants` should have rejected it"
             ),
-            _ => continue,
+            // An uninhabited schema is emitted as an empty `pub enum`, not as an alias.
+            TypeKind::Never => continue,
+            // Every other kind is emitted as `pub type X = …;`, as codegen's own fallback arm does.
+            _ => {
+                aliases.insert(name);
+                continue;
+            }
         };
         types.insert(name, surface);
     }
 
-    Surface { operations, types }
+    Surface {
+        operations,
+        types,
+        aliases,
+    }
 }
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -686,6 +702,15 @@ fn diff_param(
 fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
     for name in keys(&old.types, &new.types) {
         match (old.types.get(name), new.types.get(name)) {
+            // The name was public on both sides, so code naming the alias now names a nominal type
+            // with another shape, and code relying on the alias's target (or on the nominal type's
+            // constructor and fields, the other way round) stops compiling.
+            (None, Some(new_ty)) if old.aliases.contains(name) => {
+                push_kind_change(name, "alias", new_ty.kind_label(), changes);
+            }
+            (Some(old_ty), None) if new.aliases.contains(name) => {
+                push_kind_change(name, old_ty.kind_label(), "alias", changes);
+            }
             (None, Some(_)) => {
                 changes.push(Change::new(ChangeKind::TypeAdded, name, "new public type"));
             }
@@ -724,16 +749,19 @@ fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec
             ));
         }
         (TypeSurface::Newtype(_), TypeSurface::Newtype(_)) => {}
-        (old_ty, new_ty) => changes.push(Change::new(
-            ChangeKind::TypeKindChanged,
-            name,
-            format!(
-                "type kind `{}` -> `{}`",
-                old_ty.kind_label(),
-                new_ty.kind_label()
-            ),
-        )),
+        (old_ty, new_ty) => {
+            push_kind_change(name, old_ty.kind_label(), new_ty.kind_label(), changes);
+        }
     }
+}
+
+/// Report that the public type `name` changed generation kind from `old` to `new`.
+fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>) {
+    changes.push(Change::new(
+        ChangeKind::TypeKindChanged,
+        name,
+        format!("type kind `{old}` -> `{new}`"),
+    ));
 }
 
 fn diff_struct(
