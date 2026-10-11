@@ -487,6 +487,35 @@ fn a_one_position_tuple_is_labelled_with_its_trailing_comma() {
 }
 
 #[test]
+fn a_self_referential_array_is_labelled_by_its_newtype_name() {
+    // Issue #650: the surface expanded an array by recursing into its item, so an array component
+    // whose items name itself overflowed the stack. Codegen emits it as the nominal newtype `Node`
+    // (#648), so that is the label, and a plain array alias over it is still `Vec<Node>`.
+    let schemas = "    Node:
+      type: array
+      items: { $ref: '#/components/schemas/Node' }
+    Into:
+      type: array
+      items: { $ref: '#/components/schemas/Node' }
+";
+    let node = full(
+        &pets_get("listPets", "", "{ $ref: '#/components/schemas/Node' }"),
+        schemas,
+    );
+    let into = full(
+        &pets_get("listPets", "", "{ $ref: '#/components/schemas/Into' }"),
+        schemas,
+    );
+    let same = diff(&node, &node);
+    assert!(same.changes.is_empty(), "{:?}", same.changes);
+    assert_eq!(same.bump, Impact::Patch);
+    assert_eq!(
+        success_type_detail(&node, &into),
+        "success type `Node` -> `Vec<Node>`"
+    );
+}
+
+#[test]
 fn documenting_a_bodyless_success_beside_the_body_is_major() {
     // A bodyless `204` beside the `200` body turns the plain `Pet` into a response enum with a
     // `Status204` variant (issue #121), so every consumer reading the `Pet` directly breaks.

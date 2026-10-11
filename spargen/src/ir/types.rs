@@ -122,13 +122,78 @@ impl TypeGraph {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
 
+    /// Whether the definition at `id` reaches itself again through definitions that are emitted as
+    /// aliases alone: an array or tuple whose items name `id`, or name another array or tuple that
+    /// does, whatever `Option`/`Box` wraps each reference. rustc expands a type alias in place, so
+    /// such a cycle of aliases has no finite expansion and is rejected (`E0391`); a reference that
+    /// passes through a struct, enum, or union stops there, because those are nominal. Every member
+    /// of the cycle answers `true`, independently of which one is visited first.
+    ///
+    /// Such a definition is emitted as a nominal `#[serde(transparent)]` newtype rather than an
+    /// alias (#648), so every reader that asks which Rust type a definition is — codegen, the
+    /// [`same_generated_type`](Self::same_generated_type) comparison, and the API surface — reads
+    /// it here, and none of them can disagree about which definitions are nominal.
+    ///
+    /// Asked only after `check_invariants`, so it panics if the walk meets a reservation; a reader
+    /// that can run earlier asks [`alias_cycle`](Self::alias_cycle), which answers that unknown.
+    pub(crate) fn closes_alias_cycle(&self, id: TypeId) -> bool {
+        self.alias_cycle(id).unwrap_or_else(|| {
+            unreachable!(
+                "an alias cycle was asked of a reservation; `check_invariants` should have \
+                 rejected it"
+            )
+        })
+    }
+
+    /// [`closes_alias_cycle`](Self::closes_alias_cycle), or `None` where the walk reaches a
+    /// reservation — `id` itself, or an array or tuple item along the way — whose body is unknown,
+    /// so whether it closes the cycle is unknown too.
+    fn alias_cycle(&self, id: TypeId) -> Option<bool> {
+        /// The references an alias's expansion contains, none for a definition that is not an
+        /// alias of a container (a nominal type, or a leaf alias such as a primitive), or `None`
+        /// for a reservation, whose expansion is not known yet.
+        fn alias_items(kind: &TypeKind) -> Option<&[Ty]> {
+            match kind {
+                TypeKind::Array(item) => Some(std::slice::from_ref(&**item)),
+                TypeKind::Tuple(items) => Some(items),
+                TypeKind::Primitive(_)
+                | TypeKind::Struct(_)
+                | TypeKind::Enum(_)
+                | TypeKind::Bytes
+                | TypeKind::Null
+                | TypeKind::Never
+                | TypeKind::Union(_)
+                | TypeKind::Any => Some(&[]),
+                TypeKind::Reserved => None,
+            }
+        }
+        let Some(def) = self.get(id) else {
+            return Some(false);
+        };
+        let mut pending: Vec<TypeId> = alias_items(&def.kind)?.iter().map(|ty| ty.id).collect();
+        let mut seen = BTreeSet::new();
+        while let Some(next) = pending.pop() {
+            if next == id {
+                return Some(true);
+            }
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(def) = self.get(next) {
+                pending.extend(alias_items(&def.kind)?.iter().map(|ty| ty.id));
+            }
+        }
+        Some(false)
+    }
+
     /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
     /// means the generated types are one type, because every non-nominal definition is emitted as a
     /// transparent `pub type` alias of its structure. A nominal definition (a struct, string enum,
-    /// union, or `Never`) is its own item and matches only itself. Both use-site modifiers must
-    /// agree, so callers strip the top-level ones they absorb; nested ones are compared, because a
-    /// tuple item keeps its `Box`. Independent of the `uuid`/`time` features: a feature-mapped
-    /// primitive never equals `String`, even in a build where it would emit one.
+    /// union, `Never`, or an array or tuple that [closes an alias cycle](Self::closes_alias_cycle))
+    /// is its own item and matches only itself. Both use-site modifiers must agree, so callers
+    /// strip the top-level ones they absorb; nested ones are compared, because a tuple item keeps
+    /// its `Box`. Independent of the `uuid`/`time` features: a feature-mapped primitive never
+    /// equals `String`, even in a build where it would emit one.
     pub(crate) fn same_generated_type(&self, a: Ty, b: Ty) -> bool {
         self.same_generated_type_guarded(a, b, false, &mut Vec::new())
     }
@@ -173,6 +238,17 @@ impl TypeGraph {
         let (Some(a_def), Some(b_def)) = (self.get(a.id), self.get(b.id)) else {
             return false;
         };
+        // A cycle-member array or tuple is emitted as its own newtype, so as a Rust type it matches
+        // only itself, which the id comparison above already answered. Its transparent newtype
+        // decodes exactly what its structure does, so `structural` still compares that. A side
+        // whose walk reaches a reservation (itself, or an array or tuple item) may fill to such a
+        // newtype, so nothing proves it one type with the other: `false`, as the `Reserved` arm
+        // below answers, rather than a panic.
+        if !structural
+            && (self.alias_cycle(a.id) != Some(false) || self.alias_cycle(b.id) != Some(false))
+        {
+            return false;
+        }
         visiting.push(pair);
         let same = match (&a_def.kind, &b_def.kind) {
             (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
