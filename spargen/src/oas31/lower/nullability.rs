@@ -297,15 +297,53 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A branch whose `enum` or `const` lists `null` with no `type` (`const: null`,
             // `enum: [null]`, or a bare `$ref` to one) decides `null`, so it gives the union
             // nothing undecided to admit, but it is a second branch `null` matches beside an
-            // undecided one, which fails exactly-one (#657).
+            // undecided one, which fails exactly-one (#657). Only beside an undecided branch the
+            // union's own lowering counts it beside ([`Self::branch_counts_beside_exact_null`]),
+            // so this spelling and the sibling one agree; beside a branch of scalar keywords or
+            // one that states nothing the union keeps its `null` in both (#668).
             matching == 1
-                && !members.iter().any(|member| match member {
+                && !(members.iter().any(|member| match member {
                     SchemaOr::Schema(member) => self.branch_lists_null_by_value(member),
                     SchemaOr::Bool(_) => false,
-                })
+                }) && members
+                    .iter()
+                    .any(|member| self.branch_counts_beside_exact_null(member, depth + 1)))
         } else {
             matching > 0
         }
+    }
+
+    /// Whether `member`, a `oneOf` branch, is one beside which the union's own lowering counts an
+    /// exact-null branch as a second branch `null` matches (#657): an untyped object or array
+    /// whose keywords leave `null` undecided (#622), or a nested union `null` matches through its
+    /// own branches (#628), written inline or as a bare `$ref`. A branch of scalar keywords alone
+    /// or one that states nothing (`true`, `{}`) is not one, so the union keeps its `null` beside
+    /// it here as it does in the sibling spelling. `depth` bounds the walk.
+    fn branch_counts_beside_exact_null(&self, member: &SchemaOr, depth: u32) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        if schema_has_union(member) {
+            return self.union_admits_null_undecided(member, depth);
+        }
+        if stated_nullability(member).is_some() || self.all_of_decides_null(member, depth) {
+            return false;
+        }
+        let Some(reference) = member.reference.as_deref() else {
+            return self.schema_is_untyped_shape(member, depth);
+        };
+        let mut sibling = member.as_ref().clone();
+        sibling.reference = None;
+        !schema_has_shape_constraint(&sibling)
+            && self
+                .ref_target_body(reference, &member.provenance)
+                .is_some_and(|target| {
+                    if schema_has_union(&target) {
+                        self.union_admits_null_undecided(&target, depth)
+                    } else {
+                        self.schema_is_untyped_shape(&target, depth)
+                    }
+                })
     }
 
     /// Whether `member`, a union branch, matches `null` through an `enum` or `const` that lists it,

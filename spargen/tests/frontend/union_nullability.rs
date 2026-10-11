@@ -1157,6 +1157,54 @@ fn a_oneof_exact_null_branch_beside_a_branch_the_sibling_narrows_to_null_admits_
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A `oneOf` exact-null branch (`const: null`) beside an untyped branch whose keywords constrain
+/// scalars alone (`minLength`, `pattern`, `minimum`, `not`) or nothing (`true`, `{}`) gets one
+/// answer in the sibling spelling and the `allOf` one: the same field type and the same `()` arms.
+/// The exact-null count of #657 is taken beside a branch the sibling meet narrows to `null`, an
+/// untyped object or array branch, or a nested union `null` matches, and the `allOf` spelling's
+/// reading of whether the union admits `null` undecided denies it beside those alone, so it does
+/// not deny it here where the sibling spelling keeps it. Before, the `allOf` spelling denied it
+/// beside any such branch and gave `Pick` where the sibling spelling gave `Option<Pick>`.
+#[test]
+fn a_oneof_exact_null_branch_beside_a_scalar_keyword_branch_agrees_across_spellings() {
+    let mut mismatches = Vec::new();
+    for other in [
+        "{ minLength: 1 }",
+        "{ pattern: '^a' }",
+        "{ minimum: 1 }",
+        "{ not: { type: boolean } }",
+        "true",
+        "{}",
+    ] {
+        let members = format!("[ {other}, {{ const: null }}, {{ type: integer }} ]");
+        let mut answers = Vec::new();
+        for site in [
+            format!("{{ type: [string, integer, 'null'], oneOf: {members} }}"),
+            format!(
+                "{{ allOf: [ {{ type: [string, integer, 'null'] }}, {{ oneOf: {members} }} ] }}"
+            ),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+            answers.push((site, pick, types.matches("= ();").count()));
+        }
+        if answers[0].1 != answers[1].1 || answers[0].2 != answers[1].2 {
+            mismatches.push(format!("{other}: the spellings disagree: {answers:#?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Reading whether an `allOf` wraps a union that admits `null` undecided (#638) is done once per
 /// `$ref` target, not once per path. `W<i>` is `allOf: [$ref W<i-1>, $ref W<i-1>]` over the union
 /// `W0`, so the paths to it number 2^30; re-reading each target at every `$ref` (as the walk
