@@ -586,8 +586,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && self.flattened_members_admit_null(schema, &mut HashSet::new(), 0)
     }
 
-    /// Whether every schema `schema`'s `allOf` members flatten into its meet admits `null` by its
-    /// own keywords: [`Self::flattened_keywords_admit_null`] below the schema itself.
+    /// Whether every inline schema among `schema`'s `allOf` members admits `null` by its own
+    /// keywords, descending into the members [`Self::gather_member`] flattens into the meet:
+    /// [`Self::flattened_keywords_admit_null`] below the schema itself.
     fn flattened_members_admit_null(
         &self,
         schema: &Schema,
@@ -600,8 +601,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
-    /// [`Self::flattened_keywords_admit_null`] of one `allOf` member, read the way
-    /// [`Self::gather_member`] gathers it. The answer is the conjunction of every flattened
+    /// [`Self::flattened_keywords_admit_null`] of one `allOf` member: [`own_keywords_admit_null`]
+    /// over the member itself (its siblings, for a `$ref`, and the resolved target of a
+    /// non-component `$ref`), whether or not it is flattened, then over its own members where
+    /// [`Self::gather_member`] flattens it. The answer is the conjunction of every such inline
     /// schema's own keywords, so a resolved target already in `visited` adds nothing a second
     /// time: skipping it keeps a target shared along many paths linear. Gathering already refused
     /// a cycle and an over-deep chain, and resolved every target this reaches, so the depth bound
