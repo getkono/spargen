@@ -11,7 +11,7 @@ use crate::source::{is_remote_ref, Node};
 use super::combine::{schema_has_union, schema_is_object_like, Contribution};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::schema_has_shape_constraint;
-use super::{memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
+use super::{memoised_answer, memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether some member of `schema`'s object `allOf` decides the merge's nullability, as
@@ -317,7 +317,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// otherwise members that decide nothing ([`Self::all_of_decides_null`]): `Wrap: { allOf:
     /// [ { $ref: U } ] }` admits exactly the values `U` does, so a `$ref` member to `Wrap`, or a
     /// non-component pointer to such an `allOf`, takes `null` as a `$ref` member to `U` does
-    /// (#638). `depth` bounds the walk; a chain past it answers `false`.
+    /// (#638). `depth` bounds the walk; a chain past it answers `false`. Each `$ref` member's target
+    /// is read once per pass and its answer replayed ([`Self::admits_null_undecided_memo`]).
     fn all_of_wraps_undecided_union(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH
             || schema.all_of.is_empty()
@@ -338,21 +339,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 SchemaOr::Bool(false) => return false,
                 SchemaOr::Schema(member) => member.as_ref(),
             };
-            let body = match member.reference.as_deref() {
+            let admits = match member.reference.as_deref() {
                 Some(reference) => {
                     // A `$ref` member with siblings of its own is an intersection this does not
                     // read.
                     let mut sibling = member.clone();
                     sibling.reference = None;
-                    if schema_has_shape_constraint(&sibling) {
-                        None
-                    } else {
-                        self.ref_target_body(reference, &member.provenance)
-                    }
+                    !schema_has_shape_constraint(&sibling)
+                        && self
+                            .ref_target_body(reference, &member.provenance)
+                            .is_some_and(|body| {
+                                memoised_answer(
+                                    &self.admits_null_undecided_memo,
+                                    &body,
+                                    false,
+                                    || self.admits_null_undecided_through_union(&body, depth + 1),
+                                )
+                            })
                 }
-                None => Some(std::borrow::Cow::Borrowed(member)),
+                None => self.admits_null_undecided_through_union(member, depth + 1),
             };
-            if body.is_some_and(|body| self.admits_null_undecided_through_union(&body, depth + 1)) {
+            if admits {
                 wraps = true;
             } else if self.all_of_decides_null(member, depth + 1) {
                 return false;
