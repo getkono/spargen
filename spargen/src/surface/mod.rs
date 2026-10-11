@@ -20,8 +20,9 @@
 //!   `DateTime`, `Date`) — independent of the `uuid`/`time` feature flags, which only change the
 //!   concrete Rust type, not the surface identity;
 //! * a **nominal** type — a `struct`, a string `enum`, a union (the models a consumer names,
-//!   constructs, and matches), or an array or tuple that closes an alias cycle (emitted as a
-//!   newtype, #648) → its generated type name;
+//!   constructs, and matches), an array or tuple that closes an alias cycle (emitted as a
+//!   newtype, #648), or an uninhabited schema (emitted as an empty `pub enum`) → its generated
+//!   type name;
 //! * an array → `Vec<inner>`, a tuple → `(a, b, …)` (one position → `(a,)`, as Rust spells it),
 //!   bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
@@ -86,7 +87,8 @@ struct ParamSurface {
 }
 
 /// A public model type's surface, by generation kind. Only nominal types with real distinct
-/// structure are modelled: structs, string `enum`s, unions, and cycle-member newtypes.
+/// structure are modelled: structs, string `enum`s, unions, cycle-member newtypes, and uninhabited
+/// empty enums.
 /// Integer/boolean enums and other alias-only components carry no structure beyond a scalar the
 /// consumer already sees at every use site, so they are compared structurally there rather than as
 /// standalone entries.
@@ -101,6 +103,9 @@ enum TypeSurface {
     /// An array or tuple that closes an alias cycle, emitted as `pub struct X(pub T);` (#648): the
     /// canonical rendering of the wrapped `T`, which is the type of the public `.0` field.
     Newtype(String),
+    /// An uninhabited schema (`false`, or one whose constraints admit nothing), emitted as an empty
+    /// `pub enum X {}`: it has no structure, but it is a public type a use site names.
+    Never,
 }
 
 impl TypeSurface {
@@ -111,6 +116,7 @@ impl TypeSurface {
             TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
             TypeSurface::Newtype(_) => "newtype",
+            TypeSurface::Never => "empty enum",
         }
     }
 }
@@ -477,8 +483,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             TypeKind::Reserved => unreachable!(
                 "a reservation reached the surface; `check_invariants` should have rejected it"
             ),
-            // An uninhabited schema is emitted as an empty `pub enum`, not as an alias.
-            TypeKind::Never => continue,
+            // An uninhabited schema is emitted as an empty `pub enum`, not as an alias, and every
+            // use site renders it by name, so it is listed here like any other nominal type (#661).
+            TypeKind::Never => TypeSurface::Never,
             // Every other kind is emitted as `pub type X = …;`, as codegen's own fallback arm does.
             _ => {
                 aliases.insert(name);
@@ -749,6 +756,8 @@ fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec
             ));
         }
         (TypeSurface::Newtype(_), TypeSurface::Newtype(_)) => {}
+        // An empty enum has no structure to differ in.
+        (TypeSurface::Never, TypeSurface::Never) => {}
         (old_ty, new_ty) => {
             push_kind_change(name, old_ty.kind_label(), new_ty.kind_label(), changes);
         }

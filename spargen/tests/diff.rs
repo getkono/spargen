@@ -668,6 +668,81 @@ fn a_struct_becoming_a_cycle_member_newtype_changes_its_kind() {
     assert_eq!(report.changes[0].detail, "type kind `struct` -> `newtype`");
 }
 
+/// The `Pet` spec with `nope` (4-space indent) appended to its schemas, for the uninhabited-
+/// component fixtures below: `Nope` is referenced by nothing, so it is the only change.
+fn with_nope(nope: &str) -> String {
+    full(
+        &pets_get("listPets", "", PET_REF),
+        &format!("{PET_SCHEMA}{nope}"),
+    )
+}
+
+const NOPE_NEVER: &str = "    Nope: false\n";
+
+const NOPE_STRUCT: &str = "    Nope:
+      type: object
+      properties:
+        y: { type: string }
+";
+
+#[test]
+fn adding_an_uninhabited_component_is_minor_and_removing_one_is_major() {
+    // Issue #661: a `false` component is emitted as the empty `pub enum Nope {}`, a public type a
+    // consumer can name, so it appears and disappears like any other.
+    let added = diff(&with_nope(""), &with_nope(NOPE_NEVER));
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::TypeAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.changes[0].location, "Nope");
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_nope(NOPE_NEVER), &with_nope(""));
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::TypeRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.changes[0].location, "Nope");
+    assert_eq!(removed.bump, Impact::Major);
+
+    let unchanged = diff(&with_nope(NOPE_NEVER), &with_nope(NOPE_NEVER));
+    assert!(unchanged.changes.is_empty(), "{:?}", unchanged.changes);
+    assert_eq!(unchanged.bump, Impact::Patch);
+}
+
+#[test]
+fn a_struct_becoming_uninhabited_changes_its_kind() {
+    // Issue #661: `Nope` exists on both sides, so the change is a kind change, not a removal of
+    // the struct beside an addition of nothing (or the reverse).
+    let report = diff(&with_nope(NOPE_STRUCT), &with_nope(NOPE_NEVER));
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::TypeKindChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.changes[0].location, "Nope");
+    assert_eq!(
+        report.changes[0].detail,
+        "type kind `struct` -> `empty enum`"
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    let back = diff(&with_nope(NOPE_NEVER), &with_nope(NOPE_STRUCT));
+    assert_eq!(
+        kinds(&back),
+        vec![ChangeKind::TypeKindChanged],
+        "{:?}",
+        back.changes
+    );
+    assert_eq!(back.changes[0].detail, "type kind `empty enum` -> `struct`");
+    assert_eq!(back.bump, Impact::Major);
+}
+
 #[test]
 fn documenting_a_bodyless_success_beside_the_body_is_major() {
     // A bodyless `204` beside the `200` body turns the plain `Pet` into a response enum with a
