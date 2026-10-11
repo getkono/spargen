@@ -1366,12 +1366,14 @@ components:
 /// `{}`) in place of the untyped one gets the same answers (#592): the `$ref` and `allOf`
 /// spellings did not count it as taking `null` from the conjunct the union is met with, so an
 /// `anyOf` beside `const: null` denied `null` there, and a `oneOf` beside a nullable typed branch
-/// counted `null` in one branch alone and admitted it.
+/// counted `null` in one branch alone and admitted it. The `oneOf` rows of `const: null` beside
+/// the untyped object branch emit no `()` variant for it either: `null` fails exactly-one, and the
+/// branch accepts nothing else (#657).
 #[test]
 fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings() {
     let u = "$ref: '#/components/schemas/U'";
     let c = "{ properties: { u: { type: string } } }";
-    let mut rows: Vec<(String, bool)> = Vec::new();
+    let mut rows: Vec<(String, bool, bool)> = Vec::new();
     for keyword in ["anyOf", "oneOf"] {
         for typed in [
             "{ type: [object, 'null'], properties: { a: { type: string } } }",
@@ -1386,6 +1388,9 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
             // spelling.
             for other in ["{ properties: { b: { type: string } } }", "true", "{}"] {
                 let branches = format!("[ {typed}, {other} ]");
+                // Beside the untyped object branch a `oneOf`'s `const: null` branch is no variant.
+                let no_unit =
+                    !admits && typed == "{ const: null }" && other.starts_with("{ properties");
                 rows.extend(
                     [
                         format!("{{ {u}, {keyword}: {branches} }}"),
@@ -1401,13 +1406,13 @@ fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spelli
                         format!("{{ required: [u], {keyword}: {branches} }}"),
                     ]
                     .into_iter()
-                    .map(|site| (site, admits)),
+                    .map(|site| (site, admits, no_unit)),
                 );
             }
         }
     }
     let mut mismatches = Vec::new();
-    for (site, admits) in rows {
+    for (site, admits, no_unit) in rows {
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -1448,6 +1453,11 @@ components:
             let validity = if admits { "valid" } else { "invalid" };
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+        if no_unit && types.contains("= ();") {
+            mismatches.push(format!(
+                "{site}: the `const: null` branch is still a `()` variant: {types}"
             ));
         }
     }

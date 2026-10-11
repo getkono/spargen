@@ -398,9 +398,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut met_into_null: HashSet<usize> = HashSet::new();
         // How many variants are such a branch: each is one branch `null` matches (#645).
         let mut met_nulls = 0usize;
+        // Whether a branch whose own keywords leave `null` undecided (an untyped object or array,
+        // or a nested union `null` matches) accepts `null` after its meet, whatever gave it: the
+        // `type` array a multi-category sibling permits it through (#574), or a sibling that
+        // states `null`. It is counted as a nullable variant, and is a branch `null` matches
+        // beside an exact-`null` one as the same branch met with a single category is (#657).
+        let mut undecided_took_null = false;
+        // The members that are the exact null type on their own (`const: null`, `enum: [null]`),
+        // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
+        // a `oneOf` drops them where it counts them and `null` matches another branch too (#657).
+        let mut own_nulls: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
         for (index, member) in real_members.iter().enumerate() {
+            let lowered_from = self.graph_mark();
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            let lowered = lowered_from..self.graph_mark();
             let mut took_conjunct_null = false;
             // A variant that is a back-edge to *this* union — the member's type is the very
             // reservation this schema will occupy — is the whole union, so it constrains nothing and
@@ -567,7 +579,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // that took the conjunct's `null`) is one branch `null` matches, not two.
                 undecided_nulls +=
                     usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
-                null_variants += usize::from(self.is_exact_null(ty));
+                undecided_took_null = undecided_took_null
+                    || (leaves_null_undecided && ty.nullable && !stated_nothing_took_null);
+                if self.is_exact_null(ty) {
+                    null_variants += 1;
+                    own_nulls.push((index, lowered));
+                }
             }
             null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
@@ -628,8 +645,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
         // nothing and that `null` matches through its own branches (#628). A branch the sibling
         // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a
-        // `null` member is (#645).
-        let null_variants = if null_from_conjunct { null_variants } else { 0 };
+        // `null` member is (#645). Beside such a branch, or an untyped one that leaves `null`
+        // undecided, an exact-`null` variant is counted too: `null` matches both (#657). So it is
+        // beside such an untyped one that accepts `null` after its meet, as the same branch does
+        // beside a multi-category `type` array, which the `allOf` spelling lowers it alone beside.
+        let null_variants =
+            if null_from_conjunct || met_nulls > 0 || undecided_nulls > 0 || undecided_took_null {
+                null_variants
+            } else {
+                0
+            };
         let null_twice = mode == UnionMode::OneOf
             && null_members
                 + nullable_variants
@@ -681,7 +706,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the branches are not reported as indistinguishable variants of an enum that no longer
         // has them. The dropped branches' meet inserts (their `…Constrained` aliases) are elided
         // unless a surviving variant reaches them. A branch that is the null type on its own
-        // (`const: null`) stays the `()` variant it is with no sibling and in the `allOf` spelling.
+        // (`const: null`) stays the `()` variant it is with no sibling and in the `allOf` spelling,
+        // except where a `oneOf` drops it below (#657).
         if variant_members
             .iter()
             .any(|member| met_into_null.contains(member))
@@ -717,6 +743,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         }
                     }
                 }
+            }
+        }
+        // A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`),
+        // where the count above takes it beside another branch `null` matches — one the sibling
+        // meet narrowed to the null type (#645), an untyped object or array one (#622), or an
+        // untyped one that took `null` from a conjunct (#586) — puts `null` in two branches. `null`
+        // fails exactly-one, and the branch accepts nothing else, so it accepts nothing the union
+        // does: it is no variant, and the typed branches are, in the sibling spelling and in the
+        // `allOf` one, whose union member is lowered on its own. Kept, it was a `()` arm that
+        // decoded the `null` the union refuses (#657). The types its own lowering inserted are
+        // elided unless something else names them: a `$ref`'d component stays. Only where another
+        // variant is left, which the count guarantees, since the branch it counts beside is no
+        // exact-`null` variant of its own. Beside a branch that states nothing and took the
+        // conjunct's `null` (#592) the arm stays: that branch's copy of `null` is cleared by the
+        // caller only while the meet is still a union ([`Self::clear_counted_null`]).
+        let is_own_null = |member: &usize| own_nulls.iter().any(|(own, _)| own == member);
+        if mode == UnionMode::OneOf
+            && null_twice
+            && null_variants > 0
+            && stated_nothing_nulls == 0
+            && variant_members.iter().any(|member| !is_own_null(member))
+        {
+            let entries = std::mem::take(&mut variants)
+                .into_iter()
+                .zip(std::mem::take(&mut ref_names))
+                .zip(std::mem::take(&mut variant_members));
+            for ((variant, ref_name), member) in entries {
+                if !is_own_null(&member) {
+                    variants.push(variant);
+                    ref_names.push(ref_name);
+                    variant_members.push(member);
+                }
+            }
+            for (_, lowered) in own_nulls {
+                self.elide_unused_union_lowering(lowered);
             }
         }
         // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
