@@ -87,13 +87,24 @@ fn memoised_decision(
     target: &Schema,
     decide: impl FnOnce() -> bool,
 ) -> bool {
+    memoised_answer(memo, target, true, decide)
+}
+
+/// [`memoised_decision`] with `provisional` as the answer a walk that loops back to `target` reads
+/// while `target` is still being answered.
+fn memoised_answer(
+    memo: &RefCell<HashMap<String, bool>>,
+    target: &Schema,
+    provisional: bool,
+    decide: impl FnOnce() -> bool,
+) -> bool {
     let Some(key) = resolved_identity(&target.provenance) else {
         return decide();
     };
     if let Some(&decides) = memo.borrow().get(&key) {
         return decides;
     }
-    memo.borrow_mut().insert(key.clone(), true);
+    memo.borrow_mut().insert(key.clone(), provisional);
     let decides = decide();
     memo.borrow_mut().insert(key, decides);
     decides
@@ -227,6 +238,7 @@ fn lower_pass(
         gatherings: Vec::new(),
         target_decides_null_memo: RefCell::new(HashMap::new()),
         resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
+        admits_null_undecided_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
@@ -816,6 +828,13 @@ struct LowerCtx<'a, 'doc> {
     /// The same memo for [`Self::all_of_decides_null`]'s read of a bundle-`$ref` member's resolved
     /// target, which it reads as a whole schema rather than as a `$ref` target body.
     resolved_all_of_decides_null_memo: RefCell<HashMap<String, bool>>,
+    /// [`Self::all_of_wraps_undecided_union`]'s answer for each `$ref` member's target body, keyed
+    /// as [`Self::target_decides_null_memo`] is: a reuse graph of wrappers that branches (`W<i>:
+    /// allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time exponential
+    /// in its depth. A body being read records `false` (admits nothing undecided) before its
+    /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
+    /// end it.
+    admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
     /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
     /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
     ///

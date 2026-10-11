@@ -626,6 +626,101 @@ fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// An `allOf` `$ref` member whose target is itself an `allOf` wrapping a `$ref` to a union whose
+/// branches leave `null` undecided takes `null` from a member that admits it, as the flat (#624)
+/// and inline nested (#630) spellings do (#638): `Wrap: { allOf: [ { $ref: U } ] }` admits exactly
+/// the values `U` does. That holds for the member written as a `$ref` to a component and as a
+/// non-component pointer to such an `allOf`, through a wrapper of a wrapper, and for a wrapper
+/// whose union, or nested wrapper, is written inline. A `oneOf` that `null` matches twice admits
+/// none, a wrapper whose own `type` excludes `null` withholds it, a wrapped `$ref` whose own
+/// `type` sibling excludes `null` withholds it, and two wrapped unions alone decide nothing for
+/// each other: those stay non-null.
+#[test]
+fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitting_it() {
+    let mut mismatches = Vec::new();
+    for (site, nullable) in [
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/Wrap' } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/Bx/properties/w' \
+             } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapWrap' } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapOneOf' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: \
+             '#/components/schemas/Bx/properties/one' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapTyped' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/Wrap' }, { $ref: \
+             '#/components/schemas/WrapWrap' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapInline' } \
+             ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: \
+             '#/components/schemas/WrapInlineWrap' } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapSibling' } \
+             ] }",
+            false,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    U: {{ anyOf: [ {{ items: {{ type: string }} }}, {{ items: \
+                 {{ type: integer }} }} ] }}\n    UOne: {{ oneOf: [ {{ items: {{ type: string }} \
+                 }}, {{ items: {{ type: integer }} }} ] }}\n    Wrap: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/U' }} ] }}\n    WrapWrap: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/Wrap' }} ] }}\n    WrapOneOf: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/UOne' }} ] }}\n    WrapTyped: {{ type: array, allOf: [ {{ \
+                 $ref: '#/components/schemas/U' }} ] }}\n    WrapInline: {{ allOf: [ {{ anyOf: [ \
+                 {{ items: {{ type: string }} }}, {{ items: {{ type: integer }} }} ] }} ] }}\n    \
+                 WrapInlineWrap: {{ allOf: [ {{ allOf: [ {{ $ref: '#/components/schemas/U' }} ] \
+                 }} ] }}\n    WrapSibling: {{ allOf: [ {{ $ref: '#/components/schemas/U', type: \
+                 array }} ] }}\n    Bx:\n      type: object\n      \
+                 properties:\n        w: {{ allOf: [ {{ $ref: '#/components/schemas/U' }} ] }}\n        \
+                 one: {{ allOf: [ {{ $ref: '#/components/schemas/UOne' }} ] }}\n    Holder:\n      \
+                 type: object\n      properties:\n        pick: {{ $ref: \
+                 '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != nullable {
+            let validity = if nullable { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// A `oneOf` branch the sibling meet narrows to the exact null type, beside a branch it leaves
 /// typed, is a branch `null` matches, as a `null` member is, and the typed branches are the
 /// variants, as the `allOf` spelling (the `type` as a member beside the union) lowers it (#645).
@@ -706,4 +801,40 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Reading whether an `allOf` wraps a union that admits `null` undecided (#638) is done once per
+/// `$ref` target, not once per path. `W<i>` is `allOf: [$ref W<i-1>, $ref W<i-1>]` over the union
+/// `W0`, so the paths to it number 2^30; re-reading each target at every `$ref` (as the walk
+/// briefly did, taking 18 s at depth 20) would not finish at this depth. The answer is still the
+/// union's, replayed: `Pick` takes `null` from its nullable member.
+#[test]
+fn a_ref_member_to_a_branching_allof_wrapper_graph_reads_each_target_once() {
+    const DEPTH: usize = 30;
+    let mut defs = String::from(
+        "    W0: { anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }\n",
+    );
+    for level in 1..=DEPTH {
+        let prev = level - 1;
+        defs.push_str(&format!(
+            "    W{level}: {{ allOf: [ {{ $ref: '#/components/schemas/W{prev}' }}, {{ $ref: \
+             '#/components/schemas/W{prev}' }} ] }}\n"
+        ));
+    }
+    let spec = with_schemas(
+        "3.1.0",
+        &format!(
+            "    Pick: {{ allOf: [ {{ type: [array, 'null'] }}, {{ $ref: \
+             '#/components/schemas/W{DEPTH}' }} ] }}\n{defs}    Holder:\n      type: object\n      \
+             properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: \
+             [pick]\n"
+        ),
+    );
+    let (report, code) = generate_with_code(&spec);
+    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    let types = types_module(&code);
+    let pick = field_type(&types, "pub pick").unwrap_or_else(|| panic!("no `pick` field: {types}"));
+    assert!(pick.starts_with("Option<"), "`pick` is `{pick}`");
 }
