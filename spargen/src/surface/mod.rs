@@ -19,8 +19,9 @@
 //! * primitives → their canonical scalar label (`String`, `i32`, `i64`, `f64`, `bool`, `Uuid`,
 //!   `DateTime`, `Date`) — independent of the `uuid`/`time` feature flags, which only change the
 //!   concrete Rust type, not the surface identity;
-//! * a **nominal** type — a `struct`, a string `enum`, or a union (the models a consumer names,
-//!   constructs, and matches) → its generated type name;
+//! * a **nominal** type — a `struct`, a string `enum`, a union (the models a consumer names,
+//!   constructs, and matches), or an array or tuple that closes an alias cycle (emitted as a
+//!   newtype, #648) → its generated type name;
 //! * an array → `Vec<inner>`, a tuple → `(a, b, …)` (one position → `(a,)`, as Rust spells it),
 //!   bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
@@ -47,6 +48,11 @@ pub(crate) struct Surface {
     operations: BTreeMap<String, OpSurface>,
     /// Public model types keyed by their generated type name.
     types: BTreeMap<String, TypeSurface>,
+    /// The generated names of the components emitted as a `pub type X = …;` alias. An alias has
+    /// no entry in `types` (its target is compared at every use site), but its name is public, so
+    /// a type that turns into one or out of one is a kind change rather than an addition or a
+    /// removal.
+    aliases: BTreeSet<String>,
 }
 
 /// One client method's surface: the generated method name, its parameters, request body, and the
@@ -80,9 +86,10 @@ struct ParamSurface {
 }
 
 /// A public model type's surface, by generation kind. Only nominal types with real distinct
-/// structure are modelled: structs, string `enum`s, and unions. Integer/boolean enums and other
-/// alias-only components carry no structure beyond a scalar the consumer already sees at every use
-/// site, so they are compared structurally there rather than as standalone entries.
+/// structure are modelled: structs, string `enum`s, unions, and cycle-member newtypes.
+/// Integer/boolean enums and other alias-only components carry no structure beyond a scalar the
+/// consumer already sees at every use site, so they are compared structurally there rather than as
+/// standalone entries.
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name.
     Struct(BTreeMap<String, FieldSurface>),
@@ -91,6 +98,9 @@ enum TypeSurface {
     Enum(BTreeSet<String>, Option<String>),
     /// A union enum: variants keyed by generated variant name → canonical payload type.
     Union(BTreeMap<String, String>),
+    /// An array or tuple that closes an alias cycle, emitted as `pub struct X(pub T);` (#648): the
+    /// canonical rendering of the wrapped `T`, which is the type of the public `.0` field.
+    Newtype(String),
 }
 
 impl TypeSurface {
@@ -100,6 +110,7 @@ impl TypeSurface {
             TypeSurface::Struct(_) => "struct",
             TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
+            TypeSurface::Newtype(_) => "newtype",
         }
     }
 }
@@ -180,7 +191,8 @@ pub enum ChangeKind {
     TypeAdded,
     /// A public type was removed. **Major**.
     TypeRemoved,
-    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union`). **Major**.
+    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union` ↔ `newtype`), or a
+    /// `pub type` alias of the same name became one of those, or the reverse. **Major**.
     TypeKindChanged,
     /// A new optional field was added to a struct. **Minor**.
     FieldAdded,
@@ -188,7 +200,8 @@ pub enum ChangeKind {
     RequiredFieldAdded,
     /// A struct field was removed. **Major**.
     FieldRemoved,
-    /// A struct field's type changed. **Major**.
+    /// A struct field's type changed, or the type a cycle-member newtype wraps in its public `.0`
+    /// field. **Major**.
     FieldTypeChanged,
     /// A struct field's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
     FieldRequirednessChanged,
@@ -400,6 +413,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     }
 
     let mut types = BTreeMap::new();
+    let mut aliases = BTreeSet::new();
     // An elided type has a name but no item, so it is no part of the surface.
     for (id, def) in api.types.emitted() {
         let name = match names.types.get(&id) {
@@ -452,17 +466,33 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 }
                 TypeSurface::Union(variants)
             }
+            // A cycle-member array or tuple is a nominal newtype whose wrapped type is the public
+            // `.0` field (#648); every use site renders it by name, so its structure is compared
+            // here, one level deep, or a change to what it wraps would go unreported (#654).
+            TypeKind::Array(_) | TypeKind::Tuple(_) if api.types.closes_alias_cycle(id) => {
+                TypeSurface::Newtype(canon_container(&def.kind, api, names))
+            }
             // Unreachable for the reason `canon_ty` states: only a checked `Api` is surfaced.
             // Skipping it like an alias would drop a type from the diff without anything noticing.
             TypeKind::Reserved => unreachable!(
                 "a reservation reached the surface; `check_invariants` should have rejected it"
             ),
-            _ => continue,
+            // An uninhabited schema is emitted as an empty `pub enum`, not as an alias.
+            TypeKind::Never => continue,
+            // Every other kind is emitted as `pub type X = …;`, as codegen's own fallback arm does.
+            _ => {
+                aliases.insert(name);
+                continue;
+            }
         };
         types.insert(name, surface);
     }
 
-    Surface { operations, types }
+    Surface {
+        operations,
+        types,
+        aliases,
+    }
 }
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -672,6 +702,15 @@ fn diff_param(
 fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
     for name in keys(&old.types, &new.types) {
         match (old.types.get(name), new.types.get(name)) {
+            // The name was public on both sides, so code naming the alias now names a nominal type
+            // with another shape, and code relying on the alias's target (or on the nominal type's
+            // constructor and fields, the other way round) stops compiling.
+            (None, Some(new_ty)) if old.aliases.contains(name) => {
+                push_kind_change(name, "alias", new_ty.kind_label(), changes);
+            }
+            (Some(old_ty), None) if new.aliases.contains(name) => {
+                push_kind_change(name, old_ty.kind_label(), "alias", changes);
+            }
             (None, Some(_)) => {
                 changes.push(Change::new(ChangeKind::TypeAdded, name, "new public type"));
             }
@@ -700,16 +739,29 @@ fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec
         (TypeSurface::Union(old_variants), TypeSurface::Union(new_variants)) => {
             diff_union(name, old_variants, new_variants, changes);
         }
-        (old_ty, new_ty) => changes.push(Change::new(
-            ChangeKind::TypeKindChanged,
-            name,
-            format!(
-                "type kind `{}` -> `{}`",
-                old_ty.kind_label(),
-                new_ty.kind_label()
-            ),
-        )),
+        // The wrapped type is the newtype's public `.0` field, so a change to it is a field type
+        // change: every `.0` read and every `X(…)` construction sees the new type.
+        (TypeSurface::Newtype(old_ty), TypeSurface::Newtype(new_ty)) if old_ty != new_ty => {
+            changes.push(Change::new(
+                ChangeKind::FieldTypeChanged,
+                format!("{name}.0"),
+                format!("field type `{old_ty}` -> `{new_ty}`"),
+            ));
+        }
+        (TypeSurface::Newtype(_), TypeSurface::Newtype(_)) => {}
+        (old_ty, new_ty) => {
+            push_kind_change(name, old_ty.kind_label(), new_ty.kind_label(), changes);
+        }
     }
+}
+
+/// Report that the public type `name` changed generation kind from `old` to `new`.
+fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>) {
+    changes.push(Change::new(
+        ChangeKind::TypeKindChanged,
+        name,
+        format!("type kind `{old}` -> `{new}`"),
+    ));
 }
 
 fn diff_struct(
@@ -875,19 +927,7 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         Some(TypeKind::Array(_) | TypeKind::Tuple(_)) if api.types.closes_alias_cycle(ty.id) => {
             nominal_name(ty, names)
         }
-        Some(TypeKind::Array(inner)) => format!("Vec<{}>", canon_ty(**inner, api, names)),
-        Some(TypeKind::Tuple(items)) => {
-            let rendered: Vec<String> = items
-                .iter()
-                .map(|item| canon_ty(*item, api, names))
-                .collect();
-            // A one-position tuple keeps its trailing comma, as codegen declares it: `(T)` would
-            // name a parenthesized `T`, not the `(T,)` the generated client has.
-            match rendered.as_slice() {
-                [only] => format!("({only},)"),
-                _ => format!("({})", rendered.join(", ")),
-            }
-        }
+        Some(kind @ (TypeKind::Array(_) | TypeKind::Tuple(_))) => canon_container(kind, api, names),
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
         Some(TypeKind::Null) => "()".to_owned(),
         Some(TypeKind::Never) => nominal_name(ty, names),
@@ -908,6 +948,31 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         format!("Option<{base}>")
     } else {
         base
+    }
+}
+
+/// Render an array's or tuple's own structure one level deep: `Vec<item>` or `(a, b, …)`, each
+/// item through [`canon_ty`]. The structural form of an alias at a use site, and the wrapped type
+/// of a cycle-member newtype in its own surface entry.
+fn canon_container(kind: &TypeKind, api: &Api, names: &Names) -> String {
+    match kind {
+        TypeKind::Array(inner) => format!("Vec<{}>", canon_ty(**inner, api, names)),
+        TypeKind::Tuple(items) => {
+            let rendered: Vec<String> = items
+                .iter()
+                .map(|item| canon_ty(*item, api, names))
+                .collect();
+            // A one-position tuple keeps its trailing comma, as codegen declares it: `(T)` would
+            // name a parenthesized `T`, not the `(T,)` the generated client has.
+            match rendered.as_slice() {
+                [only] => format!("({only},)"),
+                _ => format!("({})", rendered.join(", ")),
+            }
+        }
+        TypeKind::Reserved => unreachable!(
+            "a reservation reached the surface; `check_invariants` should have rejected it"
+        ),
+        _ => unreachable!("both callers pass only an array or tuple"),
     }
 }
 

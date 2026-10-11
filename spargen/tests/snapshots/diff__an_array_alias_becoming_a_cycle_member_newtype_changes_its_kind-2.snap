@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|success-type-changed|GET /status|success type `Status` -> `Vec<String>`
+major|type-kind-changed|Status|type kind `newtype` -> `alias`
+bump=major

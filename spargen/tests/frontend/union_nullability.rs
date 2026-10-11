@@ -721,6 +721,88 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// A `oneOf` branch the sibling meet narrows to the exact null type, beside a branch it leaves
+/// typed, is a branch `null` matches, as a `null` member is, and the typed branches are the
+/// variants, as the `allOf` spelling (the `type` as a member beside the union) lowers it (#645).
+/// Spargen reads an untyped `items` or `properties` branch as array-only or object-only (#614,
+/// #613), so `type: [string, 'null']` meets it in `null` alone. Where `null` matches more than one
+/// branch — two narrowed branches, or one beside a branch that accepts `null` itself — it fails
+/// the exactly-one rule, and both spellings admit no `null`: `pub pick: Pick`. Where the narrowed
+/// branch is the only one `null` matches, both spellings are `pub pick: Option<Pick>`, as the
+/// `anyOf` counterpart is (#633). The sibling spelling kept a `()` variant for those branches,
+/// merged with a `W001` where there were two.
+#[test]
+fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
+    let mut mismatches = Vec::new();
+    for (members, single, nullable) in [
+        // `null` matches branches 0 and 1, so only strings satisfy it (the issue's shape).
+        (
+            "[ { items: { type: string } }, { items: { type: integer } }, { type: string } ]",
+            true,
+            false,
+        ),
+        (
+            "[ { items: { type: string } }, { properties: { a: { type: string } } }, { type: \
+             string, enum: [a] }, { type: string, enum: [b] } ]",
+            false,
+            false,
+        ),
+        // A typed branch that accepts `null` too is the second branch `null` matches.
+        (
+            "[ { items: { type: string } }, { type: [string, 'null'] } ]",
+            true,
+            false,
+        ),
+        // The narrowed branch is the only one `null` matches.
+        (
+            "[ { items: { type: string } }, { type: string } ]",
+            true,
+            true,
+        ),
+        (
+            "[ { items: { type: string } }, { type: string, enum: [a] }, { type: string, enum: \
+             [b] } ]",
+            false,
+            true,
+        ),
+    ] {
+        for site in [
+            format!("{{ type: [string, 'null'], oneOf: {members} }}"),
+            format!("{{ allOf: [ {{ type: [string, 'null'] }}, {{ oneOf: {members} }} ] }}"),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick");
+            let expected_pick = if nullable { "Option<Pick>" } else { "Pick" };
+            let shape = if single {
+                types.contains("pub type Pick = String;")
+            } else {
+                types.contains("pub enum Pick {")
+            };
+            if report.outcome() == Outcome::Rejected
+                || has_code(&report, Code::ValidationKeywordIgnored)
+                || pick.as_deref() != Some(expected_pick)
+                || !shape
+                || types.contains("= ();")
+                || types.contains("(())")
+            {
+                mismatches.push(format!(
+                    "{site}: not the typed branches as `{expected_pick}` with no `()` arm and no \
+                     `W001`: {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Reading whether an `allOf` wraps a union that admits `null` undecided (#638) is done once per
 /// `$ref` target, not once per path. `W<i>` is `allOf: [$ref W<i-1>, $ref W<i-1>]` over the union
 /// `W0`, so the paths to it number 2^30; re-reading each target at every `$ref` (as the walk
