@@ -232,8 +232,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut contributions = Vec::new();
         // Where the union's contribution goes when it is combined as a scalar member below.
         let mut union_slot = 0;
-        // The `$ref` members gathered as the one scalar their target lowers to, by where it went,
-        // as [`Self::lower_all_of`] records them.
+        // The members gathered as one scalar, by where it went, as [`Self::lower_all_of`] records
+        // them: each `$ref` member, and each inline union nested in an inner `allOf`.
         let mut union_members = Vec::new();
         self.in_composition(|ctx| {
             for (index, member) in schema.all_of.iter().enumerate() {
