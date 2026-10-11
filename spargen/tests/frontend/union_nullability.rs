@@ -635,7 +635,18 @@ fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
 #[test]
 fn an_exact_null_anyof_branch_beside_a_sibling_emits_one_unit_alias() {
     let mut mismatches = Vec::new();
-    for branch in ["{ const: null }", "{ enum: [null] }"] {
+    // A `$ref` to a `const: null` component takes the same path: the branch keeps the component's
+    // own alias, so the unit arm carries `Box<Nothing>` where it carried
+    // `Box<PickVariant0Constrained>`.
+    for (branch, unit, component) in [
+        ("{ const: null }", "PickVariant0", ""),
+        ("{ enum: [null] }", "PickVariant0", ""),
+        (
+            "{ $ref: '#/components/schemas/Nothing' }",
+            "Nothing",
+            "    Nothing: { const: null }\n",
+        ),
+    ] {
         let members =
             format!("[ {branch}, {{ type: string, enum: [a] }}, {{ type: string, enum: [b] }} ]");
         for site in [
@@ -645,8 +656,9 @@ fn an_exact_null_anyof_branch_beside_a_sibling_emits_one_unit_alias() {
             let spec = with_schemas(
                 "3.1.0",
                 &format!(
-                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
-                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+                    "{component}    Pick: {site}\n    Holder:\n      type: object\n      \
+                     properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                     required: [pick]\n"
                 ),
             );
             let (report, code) = generate_with_code(&spec);
@@ -661,7 +673,7 @@ fn an_exact_null_anyof_branch_beside_a_sibling_emits_one_unit_alias() {
                 .collect();
             let sibling = site.starts_with("{ type:");
             if report.outcome() == Outcome::Rejected
-                || (sibling && units != ["PickVariant0"])
+                || (sibling && units != [unit])
                 || units
                     .iter()
                     .any(|unit| !types.contains(&format!("(Box<{unit}>)")))
