@@ -9,9 +9,10 @@ use crate::ir::{
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
+use super::all_of::MetUnionMember;
 use super::combine::{schema_has_union, sole_union_member};
 use super::meet::value_category;
-use super::nullability::union_branch_admits_null;
+use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
 use super::shape::schema_has_shape_constraint;
 use super::{LowerCtx, MetUnion, MAX_SCHEMA_DEPTH};
@@ -38,7 +39,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_too_deep(&schema.provenance);
         }
         self.depth += 1;
-        let result = self.lower_schema_inner(schema, hint);
+        let mark = self.graph_mark();
+        let result = self
+            .lower_schema_inner(schema, hint)
+            .and_then(|ty| self.settle_null_admission(schema, ty, mark));
         self.depth -= 1;
         result
     }
@@ -255,8 +259,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
             let sibling = sibling?;
             let mark = self.graph_mark();
+            let meets_from = self.variant_meets.len();
             let intersection =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"));
+            // A branch of the union sibling the target excludes is reported as the inline sibling
+            // spelling reports it (#671).
+            if has_union_sibling && intersection.is_ok() {
+                let mut union = schema.clone();
+                union.reference = None;
+                let met = MetUnionMember {
+                    union: sibling.id,
+                    schema: union,
+                    conjunct: self.union_sibling_null_admission(schema),
+                    conjunct_is_null: self.is_exact_null(referenced),
+                };
+                self.warn_excluded_union_member_branches(schema, &[met], meets_from);
+            }
             // A union sibling uninhabited on its own (a lone `false` branch) leaves the
             // conjunction so (#615), as the `allOf` spellings of it do, rather than an empty meet
             // that rejects it.
@@ -567,12 +585,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
-        // A `null` member — or `"null"` in the schema's own type array — makes the enum/const
-        // nullable: strip the nulls, lower the remaining scalars as the enum, and wrap the result
-        // in `Option`. The enum/const branch returns before `lower_schema` computes `nullable`, so
-        // the nullability has to be decided here from both sources.
-        let has_null = schema.types.types.contains(&JsonType::Null)
-            || values.iter().any(|value| matches!(value.node, Node::Null));
+        // The enum/const admits `null` where its own `type`, `enum` and `const` all do — their
+        // conjunction, the one decision ([`NullAdmission::of_own_keywords`]): a `"null"` in the
+        // type array beside an `enum` that leaves it out admits none (#666), and nor does a `null`
+        // member beside a `type` that leaves it out. Strip the nulls, lower the remaining scalars
+        // as the enum, and wrap the result in `Option` where it admits `null`.
+        let has_null = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
         // Declared order is preserved (minus nulls) so double generation stays byte-identical.
         let remainder: Vec<&SpannedValue> = values
             .iter()

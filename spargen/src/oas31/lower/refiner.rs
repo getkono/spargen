@@ -472,7 +472,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut retained = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
             match self.meet_refiner(variant.ty, other, reach, &format!("{hint}Variant{index}")) {
-                Ok(ty) => {
+                Ok(mut ty) => {
+                    // A branch already the exact null type is narrowed by nothing that admits
+                    // `null` beside it, so it keeps its own `()` def, as the sibling spelling keeps
+                    // it (#653); the meet's copy would be a second alias for the same arm.
+                    if ty.id != variant.ty.id
+                        && self.is_exact_null(variant.ty)
+                        && self.is_exact_null(ty)
+                    {
+                        self.graph.elide(ty.id);
+                        ty = non_nullable(variant.ty);
+                    }
+                    self.variant_meets.push((union_ty.id, index, true));
                     variants.push(UnionVariant {
                         name_hint: variant.name_hint.clone(),
                         ty,
@@ -480,8 +491,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     retained.push(index);
                 }
                 // A branch no value of `other` satisfies contributes nothing to the intersection,
-                // so dropping it loses no value.
-                Err(NoMeet::Empty) => {}
+                // so dropping it loses no value. Recorded, so an `allOf` that met a union member
+                // here can report it as the sibling spelling does
+                // ([`Self::warn_excluded_union_member_branches`]).
+                Err(NoMeet::Empty) => self.variant_meets.push((union_ty.id, index, false)),
                 // A branch that shares values with `other` but has no type for them cannot be
                 // dropped without refusing those values, whatever the other branches do.
                 Err(NoMeet::Unrepresentable) => return Err(NoMeet::Unrepresentable),

@@ -11,7 +11,7 @@ use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
 use super::meet::{carries_key, merge_field_default, NoMeet};
-use super::nullability::{object_all_of_admits_null, stated_nullability};
+use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
 use super::{
@@ -82,12 +82,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return Some(self.with_all_of_nullability(schema, ty));
             };
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
-                let Ok(merged) = self.intersect_types(
+                let merged = match self.intersect_types(
                     intersection,
                     member,
                     &format!("{hint}Intersection{index}"),
-                ) else {
-                    return self.reject_all_of_scalars(schema);
+                ) {
+                    Ok(merged) => merged,
+                    // The members share no non-null value, but the one null decision says the
+                    // `allOf` states `null` and `null` satisfies every member: a union member whose
+                    // branch `null` matches through an untyped branch of its own (a `$ref` to such
+                    // a union) lowered non-null on its own. Only `null` is left, the exact null type
+                    // the sibling spelling gives the same constraints (#674).
+                    Err(NoMeet::Empty) if self.null_admission(schema) == NullAdmission::Admits => {
+                        self.discard_meet_intermediates(mark, &TypeKind::Null);
+                        return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+                    }
+                    Err(_) => return self.reject_all_of_scalars(schema),
                 };
                 intersection = merged;
             }
