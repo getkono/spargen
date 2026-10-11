@@ -570,15 +570,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(self.insert_schema_type(schema, hint, TypeKind::Null))
     }
 
-    /// [`own_keywords_admit_null`] over an `allOf` schema and every schema
-    /// [`Self::gather_member`] flattens into its meet: a member with an `allOf` and no union beside
-    /// it, whether inline, as a `$ref`'s siblings, or as the resolved target of a non-component
-    /// `$ref` member, which [`Self::gather_ref_target`] expands in place rather than lowering.
-    /// Flattening gathers only such a schema's members and object keywords, so its own `type`,
-    /// `enum` or `const` reaches no contribution, yet still constrains every value of the meet
-    /// (#569). Any other member is lowered or read as a contribution of its own, which carries its
-    /// nullability already: a component or remote `$ref` lowers to a type, and a plain body is
-    /// read by its keywords.
+    /// [`own_keywords_admit_null`] over an `allOf` schema and every inline schema among its
+    /// members: each member, as a `$ref`'s siblings or as the resolved target of a non-component
+    /// `$ref` member, and, where [`Self::gather_member`] flattens it into the meet (a member with
+    /// an `allOf` and no union beside it, which [`Self::gather_ref_target`] expands in place
+    /// rather than lowering when it is a `$ref`'s target), its own members in turn. Flattening
+    /// gathers only such a schema's members and object keywords, so its own `type`, `enum` or
+    /// `const` reaches no contribution, yet still constrains every value of the meet (#569). A
+    /// member lowered as a contribution of its own is read by the same conjunction, since its
+    /// lowering does not: `{ type: [string, 'null'], enum: [a] }` lowers to a nullable enum though
+    /// its `enum` refuses `null`, and a union member beside it then took that `null` (#649). A
+    /// component or remote `$ref` lowers to a type, which carries its nullability already.
     pub(super) fn flattened_keywords_admit_null(&self, schema: &Schema) -> bool {
         own_keywords_admit_null(schema)
             && self.flattened_members_admit_null(schema, &mut HashSet::new(), 0)
@@ -639,11 +641,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && (!schema_has_shape_constraint(&sibling)
                     || self.flattened_member_admits_null(&sibling, visited, depth + 1));
         }
-        if member.all_of.is_empty() || schema_has_union(member) {
-            return true;
-        }
         own_keywords_admit_null(member)
-            && self.flattened_members_admit_null(member, visited, depth + 1)
+            && (member.all_of.is_empty()
+                || schema_has_union(member)
+                || self.flattened_members_admit_null(member, visited, depth + 1))
     }
 
     /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.

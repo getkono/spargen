@@ -624,12 +624,11 @@ fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refus
         match rejected_with {
             None => {
                 let types = types_module(&code);
-                // The `allOf` spelling still makes the field `Option<Pick>` (#649), so only the
-                // sibling spelling's field is held to the non-optional type here.
-                let sibling = !site.starts_with("{ allOf");
+                // Both spellings hold the field to the non-optional type: the `allOf` member's
+                // `enum` / `const` refuses the `null` its type array lists (#649).
                 if report.outcome() == Outcome::Rejected
                     || !types.contains(only_a)
-                    || (sibling && field_type(&types, "pub pick").as_deref() != Some("Pick"))
+                    || field_type(&types, "pub pick").as_deref() != Some("Pick")
                 {
                     mismatches.push(format!(
                         "{site}: only `\"a\"` satisfies it, but it is not `Pick {{ A }}`: \
@@ -651,6 +650,58 @@ fn a_type_array_listing_null_gives_untyped_oneof_branches_no_null_its_enum_refus
                     ));
                 }
             }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The rule above on the `allOf` arm that meets every union member as a scalar: a `$ref` member
+/// to a union whose untyped `items` branch leaves `null` undecided, or several inline unions,
+/// take `null` from the other members only where every member's own `type`, `enum` and `const`
+/// admit it. `{ type: [string, 'null'], enum: [a] }` refuses `null`, so the field is `Pick`; with
+/// `null` listed in its `enum` as well it admits `null`, and the field stays `Option<Pick>` (#649).
+#[test]
+fn an_allof_member_whose_enum_refuses_null_gives_union_members_no_null() {
+    let union = "{ oneOf: [ { items: { type: string } }, { type: string } ] }";
+    let mut mismatches = Vec::new();
+    for (site, expected) in [
+        (
+            "{ allOf: [ { type: [string, 'null'], enum: [a] }, { $ref: '#/components/schemas/U' \
+             } ] }",
+            "Pick",
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], const: a }, { $ref: '#/components/schemas/U' } \
+             ] }",
+            "Pick",
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], enum: [a] }, { $ref: '#/components/schemas/U' \
+             }, { anyOf: [ { items: { type: string } }, { type: string } ] } ] }",
+            "Pick",
+        ),
+        (
+            "{ allOf: [ { type: [string, 'null'], enum: [a, null] }, { $ref: \
+             '#/components/schemas/U' } ] }",
+            "Option<Pick>",
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    U: {union}\n    Pick: {site}\n    Holder:\n      type: object\n      \
+                 properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        if report.outcome() == Outcome::Rejected
+            || field_type(&types, "pub pick").as_deref() != Some(expected)
+        {
+            mismatches.push(format!(
+                "{site}: the field is not `{expected}`: {report:#?} {types}"
+            ));
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
