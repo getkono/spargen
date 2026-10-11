@@ -578,9 +578,9 @@ fn an_anyof_branch_the_sibling_narrows_to_null_is_the_union_option() {
 /// An `anyOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`), not
 /// one the sibling meet narrows to it, stays the `()` variant it is with no sibling and in the
 /// `allOf` spelling, beside a sibling too (#633 changes only the branches the meet narrows). The
-/// union is that enum with a `()` arm, not an `Option` of the typed branches. The sibling spelling
-/// also leaves the branch's pre-meet `()` alias unused beside its met copy, as master does; this
-/// pins only that the arm is kept.
+/// union is that enum with a `()` arm, not an `Option` of the typed branches. That no unused `()`
+/// alias is left beside the arm is pinned by
+/// `an_exact_null_anyof_branch_beside_a_sibling_emits_one_unit_alias`.
 #[test]
 fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
     let mut mismatches = Vec::new();
@@ -619,6 +619,67 @@ fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
             {
                 mismatches.push(format!(
                     "{site}: not the enum with its `()` arm: {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The sibling meet of an `anyOf` branch that is already the exact null type (`const: null`,
+/// `enum: [null]`) narrows nothing, so the branch keeps its own `()` alias and the meet leaves no
+/// copy of it. The sibling spelling emitted both `PickVariant0 = ()` and the met
+/// `PickVariant0Constrained = ()`, and only the second was reachable (#653). It now emits the one
+/// alias `PickVariant0`, which the enum's unit arm carries; in the `allOf` spelling, as before,
+/// every `()` alias is an arm's payload.
+#[test]
+fn an_exact_null_anyof_branch_beside_a_sibling_emits_one_unit_alias() {
+    let mut mismatches = Vec::new();
+    // A `$ref` to a `const: null` component takes the same path: the branch keeps the component's
+    // own alias, so the unit arm carries `Box<Nothing>` where it carried
+    // `Box<PickVariant0Constrained>`.
+    for (branch, unit, component) in [
+        ("{ const: null }", "PickVariant0", ""),
+        ("{ enum: [null] }", "PickVariant0", ""),
+        (
+            "{ $ref: '#/components/schemas/Nothing' }",
+            "Nothing",
+            "    Nothing: { const: null }\n",
+        ),
+    ] {
+        let members =
+            format!("[ {branch}, {{ type: string, enum: [a] }}, {{ type: string, enum: [b] }} ]");
+        for site in [
+            format!("{{ type: [string, 'null'], anyOf: {members} }}"),
+            format!("{{ allOf: [ {{ type: [string, 'null'] }}, {{ anyOf: {members} }} ] }}"),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "{component}    Pick: {site}\n    Holder:\n      type: object\n      \
+                     properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                     required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            let units: Vec<&str> = types
+                .lines()
+                .filter_map(|line| {
+                    line.trim()
+                        .strip_prefix("pub type ")?
+                        .strip_suffix(" = ();")
+                })
+                .collect();
+            let sibling = site.starts_with("{ type:");
+            if report.outcome() == Outcome::Rejected
+                || (sibling && units != [unit])
+                || units
+                    .iter()
+                    .any(|unit| !types.contains(&format!("(Box<{unit}>)")))
+            {
+                mismatches.push(format!(
+                    "{site}: a `()` alias no arm carries: {units:?} {report:#?} {types}"
                 ));
             }
         }
