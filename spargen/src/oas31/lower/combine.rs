@@ -108,7 +108,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // A union member's `Value` variant took the other members' `null` from the meet,
             // which the `allOf` already decided for the union by its own count (#660).
-            intersection = self.clear_value_variant_null(intersection, &value_variants);
+            intersection = self.clear_value_variant_null(intersection, &value_variants, mark);
             // A `oneOf` the meets left with branches of one generated type collapses with `W001`,
             // as the meet of a union member does (#643); an `anyOf` member met with a `oneOf`
             // member left such `oneOf`s nested in its branches.

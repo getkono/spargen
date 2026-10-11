@@ -917,9 +917,11 @@ struct LowerCtx<'a, 'doc> {
     held_untyped_warnings: Option<Vec<HeldUntypedWarning>>,
     /// The variant hints of the `Value` variants of the union members an `allOf`'s scalar meet
     /// meets, whose `null` the `allOf` decided by the union's own count
-    /// ([`Self::union_members_take_scalar_null`]). `Value` is the identity of the meet, so the
-    /// meet hands each the other members' `null` a second time; [`Self::combine_all_of`] clears
-    /// that copy before it collapses the met `oneOf`, so `null` is counted once (#660).
+    /// ([`Self::union_members_take_scalar_null`]) rather than by a branch that states `null`
+    /// (beside which the copy is a second branch `null` matches, and stays). `Value` is the
+    /// identity of the meet, so the meet hands each the other members' `null` a second time;
+    /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
+    /// is counted once (#660).
     scalar_meet_value_variants: HashSet<String>,
 }
 

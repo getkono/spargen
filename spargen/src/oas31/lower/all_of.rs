@@ -5,10 +5,11 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::diag::Provenance;
-use crate::ir::{Docs, Ty, TypeKind};
+use crate::ir::{Docs, Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::{schema_has_union, take_refiners, Contribution};
+use super::meet::same_ty;
 use super::nullability::{undecided_admits_null, union_branch_admits_null};
 use super::refiner::implied_applicator_category;
 use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
@@ -76,14 +77,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // union nested in an inner `allOf` flattened into this one (#642). Only where `null`
         // can satisfy the merge at all: the own `type`, `enum` or `const` of this schema, or of
         // an `allOf` flattened into it, contributes nothing to the meet yet constrains every
-        // value of it, so one that excludes `null` leaves no `null` to take.
-        if self.flattened_keywords_admit_null(schema) {
-            self.union_members_take_scalar_null(&union_members, &mut contributions);
-        }
+        // value of it, so one that excludes `null` leaves no `null` to take
+        // ([`Self::combine_scalar_union_members`] takes it).
         self.combine_scalar_union_members(
             schema,
             hint,
-            &contributions,
+            contributions,
             &union_members,
             held,
             lowerings,
@@ -93,16 +92,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::combine_all_of`] of `contributions`, where `union_members` records the union
     /// members gathered as one scalar (as [`Self::lower_all_of`] records them) and `held` the
     /// `W001`s the gather held back ([`Self::holding_untyped_warnings`]). Each union member's
-    /// `null` is decided by the union's own count before this
-    /// ([`Self::union_members_take_scalar_null`]), so the copy the meet hands its `Value` variants
-    /// is cleared ([`Self::scalar_meet_value_variants`]), and an inline union member's `W001` is
-    /// raised for the variants the meet leaves `Value` alone: met with `type: [string, 'null']`, a
-    /// branch that states nothing is a `string` branch, as the sibling spelling lowers it (#660).
+    /// `null` is decided here by the union's own count
+    /// ([`Self::union_members_take_scalar_null`]), where `null` can satisfy the merge at all, so
+    /// the copy the meet hands its `Value` variants is cleared
+    /// ([`Self::scalar_meet_value_variants`]), and an inline union member's `W001` is raised for
+    /// the variants the meet leaves `Value` alone: met with `type: [string, 'null']`, a branch that
+    /// states nothing is a `string` branch, as the sibling spelling lowers it (#660).
+    ///
+    /// A union whose own lowering already took `null` from a branch that states it
+    /// (`[ {}, { type: [string, 'null'] } ]`) holds that branch's `null`, not its `Value`
+    /// variant's: `null` matches both branches, so the copy is the second match the `oneOf`
+    /// collapse must count to deny `null`, as the sibling spelling does, and it stays.
     fn combine_scalar_union_members(
         &mut self,
         schema: &Schema,
         hint: &str,
-        contributions: &[Contribution],
+        mut contributions: Vec<Contribution>,
         union_members: &[(usize, &Schema)],
         held: Vec<HeldUntypedWarning>,
         lowerings: Vec<(Provenance, Range<u32>)>,
@@ -112,6 +117,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(Contribution::Scalar(ty)) = contributions.get(*slot) else {
                 continue;
             };
+            if ty.nullable {
+                continue;
+            }
             let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
                 continue;
             };
@@ -124,17 +132,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+        if self.flattened_keywords_admit_null(schema) {
+            self.union_members_take_scalar_null(union_members, &mut contributions);
+        }
         self.scalar_meet_value_variants = value_variants;
-        let met = self.combine_all_of(schema, hint, contributions);
+        let met = self.combine_all_of(schema, hint, &contributions);
         let mut held = held;
         // A met reservation's body is not known yet, so nothing is settled against it.
         if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
-            let met_union =
-                if let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) {
-                    Some(union.variants.clone())
-                } else {
-                    None
-                };
+            let met_union = self.met_union_variants(met);
             for (provenance, lowered) in lowerings {
                 let Some(index) = held
                     .iter()
@@ -153,7 +159,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     continue;
                 };
                 // The meet is this union's own where it left one branch (no union), or a union
-                // that carries its variants; a union of another member's branches is not.
+                // that carries its variants, at the top or nested under another union member's
+                // branches, so the member order does not decide it; a union of another member's
+                // branches alone is not.
                 let carries = |hint: &str| {
                     met_union.as_ref().map_or(Some(None), |variants| {
                         variants
@@ -217,14 +225,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// the union variants `value_variants` names cleared ([`Self::scalar_meet_value_variants`]):
     /// each lowered to `Value`, the identity of the meet, so the meet gave it the other members'
     /// `null` a second time, and a `oneOf` collapsed after it read that copy as one more branch
-    /// `null` matches. `met` is returned as it is where it is no union or no such variant took
-    /// `null`.
+    /// `null` matches. The unions the meet nested in `met`'s variants (a second union member met
+    /// with each branch of the first) are cleared alike, since types inserted since `mark` are the
+    /// meet's own. `met` is returned as it is where nothing is cleared.
     pub(super) fn clear_value_variant_null(
         &mut self,
         met: Ty,
         value_variants: &HashSet<String>,
+        mark: u32,
     ) -> Ty {
-        if value_variants.is_empty() {
+        if value_variants.is_empty() || met.id.0 < mark {
             return met;
         }
         let Some(def) = self.graph.get(met.id) else {
@@ -233,24 +243,53 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let TypeKind::Union(union) = &def.kind else {
             return met;
         };
-        if !union
-            .variants
-            .iter()
-            .any(|variant| variant.ty.nullable && value_variants.contains(&variant.name_hint))
-        {
-            return met;
-        }
         let hint = def.name_hint.clone();
         let mut union = union.clone();
+        let mut changed = false;
         for variant in &mut union.variants {
-            if value_variants.contains(&variant.name_hint) {
-                variant.ty.nullable = false;
+            let cleared = self.clear_value_variant_null(variant.ty, value_variants, mark);
+            if !same_ty(cleared, variant.ty) {
+                variant.ty = cleared;
+                changed = true;
             }
+        }
+        for variant in &mut union.variants {
+            if variant.ty.nullable && value_variants.contains(&variant.name_hint) {
+                variant.ty.nullable = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            return met;
         }
         let mut ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
         ty.nullable = met.nullable;
         ty.boxed = met.boxed;
         ty
+    }
+
+    /// Every variant of `met` where it is a union, and of each union nested in those variants:
+    /// where a union member meets another union, its variants sit one level down, under the
+    /// other's branches, whichever member is written first. `None` where `met` is no union.
+    fn met_union_variants(&self, met: Ty) -> Option<Vec<UnionVariant>> {
+        let Some(TypeKind::Union(_)) = self.graph.get(met.id).map(|def| &def.kind) else {
+            return None;
+        };
+        let mut seen = HashSet::new();
+        let mut pending = vec![met.id];
+        let mut variants = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(TypeKind::Union(union)) = self.graph.get(id).map(|def| &def.kind) {
+                for variant in &union.variants {
+                    pending.push(variant.ty.id);
+                    variants.push(variant.clone());
+                }
+            }
+        }
+        Some(variants)
     }
 
     /// [`Self::gather_all_of`] of `schema`, recording in `union_members` each `$ref` member
@@ -507,13 +546,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             union_members.push((union_slot, union.as_ref()));
-            if self.flattened_keywords_admit_null(schema) {
-                self.union_members_take_scalar_null(&union_members, &mut contributions);
-            }
+            // The union members take `null` there, where it can satisfy the merge.
             return self.combine_scalar_union_members(
                 schema,
                 hint,
-                &contributions,
+                contributions,
                 &union_members,
                 held,
                 lowerings,

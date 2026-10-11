@@ -1006,10 +1006,15 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
 /// `Option` arm and a `W001` beside the narrowed branch, and `Pick` (the `null` counted twice) on
 /// its own (#660). Each spelling now gives the sibling one's answer, with no `Option` arm and no
 /// `W001`, written as a member, nested in an inner `allOf`, or after the `type` member.
+///
+/// Beside a branch that accepts `null` itself (`type: [string, 'null']`, `enum: [a, null]`), the
+/// branch that states nothing is the second branch `null` matches, so every spelling keeps `null`
+/// denied: `pub pick: Pick`, as before #660. Where the met branches are one generated type, the
+/// collapse's `W001` stands in every spelling.
 #[test]
 fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
     let mut mismatches = Vec::new();
-    for (members, single, nullable) in [
+    let quiet = [
         // `null` matches branches 0 and 1, so only strings satisfy it (the issue's shape).
         (
             "[ { items: { type: string } }, { items: { type: integer } }, { type: string } ]",
@@ -1058,15 +1063,52 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             false,
             true,
         ),
-    ] {
+    ]
+    .map(|(members, single, nullable)| ("[string, 'null']", members, single, nullable, false));
+    // A branch that states nothing beside one that accepts `null` itself: `null` matches both.
+    let null_stated = [
+        (
+            "[string, 'null']",
+            "[ {}, { type: [string, 'null'] } ]",
+            true,
+            false,
+            true,
+        ),
+        (
+            "[string, 'null']",
+            "[ {}, { enum: [a, null] } ]",
+            false,
+            false,
+            false,
+        ),
+        (
+            "[string, 'null']",
+            "[ true, { type: [string, 'null'] } ]",
+            true,
+            false,
+            true,
+        ),
+        (
+            "[string, 'null']",
+            "[ { minLength: 1 }, { type: [string, 'null'] } ]",
+            true,
+            false,
+            true,
+        ),
+        (
+            "[integer, 'null']",
+            "[ {}, { type: [integer, 'null'] } ]",
+            true,
+            false,
+            true,
+        ),
+    ];
+    for (ty, members, single, nullable, warns) in quiet.into_iter().chain(null_stated) {
         for site in [
-            format!("{{ type: [string, 'null'], oneOf: {members} }}"),
-            format!("{{ allOf: [ {{ type: [string, 'null'] }}, {{ oneOf: {members} }} ] }}"),
-            format!(
-                "{{ allOf: [ {{ type: [string, 'null'] }}, {{ allOf: [ {{ oneOf: {members} }} ] \
-                 }} ] }}"
-            ),
-            format!("{{ allOf: [ {{ oneOf: {members} }}, {{ type: [string, 'null'] }} ] }}"),
+            format!("{{ type: {ty}, oneOf: {members} }}"),
+            format!("{{ allOf: [ {{ type: {ty} }}, {{ oneOf: {members} }} ] }}"),
+            format!("{{ allOf: [ {{ type: {ty} }}, {{ allOf: [ {{ oneOf: {members} }} ] }} ] }}"),
+            format!("{{ allOf: [ {{ oneOf: {members} }}, {{ type: {ty} }} ] }}"),
         ] {
             let spec = with_schemas(
                 "3.1.0",
@@ -1080,12 +1122,12 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             let pick = field_type(&types, "pub pick");
             let expected_pick = if nullable { "Option<Pick>" } else { "Pick" };
             let shape = if single {
-                types.contains("pub type Pick = String;")
+                types.contains("pub type Pick = String;") || types.contains("pub type Pick = i64;")
             } else {
                 types.contains("pub enum Pick {")
             };
             if report.outcome() == Outcome::Rejected
-                || has_code(&report, Code::ValidationKeywordIgnored)
+                || has_code(&report, Code::ValidationKeywordIgnored) != warns
                 || pick.as_deref() != Some(expected_pick)
                 || !shape
                 || types.contains("= ();")
@@ -1094,9 +1136,79 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             {
                 mismatches.push(format!(
                     "{site}: not the typed branches as `{expected_pick}` with no `()` or `Option` \
-                     arm and no `W001`: {report:#?} {types}"
+                     arm and a `W001` only where expected ({warns}): {report:#?} {types}"
                 ));
             }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The `allOf` scalar meet clears the second `null` it hands a union member's `Value` variant
+/// (#660) wherever the meet put that variant, so neither the member order nor a second union
+/// member decides the result.
+///
+/// Two inline `oneOf` members each with a branch that states nothing: the second union is met
+/// with each branch of the first, so its variants sit in a union nested under the first's, and
+/// that nested `Value` variant took the `type` member's `null` as well. `null` matches the `{}`
+/// branch of each union once, so the field is `Option<Pick>`, with no `Option` arm at any depth,
+/// in every member order. And beside a `type` member that is a union itself
+/// (`[string, integer, 'null']`), whose branches the union member's variants sit under when it is
+/// written first, every `allOf` spelling settles the union member's `W001` alike: its met
+/// variants are typed, so none reports it or emits a `serde_json::Value` alias.
+#[test]
+fn an_all_of_union_members_value_variant_null_is_settled_at_any_depth_and_order() {
+    let mut mismatches = Vec::new();
+    let a = "{ oneOf: [ {}, { type: string, enum: [a] } ] }";
+    let b = "{ oneOf: [ {}, { type: string, enum: [b] } ] }";
+    let ty = "{ type: [string, 'null'] }";
+    let two_unions = [
+        format!("{{ allOf: [ {ty}, {a}, {b} ] }}"),
+        format!("{{ allOf: [ {a}, {ty}, {b} ] }}"),
+        format!("{{ allOf: [ {a}, {b}, {ty} ] }}"),
+        format!("{{ allOf: [ {ty}, {{ allOf: [ {a}, {b} ] }} ] }}"),
+    ]
+    .map(|site| (site, "Option<Pick>"));
+    let multi = "[string, integer, 'null']";
+    let multi_type = [
+        ("[ {}, { type: string, enum: [a] } ]", "Option<Pick>"),
+        (
+            "[ { items: { type: string } }, {}, { type: string, enum: [a] } ]",
+            "Pick",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(members, pick)| {
+        [
+            format!("{{ allOf: [ {{ type: {multi} }}, {{ oneOf: {members} }} ] }}"),
+            format!(
+                "{{ allOf: [ {{ type: {multi} }}, {{ allOf: [ {{ oneOf: {members} }} ] }} ] }}"
+            ),
+            format!("{{ allOf: [ {{ oneOf: {members} }}, {{ type: {multi} }} ] }}"),
+        ]
+        .map(|site| (site, pick))
+    });
+    for (site, expected_pick) in two_unions.into_iter().chain(multi_type) {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        if report.outcome() == Outcome::Rejected
+            || has_code(&report, Code::ValidationKeywordIgnored)
+            || field_type(&types, "pub pick").as_deref() != Some(expected_pick)
+            || !types.contains("pub enum Pick {")
+            || types.contains("(Option<")
+            || types.contains("= serde_json::Value;")
+        {
+            mismatches.push(format!(
+                "{site}: not `{expected_pick}` with no `Option` arm, no `Value` alias and no \
+                 `W001`: {report:#?} {types}"
+            ));
         }
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
