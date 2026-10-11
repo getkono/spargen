@@ -398,6 +398,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut met_into_null: HashSet<usize> = HashSet::new();
         // How many variants are such a branch: each is one branch `null` matches (#645).
         let mut met_nulls = 0usize;
+        // Whether a branch whose own keywords leave `null` undecided (an untyped object or array,
+        // or a nested union `null` matches) accepts `null` after its meet, whatever gave it: the
+        // `type` array a multi-category sibling permits it through (#574), or a sibling that
+        // states `null`. It is counted as a nullable variant, and is a branch `null` matches
+        // beside an exact-`null` one as the same branch met with a single category is (#657).
+        let mut undecided_took_null = false;
         // The members that are the exact null type on their own (`const: null`, `enum: [null]`),
         // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
         // a `oneOf` drops them where it counts them and `null` matches another branch too (#657).
@@ -573,6 +579,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // that took the conjunct's `null`) is one branch `null` matches, not two.
                 undecided_nulls +=
                     usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
+                undecided_took_null = undecided_took_null
+                    || (leaves_null_undecided && ty.nullable && !stated_nothing_took_null);
                 if self.is_exact_null(ty) {
                     null_variants += 1;
                     own_nulls.push((index, lowered));
@@ -638,12 +646,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // nothing and that `null` matches through its own branches (#628). A branch the sibling
         // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a
         // `null` member is (#645). Beside such a branch, or an untyped one that leaves `null`
-        // undecided, an exact-`null` variant is counted too: `null` matches both (#657).
-        let null_variants = if null_from_conjunct || met_nulls > 0 || undecided_nulls > 0 {
-            null_variants
-        } else {
-            0
-        };
+        // undecided, an exact-`null` variant is counted too: `null` matches both (#657). So it is
+        // beside such an untyped one that accepts `null` after its meet, as the same branch does
+        // beside a multi-category `type` array, which the `allOf` spelling lowers it alone beside.
+        let null_variants =
+            if null_from_conjunct || met_nulls > 0 || undecided_nulls > 0 || undecided_took_null {
+                null_variants
+            } else {
+                0
+            };
         let null_twice = mode == UnionMode::OneOf
             && null_members
                 + nullable_variants
