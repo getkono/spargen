@@ -998,6 +998,14 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
 /// branch is the only one `null` matches, both spellings are `pub pick: Option<Pick>`, as the
 /// `anyOf` counterpart is (#633). The sibling spelling kept a `()` variant for those branches,
 /// merged with a `W001` where there were two.
+///
+/// A branch that states nothing (`{}`, `true`) accepts `null` too, so beside a narrowed branch it is
+/// the second branch `null` matches, and on its own the only one. The `allOf` spelling lowers the
+/// union on its own, where such a branch is `serde_json::Value` with a `W001`, and its scalar meet
+/// handed that branch the `type` member's `null` a second time: the field was `Pick` with an
+/// `Option` arm and a `W001` beside the narrowed branch, and `Pick` (the `null` counted twice) on
+/// its own (#660). Each spelling now gives the sibling one's answer, with no `Option` arm and no
+/// `W001`, written as a member, nested in an inner `allOf`, or after the `type` member.
 #[test]
 fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
     let mut mismatches = Vec::new();
@@ -1013,6 +1021,24 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
              string, enum: [a] }, { type: string, enum: [b] } ]",
             false,
             false,
+        ),
+        // A branch that states nothing accepts `null` too, so it is the second branch `null`
+        // matches, and it keeps no nullable arm (#660).
+        (
+            "[ { items: { type: string } }, {}, { type: string, enum: [a] } ]",
+            false,
+            false,
+        ),
+        (
+            "[ { properties: { a: { type: string } } }, true, { type: string, enum: [a] } ]",
+            false,
+            false,
+        ),
+        // With no narrowed branch, the branch that states nothing is the only one `null` matches.
+        (
+            "[ {}, { type: string, enum: [a] }, { type: string, enum: [b] } ]",
+            false,
+            true,
         ),
         // A typed branch that accepts `null` too is the second branch `null` matches.
         (
@@ -1036,6 +1062,11 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
         for site in [
             format!("{{ type: [string, 'null'], oneOf: {members} }}"),
             format!("{{ allOf: [ {{ type: [string, 'null'] }}, {{ oneOf: {members} }} ] }}"),
+            format!(
+                "{{ allOf: [ {{ type: [string, 'null'] }}, {{ allOf: [ {{ oneOf: {members} }} ] \
+                 }} ] }}"
+            ),
+            format!("{{ allOf: [ {{ oneOf: {members} }}, {{ type: [string, 'null'] }} ] }}"),
         ] {
             let spec = with_schemas(
                 "3.1.0",
@@ -1059,10 +1090,11 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
                 || !shape
                 || types.contains("= ();")
                 || types.contains("(())")
+                || types.contains("(Option<")
             {
                 mismatches.push(format!(
-                    "{site}: not the typed branches as `{expected_pick}` with no `()` arm and no \
-                     `W001`: {report:#?} {types}"
+                    "{site}: not the typed branches as `{expected_pick}` with no `()` or `Option` \
+                     arm and no `W001`: {report:#?} {types}"
                 ));
             }
         }

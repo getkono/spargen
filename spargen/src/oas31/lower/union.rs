@@ -16,7 +16,7 @@ use super::nullability::{
 use super::prune::{kind_edges, reachable_types};
 use super::refiner::{unreached_halves, unreached_message};
 use super::shape::schema_has_shape_constraint;
-use super::{LowerCtx, Refiner, ScopeReach, StatedNothingNull};
+use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower a `oneOf`/`anyOf` union, with `open_narrowing` out of effect.
@@ -941,15 +941,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let union = Union { variants, strategy };
         // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
-        // branches what they are ([`Self::collapse_met_union`]), as its merge is.
+        // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
+        // gathers its members the report waits for its scalar meet, which may give a `Value`
+        // variant a type ([`Self::held_untyped_warnings`], #660).
         if self.unmerged_union.as_ref() != Some(&schema.provenance) {
-            self.warn_untyped_one_of_variants(
-                &schema.provenance,
-                &union,
-                &variant_members,
-                "this `oneOf`'s",
-                "member",
-            );
+            let untyped = self.untyped_one_of_variants(&union, &variant_members);
+            self.report_untyped_one_of(HeldUntypedWarning {
+                provenance: schema.provenance.clone(),
+                untyped,
+            });
         }
         let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
         ty.nullable = nullable;
@@ -976,6 +976,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         prefix: &str,
         noun: &str,
     ) {
+        let untyped: Vec<usize> = self
+            .untyped_one_of_variants(union, labels)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect();
+        self.emit_untyped_one_of_warning(provenance, &untyped, prefix, noun);
+    }
+
+    /// The variants [`Self::warn_untyped_one_of_variants`] reports of `union`, each variant's hint
+    /// beside its label from `labels`: those that lower to `serde_json::Value`, in a trial-matched
+    /// `oneOf` of two or more variants. Empty for any other union.
+    pub(super) fn untyped_one_of_variants(
+        &self,
+        union: &Union,
+        labels: &[usize],
+    ) -> Vec<(String, usize)> {
         if union.variants.len() < 2
             || !matches!(
                 union.strategy,
@@ -985,9 +1001,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             )
         {
-            return;
+            return Vec::new();
         }
-        let untyped: Vec<String> = union
+        union
             .variants
             .iter()
             .zip(labels)
@@ -997,11 +1013,38 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(TypeKind::Any)
                 )
             })
-            .map(|(_, label)| label.to_string())
-            .collect();
+            .map(|(variant, label)| (variant.name_hint.clone(), *label))
+            .collect()
+    }
+
+    /// Report `warning`, an inline `oneOf`'s `W001` for its `serde_json::Value` variants, or hold
+    /// it back while an `allOf` gathers its members ([`Self::held_untyped_warnings`]). Nothing is
+    /// reported for a warning that names no variant.
+    pub(super) fn report_untyped_one_of(&mut self, warning: HeldUntypedWarning) {
+        if warning.untyped.is_empty() {
+            return;
+        }
+        if let Some(held) = &mut self.held_untyped_warnings {
+            held.push(warning);
+            return;
+        }
+        let labels: Vec<usize> = warning.untyped.iter().map(|(_, label)| *label).collect();
+        self.emit_untyped_one_of_warning(&warning.provenance, &labels, "this `oneOf`'s", "member");
+    }
+
+    /// Emit the `W001` [`Self::warn_untyped_one_of_variants`] describes for the variants labelled
+    /// `untyped`, if there are any.
+    fn emit_untyped_one_of_warning(
+        &mut self,
+        provenance: &Provenance,
+        untyped: &[usize],
+        prefix: &str,
+        noun: &str,
+    ) {
         if untyped.is_empty() {
             return;
         }
+        let untyped: Vec<String> = untyped.iter().map(ToString::to_string).collect();
         let (noun, verb) = if untyped.len() == 1 {
             (noun.to_owned(), "lowers")
         } else {

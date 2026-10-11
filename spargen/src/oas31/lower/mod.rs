@@ -251,6 +251,8 @@ fn lower_pass(
         unmerged_union_meets_null: false,
         untyped_beside_null_member: None,
         stated_nothing_took_null: None,
+        held_untyped_warnings: None,
+        scalar_meet_value_variants: HashSet::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -687,6 +689,18 @@ enum StatedNothingNull {
     Sole,
 }
 
+/// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
+/// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
+/// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
+/// types, that meet decides which of those variants are still `Value` (#660).
+#[derive(Clone, Debug)]
+struct HeldUntypedWarning {
+    /// The union the warning is raised at.
+    provenance: Provenance,
+    /// Each `Value` variant's hint, beside its member position for the message.
+    untyped: Vec<(String, usize)>,
+}
+
 /// The three spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
 /// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
 /// the union as its sibling, an `allOf` with the union beside it on one schema (#419), and an
@@ -895,6 +909,18 @@ struct LowerCtx<'a, 'doc> {
     /// branch `null` matches is one of these records that too ([`StatedNothingNull::Sole`]), so
     /// a meet that narrows the union to that branch keeps the `null` it gave it (#597).
     stated_nothing_took_null: Option<(Provenance, StatedNothingNull)>,
+    /// The `W001`s inline `oneOf`s raise for their `serde_json::Value` variants while an `allOf`
+    /// gathers its members, held back where `Some` ([`HeldUntypedWarning`]). A union member the
+    /// `allOf`'s scalar meet meets lowers on its own first, where a branch that states nothing
+    /// (`{}`, `true`) is `Value`; the meet then gives it the other members' type, so the warning
+    /// is raised for the variants the meet leaves `Value` alone (#660).
+    held_untyped_warnings: Option<Vec<HeldUntypedWarning>>,
+    /// The variant hints of the `Value` variants of the union members an `allOf`'s scalar meet
+    /// meets, whose `null` the `allOf` decided by the union's own count
+    /// ([`Self::union_members_take_scalar_null`]). `Value` is the identity of the meet, so the
+    /// meet hands each the other members' `null` a second time; [`Self::combine_all_of`] clears
+    /// that copy before it collapses the met `oneOf`, so `null` is counted once (#660).
+    scalar_meet_value_variants: HashSet<String>,
 }
 
 /// The options that change what lowering produces.
