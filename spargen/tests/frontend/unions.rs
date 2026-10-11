@@ -583,6 +583,37 @@ fn one_of_branches_of_one_structure_merge_and_warn() {
     }
 }
 
+/// Two authored `oneOf` branches that are arrays of uninhabited items decode the same values (only
+/// `[]`), so they merge with `W001` into one type, as the branches of one structure above do:
+/// each `items: false` lowers to its own empty `pub enum`, but neither decodes a value, so no value
+/// tells the two arrays apart (#643). `U` is the one array, not an enum with a variant per branch.
+#[test]
+fn one_of_arrays_of_uninhabited_items_merge_and_warn() {
+    let spec = single_component_document(
+        "      oneOf: [ { type: array, items: false }, { type: array, items: false } ]\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/U"
+            }),
+            "via {entry}: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type U = Vec<Uvariant0Item>;") && !types.contains("pub enum U "),
+        "`U` must be the one array both branches lower to: {types}"
+    );
+}
+
 /// A `oneOf` admits `null` only when exactly one of its branches does, whether or not any of its
 /// variants merge (#563). The branches of `Pick` are typed `[object, 'null']` and stay two variants
 /// after the meet with `NB`, which admits `null` too: `null` matches both branches and fails
