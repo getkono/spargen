@@ -625,3 +625,77 @@ fn an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// An `allOf` `$ref` member whose target is itself an `allOf` wrapping a `$ref` to a union whose
+/// branches leave `null` undecided takes `null` from a member that admits it, as the flat (#624)
+/// and inline nested (#630) spellings do (#638): `Wrap: { allOf: [ { $ref: U } ] }` admits exactly
+/// the values `U` does. That holds for the member written as a `$ref` to a component and as a
+/// non-component pointer to such an `allOf`, and through a wrapper of a wrapper. A `oneOf` that
+/// `null` matches twice admits none, a wrapper whose own `type` excludes `null` withholds it, and
+/// two wrapped unions alone decide nothing for each other: those stay non-null.
+#[test]
+fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitting_it() {
+    let mut mismatches = Vec::new();
+    for (site, nullable) in [
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/Wrap' } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/Bx/properties/w' \
+             } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapWrap' } ] }",
+            true,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapOneOf' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: \
+             '#/components/schemas/Bx/properties/one' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/WrapTyped' } ] }",
+            false,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/Wrap' }, { $ref: \
+             '#/components/schemas/WrapWrap' } ] }",
+            false,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    U: {{ anyOf: [ {{ items: {{ type: string }} }}, {{ items: \
+                 {{ type: integer }} }} ] }}\n    UOne: {{ oneOf: [ {{ items: {{ type: string }} \
+                 }}, {{ items: {{ type: integer }} }} ] }}\n    Wrap: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/U' }} ] }}\n    WrapWrap: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/Wrap' }} ] }}\n    WrapOneOf: {{ allOf: [ {{ $ref: \
+                 '#/components/schemas/UOne' }} ] }}\n    WrapTyped: {{ type: array, allOf: [ {{ \
+                 $ref: '#/components/schemas/U' }} ] }}\n    Bx:\n      type: object\n      \
+                 properties:\n        w: {{ allOf: [ {{ $ref: '#/components/schemas/U' }} ] }}\n        \
+                 one: {{ allOf: [ {{ $ref: '#/components/schemas/UOne' }} ] }}\n    Holder:\n      \
+                 type: object\n      properties:\n        pick: {{ $ref: \
+                 '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick")
+            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+        if pick.starts_with("Option<") != nullable {
+            let validity = if nullable { "valid" } else { "invalid" };
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
