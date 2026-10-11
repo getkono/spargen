@@ -1010,7 +1010,9 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
 /// Beside a branch that accepts `null` itself (`type: [string, 'null']`, `enum: [a, null]`), the
 /// branch that states nothing is the second branch `null` matches, so every spelling keeps `null`
 /// denied: `pub pick: Pick`, as before #660. Where the met branches are one generated type, the
-/// collapse's `W001` stands in every spelling.
+/// collapse's `W001` stands in every spelling. Beside an exact-null branch (`const: null`,
+/// `enum: [null]`, or a `$ref` to such a component), every `allOf` spelling keeps `null` denied
+/// alike, with the exact-null branch's `()` arm.
 #[test]
 fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
     let mut mismatches = Vec::new();
@@ -1137,6 +1139,44 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
                 mismatches.push(format!(
                     "{site}: not the typed branches as `{expected_pick}` with no `()` or `Option` \
                      arm and a `W001` only where expected ({warns}): {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    // Beside an exact-null branch, the `null` the branch that states nothing takes from the meet
+    // is the second branch `null` matches, so every `allOf` spelling keeps `null` denied with the
+    // exact-null branch's `()` arm, as before #660. The sibling spelling gives `Option<Pick>` here
+    // and is not compared.
+    for members in [
+        "[ {}, { const: null } ]",
+        "[ {}, { enum: [null] } ]",
+        "[ {}, { const: null }, { type: string, enum: [a] } ]",
+        "[ {}, { $ref: '#/components/schemas/Z' } ]",
+    ] {
+        let ty = "{ type: [string, 'null'] }";
+        for site in [
+            format!("{{ allOf: [ {ty}, {{ oneOf: {members} }} ] }}"),
+            format!("{{ allOf: [ {ty}, {{ allOf: [ {{ oneOf: {members} }} ] }} ] }}"),
+            format!("{{ allOf: [ {{ oneOf: {members} }}, {ty} ] }}"),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Z: {{ const: null }}\n    Pick: {site}\n    Holder:\n      type: object\n      \
+                     properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                     required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            if report.outcome() == Outcome::Rejected
+                || field_type(&types, "pub pick").as_deref() != Some("Pick")
+                || !types.contains("pub enum Pick {")
+                || !types.contains("pub type PickIntersection1Variant1 = ();")
+                || types.contains("(Option<")
+            {
+                mismatches.push(format!(
+                    "{site}: not `Pick` with a `()` arm and no `Option` arm: {report:#?} {types}"
                 ));
             }
         }

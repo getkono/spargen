@@ -102,7 +102,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// A union whose own lowering already took `null` from a branch that states it
     /// (`[ {}, { type: [string, 'null'] } ]`) holds that branch's `null`, not its `Value`
     /// variant's: `null` matches both branches, so the copy is the second match the `oneOf`
-    /// collapse must count to deny `null`, as the sibling spelling does, and it stays.
+    /// collapse must count to deny `null`, as the sibling spelling does, and it stays. So it does
+    /// beside a variant that accepts `null` itself, such as an exact-null branch's `()`
+    /// (`[ {}, { const: null } ]`, or a `$ref` to such a component).
     fn combine_scalar_union_members(
         &mut self,
         schema: &Schema,
@@ -123,13 +125,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
                 continue;
             };
-            for variant in &union.variants {
-                if matches!(
+            let is_value = |variant: &UnionVariant| {
+                matches!(
                     self.graph.get(variant.ty.id).map(|def| &def.kind),
                     Some(TypeKind::Any)
-                ) {
-                    value_variants.insert(variant.name_hint.clone());
-                }
+                )
+            };
+            if union
+                .variants
+                .iter()
+                .any(|variant| !is_value(variant) && self.ty_accepts_null(variant.ty))
+            {
+                continue;
+            }
+            for variant in union.variants.iter().filter(|variant| is_value(variant)) {
+                value_variants.insert(variant.name_hint.clone());
             }
         }
         if self.flattened_keywords_admit_null(schema) {
