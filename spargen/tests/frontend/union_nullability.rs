@@ -1570,6 +1570,35 @@ fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
     }
 }
 
+/// A schema that composes a `$ref` to that spelling reads the target as its type or `null` too, as
+/// at 0.5.0: a required field that is an `allOf` of it, or a `oneOf` / `anyOf` of it beside a
+/// branch that refuses `null`, is `Option<Holderpick>`, not a non-null type that refuses the
+/// `null` the API sends.
+#[test]
+fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed() {
+    for field in [
+        "{ allOf: [ { $ref: '#/components/schemas/Pick' } ] }",
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { type: integer } ] }",
+        "{ anyOf: [ { $ref: '#/components/schemas/Pick' }, { type: integer } ] }",
+    ] {
+        let document = required_pick_document(
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+        )
+        .replace(
+            "pick: { $ref: '#/components/schemas/Pick' }",
+            &format!("pick: {field}"),
+        );
+        let (report, code) = generate_with_code(&document);
+        assert_eq!(report.outcome(), Outcome::Generated, "{field}: {report:#?}");
+        let types = types_module(&code);
+        assert_eq!(
+            field_type(&types, "pub pick").as_deref(),
+            Some("Option<Holderpick>"),
+            "{field}: {types}"
+        );
+    }
+}
+
 /// A schema whose `enum` or `const` leaves only `null` beside a `type` that refuses it admits no
 /// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
 /// 0.5.0). The message names the construct written, not a `oneOf` the schema does not have.
