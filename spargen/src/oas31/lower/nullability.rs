@@ -182,6 +182,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   variant, or as the `Option` of the one merged variant `null` matches, and it is made
     ///   `Option` where none of them does.
     ///
+    /// One spelling departs from it: a `type` naming only `null` beside an `allOf` whose members
+    /// lowered to a non-null type admits no value under 2020-12, and is read as that type or
+    /// `null` instead (`Option`).
+    ///
     /// Only types this lowering inserted (at or above `mark`), and no component among them, are
     /// changed in place.
     pub(super) fn settle_null_admission(
@@ -216,7 +220,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         if self.is_exact_null(ty) {
             if admission == NullAdmission::Denies {
-                return self.reject_one_of_null_in_every_branch(schema);
+                return self.reject_null_admission_denied(schema);
             }
             // `null` is its one value, so it is no `Option`.
             ty.nullable = false;
@@ -234,12 +238,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty.nullable = false;
                 self.clear_variant_nulls(ty.id, mark, false);
             }
+            // A `type` naming only `null` beside an `allOf` that lowered to a non-null type
+            // (`{allOf: [{$ref: User}], type: ['null']}`, GitHub's spelling of a nullable `$ref`)
+            // is satisfied by no value under 2020-12, yet a non-null type would refuse the `null`
+            // such an API sends, and `E013` would refuse the whole description: it is read as that
+            // type or `null`, as before the one decision.
+            NullAdmission::Denies if type_beside_all_of_is_null_only(schema) => {
+                if !self.carries_null(ty) {
+                    ty.nullable = true;
+                }
+            }
             NullAdmission::Denies => {
                 ty.nullable = false;
                 match self.clear_variant_nulls(ty.id, mark, true) {
                     Settled::Kept => {}
                     Settled::Collapsed(variant) => ty.boxed = variant.boxed,
-                    Settled::Emptied => return self.reject_one_of_null_in_every_branch(schema),
+                    Settled::Emptied => return self.reject_null_admission_denied(schema),
                 }
             }
         }
@@ -1377,6 +1391,17 @@ fn target_decides_null(schema: &Schema) -> bool {
 /// (`required`, `items`, `additionalProperties`, `format`, a validation keyword, an annotation)
 /// either is vacuous for a `null` instance in 2020-12 or constrains nothing the generated type
 /// carries, so `{type: "null", required: [a]}` counts as null-only too.
+/// Whether `schema` is an `allOf` beside a `type` that names only `null`, and no union or `$ref`:
+/// the spelling [`LowerCtx::settle_null_admission`] reads as the `allOf`'s type or `null`.
+fn type_beside_all_of_is_null_only(schema: &Schema) -> bool {
+    schema.types.types == [JsonType::Null]
+        && !schema.all_of.is_empty()
+        && schema.reference.is_none()
+        && !schema_has_union(schema)
+        && schema.enum_values.is_none()
+        && schema.const_value.is_none()
+}
+
 pub(super) fn member_is_null_only(member: &SchemaOr) -> bool {
     let SchemaOr::Schema(schema) = member else {
         return false;

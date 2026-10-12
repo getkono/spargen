@@ -1489,3 +1489,115 @@ fn a_ref_member_to_a_branching_allof_wrapper_graph_reads_each_target_once() {
     let pick = field_type(&types, "pub pick").unwrap_or_else(|| panic!("no `pick` field: {types}"));
     assert!(pick.starts_with("Option<"), "`pick` is `{pick}`");
 }
+
+/// A document whose `Holder` requires `pick: Pick`, `Pick` being `body`, beside an object `O`.
+fn required_pick_document(body: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /h:\n    \
+         get:\n      \
+         operationId: getH\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/Holder' }}\n\
+         components:\n  \
+         schemas:\n    \
+         O: {{ type: object, properties: {{ login: {{ type: string }} }} }}\n    \
+         Pick: {body}\n    \
+         Holder: {{ type: object, properties: {{ pick: {{ $ref: '#/components/schemas/Pick' }} \
+         }}, required: [pick] }}\n"
+    )
+}
+
+/// A `type` that names only `null` beside an `allOf` whose members lower to a non-null type is
+/// GitHub's spelling of a nullable `$ref` (`repository-advisory`'s required `author`, `publisher`
+/// and `private_fork`). JSON Schema 2020-12 lets no value satisfy it, but a non-null struct would
+/// refuse the `null` such an API sends and `E013` would refuse the whole description, so it is
+/// read as the `allOf`'s type or `null`: `Option<Pick>`, as at 0.5.0. The same constraints written
+/// as an `allOf` member or as a `$ref`'s sibling are `E013`, as at 0.5.0. A `type` that also names
+/// the members' category is held to the one decision: the `$ref`'d object refuses `null`, so the
+/// conjunction does and `pick` is `Pick` (`Option<Pick>` at 0.5.0).
+#[test]
+fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
+    for (body, expected) in [
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: 'null' }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { type: object, properties: { a: { type: string } } } ], type: ['null'] }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { type: 'null' }, { $ref: '#/components/schemas/O' } ] }",
+            None,
+        ),
+        ("{ $ref: '#/components/schemas/O', type: ['null'] }", None),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: [object, 'null'] }",
+            Some("Pick"),
+        ),
+    ] {
+        let (report, code) = generate_with_code(&required_pick_document(body));
+        match expected {
+            Some(expected) => {
+                assert_eq!(report.outcome(), Outcome::Generated, "{body}: {report:#?}");
+                let types = types_module(&code);
+                assert_eq!(
+                    field_type(&types, "pub pick").as_deref(),
+                    Some(expected),
+                    "{body}: {types}"
+                );
+            }
+            None => {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{body}: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// A schema whose `enum` or `const` leaves only `null` beside a `type` that refuses it admits no
+/// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
+/// 0.5.0). The message names the construct written, not a `oneOf` the schema does not have.
+#[test]
+fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
+    for (body, names) in [
+        (
+            "{ type: string, const: null }",
+            "`enum`, `const` or `anyOf`",
+        ),
+        (
+            "{ type: string, enum: [null] }",
+            "`enum`, `const` or `anyOf`",
+        ),
+        (
+            "{ type: string, allOf: [ { const: null } ] }",
+            "`allOf` scalar members",
+        ),
+    ] {
+        let report = generate(&required_pick_document(body));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert!(
+            !messages.is_empty()
+                && messages
+                    .iter()
+                    .all(|message| message.contains(names) && !message.contains("oneOf")),
+            "{body}: {messages:#?}"
+        );
+    }
+}

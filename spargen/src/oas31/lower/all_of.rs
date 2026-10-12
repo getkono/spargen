@@ -174,7 +174,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for (provenance, lowered) in lowerings {
                 // The member's own lowering is an input to the meet, emitted as a public type
                 // nothing referred to once the meet replaced it, whatever the member order (#675).
-                self.elide_unused_union_lowering(lowered.clone());
+                self.elide_unused_union_lowering(lowered);
                 let Some(index) = held
                     .iter()
                     .position(|warning| warning.provenance == provenance)
@@ -203,11 +203,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .map(Some)
                     })
                 };
-                // The union's own lowering is an input to the meet, emitted as a public type
-                // nothing referred to once the meet replaced it, as the held-back union's lowering
-                // is ([`Self::meet_union_with_all_of`]). Where something still names the union,
-                // its `Value` variants are still emitted, and its warning stands as raised.
-                self.elide_unused_union_lowering(lowered);
+                // The union's own lowering was elided above, as the held-back union's lowering is
+                // ([`Self::meet_union_with_all_of`]). Where something still names the union, its
+                // `Value` variants are still emitted, and its warning stands as raised.
                 if !self.graph.is_elided(union_id) {
                     continue;
                 }
