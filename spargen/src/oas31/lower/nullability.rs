@@ -143,6 +143,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.null_admission_within(schema, 0, Some(member))
     }
 
+    /// Whether [`Self::null_admission`] admits `null` at `schema` only by its one departure: a
+    /// `type` naming only `null` beside an `allOf` whose members refuse it, read as the `allOf`'s
+    /// type or `null`. That `null` makes the members' type optional and is never the whole type,
+    /// so members that share no value leave the schema `E013`.
+    pub(super) fn null_admitted_only_by_departure(&self, schema: &Schema) -> bool {
+        type_beside_all_of_is_null_only(schema)
+            && schema
+                .all_of
+                .iter()
+                .map(|member| self.branch_null_admission(member))
+                .fold(NullAdmission::Undecided, NullAdmission::and)
+                == NullAdmission::Denies
+    }
+
     /// [`Self::null_admission`] of the keywords a union's branches are met with: `schema` without
     /// its `oneOf`, `anyOf` and `discriminator`.
     pub(super) fn union_sibling_null_admission(&self, schema: &Schema) -> NullAdmission {

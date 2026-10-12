@@ -92,8 +92,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // `allOf` states `null` and `null` satisfies every member: a union member whose
                     // branch `null` matches through an untyped branch of its own (a `$ref` to such
                     // a union) lowered non-null on its own. Only `null` is left, the exact null type
-                    // the sibling spelling gives the same constraints (#674).
-                    Err(NoMeet::Empty) if self.null_admission(schema) == NullAdmission::Admits => {
+                    // the sibling spelling gives the same constraints (#674). A `null` only the
+                    // decision's departure admits (a null-only `type` beside the `allOf`) is not
+                    // such a `null`: it makes the members' type optional, and members sharing no
+                    // value make none, so the schema is `E013`, as before the one decision.
+                    Err(NoMeet::Empty)
+                        if self.null_admission(schema) == NullAdmission::Admits
+                            && !self.null_admitted_only_by_departure(schema) =>
+                    {
                         self.discard_meet_intermediates(mark, &TypeKind::Null);
                         return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
                     }

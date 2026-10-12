@@ -1520,9 +1520,10 @@ fn required_pick_document(body: &str) -> String {
 /// and `private_fork`). JSON Schema 2020-12 lets no value satisfy it, but a non-null struct would
 /// refuse the `null` such an API sends and `E013` would refuse the whole description, so it is
 /// read as the `allOf`'s type or `null`: `Option<Pick>`, as at 0.5.0. The same constraints written
-/// as an `allOf` member or as a `$ref`'s sibling are `E013`, as at 0.5.0. A `type` that also names
-/// the members' category is held to the one decision: the `$ref`'d object refuses `null`, so the
-/// conjunction does and `pick` is `Pick` (`Option<Pick>` at 0.5.0).
+/// as an `allOf` member or as a `$ref`'s sibling are `E013`, as at 0.5.0, and so is an `allOf`
+/// whose members share no value, beside which the departure has no type to make optional. A
+/// `type` that also names the members' category is held to the one decision: the `$ref`'d object
+/// refuses `null`, so the conjunction does and `pick` is `Pick` (`Option<Pick>` at 0.5.0).
 #[test]
 fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
     for (body, expected) in [
@@ -1543,6 +1544,12 @@ fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
             None,
         ),
         ("{ $ref: '#/components/schemas/O', type: ['null'] }", None),
+        // Members that make no type at all are not that spelling's `allOf`: the meet is empty,
+        // so the schema is `E013`, as at 0.5.0, not the exact null type.
+        (
+            "{ allOf: [ { type: string }, { type: integer } ], type: 'null' }",
+            None,
+        ),
         (
             "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: [object, 'null'] }",
             Some("Pick"),
@@ -1573,7 +1580,7 @@ fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
 /// A schema that composes a `$ref` to that spelling reads the target as its type or `null` too, as
 /// at 0.5.0: a required field that is an `allOf` of it, or a `oneOf` / `anyOf` of it beside a
 /// branch that refuses `null`, is `Option<Holderpick>`, not a non-null type that refuses the
-/// `null` the API sends.
+/// `null` the API sends. A `oneOf` in which `null` matches a second branch admits no `null`.
 #[test]
 fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed() {
     for field in [
@@ -1594,6 +1601,33 @@ fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed
         assert_eq!(
             field_type(&types, "pub pick").as_deref(),
             Some("Option<Holderpick>"),
+            "{field}: {types}"
+        );
+    }
+    // Beside a `{type: 'null'}` branch or a second such branch, `null` matches two branches of a
+    // `oneOf`, so the `oneOf` admits none and the field is not optional.
+    for field in [
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { type: 'null' } ] }",
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { $ref: '#/components/schemas/Pack' } ] }",
+    ] {
+        let document = required_pick_document(
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+        )
+        .replace(
+            "pick: { $ref: '#/components/schemas/Pick' }",
+            &format!("pick: {field}"),
+        )
+        .replace(
+            "    Holder:",
+            "    Pack: { allOf: [ { type: object, properties: { id: { type: integer } } } ], \
+             type: ['null'] }\n    Holder:",
+        );
+        let (report, code) = generate_with_code(&document);
+        assert_eq!(report.outcome(), Outcome::Generated, "{field}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick");
+        assert!(
+            pick.as_deref().is_some_and(|pick| !pick.starts_with("Option<")),
             "{field}: {types}"
         );
     }
