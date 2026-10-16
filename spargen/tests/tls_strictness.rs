@@ -1,12 +1,12 @@
 //! `spargen lock`'s real fetcher against a deliberately **non-conformant** TLS 1.3 peer.
 //!
 //! A conformant peer behaves identically under every rustls release, so a test built on one
-//! cannot notice a change in what the fetcher accepts. RUSTSEC-2026-0285, fixed by the
-//! `rustls 0.23.45` floor in `spargen/Cargo.toml`, is exactly such a change: releases before it
-//! accepted a plaintext handshake record that carried a key-changing message *and* a further
-//! handshake message, which RFC 8446 §5.1 forbids ("Handshake messages MUST NOT span key
-//! changes"). The peer here sends that record, so this suite fails on a rustls that relaxes the
-//! rule again.
+//! cannot notice a change in what the fetcher accepts. RUSTSEC-2026-0285, fixed in
+//! `rustls 0.23.45` (the `rustls` floor in `spargen/Cargo.toml` now sits at 0.23.46), is exactly
+//! such a change: releases before it accepted a plaintext handshake record that carried a
+//! key-changing message *and* a further handshake message, which RFC 8446 §5.1 forbids
+//! ("Handshake messages MUST NOT span key changes"). The peer here sends that record, so this
+//! suite fails on a rustls that relaxes the rule again.
 //!
 //! The key-changing message is a HelloRetryRequest, which the client acts on before any key
 //! exchange, so the peer needs no certificate, no key share, and no crypto: it reads the
