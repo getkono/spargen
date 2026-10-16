@@ -3,14 +3,23 @@ use std::process::Command;
 use camino::Utf8PathBuf;
 use spargen::{CargoIntegration, Code, Outcome, Spec};
 
-/// A `cargo` invocation for the fixture crate at `crate_dir`, building into that crate's own
-/// `target/`. Every nested `cargo` in this suite goes through here.
+/// A `cargo` invocation that builds the fixture crate at `crate_dir` into [`fixture_target_dir`],
+/// the one target directory every fixture of this run shares, so the dependency graph the fixtures
+/// have in common (reqwest, tokio, serde, …) is compiled once per run rather than once per fixture.
+/// Every nested `cargo` that builds goes through here.
 fn fixture_cargo(crate_dir: &std::path::Path) -> Command {
-    isolated(Command::new("cargo"), crate_dir)
+    claim_fixture_name(crate_dir);
+    isolated(query_cargo(crate_dir), crate_dir, fixture_target_dir())
 }
 
-/// Run `command` in `crate_dir` with its build and target directories inside `crate_dir`,
-/// overriding whatever this process inherited.
+/// A `cargo` invocation that only reads `crate_dir` (`metadata`, `tree`) and builds nothing. It
+/// keeps `crate_dir`'s own `target/`, so its package name need not be unique in the run.
+fn query_cargo(crate_dir: &std::path::Path) -> Command {
+    isolated(Command::new("cargo"), crate_dir, &crate_dir.join("target"))
+}
+
+/// Run `command` in `crate_dir` with its build and target directories set to `target`, overriding
+/// whatever this process inherited.
 ///
 /// A nested `cargo` otherwise inherits the caller's `CARGO_TARGET_DIR` (or a `build.target-dir` /
 /// `build.build-dir` from Cargo config), and then every fixture crate of every concurrent run shares
@@ -21,13 +30,121 @@ fn fixture_cargo(crate_dir: &std::path::Path) -> Command {
 /// server-override fixture runs a binary with another run's port baked in, and the `W012` fixture
 /// a build script that reads another run's (possibly deleted) spec. Environment variables outrank
 /// Cargo config, so setting both here wins over either source.
-fn isolated(mut command: Command, crate_dir: &std::path::Path) -> Command {
-    let target = crate_dir.join("target");
+///
+/// [`fixture_cargo`] shares one `target` across the fixtures of one run without reopening that
+/// collision: the directory belongs to this run alone ([`fixture_target_dir`]), and no two fixtures
+/// of this run share a package name ([`claim_fixture_name`]). Nothing is shared *across* runs, because
+/// Cargo's fingerprint cannot tell a same-named fixture of another run from this one's.
+fn isolated(
+    mut command: Command,
+    crate_dir: &std::path::Path,
+    target: &std::path::Path,
+) -> Command {
     command
         .current_dir(crate_dir)
-        .env("CARGO_TARGET_DIR", &target)
-        .env("CARGO_BUILD_BUILD_DIR", &target);
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_BUILD_BUILD_DIR", target);
     command
+}
+
+/// The target directory every fixture crate of this run builds into, and no other run's: a fresh
+/// `run-<pid>` directory under `e2e-fixtures`, locked for the life of the process so that a later
+/// run's [`sweep_finished_runs`] knows it is still in use. The sweep and this run's own directory
+/// are made under the root's lock, so a starting run never deletes one that is being set up.
+fn fixture_target_dir() -> &'static std::path::Path {
+    static DIR: std::sync::LazyLock<(std::path::PathBuf, std::fs::File)> =
+        std::sync::LazyLock::new(|| {
+            let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-fixtures");
+            std::fs::create_dir_all(&root).unwrap();
+            let root_lock = open_lock(&root.join(FIXTURE_RUN_LOCK));
+            lock_exclusive(&root_lock);
+            sweep_finished_runs(&root);
+            let dir = root.join(format!("run-{}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            let lock = open_lock(&dir.join(FIXTURE_RUN_LOCK));
+            lock_exclusive(&lock);
+            (dir, lock)
+        });
+    &DIR.0
+}
+
+/// Delete every run directory under `root` whose lock can be taken, i.e. whose run has exited.
+/// Each run deletes its predecessors' directories, so at most the last run's is left on disk.
+///
+/// Deletion is best-effort: a run killed outright can leave a nested `cargo` still writing into its
+/// directory, and a leftover directory costs only disk, where a failed sweep would fail this run.
+fn sweep_finished_runs(root: &std::path::Path) {
+    for entry in std::fs::read_dir(root).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let finished = try_lock_exclusive(&open_lock(&dir.join(FIXTURE_RUN_LOCK)));
+        if finished {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+const FIXTURE_RUN_LOCK: &str = ".e2e-run.lock";
+
+fn open_lock(path: &std::path::Path) -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
+#[expect(
+    clippy::incompatible_msrv,
+    reason = "test-only: the msrv gate checks no test target"
+)]
+fn lock_exclusive(file: &std::fs::File) {
+    file.lock().unwrap();
+}
+
+/// Take `file`'s exclusive lock if no other handle holds it; `false` when one does.
+#[expect(
+    clippy::incompatible_msrv,
+    reason = "test-only: the msrv gate checks no test target"
+)]
+fn try_lock_exclusive(file: &std::fs::File) -> bool {
+    match file.try_lock() {
+        Ok(()) => true,
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(error)) => panic!("{error}"),
+    }
+}
+
+/// Record that `crate_dir`'s package name is built into [`fixture_target_dir`] from `crate_dir`
+/// alone. Two fixtures of one run with the same name would share artifacts there; this refuses the
+/// second rather than letting it run the first one's build.
+fn claim_fixture_name(crate_dir: &std::path::Path) {
+    static CLAIMED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let manifest: toml::Table = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let name = manifest["package"]["name"]
+        .as_str()
+        .expect("a fixture crate `fixture_cargo` builds is a package with a name")
+        .to_owned();
+    let mut claimed = CLAIMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let owner = claimed
+        .entry(name.clone())
+        .or_insert_with(|| crate_dir.to_path_buf());
+    assert_eq!(
+        owner.as_path(),
+        crate_dir,
+        "fixture package `{name}` is built from two directories; fixtures share one target \
+         directory, so each needs a package name of its own"
+    );
 }
 
 /// The helper is only a guard if nothing goes around it: a bare nested `cargo` inherits the
@@ -39,54 +156,64 @@ fn every_nested_cargo_goes_through_the_isolating_helper() {
     assert_eq!(
         source.matches(bare).count(),
         1,
-        "every nested `cargo` must be built by `fixture_cargo`, which alone may spell `{bare}`"
+        "every nested `cargo` must be built by `query_cargo`, which alone may spell `{bare}`"
     );
+}
+
+/// `cargo run` the crate `command` is set up for, returning what it printed.
+fn run_printed(mut command: Command) -> String {
+    let output = command.args(["run", "--quiet"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A binary crate named `same_name` at `root`, printing `value`. Every one of these shares the
+/// name, so any two built into one target directory collide unless Cargo rebuilds the second.
+fn same_name_crate(root: &std::path::Path, value: &str) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"same_name\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        format!("fn main() {{ print!(\"{value}\"); }}\n"),
+    )
+    .unwrap();
 }
 
 /// Two same-named fixture crates in different directories, both written before either is built,
 /// under an inherited shared directory: the second one is judged fresh and runs the first one's
 /// binary. The control proves each case reproduces that collision, so the isolated run printing its
-/// own value, from its own `target/`, is evidence that `isolated` prevents it rather than a vacuous
-/// pass. Each variable is inherited on its own, because each alone is enough to share artifacts.
+/// own value, from the target `isolated` names, is evidence that `isolated` prevents it rather than a
+/// vacuous pass. Each variable is inherited on its own, because each alone is enough to share
+/// artifacts.
 #[test]
 fn same_named_fixtures_never_share_an_inherited_target_directory() {
-    let run = |mut command: Command| {
-        let output = command.args(["run", "--quiet"]).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    };
-
     for inherited in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
         let temp = tempfile::tempdir().unwrap();
         let shared = temp.path().join("shared");
-        let fixture = |value: &str| {
-            let root = temp.path().join(value);
-            std::fs::create_dir_all(root.join("src")).unwrap();
-            std::fs::write(
-                root.join("Cargo.toml"),
-                "[package]\nname = \"same_name\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
-                 [workspace]\n",
-            )
-            .unwrap();
-            std::fs::write(
-                root.join("src/main.rs"),
-                format!("fn main() {{ print!(\"{value}\"); }}\n"),
-            )
-            .unwrap();
-            root
-        };
-        let first = fixture("first");
-        let control = fixture("control");
-        let second = fixture("second");
+        let own = temp.path().join("own");
+        let first = temp.path().join("first");
+        let control = temp.path().join("control");
+        let second = temp.path().join("second");
+        for (root, value) in [
+            (&first, "first"),
+            (&control, "control"),
+            (&second, "second"),
+        ] {
+            same_name_crate(root, value);
+        }
 
         // What an unisolated nested `cargo` sees when the suite runs with this variable (or its
         // Cargo config key) pointing at a directory other runs share.
         let inheriting = |crate_dir: &std::path::Path| {
-            let mut command = fixture_cargo(crate_dir);
+            let mut command = query_cargo(crate_dir);
             command
                 .env_remove("CARGO_TARGET_DIR")
                 .env_remove("CARGO_BUILD_BUILD_DIR")
@@ -94,26 +221,97 @@ fn same_named_fixtures_never_share_an_inherited_target_directory() {
             command
         };
 
-        assert_eq!(run(inheriting(&first)), "first", "{inherited}");
+        assert_eq!(run_printed(inheriting(&first)), "first", "{inherited}");
         assert_eq!(
-            run(inheriting(&control)),
+            run_printed(inheriting(&control)),
             "first",
             "under a shared {inherited}, the control must reproduce the collision, or this test \
              proves nothing about `isolated`"
         );
         assert_eq!(
-            run(isolated(inheriting(&second), &second)),
+            run_printed(isolated(inheriting(&second), &second, &own)),
             "second",
             "under a shared {inherited}, an isolated fixture must build its own sources, not reuse \
              a same-named crate's artifacts"
         );
-        let binary = format!("target/debug/same_name{}", std::env::consts::EXE_SUFFIX);
+        let binary = format!("debug/same_name{}", std::env::consts::EXE_SUFFIX);
         assert!(
-            second.join(&binary).is_file(),
-            "under a shared {inherited}, an isolated fixture's artifacts must land in its own \
-             `target/`"
+            own.join(&binary).is_file(),
+            "under a shared {inherited}, an isolated fixture's artifacts must land in the target \
+             `isolated` names"
         );
     }
+}
+
+/// Within one run, one package name is built from one directory, and a second directory claiming
+/// it is refused before it can share the first one's artifacts.
+#[test]
+fn a_fixture_name_is_claimed_by_one_crate_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"claim_probe\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+    }
+
+    claim_fixture_name(&first);
+    claim_fixture_name(&first);
+    let refused = std::panic::catch_unwind(|| claim_fixture_name(&second))
+        .expect_err("a second directory claiming `claim_probe` must be refused");
+    let message = refused
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .unwrap_or_default();
+    assert!(
+        message.contains("fixture package `claim_probe` is built from two directories"),
+        "{message}"
+    );
+}
+
+/// This run's fixture directory is its own, and stays locked for the whole run, so a run starting
+/// alongside it cannot sweep it away.
+#[test]
+fn the_fixture_target_directory_is_this_runs_alone() {
+    let dir = fixture_target_dir();
+    assert_eq!(
+        dir.file_name().unwrap(),
+        format!("run-{}", std::process::id()).as_str()
+    );
+    assert!(
+        !try_lock_exclusive(&open_lock(&dir.join(FIXTURE_RUN_LOCK))),
+        "another handle must not take the run lock while this run holds it"
+    );
+}
+
+/// A starting run deletes the directories of runs that have exited and keeps those of runs still
+/// holding their lock.
+#[test]
+fn sweeping_removes_only_finished_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let finished = root.path().join("run-finished");
+    let live = root.path().join("run-live");
+    for dir in [&finished, &live] {
+        std::fs::create_dir_all(dir.join("debug")).unwrap();
+    }
+    drop(open_lock(&finished.join(FIXTURE_RUN_LOCK)));
+    let live_lock = open_lock(&live.join(FIXTURE_RUN_LOCK));
+    lock_exclusive(&live_lock);
+
+    sweep_finished_runs(root.path());
+
+    assert!(
+        !finished.exists(),
+        "a finished run's directory must be removed"
+    );
+    assert!(
+        live.join("debug").is_dir(),
+        "a live run's directory must be kept"
+    );
 }
 
 fn generate_fixture_crate(
@@ -1082,7 +1280,7 @@ fn workspace_graph_package_names(features: &[&str]) -> std::collections::BTreeSe
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
-    let output = fixture_cargo(root)
+    let output = query_cargo(root)
         .args(["tree", "--workspace", "--locked", "--target", "all"])
         .args(["--edges", "normal,build,dev", "--prefix", "none"])
         .args(["--format", "{p}"])
@@ -6950,7 +7148,7 @@ fn cargo_view(
     package: &str,
 ) -> Result<std::collections::BTreeMap<String, CargoDeclared>, String> {
     let metadata = |features: &str| {
-        let output = fixture_cargo(member.parent().unwrap())
+        let output = query_cargo(member.parent().unwrap())
             .args(["metadata", "--offline", "--format-version", "1", features])
             .arg("--manifest-path")
             .arg(member)
@@ -7495,7 +7693,7 @@ fn audit_materialized_layout(
         std::fs::write(&path, contents).unwrap();
     }
     let manifest = root.join(member);
-    let metadata = fixture_cargo(manifest.parent().unwrap())
+    let metadata = query_cargo(manifest.parent().unwrap())
         .args([
             "metadata",
             "--no-deps",
