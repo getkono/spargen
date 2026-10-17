@@ -115,21 +115,22 @@ fn bad_omit_flag_syntax_errors_cleanly() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--omit-operation"));
 
     // Each message is pinned by `bad_omit_flag_syntax_errors` in `cli/config.rs`; here, that every
-    // parse failure of either flag reaches the user as a usage error naming the value it refused.
-    for (flag, value) in [
-        ("--omit-operation", "get /pets extra"),
-        ("--omit-operation", "frobnicate /pets"),
-        ("--omit-component", "LegacyPet"),
-        ("--omit-component", "schema: "),
-        ("--omit-component", "bogus:Name"),
+    // parse failure of either flag reaches the user as a usage error naming what it refused: the
+    // whole value for a malformed one, and the one token for an unknown method or kind. Each is
+    // matched in its backtick quotes, which the usage example `schema:LegacyPet` never yields.
+    for (flag, value, refused) in [
+        ("--omit-operation", "get /pets extra", "get /pets extra"),
+        ("--omit-operation", "frobnicate /pets", "frobnicate"),
+        ("--omit-component", "LegacyPet", "LegacyPet"),
+        ("--omit-component", "schema: ", "schema: "),
+        ("--omit-component", "bogus:Name", "bogus"),
     ] {
         let output = check(temp.path(), &spec, &[flag, value]);
         assert_eq!(output.status.code(), Some(3), "{flag} {value}: {output:?}");
         assert!(output.stdout.is_empty(), "{flag} {value}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let refused = value.split([' ', ':']).next().unwrap();
         assert!(
-            stderr.starts_with("error: ") && stderr.contains(refused),
+            stderr.starts_with("error: ") && stderr.contains(&format!("`{refused}`")),
             "{flag} {value}: {stderr}"
         );
     }
