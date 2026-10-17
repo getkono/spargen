@@ -3792,6 +3792,81 @@ mod remote {
         );
     }
 
+    /// Lay out the gizmo spec beside a `spargen.lock` holding `lock`'s bytes and, when given, a
+    /// vendored gizmo holding `vendored`'s, then run both entry points. Each run's `E011`s are
+    /// returned as their pointers and messages, with the tempdir's path spelled `<dir>`.
+    fn invalid_input_with_bytes(lock: &[u8], vendored: Option<&[u8]>) -> Vec<(String, String)> {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec()).unwrap();
+        std::fs::write(dir.join("spargen.lock"), lock).unwrap();
+        if let Some(vendored) = vendored {
+            let path = dir.join(".spargen/vendor").join(GIZMO_VENDOR_PATH);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vendored).unwrap();
+        }
+        let spec = Spec::new(dir.join("openapi.yaml"));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = run_check(&spec);
+        assert_check_agrees(&generated, &checked);
+        let mut found = Vec::new();
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            found.extend(
+                report
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| d.code == Code::InvalidInput)
+                    .map(|d| {
+                        (
+                            d.pointer.as_str().to_owned(),
+                            d.message.replace(dir.as_str(), "<dir>"),
+                        )
+                    }),
+            );
+        }
+        found
+    }
+
+    /// A vendored file whose bytes match the pin but are not UTF-8 is `E011` naming the URL it
+    /// was vendored for, not drift: the hash already agrees.
+    #[test]
+    fn a_vendored_file_that_is_not_utf8_is_e011() {
+        use sha2::{Digest, Sha256};
+        let bytes = b"type: object\ndescription: \xff\n";
+        let sha256: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let message = format!("vendored file for `{GIZMO_URL}` is not valid UTF-8");
+        assert_eq!(
+            invalid_input_with_bytes(lock(&sha256).as_bytes(), Some(bytes)),
+            [(String::new(), message.clone()), (String::new(), message)]
+        );
+    }
+
+    /// A lock that exists but cannot be read as text, and one whose text is not a lock, are each
+    /// `E011` naming the lock, before any remote reference is resolved against it.
+    #[test]
+    fn an_unreadable_or_invalid_lock_is_e011() {
+        let unreadable = "failed to read `<dir>/spargen.lock`: stream did not contain valid UTF-8";
+        assert_eq!(
+            invalid_input_with_bytes(b"version = 1\n\xff\n", None),
+            [
+                (String::new(), unreadable.to_owned()),
+                (String::new(), unreadable.to_owned())
+            ]
+        );
+        let invalid = "invalid spargen.lock: spargen.lock line 2: expected `key = value`";
+        assert_eq!(
+            invalid_input_with_bytes(b"version = 1\nnot a lock\n", None),
+            [
+                (String::new(), invalid.to_owned()),
+                (String::new(), invalid.to_owned())
+            ]
+        );
+    }
+
     #[test]
     fn traversal_vendor_path_in_lock_is_rejected_without_reading() {
         // A hand-edited lock whose `path` escapes the vendor dir must be rejected at lock-parse
@@ -3876,6 +3951,34 @@ components:
     );
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::DynamicRefRejected));
+}
+
+/// A schema that opens a static resource scope, by `$id` or by `$anchor`, is `E004`'s
+/// resource-scope case at that schema, with the remedy that says no reference is literally
+/// unresolved.
+#[test]
+fn e004_a_schema_resource_scope_is_rejected_at_the_schema() {
+    for keyword in ["$id: https://example.com/thing", "$anchor: thing"] {
+        let report = generate(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Thing:\n      {keyword}\n      type: object\n"
+        ));
+        assert_eq!(
+            e004_pointers(&report, keyword),
+            ["/components/schemas/Thing"],
+            "{keyword}"
+        );
+        let remedy = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::UnresolvedRef)
+            .and_then(|d| d.remedy.as_deref())
+            .unwrap_or_default();
+        assert!(
+            remedy.contains("inline the subschema or reference it by JSON Pointer"),
+            "{keyword}: {report:#?}"
+        );
+    }
 }
 
 /// Build an OpenAPI document whose components form a chain `S0 -> S1 -> ... -> S{depth}`, where each

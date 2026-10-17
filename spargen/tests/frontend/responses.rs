@@ -808,3 +808,42 @@ fn an_unparseable_response_key_behind_a_ref_reports_rather_than_vanishing() {
     assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
 }
+
+/// A response's `links` describe hypermedia flows a client follows by hand, so they are
+/// acknowledged (`W002`) at the `links` member and the response itself still generates.
+#[test]
+fn w002_response_links_are_acknowledged_at_the_member() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+          links:
+            GetPet:
+              operationId: getPet
+              parameters: { id: "$response.body#/id" }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let flows: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::ServerInitiatedFlowIgnored)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        flows,
+        ["/paths/~1pets/post/responses/201/links"],
+        "{report:#?}"
+    );
+    assert!(code.contains("fn create_pet"), "{code}");
+}
