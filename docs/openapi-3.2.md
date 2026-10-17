@@ -1,7 +1,9 @@
 # OpenAPI 3.2 scope
 
 OpenAPI 3.2 is a focused extension of 3.1, not a new schema generation model. It keeps JSON
-Schema 2020-12 and the `https://spec.openapis.org/oas/3.1/dialect/base` dialect URI. Spargen
+Schema 2020-12 and the `https://spec.openapis.org/oas/3.1/dialect/base` dialect URI; spargen also
+accepts `https://spec.openapis.org/oas/3.2/dialect/2025-09-17` on a 3.2 document, which 3.2's
+published document schema gives as `jsonSchemaDialect`'s default (`spargen explain E002`). Spargen
 therefore validates 3.1 and 3.2 with their version-specific official document schemas, then lowers
 both through the same typed frontend and version-neutral IR.
 

@@ -204,6 +204,50 @@ components:
 }
 
 #[test]
+fn e002_a_schema_objects_own_dialect_is_judged_without_the_document_version() {
+    // `spargen explain E002`: a Schema Object's `$schema` other than the two OAS dialect URIs is
+    // rejected, and either URI is accepted there on a 3.1 document as on a 3.2 one, since a
+    // Schema Object is read without the document's version.
+    let spec = |version: &str, dialect: &str| {
+        format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $schema: {dialect}
+                type: object
+"##
+        )
+    };
+    for version in ["3.1.0", "3.2.0"] {
+        for dialect in [
+            "https://spec.openapis.org/oas/3.1/dialect/base",
+            "https://spec.openapis.org/oas/3.2/dialect/2025-09-17",
+        ] {
+            let source = spec(version, dialect);
+            for report in [generate(&source), check(&source)] {
+                assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+                assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+            }
+        }
+        let source = spec(version, "http://json-schema.org/draft-07/schema#");
+        for report in [generate(&source), check(&source)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+        }
+    }
+}
+
+#[test]
 fn oas32_query_method_operation_generates() {
     // The OpenAPI 3.2 fixed `QUERY` path-item method is fully supported: it lowers to an operation
     // and generates a client method like any other verb — no warning, no rejection.
