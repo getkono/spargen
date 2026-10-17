@@ -1635,22 +1635,18 @@ fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed
 
 /// A schema whose `enum` or `const` leaves only `null` beside a `type` that refuses it admits no
 /// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
-/// 0.5.0). The message names the construct written, not a `oneOf` the schema does not have, and
-/// where no composition is written the remedy names the keywords that disagree rather than asking
-/// to restructure one.
+/// 0.5.0). The message names the construct written, not a `oneOf`, and with no composition
+/// written the remedy names the keywords that disagree rather than a composition.
 #[test]
 fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
+    let (own, add, e013) = (
+        "`enum`, `const` or `anyOf`",
+        "add `null` to the schema's `type`",
+        Code::AllOfIrreconcilable,
+    );
     for (body, names, remedy) in [
-        (
-            "{ type: string, const: null }",
-            "`enum`, `const` or `anyOf`",
-            "add `null` to the schema's `type`",
-        ),
-        (
-            "{ type: string, enum: [null] }",
-            "`enum`, `const` or `anyOf`",
-            "add `null` to the schema's `type`",
-        ),
+        ("{ type: string, const: null }", own, add),
+        ("{ type: string, enum: [null] }", own, add),
         (
             "{ type: string, allOf: [ { const: null } ] }",
             "`allOf` scalar members",
@@ -1659,19 +1655,11 @@ fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
     ] {
         let report = generate(&required_pick_document(body));
         assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
-        let diagnostics: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::AllOfIrreconcilable)
-            .collect();
-        assert!(
-            !diagnostics.is_empty()
-                && diagnostics.iter().all(|d| d.message.contains(names)
-                    && !d.message.contains("oneOf")
-                    && d.remedy
-                        .as_deref()
-                        .is_some_and(|text| text.contains(remedy))),
-            "{body}: {diagnostics:#?}"
-        );
+        assert!(has_code(&report, e013), "{body}: {report:#?}");
+        for d in report.diagnostics().iter().filter(|d| d.code == e013) {
+            let fix = d.remedy.as_deref().unwrap_or_default();
+            let ok = d.message.contains(names) && !d.message.contains("oneOf");
+            assert!(ok && fix.contains(remedy), "{body}: {d:#?}");
+        }
     }
 }
