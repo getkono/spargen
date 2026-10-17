@@ -1011,8 +1011,8 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
 /// branch that states nothing is the second branch `null` matches, so every spelling keeps `null`
 /// denied: `pub pick: Pick`, as before #660. Where the met branches are one generated type, the
 /// collapse's `W001` stands in every spelling. Beside an exact-null branch (`const: null`,
-/// `enum: [null]`, or a `$ref` to such a component), every `allOf` spelling keeps `null` denied
-/// alike, with the exact-null branch's `()` arm.
+/// `enum: [null]`, or a `$ref` to such a component), every spelling denies `null` alike, and the
+/// exact-null branch is no `()` arm (#674).
 #[test]
 fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
     let mut mismatches = Vec::new();
@@ -1104,6 +1104,16 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             false,
             true,
         ),
+        // Two branches that state nothing, or one beside a `null` member: `null` matches both, so
+        // every spelling denies it (#673), and two `{}` branches are one type with `W001`.
+        ("[string, 'null']", "[ {}, {} ]", true, false, true),
+        (
+            "[string, 'null']",
+            "[ {}, { type: 'null' } ]",
+            true,
+            false,
+            false,
+        ),
     ];
     for (ty, members, single, nullable, warns) in quiet.into_iter().chain(null_stated) {
         for site in [
@@ -1143,18 +1153,22 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             }
         }
     }
-    // Beside an exact-null branch, the `null` the branch that states nothing takes from the meet
-    // is the second branch `null` matches, so every `allOf` spelling keeps `null` denied with the
-    // exact-null branch's `()` arm, as before #660. The sibling spelling gives `Option<Pick>` here
-    // and is not compared.
-    for members in [
-        "[ {}, { const: null } ]",
-        "[ {}, { enum: [null] } ]",
-        "[ {}, { const: null }, { type: string, enum: [a] } ]",
-        "[ {}, { $ref: '#/components/schemas/Z' } ]",
+    // Beside an exact-null branch, the branch that states nothing is the second branch `null`
+    // matches, so every spelling denies `null`, and the exact-null branch, which accepts nothing
+    // else, is no variant (#668, #674): `Pick` with no `()` arm. Before #674 the `allOf` spellings
+    // kept that arm and the sibling spelling gave `Option<Pick>`.
+    for (members, single) in [
+        ("[ {}, { const: null } ]", true),
+        ("[ {}, { enum: [null] } ]", true),
+        (
+            "[ {}, { const: null }, { type: string, enum: [a] } ]",
+            false,
+        ),
+        ("[ {}, { $ref: '#/components/schemas/Z' } ]", true),
     ] {
         let ty = "{ type: [string, 'null'] }";
         for site in [
+            format!("{{ type: [string, 'null'], oneOf: {members} }}"),
             format!("{{ allOf: [ {ty}, {{ oneOf: {members} }} ] }}"),
             format!("{{ allOf: [ {ty}, {{ allOf: [ {{ oneOf: {members} }} ] }} ] }}"),
             format!("{{ allOf: [ {{ oneOf: {members} }}, {ty} ] }}"),
@@ -1169,14 +1183,21 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             );
             let (report, code) = generate_with_code(&spec);
             let types = types_module(&code);
+            let shape = if single {
+                types.contains("pub type Pick = String;")
+            } else {
+                types.contains("pub enum Pick {")
+            };
+            // `Z` is a component of its own, emitted whatever the union does with it.
             if report.outcome() == Outcome::Rejected
                 || field_type(&types, "pub pick").as_deref() != Some("Pick")
-                || !types.contains("pub enum Pick {")
-                || !types.contains("pub type PickIntersection1Variant1 = ();")
+                || !shape
+                || types.matches("= ();").count() != 1
+                || types.contains("(Box<Z>)")
                 || types.contains("(Option<")
             {
                 mismatches.push(format!(
-                    "{site}: not `Pick` with a `()` arm and no `Option` arm: {report:#?} {types}"
+                    "{site}: not `Pick` with no `()` or `Option` arm: {report:#?} {types}"
                 ));
             }
         }
@@ -1262,7 +1283,9 @@ fn an_all_of_union_members_value_variant_null_is_settled_at_any_depth_and_order(
 /// the field was `Option<Pick>` and `Pick` kept a `()` arm for the `const: null` branch. The same
 /// union with no `type` beside it counts the untyped `items` branch, which `null` matches (#622),
 /// and drops the arm alike. The `items` branch is written inline, as a `$ref` to an `Arr`
-/// component, and inside an inline nested union `null` matches through it. The `anyOf`
+/// component, inside an inline nested union `null` matches through it, and inside such a union
+/// written as a `$ref` to `U`, which the sibling meet narrows to `null` as it does the inline one
+/// rather than excluding it with `W011` (#670). The `anyOf`
 /// counterpart keeps that arm
 /// (`an_exact_null_anyof_branch_beside_a_sibling_stays_its_unit_variant`).
 #[test]
@@ -1271,11 +1294,15 @@ fn a_oneof_exact_null_branch_beside_a_branch_the_sibling_narrows_to_null_admits_
     // The branch the sibling meet narrows to `null`: the untyped `items` branch, inline or as a
     // `$ref`, or an inline nested union `null` matches through it, which the `allOf` spelling
     // reads as the branch `null` matches beside the exact-null one.
-    let shapes = "    Arr: { items: { type: string } }\n";
+    let shapes = "    Arr: { items: { type: string } }\n    U: { oneOf: [ { items: { type: \
+                  string } }, { type: boolean } ] }\n";
+    // A `$ref` to the nested union is narrowed to `null` as the inline one is, not excluded with
+    // `W011` (#670).
     let arrays = [
         "{ items: { type: string } }",
         "{ $ref: '#/components/schemas/Arr' }",
         "{ oneOf: [ { items: { type: string } }, { type: boolean } ] }",
+        "{ $ref: '#/components/schemas/U' }",
     ];
     for ((branch, component), array) in [
         ("{ const: null }", ""),
@@ -1335,6 +1362,7 @@ fn a_oneof_exact_null_branch_beside_a_branch_the_sibling_narrows_to_null_admits_
                 let units = types.matches("= ();").count();
                 if report.outcome() == Outcome::Rejected
                     || has_code(&report, Code::ValidationKeywordIgnored)
+                    || has_code(&report, Code::DeclarationHasNoEffect)
                     || pick.as_deref() != Some("Pick")
                     || !shape
                     || units != usize::from(!component.is_empty())
@@ -1354,46 +1382,45 @@ fn a_oneof_exact_null_branch_beside_a_branch_the_sibling_narrows_to_null_admits_
 
 /// A `oneOf` exact-null branch (`const: null`) beside a multi-category `type` array gets one
 /// answer in the sibling spelling and the `allOf` one: the same field type and the same `()` arms.
-/// Beside an untyped branch whose keywords constrain scalars alone (`minLength`, `pattern`,
-/// `minimum`, `not`) or nothing (`true`, `{}`), both keep `Option<Pick>` and the arm (#668).
-/// Beside an untyped object or array branch, inline, as a `$ref` or as `allOf: [$ref]`, or a
-/// nested union `null` matches, inline or as a `$ref`, `null` matches that branch and the
-/// `const: null` one, so both give `Pick` with no `()` arm (#657). Before, the `allOf` spelling,
-/// which lowers the union on its own, dropped the arm and denied `null` there, while the sibling
-/// spelling, where the branch takes `null` from the `type` array, kept both.
+/// `null` matches every branch beside it here — one whose keywords constrain scalars alone
+/// (`minLength`, `pattern`, `minimum`, `not`) or nothing (`true`, `{}`) (#668, #674), an untyped
+/// object or array branch, inline, as a `$ref` or as `allOf: [$ref]`, and a nested union `null`
+/// matches, inline or as a `$ref` (#657) — and the `const: null` one, so it fails the exactly-one
+/// rule: both give `Pick` with no `()` arm. Before #674 both kept `Option<Pick>` and the arm beside
+/// the scalar-keyword and stated-nothing branches.
 #[test]
 fn a_oneof_exact_null_branch_beside_a_multi_category_conjunct_agrees_across_spellings() {
     let mut mismatches = Vec::new();
     let components = "    Obj: { properties: { a: { type: string } } }\n    Arr: { items: { type: \
                       string } }\n    U: { oneOf: [ { items: { type: string } }, { type: boolean } \
                       ] }\n";
-    // Each branch beside `const: null`, and whether `null` matching it drops the `()` arm.
+    // Each branch beside `const: null`: `null` matches it, so the `()` arm drops.
     let rows = [
-        ("{ minLength: 1 }", false),
-        ("{ pattern: '^a' }", false),
-        ("{ minimum: 1 }", false),
-        ("{ not: { type: boolean } }", false),
-        ("true", false),
-        ("{}", false),
-        ("{ items: { type: string } }", true),
-        ("{ properties: { a: { type: string } } }", true),
-        ("{ $ref: '#/components/schemas/Obj' }", true),
-        ("{ $ref: '#/components/schemas/Arr' }", true),
-        ("{ allOf: [ { $ref: '#/components/schemas/Obj' } ] }", true),
-        (
-            "{ oneOf: [ { items: { type: string } }, { type: boolean } ] }",
-            true,
-        ),
-        ("{ $ref: '#/components/schemas/U' }", true),
+        "{ minLength: 1 }",
+        "{ pattern: '^a' }",
+        "{ minimum: 1 }",
+        "{ not: { type: boolean } }",
+        "true",
+        "{}",
+        "{ items: { type: string } }",
+        "{ properties: { a: { type: string } } }",
+        "{ $ref: '#/components/schemas/Obj' }",
+        "{ $ref: '#/components/schemas/Arr' }",
+        "{ allOf: [ { $ref: '#/components/schemas/Obj' } ] }",
+        "{ oneOf: [ { items: { type: string } }, { type: boolean } ] }",
+        "{ $ref: '#/components/schemas/U' }",
     ];
-    for (other, drops) in rows {
+    // The multi-category conjunct, and the single-category one beside which #670 found the two
+    // spellings disagreeing as well.
+    for (ty, other) in ["[string, integer, 'null']", "[integer, 'null']"]
+        .into_iter()
+        .flat_map(|ty| rows.map(|other| (ty, other)))
+    {
         let members = format!("[ {other}, {{ const: null }}, {{ type: integer }} ]");
         let mut answers = Vec::new();
         for site in [
-            format!("{{ type: [string, integer, 'null'], oneOf: {members} }}"),
-            format!(
-                "{{ allOf: [ {{ type: [string, integer, 'null'] }}, {{ oneOf: {members} }} ] }}"
-            ),
+            format!("{{ type: {ty}, oneOf: {members} }}"),
+            format!("{{ allOf: [ {{ type: {ty} }}, {{ oneOf: {members} }} ] }}"),
         ] {
             let spec = with_schemas(
                 "3.1.0",
@@ -1411,19 +1438,16 @@ fn a_oneof_exact_null_branch_beside_a_multi_category_conjunct_agrees_across_spel
             answers.push((site, pick, types.matches("= ();").count()));
         }
         if answers[0].1 != answers[1].1 || answers[0].2 != answers[1].2 {
-            mismatches.push(format!("{other}: the spellings disagree: {answers:#?}"));
+            mismatches.push(format!(
+                "{ty} {other}: the spellings disagree: {answers:#?}"
+            ));
         }
-        let (field, units) = if drops {
-            ("Pick", 0)
-        } else {
-            ("Option<Pick>", 1)
-        };
         if answers
             .iter()
-            .any(|answer| answer.1 != field || answer.2 != units)
+            .any(|answer| answer.1 != "Pick" || answer.2 != 0)
         {
             mismatches.push(format!(
-                "{other}: not `{field}` with {units} `()` arms: {answers:#?}"
+                "{ty} {other}: not `Pick` with no `()` arm: {answers:#?}"
             ));
         }
     }
@@ -1464,4 +1488,178 @@ fn a_ref_member_to_a_branching_allof_wrapper_graph_reads_each_target_once() {
     let types = types_module(&code);
     let pick = field_type(&types, "pub pick").unwrap_or_else(|| panic!("no `pick` field: {types}"));
     assert!(pick.starts_with("Option<"), "`pick` is `{pick}`");
+}
+
+/// A document whose `Holder` requires `pick: Pick`, `Pick` being `body`, beside an object `O`.
+fn required_pick_document(body: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /h:\n    \
+         get:\n      \
+         operationId: getH\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/Holder' }}\n\
+         components:\n  \
+         schemas:\n    \
+         O: {{ type: object, properties: {{ login: {{ type: string }} }} }}\n    \
+         Pick: {body}\n    \
+         Holder: {{ type: object, properties: {{ pick: {{ $ref: '#/components/schemas/Pick' }} \
+         }}, required: [pick] }}\n"
+    )
+}
+
+/// A `type` that names only `null` beside an `allOf` whose members lower to a non-null type is
+/// GitHub's spelling of a nullable `$ref` (`repository-advisory`'s required `author`, `publisher`
+/// and `private_fork`). JSON Schema 2020-12 lets no value satisfy it, but a non-null struct would
+/// refuse the `null` such an API sends and `E013` would refuse the whole description, so it is
+/// read as the `allOf`'s type or `null`: `Option<Pick>`, as at 0.5.0. The same constraints written
+/// as an `allOf` member or as a `$ref`'s sibling are `E013`, as at 0.5.0, and so is an `allOf`
+/// whose members share no value, beside which the departure has no type to make optional. A
+/// `type` that also names the members' category is held to the one decision: the `$ref`'d object
+/// refuses `null`, so the conjunction does and `pick` is `Pick` (`Option<Pick>` at 0.5.0).
+#[test]
+fn a_null_only_type_beside_an_all_of_is_its_type_or_null() {
+    for (body, expected) in [
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: 'null' }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { type: object, properties: { a: { type: string } } } ], type: ['null'] }",
+            Some("Option<Pick>"),
+        ),
+        (
+            "{ allOf: [ { type: 'null' }, { $ref: '#/components/schemas/O' } ] }",
+            None,
+        ),
+        ("{ $ref: '#/components/schemas/O', type: ['null'] }", None),
+        // Members that make no type at all are not that spelling's `allOf`: the meet is empty,
+        // so the schema is `E013`, as at 0.5.0, not the exact null type.
+        (
+            "{ allOf: [ { type: string }, { type: integer } ], type: 'null' }",
+            None,
+        ),
+        (
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: [object, 'null'] }",
+            Some("Pick"),
+        ),
+    ] {
+        let (report, code) = generate_with_code(&required_pick_document(body));
+        match expected {
+            Some(expected) => {
+                assert_eq!(report.outcome(), Outcome::Generated, "{body}: {report:#?}");
+                let types = types_module(&code);
+                assert_eq!(
+                    field_type(&types, "pub pick").as_deref(),
+                    Some(expected),
+                    "{body}: {types}"
+                );
+            }
+            None => {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{body}: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// A schema that composes a `$ref` to that spelling reads the target as its type or `null` too, as
+/// at 0.5.0: a required field that is an `allOf` of it, or a `oneOf` / `anyOf` of it beside a
+/// branch that refuses `null`, is `Option<Holderpick>`, not a non-null type that refuses the
+/// `null` the API sends. A `oneOf` in which `null` matches a second branch admits no `null`.
+#[test]
+fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed() {
+    for field in [
+        "{ allOf: [ { $ref: '#/components/schemas/Pick' } ] }",
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { type: integer } ] }",
+        "{ anyOf: [ { $ref: '#/components/schemas/Pick' }, { type: integer } ] }",
+    ] {
+        let document = required_pick_document(
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+        )
+        .replace(
+            "pick: { $ref: '#/components/schemas/Pick' }",
+            &format!("pick: {field}"),
+        );
+        let (report, code) = generate_with_code(&document);
+        assert_eq!(report.outcome(), Outcome::Generated, "{field}: {report:#?}");
+        let types = types_module(&code);
+        assert_eq!(
+            field_type(&types, "pub pick").as_deref(),
+            Some("Option<Holderpick>"),
+            "{field}: {types}"
+        );
+    }
+    // Beside a `{type: 'null'}` branch or a second such branch, `null` matches two branches of a
+    // `oneOf`, so the `oneOf` admits none and the field is not optional.
+    for field in [
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { type: 'null' } ] }",
+        "{ oneOf: [ { $ref: '#/components/schemas/Pick' }, { $ref: '#/components/schemas/Pack' } ] }",
+    ] {
+        let document = required_pick_document(
+            "{ allOf: [ { $ref: '#/components/schemas/O' } ], type: ['null'] }",
+        )
+        .replace(
+            "pick: { $ref: '#/components/schemas/Pick' }",
+            &format!("pick: {field}"),
+        )
+        .replace(
+            "    Holder:",
+            "    Pack: { allOf: [ { type: object, properties: { id: { type: integer } } } ], \
+             type: ['null'] }\n    Holder:",
+        );
+        let (report, code) = generate_with_code(&document);
+        assert_eq!(report.outcome(), Outcome::Generated, "{field}: {report:#?}");
+        let types = types_module(&code);
+        let pick = field_type(&types, "pub pick");
+        assert!(
+            pick.as_deref().is_some_and(|pick| !pick.starts_with("Option<")),
+            "{field}: {types}"
+        );
+    }
+}
+
+/// A schema whose `enum` or `const` leaves only `null` beside a `type` that refuses it admits no
+/// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
+/// 0.5.0). The message names the construct written, not a `oneOf`, and with no composition
+/// written the remedy names the keywords that disagree rather than a composition.
+#[test]
+fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
+    let (own, add, e013) = (
+        "`enum`, `const` or `anyOf`",
+        "add `null` to the schema's `type`",
+        Code::AllOfIrreconcilable,
+    );
+    for (body, names, remedy) in [
+        ("{ type: string, const: null }", own, add),
+        ("{ type: string, enum: [null] }", own, add),
+        (
+            "{ type: string, allOf: [ { const: null } ] }",
+            "`allOf` scalar members",
+            "restructure the composition",
+        ),
+    ] {
+        let report = generate(&required_pick_document(body));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert!(has_code(&report, e013), "{body}: {report:#?}");
+        for d in report.diagnostics().iter().filter(|d| d.code == e013) {
+            let fix = d.remedy.as_deref().unwrap_or_default();
+            let ok = d.message.contains(names) && !d.message.contains("oneOf");
+            assert!(ok && fix.contains(remedy), "{body}: {d:#?}");
+        }
+    }
 }

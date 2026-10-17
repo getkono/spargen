@@ -19,6 +19,10 @@
 //!   every spelling (#542). Where today's output still splits a law, the gap is held exactly and
 //!   names the open issue that tracks it (#545), so the law tightens when the issue's fix lands.
 //!
+//! * one `null` decision (#674, [`null_parity`]): a `type`, `enum` and `const` beside a `oneOf` /
+//!   `anyOf` give one generated nullability, one set of `()` and `Option` arms, and one set of
+//!   excluded-member `W011`s in every spelling of that constraint set.
+//!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a warning says why or an
 //! open issue tracks the gap (#402). Each case of the first three properties moved into a
@@ -30,6 +34,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use proptest::prelude::*;
 use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 
+#[path = "lowering_props/null_parity.rs"]
+mod null_parity;
 mod oracles;
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.

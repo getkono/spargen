@@ -859,9 +859,12 @@ components:
 /// A sub-file component whose body is a nullable union keeps its nullability at every use, as the
 /// same component in the root document does.
 ///
-/// `schema_is_nullable` reads only `type`, `enum` and `const`, so for `oneOf: [null, string]` it
-/// answers `false`, while lowering the union answers `true`. `ensure_component` stopped writing
-/// that provisional answer back over the body's; `ensure_resolved` still did, and cached it, so
+/// The reserve-time guess this was found against, `schema_is_nullable`, read only `type`, `enum`
+/// and `const`, so for `oneOf: [null, string]` it answered `false`, while lowering the union
+/// answers `true` (the guess is now `null_admission`, which reads the union and agrees with the
+/// body here; the fixture pins that the body's answer is the one kept). `ensure_component`
+/// stopped writing that provisional answer back over the body's; `ensure_resolved` still did, and
+/// cached it, so
 /// both required fields below were emitted as a bare `M` and a `null` the description allows would
 /// fail to decode. Two fields, because the first use returns the lowered `Ty` and the second the
 /// cached one, and each carried the overwrite separately.
@@ -3434,9 +3437,10 @@ mod remote {
 
     /// The remote spelling of
     /// `a_sub_file_nullable_union_component_stays_nullable_at_every_use`: a vendored schema whose
-    /// body is `oneOf: [null, string]`, used by two required fields. `ensure_remote` wrote
-    /// `schema_is_nullable`'s provisional `false` back over the union's own `true` and cached it,
-    /// so both fields were a bare type a `null` would fail to decode into.
+    /// body is `oneOf: [null, string]`, used by two required fields. `ensure_remote` wrote the
+    /// then reserve-time guess's (`schema_is_nullable`'s) provisional `false` back over the union's
+    /// own `true` and cached it, so both fields were a bare type a `null` would fail to decode
+    /// into.
     #[test]
     fn a_vendored_nullable_union_stays_nullable_at_every_use() {
         const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";

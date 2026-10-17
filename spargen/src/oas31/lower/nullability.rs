@@ -4,16 +4,456 @@
 use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
-use crate::ir::{Ty, TypeKind};
+use crate::ir::{Ty, TypeId, TypeKind, Union};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
 use super::combine::{schema_has_union, schema_is_object_like, Contribution};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::schema_has_shape_constraint;
+use super::strategy::retain_strategy;
 use super::{memoised_answer, memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
+/// What a schema says about the JSON `null` instance, read from the schema alone in JSON Schema
+/// 2020-12 terms, whatever spelling the constraints take ([`LowerCtx::null_admission`]).
+///
+/// `null` is valid against a schema or it is not; that is [`Self::matches`]. Spargen also tells
+/// apart two ways `null` can be valid, because they lower differently: a schema that *states*
+/// `null` (a `type`, `enum` or `const` listing it) generates `Option<T>`, and one whose keywords
+/// say nothing about `null` (an untyped object or array, `{}`, a branch of scalar keywords alone)
+/// generates the non-null type every other spelling of it gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NullAdmission {
+    /// `null` fails the schema: a `type`, `enum` or `const` leaves it out, a `false` schema, or a
+    /// `oneOf` in which `null` matches no branch or more than one.
+    Denies,
+    /// `null` satisfies the schema, and nothing in it states `null`.
+    Undecided,
+    /// `null` satisfies the schema, and some keyword it is held to states `null`.
+    Admits,
+}
+
+impl NullAdmission {
+    /// The conjunction of two constraints held at one location: `null` fails it where it fails
+    /// either, and is stated where either states it.
+    pub(super) fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Denies, _) | (_, Self::Denies) => Self::Denies,
+            (Self::Admits, _) | (_, Self::Admits) => Self::Admits,
+            (Self::Undecided, Self::Undecided) => Self::Undecided,
+        }
+    }
+
+    /// Whether `null` is valid against the schema: a branch `null` matches.
+    pub(super) fn matches(self) -> bool {
+        self != Self::Denies
+    }
+
+    /// A schema's own `type`, `enum` and `const`, in conjunction: each that it states admits
+    /// `null` only where it lists it, and one that states nothing decides nothing.
+    pub(super) fn of_own_keywords(schema: &Schema) -> Self {
+        let stated = |listed: bool| if listed { Self::Admits } else { Self::Denies };
+        let type_admission = stated_nullability(schema).map_or(Self::Undecided, stated);
+        let enum_admission = schema
+            .enum_values
+            .as_ref()
+            .map_or(Self::Undecided, |values| {
+                stated(values.iter().any(|value| matches!(value.node, Node::Null)))
+            });
+        let const_admission = schema
+            .const_value
+            .as_ref()
+            .map_or(Self::Undecided, |value| {
+                stated(matches!(value.node, Node::Null))
+            });
+        type_admission.and(enum_admission).and(const_admission)
+    }
+
+    /// A `oneOf` of branches each read as `branches` yields: `null` satisfies it only where it
+    /// matches exactly one branch, which then says whether `null` is stated.
+    pub(super) fn one_of(branches: impl IntoIterator<Item = Self>) -> Self {
+        let mut matching = branches.into_iter().filter(|branch| branch.matches());
+        match (matching.next(), matching.next()) {
+            (Some(only), None) => only,
+            _ => Self::Denies,
+        }
+    }
+
+    /// An `anyOf` of branches each read as `branches` yields: `null` satisfies it where it matches
+    /// at least one branch, and is stated where a matching branch states it.
+    pub(super) fn any_of(branches: impl IntoIterator<Item = Self>) -> Self {
+        branches
+            .into_iter()
+            .fold(Self::Denies, |answer, branch| match (answer, branch) {
+                (Self::Admits, _) | (_, Self::Admits) => Self::Admits,
+                (Self::Undecided, _) | (_, Self::Undecided) => Self::Undecided,
+                (Self::Denies, Self::Denies) => Self::Denies,
+            })
+    }
+}
+
+/// What [`LowerCtx::clear_variant_nulls`] left of a union.
+#[derive(Debug, Clone, Copy)]
+enum Settled {
+    /// The type keeps its kind: no union, or a union with two or more variants left.
+    Kept,
+    /// The union lost variants down to one, whose kind it now is; the variant's own `Ty`.
+    Collapsed(Ty),
+    /// The union lost every variant, and is kept as it was.
+    Emptied,
+}
+
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// The single `null` decision for `schema` ([`NullAdmission`]), from the conjunction of every
+    /// constraint that applies at its location: its own `type`, `enum` and `const`
+    /// ([`NullAdmission::of_own_keywords`]); its `$ref` target, read through
+    /// [`Self::ref_target_body`] and met with the `$ref`'s siblings; every `allOf` member, nested
+    /// `allOf`s and `$ref`s flattened alike; and its `oneOf` (exactly one branch `null` matches) and
+    /// `anyOf` (at least one). Each branch is read on its own: conjoining it with its siblings
+    /// first changes neither whether `null` matches it (where a sibling denies `null`, the whole
+    /// schema does) nor whether `null` is stated, so the answer is the same however the
+    /// constraints are spelled — a `type` beside a union, an `allOf` member in either order, a
+    /// nested `allOf`, or a `$ref` to any of them.
+    ///
+    /// Keywords that never constrain a `null` instance (object, array, string and number
+    /// keywords) decide nothing. Neither do `not` and `if`/`then`/`else`, which lowering does not
+    /// carry. A `true` schema decides nothing, and `false` denies. A `$ref` target that cannot be
+    /// read, a `$ref` loop, or a chain past [`MAX_SCHEMA_DEPTH`] decides nothing.
+    ///
+    /// One spelling departs from 2020-12: a `type` naming only `null` beside an `allOf` that
+    /// refuses `null`, with no union, `$ref`, `enum` or `const` beside them, admits no value, and
+    /// is read as admitting `null` instead — the `allOf`'s type or `null` — wherever the walk
+    /// reaches it, so a `$ref` to it, an `allOf` of it and a union branch of it agree with it.
+    pub(super) fn null_admission(&self, schema: &Schema) -> NullAdmission {
+        self.null_admission_within(schema, 0, None)
+    }
+
+    /// [`Self::null_admission`] of a union branch or `allOf` member, a boolean schema included.
+    pub(super) fn branch_null_admission(&self, branch: &SchemaOr) -> NullAdmission {
+        self.branch_null_admission_within(branch, 0, None)
+    }
+
+    /// [`Self::null_admission`] of `schema` with the `allOf` member at `member` (nested in inner
+    /// `allOf`s or not) read as `true`: what the other members hold that member to.
+    pub(super) fn null_admission_without(
+        &self,
+        schema: &Schema,
+        member: &Provenance,
+    ) -> NullAdmission {
+        self.null_admission_within(schema, 0, Some(member))
+    }
+
+    /// Whether [`Self::null_admission`] admits `null` at `schema` only by its one departure: a
+    /// `type` naming only `null` beside an `allOf` whose members refuse it, read as the `allOf`'s
+    /// type or `null`. That `null` makes the members' type optional and is never the whole type,
+    /// so members that share no value leave the schema `E013`.
+    pub(super) fn null_admitted_only_by_departure(&self, schema: &Schema) -> bool {
+        type_beside_all_of_is_null_only(schema)
+            && schema
+                .all_of
+                .iter()
+                .map(|member| self.branch_null_admission(member))
+                .fold(NullAdmission::Undecided, NullAdmission::and)
+                == NullAdmission::Denies
+    }
+
+    /// [`Self::null_admission`] of the keywords a union's branches are met with: `schema` without
+    /// its `oneOf`, `anyOf` and `discriminator`.
+    pub(super) fn union_sibling_null_admission(&self, schema: &Schema) -> NullAdmission {
+        let mut sibling = schema.clone();
+        sibling.one_of.clear();
+        sibling.any_of.clear();
+        sibling.discriminator = None;
+        self.null_admission(&sibling)
+    }
+
+    /// [`Self::null_admission`] of a union branch or `allOf` member, a boolean schema included,
+    /// reached `depth` steps into the walk.
+    fn branch_null_admission_within(
+        &self,
+        branch: &SchemaOr,
+        depth: u32,
+        except: Option<&Provenance>,
+    ) -> NullAdmission {
+        match branch {
+            SchemaOr::Bool(true) => NullAdmission::Undecided,
+            SchemaOr::Bool(false) => NullAdmission::Denies,
+            SchemaOr::Schema(schema) => self.null_admission_within(schema, depth, except),
+        }
+    }
+
+    /// Apply [`Self::null_admission`] of `schema` to `ty`, the type its composition lowered to
+    /// (everything inserted since `mark` is that lowering's own): the generated type admits `null`
+    /// exactly where the schema states it. A schema with no composition (`allOf`, `oneOf`,
+    /// `anyOf`, a `$ref` with shape-bearing siblings) and no `enum` or `const` decides by its own
+    /// `type`, which its lowering already read; a bare `$ref` is its target's type, which the
+    /// target's own lowering settled; and the exact null type `()` is `null` itself.
+    ///
+    /// The answer is applied, not re-derived from the lowered shape:
+    ///
+    /// * where `schema` denies `null`, nothing in the type decodes it: the type is not `Option`, a
+    ///   union variant of this lowering's own that is the exact null type accepts nothing the
+    ///   schema does and is no variant, and no variant is an `Option`. A union left with one
+    ///   variant is that variant's type, and one left with none — the exact null type was all the
+    ///   lowering found — admits no value at all, which is rejected (`E013`);
+    /// * where `null` satisfies it unstated, the type is not `Option` and no variant is;
+    /// * where it admits `null`, the type carries it once: as the `Option` of the union, as a `()`
+    ///   variant, or as the `Option` of the one merged variant `null` matches, and it is made
+    ///   `Option` where none of them does. A `()` variant wins over the union's `Option`: a
+    ///   union holding one is not made `Option` and does not stay one.
+    ///
+    /// A `type` naming only `null` beside an `allOf` whose members lowered to a non-null type,
+    /// which admits no value under 2020-12, is applied as the decision reads it: that type or
+    /// `null` (`Option`).
+    ///
+    /// Only types this lowering inserted (at or above `mark`), and no component among them, are
+    /// changed in place.
+    pub(super) fn settle_null_admission(
+        &mut self,
+        schema: &Schema,
+        mut ty: Ty,
+        mark: u32,
+    ) -> Option<Ty> {
+        if schema.boolean.is_some() || !schema_is_composed(schema) {
+            return Some(ty);
+        }
+        let admission = self.null_admission(schema);
+        // A union of this lowering's own whose every variant is the exact null type accepts `null`
+        // alone: it is the null type, as the sibling spelling collapses such an `anyOf` (#625).
+        if ty.id.0 >= mark && !self.is_component_def(ty.id) {
+            if let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) {
+                if union
+                    .variants
+                    .iter()
+                    .all(|variant| self.is_exact_null(variant.ty))
+                {
+                    let dropped: Vec<u32> = union.variants.iter().map(|v| v.ty.id.0).collect();
+                    if let Some(def) = self.graph.get_mut(ty.id) {
+                        def.kind = TypeKind::Null;
+                    }
+                    self.union_variant_members.remove(&ty.id);
+                    for id in dropped.into_iter().filter(|id| *id >= mark) {
+                        self.elide_unused_union_lowering(id..id + 1);
+                    }
+                }
+            }
+        }
+        if self.is_exact_null(ty) {
+            if admission == NullAdmission::Denies {
+                return self.reject_null_admission_denied(schema);
+            }
+            // `null` is its one value, so it is no `Option`.
+            ty.nullable = false;
+            return Some(ty);
+        }
+        match admission {
+            NullAdmission::Admits => {
+                if ty.nullable {
+                    // A `()` arm already carries the `null`, so the union is no `Option` as well,
+                    // as an `allOf` spelling of the same constraints settles it (Decision 3).
+                    if self.has_exact_null_variant(ty) {
+                        ty.nullable = false;
+                    }
+                    self.clear_variant_nulls(ty.id, mark, false);
+                } else if !self.carries_null(ty) {
+                    ty.nullable = true;
+                }
+            }
+            NullAdmission::Undecided => {
+                ty.nullable = false;
+                self.clear_variant_nulls(ty.id, mark, false);
+            }
+            NullAdmission::Denies => {
+                ty.nullable = false;
+                match self.clear_variant_nulls(ty.id, mark, true) {
+                    Settled::Kept => {}
+                    Settled::Collapsed(variant) => ty.boxed = variant.boxed,
+                    Settled::Emptied => return self.reject_null_admission_denied(schema),
+                }
+            }
+        }
+        Some(ty)
+    }
+
+    /// Clear the `null` the variants of the union `id` decode, where `id` is a union this lowering
+    /// inserted (at or above `mark`) and no component: each variant's `Option`, and, where
+    /// `drop_exact_nulls`, the variants that are the exact null type, which then accept nothing.
+    /// Nested unions of this lowering's own are cleared alike. A union left with one variant
+    /// becomes that variant's kind in place; one left with none is [`Settled::Emptied`] and kept.
+    fn clear_variant_nulls(&mut self, id: TypeId, mark: u32, drop_exact_nulls: bool) -> Settled {
+        if id.0 < mark || self.is_component_def(id) {
+            return Settled::Kept;
+        }
+        let Some(TypeKind::Union(union)) = self.graph.get(id).map(|def| def.kind.clone()) else {
+            return Settled::Kept;
+        };
+        let mut retained = Vec::new();
+        let mut variants = Vec::new();
+        for (index, variant) in union.variants.iter().enumerate() {
+            if drop_exact_nulls && self.is_exact_null(variant.ty) {
+                continue;
+            }
+            let mut variant = variant.clone();
+            if let Settled::Collapsed(inner) =
+                self.clear_variant_nulls(variant.ty.id, mark, drop_exact_nulls)
+            {
+                variant.ty.boxed = variant.ty.boxed || inner.boxed;
+            }
+            variant.ty.nullable = false;
+            variants.push(variant);
+            retained.push(index);
+        }
+        let dropped: Vec<TypeId> = union
+            .variants
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !retained.contains(index))
+            .map(|(_, variant)| variant.ty.id)
+            .collect();
+        let settled = match variants.len() {
+            0 => return Settled::Emptied,
+            // A variant still a reservation has no kind to take yet, so it stays a variant.
+            1 if !dropped.is_empty() && !self.is_reservation(variants[0].ty.id) => {
+                let variant = variants[0].ty;
+                let Some(kind) = self.graph.get(variant.id).map(|def| def.kind.clone()) else {
+                    return Settled::Kept;
+                };
+                if let Some(def) = self.graph.get_mut(id) {
+                    def.kind = kind;
+                }
+                Settled::Collapsed(variant)
+            }
+            _ => {
+                let strategy = retain_strategy(&union.strategy, &retained);
+                if let Some(def) = self.graph.get_mut(id) {
+                    def.kind = TypeKind::Union(Union { variants, strategy });
+                }
+                Settled::Kept
+            }
+        };
+        if dropped.is_empty() {
+            return settled;
+        }
+        // The variants' members stay aligned with the variants left; a union no longer has any.
+        if let Some(members) = self.union_variant_members.remove(&id) {
+            if matches!(settled, Settled::Kept) {
+                let members = retained
+                    .iter()
+                    .filter_map(|&index| members.get(index).cloned())
+                    .collect();
+                self.union_variant_members.insert(id, members);
+            }
+        }
+        // A dropped variant's type, and a collapsed one's (its kind now the union's own), are
+        // emitted unused unless something else names them.
+        let collapsed = match settled {
+            Settled::Collapsed(variant) => Some(variant.id),
+            Settled::Kept | Settled::Emptied => None,
+        };
+        for unused in dropped.into_iter().chain(collapsed) {
+            if unused.0 >= mark {
+                self.elide_unused_union_lowering(unused.0..unused.0 + 1);
+            }
+        }
+        settled
+    }
+
+    /// Whether `id` is the type of a component, a remote or a resolved target, finished or still
+    /// being lowered: a type other uses share, which one use's lowering does not change.
+    fn is_component_def(&self, id: TypeId) -> bool {
+        self.components
+            .values()
+            .chain(self.in_progress.values())
+            .chain(self.remote_components.values())
+            .chain(self.remote_in_progress.values())
+            .chain(self.resolved_components.values())
+            .chain(self.resolved_in_progress.values())
+            .any(|&(component, _)| component == id)
+    }
+
+    /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
+    fn has_exact_null_variant(&self, ty: Ty) -> bool {
+        matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Union(union))
+                if union.variants.iter().any(|variant| self.is_exact_null(variant.ty))
+        )
+    }
+
+    /// Whether `ty` already accepts `null` without being made nullable: it is, or it is a union
+    /// with a variant that decodes `null` — an exact-null (`()`) one, or one a merge left
+    /// nullable, where the one merged branch `null` matches is its only source.
+    fn carries_null(&self, ty: Ty) -> bool {
+        ty.nullable
+            || match self.graph.get(ty.id).map(|def| &def.kind) {
+                Some(TypeKind::Null) => true,
+                Some(TypeKind::Union(union)) => union
+                    .variants
+                    .iter()
+                    .any(|variant| variant.ty.nullable || self.is_exact_null(variant.ty)),
+                // A reservation's body is not known yet: its reference's own nullability stands.
+                Some(TypeKind::Reserved) => false,
+                _ => false,
+            }
+    }
+
+    /// [`Self::null_admission`] reached `depth` steps into the walk.
+    fn null_admission_within(
+        &self,
+        schema: &Schema,
+        depth: u32,
+        except: Option<&Provenance>,
+    ) -> NullAdmission {
+        match schema.boolean {
+            Some(true) => return NullAdmission::Undecided,
+            Some(false) => return NullAdmission::Denies,
+            None => {}
+        }
+        if depth >= MAX_SCHEMA_DEPTH || except == Some(&schema.provenance) {
+            return NullAdmission::Undecided;
+        }
+        let mut answer = NullAdmission::of_own_keywords(schema);
+        if let Some(reference) = &schema.reference {
+            let target = self.ref_target_body(reference, &schema.provenance).map_or(
+                NullAdmission::Undecided,
+                |target| {
+                    memoised_answer(
+                        &self.null_admission_memo,
+                        &target,
+                        NullAdmission::Undecided,
+                        || self.null_admission_within(&target, depth + 1, None),
+                    )
+                },
+            );
+            answer = answer.and(target);
+        }
+        for member in &schema.all_of {
+            answer = answer.and(self.branch_null_admission_within(member, depth + 1, except));
+        }
+        if !schema.one_of.is_empty() {
+            answer =
+                answer.and(NullAdmission::one_of(schema.one_of.iter().map(|branch| {
+                    self.branch_null_admission_within(branch, depth + 1, except)
+                })));
+        }
+        if !schema.any_of.is_empty() {
+            answer =
+                answer.and(NullAdmission::any_of(schema.any_of.iter().map(|branch| {
+                    self.branch_null_admission_within(branch, depth + 1, except)
+                })));
+        }
+        // A `type` naming only `null` beside an `allOf` that refuses it (`{allOf: [{$ref: User}],
+        // type: ['null']}`, GitHub's spelling of a nullable `$ref`) is satisfied by no value under
+        // 2020-12, yet a non-null type would refuse the `null` such an API sends, and `E013` would
+        // refuse the whole description: it is read as the `allOf`'s type or `null`, as before the
+        // one decision, wherever it is reached — the schema itself, and every `$ref`, `allOf`
+        // member and union branch that composes it.
+        if answer == NullAdmission::Denies && type_beside_all_of_is_null_only(schema) {
+            return NullAdmission::Admits;
+        }
+        answer
+    }
+
     /// Whether some member of `schema`'s object `allOf` decides the merge's nullability, as
     /// [`Self::gather_all_of`] records it in each [`Contribution::Object`]: the schema's own
     /// `type`, a member that states one, a `$ref` member whose target decides it
@@ -820,6 +1260,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
+/// Whether `schema` composes constraints whose `null` its own `type` alone does not settle: an
+/// `allOf`, a `oneOf` or `anyOf`, a `$ref` with shape-bearing siblings, or an `enum` or `const`.
+fn schema_is_composed(schema: &Schema) -> bool {
+    let ref_with_siblings = schema.reference.is_some() && {
+        let mut sibling = schema.clone();
+        sibling.reference = None;
+        schema_has_shape_constraint(&sibling)
+    };
+    ref_with_siblings
+        || (schema.reference.is_none()
+            && (!schema.all_of.is_empty()
+                || schema_has_union(schema)
+                || schema.enum_values.is_some()
+                || schema.const_value.is_some()))
+}
+
 pub(super) fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {
     ty.nullable || matches!(kind, TypeKind::Null | TypeKind::Any)
 }
@@ -982,34 +1438,20 @@ pub(super) fn member_is_null_only(member: &SchemaOr) -> bool {
         && schema.properties.is_empty()
 }
 
-/// Whether a schema accepts `null`: a `"null"` member of its type array, or a `null` `enum` member
-/// or `const`. Computed at component reserve time so `$ref` consumers wrap the type in `Option`,
-/// and it agrees with the `nullable` that [`LowerCtx::lower_schema`]/[`LowerCtx::lower_enum`]
-/// compute from the same schema.
-pub(super) fn schema_is_nullable(schema: &Schema) -> bool {
-    schema.types.types.contains(&JsonType::Null)
-        || schema
-            .enum_values
-            .as_ref()
-            .is_some_and(|values| values.iter().any(|value| matches!(value.node, Node::Null)))
-        || schema
-            .const_value
-            .as_ref()
-            .is_some_and(|value| matches!(value.node, Node::Null))
+/// Whether `schema` is an `allOf` beside a `type` that names only `null`, and no union or `$ref`:
+/// the spelling [`LowerCtx::null_admission`] reads as the `allOf`'s type or `null`.
+fn type_beside_all_of_is_null_only(schema: &Schema) -> bool {
+    schema.types.types == [JsonType::Null]
+        && !schema.all_of.is_empty()
+        && schema.reference.is_none()
+        && !schema_has_union(schema)
+        && schema.enum_values.is_none()
+        && schema.const_value.is_none()
 }
 
 /// Whether every one of a schema's own `type`, `enum` and `const` that it states admits `null`
-/// (vacuously so where it states none). Unlike [`schema_is_nullable`], which asks whether any of
-/// them lists `null`, this is their conjunction: `{type: string, enum: [null]}` admits no `null`.
+/// (vacuously so where it states none): their conjunction, [`NullAdmission::of_own_keywords`],
+/// so `{type: string, enum: [null]}` admits no `null`.
 pub(super) fn own_keywords_admit_null(schema: &Schema) -> bool {
-    let type_admits = stated_nullability(schema).unwrap_or(true);
-    let enum_admits = schema
-        .enum_values
-        .as_ref()
-        .is_none_or(|values| values.iter().any(|value| matches!(value.node, Node::Null)));
-    let const_admits = schema
-        .const_value
-        .as_ref()
-        .is_none_or(|value| matches!(value.node, Node::Null));
-    type_admits && enum_admits && const_admits
+    NullAdmission::of_own_keywords(schema).matches()
 }
