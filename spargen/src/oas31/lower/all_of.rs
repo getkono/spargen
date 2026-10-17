@@ -146,7 +146,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.union_members_take_scalar_null(union_members, &mut contributions);
         }
         self.scalar_meet_value_variants = value_variants;
-        let met = self.combine_all_of(schema, hint, &contributions);
+        // A `oneOf` member `null` matches twice that its own lowering left as no union denies
+        // `null` to the whole merge (#673), which the meet cannot see: the member is `Value`, its
+        // identity. Cleared after the final insert, a pure mutate of the returned `Ty`. The null
+        // type itself is left as it is.
+        let denies_null = self.union_members_deny_null(union_members, &contributions);
+        let met = self
+            .combine_all_of(schema, hint, &contributions)
+            .map(|mut met| {
+                if denies_null
+                    && !matches!(
+                        self.graph.get(met.id).map(|def| &def.kind),
+                        Some(TypeKind::Null)
+                    )
+                {
+                    met.nullable = false;
+                }
+                met
+            });
         let mut held = held;
         // A met reservation's body is not known yet, so nothing is settled against it.
         if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {

@@ -1013,6 +1013,11 @@ fn a_ref_member_to_an_allof_wrapping_a_ref_union_takes_null_from_a_member_admitt
 /// collapse's `W001` stands in every spelling. Beside an exact-null branch (`const: null`,
 /// `enum: [null]`, or a `$ref` to such a component), every `allOf` spelling keeps `null` denied
 /// alike, with the exact-null branch's `()` arm.
+///
+/// Where every branch states nothing or is the null type (`[ {}, {} ]`, `[ {}, { type: 'null' } ]`),
+/// the union lowered on its own is one `serde_json::Value`, no union left to count `null` in, and
+/// the meet kept the `type` member's `null`: `Option<Pick>` in each `allOf` spelling, inline or as
+/// a `$ref` member, where the sibling spelling gives `Pick` (#673). Every spelling now gives `Pick`.
 #[test]
 fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_variant() {
     let mut mismatches = Vec::new();
@@ -1104,6 +1109,16 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             false,
             true,
         ),
+        // Every branch states nothing or is the null type: `null` matches each, so it fails
+        // exactly-one, though the union lowered on its own is no union to count it (#673).
+        ("[string, 'null']", "[ {}, {} ]", true, false, true),
+        (
+            "[string, 'null']",
+            "[ {}, { type: 'null' } ]",
+            true,
+            false,
+            false,
+        ),
     ];
     for (ty, members, single, nullable, warns) in quiet.into_iter().chain(null_stated) {
         for site in [
@@ -1139,6 +1154,36 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
                 mismatches.push(format!(
                     "{site}: not the typed branches as `{expected_pick}` with no `()` or `Option` \
                      arm and a `W001` only where expected ({warns}): {report:#?} {types}"
+                ));
+            }
+        }
+    }
+    // A bare `$ref` member to a `oneOf` component that `null` matches twice denies it alike, in
+    // either member order (#673).
+    for members in ["[ {}, {} ]", "[ {}, { type: 'null' } ]"] {
+        let ty = "{ type: [string, 'null'] }";
+        let union = "{ $ref: '#/components/schemas/U' }";
+        for site in [
+            format!("{{ allOf: [ {ty}, {union} ] }}"),
+            format!("{{ allOf: [ {union}, {ty} ] }}"),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    U: {{ oneOf: {members} }}\n    Pick: {site}\n    Holder:\n      type: \
+                     object\n      properties:\n        pick: {{ $ref: '#/components/schemas/Pick' \
+                     }}\n      required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            let types = types_module(&code);
+            if report.outcome() == Outcome::Rejected
+                || field_type(&types, "pub pick").as_deref() != Some("Pick")
+                || !types.contains("pub type Pick = String;")
+            {
+                mismatches.push(format!(
+                    "U: {{ oneOf: {members} }}, Pick: {site}: not `Pick = String` as `Pick`: \
+                     {report:#?} {types}"
                 ));
             }
         }
