@@ -267,6 +267,14 @@ fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
         );
         prop_assert_eq!(codes(&checked), codes(&report), "{:?}: {}", spelling, spec);
         let mut answer = null_answer(&report, &source);
+        // `null` is carried once: a `()` arm, or the `Option` of the field naming `Pick`.
+        prop_assert!(
+            !(answer.optional && answer.unit_arms > 0),
+            "{:?}: `Option<Pick>` beside a `()` arm: {}\n{}",
+            spelling,
+            spec,
+            source
+        );
         if case.merges_before_the_meet() {
             answer.excluded.clear();
         }
@@ -416,11 +424,39 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             pick(false, Vec::new()),
         ));
     }
+    // An `anyOf` whose exact-null branch carries the `null` its conjunct admits, beside a `$ref` to
+    // a union `null` also matches: `null` is carried once, by the `()` arm, so the field is no
+    // `Option` in any spelling (Decision 3).
+    let any_of_rows: Vec<(&str, &str, Vec<&str>, NullAnswer)> = [
+        "type: [string, 'null'], enum: [a, null]",
+        "type: [string, 'null']",
+    ]
+    .into_iter()
+    .map(|conjunct| {
+        (
+            "#674",
+            conjunct,
+            vec![
+                "{ type: string }",
+                "{ $ref: '#/components/schemas/U' }",
+                "{ const: null }",
+            ],
+            NullAnswer {
+                unit_arms: 1,
+                ..pick(false, Vec::new())
+            },
+        )
+    })
+    .collect();
     let mut mismatches = Vec::new();
-    for (issue, conjunct, branches, expected) in rows {
+    let rows = rows
+        .into_iter()
+        .map(|row| (true, row))
+        .chain(any_of_rows.into_iter().map(|row| (false, row)));
+    for (one_of, (issue, conjunct, branches, expected)) in rows {
         let case = NullCase {
             conjunct,
-            one_of: true,
+            one_of,
             branches,
         };
         match assert_null_parity(&case) {

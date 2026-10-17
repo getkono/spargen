@@ -199,7 +199,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// * where `null` satisfies it unstated, the type is not `Option` and no variant is;
     /// * where it admits `null`, the type carries it once: as the `Option` of the union, as a `()`
     ///   variant, or as the `Option` of the one merged variant `null` matches, and it is made
-    ///   `Option` where none of them does.
+    ///   `Option` where none of them does. A `()` variant wins over the union's `Option`: a
+    ///   union holding one is not made `Option` and does not stay one.
     ///
     /// A `type` naming only `null` beside an `allOf` whose members lowered to a non-null type,
     /// which admits no value under 2020-12, is applied as the decision reads it: that type or
@@ -248,6 +249,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         match admission {
             NullAdmission::Admits => {
                 if ty.nullable {
+                    // A `()` arm already carries the `null`, so the union is no `Option` as well,
+                    // as an `allOf` spelling of the same constraints settles it (Decision 3).
+                    if self.has_exact_null_variant(ty) {
+                        ty.nullable = false;
+                    }
                     self.clear_variant_nulls(ty.id, mark, false);
                 } else if !self.carries_null(ty) {
                     ty.nullable = true;
@@ -363,6 +369,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .chain(self.resolved_components.values())
             .chain(self.resolved_in_progress.values())
             .any(|&(component, _)| component == id)
+    }
+
+    /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
+    fn has_exact_null_variant(&self, ty: Ty) -> bool {
+        matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Union(union))
+                if union.variants.iter().any(|variant| self.is_exact_null(variant.ty))
+        )
     }
 
     /// Whether `ty` already accepts `null` without being made nullable: it is, or it is a union
