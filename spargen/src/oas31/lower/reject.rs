@@ -219,13 +219,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !schema.all_of.is_empty() {
             return self.reject_all_of_scalars(schema);
         }
-        // E013 case: scalar-members
+        // E013 case: null-only-left
         self.reject_irreconcilable(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "the only value this schema's own `enum`, `const` or `anyOf` members leave is `null`, \
              and its other keywords refuse `null`, so no value satisfies the schema",
-            ALL_OF_REMEDY,
+            NULL_ONLY_LEFT_REMEDY,
         )
     }
 
@@ -392,6 +392,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// The remedy every `allOf` rejection (`E013`) gives.
 const ALL_OF_REMEDY: &str =
     "restructure the composition so members agree, or omit this API segment with spargen::omit!";
+
+/// The remedy for a schema whose own `enum`, `const` or `anyOf` leaves only the `null` its other
+/// keywords refuse (`E013`): no composition was written, so it names the keywords that disagree.
+const NULL_ONLY_LEFT_REMEDY: &str = "add `null` to the schema's `type`, or give its `enum`, \
+                                     `const` or `anyOf` a value that `type` accepts, or omit \
+                                     this API segment with spargen::omit!";
 
 /// The remedy every `$ref`-sibling intersection rejection (`E013`) gives, naming the construct the
 /// author wrote rather than an `allOf` they did not.

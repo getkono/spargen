@@ -1635,32 +1635,43 @@ fn a_ref_to_a_null_only_type_beside_an_all_of_is_its_type_or_null_where_composed
 
 /// A schema whose `enum` or `const` leaves only `null` beside a `type` that refuses it admits no
 /// value, standalone or with the `const` as an `allOf` member: `E013` (`pub type Pick = ();` at
-/// 0.5.0). The message names the construct written, not a `oneOf` the schema does not have.
+/// 0.5.0). The message names the construct written, not a `oneOf` the schema does not have, and
+/// where no composition is written the remedy names the keywords that disagree rather than asking
+/// to restructure one.
 #[test]
 fn a_type_refusing_the_only_null_its_enum_or_const_leaves_is_rejected() {
-    for (body, names) in [
+    for (body, names, remedy) in [
         (
             "{ type: string, const: null }",
             "`enum`, `const` or `anyOf`",
+            "add `null` to the schema's `type`",
         ),
         (
             "{ type: string, enum: [null] }",
             "`enum`, `const` or `anyOf`",
+            "add `null` to the schema's `type`",
         ),
         (
             "{ type: string, allOf: [ { const: null } ] }",
             "`allOf` scalar members",
+            "restructure the composition",
         ),
     ] {
         let report = generate(&required_pick_document(body));
         assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
-        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        let diagnostics: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .collect();
         assert!(
-            !messages.is_empty()
-                && messages
-                    .iter()
-                    .all(|message| message.contains(names) && !message.contains("oneOf")),
-            "{body}: {messages:#?}"
+            !diagnostics.is_empty()
+                && diagnostics.iter().all(|d| d.message.contains(names)
+                    && !d.message.contains("oneOf")
+                    && d.remedy
+                        .as_deref()
+                        .is_some_and(|text| text.contains(remedy))),
+            "{body}: {diagnostics:#?}"
         );
     }
 }
