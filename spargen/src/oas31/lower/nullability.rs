@@ -1,6 +1,7 @@
 //! Whether a schema, an `allOf` merge, a union branch or a `$ref` target admits, denies, or
 //! leaves undecided a `null`.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
@@ -786,17 +787,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Contribution::Scalar(ty) = contributions.get(slot)? else {
                     return None;
                 };
-                let target = match member.reference.as_deref() {
-                    Some(reference) => {
-                        let mut sibling = member.clone();
-                        sibling.reference = None;
-                        if schema_has_shape_constraint(&sibling) {
-                            return None;
-                        }
-                        self.ref_target_body(reference, &member.provenance)?
-                    }
-                    None => std::borrow::Cow::Borrowed(member),
-                };
+                let target = self.union_member_target(member)?;
                 (schema_has_union(&target) || self.all_of_wraps_undecided_union(&target, 0))
                     .then_some((slot, *ty, target))
             })
@@ -817,6 +808,67 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.union_member_takes_scalar_null(ty, &target, others);
             contributions[slot] = Contribution::Scalar(ty);
         }
+    }
+
+    /// The schema an `allOf` member gathered as one scalar is read by, as
+    /// [`Self::union_members_take_scalar_null`] reads it: an inline member itself, and a bare
+    /// `$ref`'s target through [`Self::ref_target_body`], aliases followed. `None` for a `$ref`
+    /// with shape-bearing siblings of its own, which are further members, and for a target that
+    /// cannot be read.
+    fn union_member_target<'s>(&'s self, member: &'s Schema) -> Option<Cow<'s, Schema>> {
+        let Some(reference) = member.reference.as_deref() else {
+            return Some(Cow::Borrowed(member));
+        };
+        let mut sibling = member.clone();
+        sibling.reference = None;
+        if schema_has_shape_constraint(&sibling) {
+            return None;
+        }
+        self.ref_target_body(reference, &member.provenance)
+    }
+
+    /// Whether some `allOf` member in `members`, gathered as the scalar `contributions[slot]`, is a
+    /// `oneOf` its own lowering left as no union, and at least two of whose branches state nothing
+    /// (`true`, `{}`, an annotation) or are the null type (`{ type: 'null' }`): `null` matches each
+    /// such branch, so it fails exactly-one, and no value of the merge is `null` (#673). Its
+    /// branches collapsed to one `serde_json::Value` (`[ {}, {} ]`), or a `null` branch was folded
+    /// into the one left (`[ {}, { type: 'null' } ]`), so the union is gone and its count with it:
+    /// `Value` is the identity of the scalar meet, which then kept the `null` of a member such as
+    /// `type: [string, 'null']`, where the sibling spelling denies it. A member that still lowers
+    /// to a union is counted by the meet's own collapse ([`Self::scalar_meet_value_variants`]).
+    pub(super) fn union_members_deny_null(
+        &self,
+        members: &[(usize, &Schema)],
+        contributions: &[Contribution],
+    ) -> bool {
+        members.iter().any(|&(slot, member)| {
+            let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
+                return false;
+            };
+            if matches!(
+                self.graph.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Union(_) | TypeKind::Reserved) | None
+            ) {
+                return false;
+            }
+            self.union_member_target(member).is_some_and(|target| {
+                target.any_of.is_empty()
+                    && target
+                        .one_of
+                        .iter()
+                        .filter(|branch| {
+                            member_is_null_only(branch)
+                                || match branch {
+                                    SchemaOr::Bool(accepts) => *accepts,
+                                    SchemaOr::Schema(branch) => {
+                                        !schema_has_shape_constraint(branch)
+                                    }
+                                }
+                        })
+                        .count()
+                        >= 2
+            })
+        })
     }
 }
 
