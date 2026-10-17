@@ -206,39 +206,13 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
         std::env::var_os("CARGO_MANIFEST_DIR"),
     )
     .map_err(|message| syn::Error::new(args.spec.span(), message))?;
-    let spec_path = consumer.resolve_spec_path(&raw);
-
-    // The config file is discovered beside the spec, then macro arguments override it — the same
-    // precedence the CLI and `build.rs` use.
-    let discovered = match spargen::Spec::new(spec_path.clone()).discover_config_file() {
-        Ok(spec) => spec,
-        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
-    };
-    let config = config(args, discovered);
+    let config = spec_for(args, &consumer)?;
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
     let _fallback = FallbackGuard::force();
     let preview = spargen::__private::preview_for_macro(&config, &consumer.manifest);
 
-    let errors: Vec<&spargen::Diagnostic> = preview
-        .report
-        .diagnostics()
-        .iter()
-        .filter(|d| d.severity == spargen::Severity::Error)
-        .collect();
-
-    if preview.report.outcome() != spargen::Outcome::Generated || preview.contents.is_none() {
-        let mut message = format!("spargen could not generate a client from `{raw}`");
-        if errors.is_empty() {
-            message.push_str(": generation did not succeed");
-        } else {
-            for diagnostic in &errors {
-                message.push_str(&format!(
-                    "\n  error[{}]: {} (at {})",
-                    diagnostic.code, diagnostic.message, diagnostic.pointer
-                ));
-            }
-        }
+    if let Some(message) = failure_message(&raw, &preview) {
         return Err(syn::Error::new(args.spec.span(), message));
     }
 
@@ -250,18 +224,65 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
         )
     })?;
 
-    // Force a rebuild whenever the spec changes: referencing it via `include_bytes!` makes Cargo
-    // track the file (proc-macros cannot emit `rerun-if-changed`). The path exists — generation
-    // above already read it.
+    let tracks = tracking(&preview);
+    Ok(quote! {
+        #generated
+        #tracks
+    })
+}
+
+/// The `Spec` `expand` generates from: the spec path resolved against the consumer, the
+/// `spargen.toml` beside it applied, then the macro arguments over that — the same precedence the
+/// CLI and `build.rs` use. A config file that cannot be read or parsed is an error at the spec
+/// literal.
+fn spec_for(args: &Args, consumer: &Consumer) -> syn::Result<spargen::Spec> {
+    let spec_path = consumer.resolve_spec_path(&args.spec.value());
+    let discovered = match spargen::Spec::new(spec_path).discover_config_file() {
+        Ok(spec) => spec,
+        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
+    };
+    Ok(config(args, discovered))
+}
+
+/// The `compile_error!` text for a preview that produced no client, or `None` when it produced
+/// one. `raw` is the spec path as the macro was given it. Each error-severity diagnostic is one
+/// line under the heading; warnings are left out.
+fn failure_message(raw: &str, preview: &spargen::__private::MacroPreview) -> Option<String> {
+    if preview.report.outcome() == spargen::Outcome::Generated && preview.contents.is_some() {
+        return None;
+    }
+    let errors: Vec<&spargen::Diagnostic> = preview
+        .report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == spargen::Severity::Error)
+        .collect();
+    let mut message = format!("spargen could not generate a client from `{raw}`");
+    if errors.is_empty() {
+        message.push_str(": generation did not succeed");
+    } else {
+        for diagnostic in &errors {
+            message.push_str(&format!(
+                "\n  error[{}]: {} (at {})",
+                diagnostic.code, diagnostic.message, diagnostic.pointer
+            ));
+        }
+    }
+    Some(message)
+}
+
+/// One `const _: &[u8] = include_bytes!(..);` item per file in `preview.source_files`, in that
+/// order, which is what makes Cargo re-expand the macro when one of them changes (proc-macros
+/// cannot emit `rerun-if-changed`). Every path exists: generation already read it.
+fn tracking(preview: &spargen::__private::MacroPreview) -> proc_macro2::TokenStream {
     let tracks = preview
         .source_files
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    Ok(quote! {
-        #generated
+    quote! {
         #(const _: &[u8] = include_bytes!(#tracks);)*
-    })
+    }
 }
 
 /// Apply the macro arguments over `discovered`, the `Spec` the config file beside the spec yields.
