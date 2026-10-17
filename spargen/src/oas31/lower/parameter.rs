@@ -79,6 +79,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         if location == ParamLoc::QueryString {
+            // The official document schema requires `content` on an `in: querystring` parameter,
+            // with exactly one entry, so a document reaching lowering without one was already
+            // rejected as `E011`. The arm stays so a future schema relaxation cannot leave the
+            // parameter silently unsent.
             let Some((media_name, object)) = parameter.content.iter().next() else {
                 Diagnostic::error(
                     Code::UnsupportedParameterStyle,
