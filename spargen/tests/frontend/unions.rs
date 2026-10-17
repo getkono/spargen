@@ -3349,10 +3349,12 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
 
 /// A schema must lower to the same nullability whether it is written inline or named as a
 /// component. `ensure_component` computed `schema_is_nullable(schema)` *before* the body was
-/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` is three
-/// disjuncts over `types`, `enum_values` and `const_value` that never look at `oneOf`, `anyOf`,
+/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` was three
+/// disjuncts over `types`, `enum_values` and `const_value` that never looked at `oneOf`, `anyOf`,
 /// `$ref` or `allOf`. So **every decision `lower_union` makes about null was discarded at a
-/// `components.schemas` boundary**, which is the dominant spelling in real descriptions.
+/// `components.schemas` boundary**, which is the dominant spelling in real descriptions. The
+/// reserve-time guess is now `null_admission`, which reads every composition, and the body's
+/// answer is the one kept whatever the guess says; the cases below pin the kept answer.
 ///
 /// The comment there claimed nullability was "a pure function of the component's own schema — the
 /// same inputs `lower_schema`/`lower_enum` use". That is true for a plain type/enum/const body and
@@ -3457,7 +3459,7 @@ fn a_component_and_an_inline_schema_agree_about_null() {
 
     // (what it exercises, the schema body, whether `null` satisfies it)
     let cases: &[(&str, &str, bool)] = &[
-        // `schema_is_nullable` sees the `"null"` in the type array and says nullable. The union says
+        // `schema_is_nullable` saw the `"null"` in the type array and said nullable. The union says
         // otherwise, and the union is right: with no null MEMBER there is no branch for `null` to
         // match, so `oneOf` fails.
         (
@@ -3476,8 +3478,8 @@ fn a_component_and_an_inline_schema_agree_about_null() {
             "type: [object, array, 'null']\nproperties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
             true,
         ),
-        // The sibling denies null through `enum`, which `schema_is_nullable` also reads — but it
-        // reads the ENUM, not the intersection, so it must still agree.
+        // The sibling denies null through `enum`, which `schema_is_nullable` also read — but it
+        // read the ENUM, not the intersection, so it must still agree.
         (
             "a union whose `enum` sibling excludes null",
             "enum: ['a', 'b']\noneOf: [{ type: string }, { type: 'null' }]",

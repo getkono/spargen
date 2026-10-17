@@ -1144,11 +1144,12 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
         // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
         // back-edge. That back-edge is taken before `B`'s body has an answer about null, so it
-        // reads the reserve-time guess — `schema_is_nullable`, which never looks at a union's
-        // members — and `B`'s `"null"` member made `B` nullable only after `A.b` had been typed
-        // `Box<B>`, a field that could not decode the legal `{"b": null}` (issue #222). The
-        // back-edge now carries `B`'s lowered nullability, so it is `Option<Box<B>>`: optional
-        // because `B` is, boxed because the cycle must have a finite size.
+        // reads the reserve-time guess. At issue #222 the guess was `schema_is_nullable`, which
+        // never looked at a union's members, and `B`'s `"null"` member made `B` nullable only after
+        // `A.b` had been typed `Box<B>`, a field that could not decode the legal `{"b": null}`. The
+        // guess is now `null_admission` over `B`'s body, which reads the `"null"` member, so the
+        // back-edge opens with `B`'s answer and is `Option<Box<B>>`: optional because `B` is, boxed
+        // because the cycle must have a finite size.
         // One message per order: the two orders take different paths, and a single format string
         // over both hands a reader of the first iteration a paragraph written about the second,
         // 3,000 output lines above the `left`/`right` that would correct it.
@@ -1184,11 +1185,14 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
 /// nullability, not the reserve-time guess — in the root document, a sub-file, and a vendored remote.
 ///
 /// `N` is "a node with a required `next` that is another `N`, or null". Its `"null"` lives in a
-/// `oneOf` member, which `schema_is_nullable` never reads, so while `N`'s body is open the only
-/// answer there is says non-nullable, and `next` — the one reference taken while it is open — was
-/// typed `Box<N>`: `{"next": null}`, which ends every such list, did not decode (issue #222). `W.n`
-/// is the control, taken after `N` finished: it was already `Option<N>`, so one schema meant two
-/// things depending on when it was referenced. Both must be optional now.
+/// `oneOf` member, which the reserve-time guess at issue #222, `schema_is_nullable`, never read, so
+/// while `N`'s body was open the only answer there was said non-nullable, and `next` — the one
+/// reference taken while it is open — was typed `Box<N>`: `{"next": null}`, which ends every such
+/// list, did not decode. `W.n` is the control, taken after `N` finished: it was already
+/// `Option<N>`, so one schema meant two things depending on when it was referenced. The guess is
+/// now `null_admission` over the body, which reads the `oneOf` member, so both are optional from
+/// the first pass; [`a_back_edge_whose_guess_the_body_contradicts_takes_the_bodys_answer`] is the
+/// fixture whose guess the body still contradicts.
 #[test]
 fn a_back_edge_into_a_union_nullable_component_is_optional() {
     const COMPONENTS: &str = r##"
@@ -1302,11 +1306,13 @@ paths:
 /// guess — for each spelling `open_reservation_for_ref` keys a reservation by.
 ///
 /// `A` is "an object with a required `b`, or null"; its `"null"` lives in a `oneOf` member, which
-/// `schema_is_nullable` never reads. `B` is a one-member `oneOf` over `A`, so when `A.b` lowers
-/// `B` while `A` is still open, the alias recogniser answers `b` with `A`'s open reservation
-/// instead of taking an ordinary back-edge into `B`. That reservation's nullability is still the
-/// guess, so without a recorded read the pass is never revised and `b` is `Box<A>`, which cannot
-/// decode the legal `{"b": null}`. `W.a` is the control, taken after `A` finished.
+/// the reserve-time guess at the time, `schema_is_nullable`, never read. `B` is a one-member
+/// `oneOf` over `A`, so when `A.b` lowers `B` while `A` is still open, the alias recogniser
+/// answers `b` with `A`'s open reservation instead of taking an ordinary back-edge into `B`. That
+/// reservation's nullability is still the guess, so when the guess was wrong and no read was
+/// recorded the pass was never revised and `b` was `Box<A>`, which cannot decode the legal
+/// `{"b": null}`. The guess is now `null_admission` over `A`'s body, which reads the `oneOf`
+/// member, so it agrees with the body here. `W.a` is the control, taken after `A` finished.
 ///
 /// The spellings reach the four sites that record the read: a root component named by its local
 /// pointer, a root component named through the root file's own path (routed back to the
@@ -1444,13 +1450,15 @@ paths:
     assert_optional("remote", &std::fs::read_to_string(&out).unwrap_or_default());
 }
 
-/// The mirror of [`a_back_edge_into_a_union_nullable_component_is_optional`]: the reserve-time
-/// guess says nullable and the body says otherwise, and the back-edge follows the body.
+/// The mirror of [`a_back_edge_into_a_union_nullable_component_is_optional`]: the type array says
+/// nullable and the body says otherwise, and the back-edge follows the body.
 ///
-/// `N`'s type array admits `"null"`, which is all `schema_is_nullable` reads, but its `oneOf` has
-/// no null branch, so `null` matches no member and fails the union: `N` is not nullable, and the
-/// finished reference `W.n` is a plain `N`. The back-edge `next` read the guess and was
-/// `Option<Box<N>>`, which accepts a `null` the schema rejects.
+/// `N`'s type array admits `"null"`, which was all the reserve-time guess then,
+/// `schema_is_nullable`, read, but its `oneOf` has no null branch, so `null` matches no member and
+/// fails the union: `N` is not nullable, and the finished reference `W.n` is a plain `N`. The
+/// back-edge `next` read the guess and was `Option<Box<N>>`, which accepts a `null` the schema
+/// rejects. The guess is now `null_admission` over the body, which reads the `oneOf` too, so it
+/// denies `null` from the first pass.
 #[test]
 fn a_back_edge_into_a_component_whose_body_denies_null_is_not_optional() {
     let spec = r##"
@@ -1495,6 +1503,63 @@ components:
         field_type(&code, "pub next:").as_deref(),
         Some("Box<N>"),
         "the back-edge must follow the body, not the type array's guess: {code}"
+    );
+}
+
+/// A back-edge whose reserve-time guess the body contradicts takes the body's answer through a
+/// second pass, not the guess.
+///
+/// The guess is whether `Pick`'s body admits `null` (`null_admission`): its `anyOf` has a
+/// `const: null` branch, so it does, and `next` — read while `Pick` is still open — opens as
+/// `Option<Box<Pick>>`. The finished body carries that `null` in its `()` arm alone, never also as
+/// the union's `Option`, so `Pick` is not nullable. `settle_reservation` records the
+/// contradiction and the next pass types `next` from the body: `Box<Pick>`, whose `()` arm decodes
+/// `{"next": null}`. Without that pass `next` keeps the guess and carries the `null` twice, beside
+/// the `()` arm, as the finished reference `W.pick` does not.
+#[test]
+fn a_back_edge_whose_guess_the_body_contradicts_takes_the_bodys_answer() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/W' } }
+components:
+  schemas:
+    W:
+      type: object
+      required: [pick]
+      properties:
+        pick: { $ref: '#/components/schemas/Pick' }
+    Pick:
+      anyOf:
+        - const: null
+        - type: object
+          required: [next]
+          properties:
+            next: { $ref: '#/components/schemas/Pick' }
+"##;
+    let (generated, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(
+        field_type(&code, "pub pick:").as_deref(),
+        Some("Pick"),
+        "the control: {code}"
+    );
+    assert_eq!(
+        field_type(&code, "pub next:").as_deref(),
+        Some("Box<Pick>"),
+        "the back-edge must follow the body, not the reserve-time guess: {code}"
     );
 }
 
