@@ -170,6 +170,83 @@ paths:
     assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 }
 
+/// A Schema Object's own `$schema` naming a dialect that is not the OAS one is `E002` at that
+/// `$schema` member, with the document-level `jsonSchemaDialect` left at its default.
+#[test]
+fn e002_a_schema_resource_with_an_unsupported_dialect_is_rejected_at_its_schema_member() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Legacy:
+      $schema: http://json-schema.org/draft-07/schema#
+      type: object
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let dialects: Vec<(&str, &str)> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnsupportedDialect)
+        .map(|d| (d.pointer.as_str(), d.message.as_str()))
+        .collect();
+    assert_eq!(
+        dialects,
+        [(
+            "/components/schemas/Legacy/$schema",
+            "schema resource uses unsupported dialect `http://json-schema.org/draft-07/schema#`"
+        )],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn e002_a_schema_objects_own_dialect_is_judged_without_the_document_version() {
+    // `spargen explain E002`: a Schema Object's `$schema` other than the two OAS dialect URIs is
+    // rejected, and either URI is accepted there on a 3.1 document as on a 3.2 one, since a
+    // Schema Object is read without the document's version.
+    let spec = |version: &str, dialect: &str| {
+        format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $schema: {dialect}
+                type: object
+"##
+        )
+    };
+    for version in ["3.1.0", "3.2.0"] {
+        for dialect in [
+            "https://spec.openapis.org/oas/3.1/dialect/base",
+            "https://spec.openapis.org/oas/3.2/dialect/2025-09-17",
+        ] {
+            let source = spec(version, dialect);
+            for report in [generate(&source), check(&source)] {
+                assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+                assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+            }
+        }
+        let source = spec(version, "http://json-schema.org/draft-07/schema#");
+        for report in [generate(&source), check(&source)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+        }
+    }
+}
+
 #[test]
 fn oas32_query_method_operation_generates() {
     // The OpenAPI 3.2 fixed `QUERY` path-item method is fully supported: it lowers to an operation
@@ -302,7 +379,66 @@ paths:
     );
     let report = generate(&cycle);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    assert_eq!(
+        invalid_input_at(&report),
+        [
+            ("/tags/0", "tag hierarchy containing `api` has a cycle"),
+            ("/tags/1", "tag hierarchy containing `pets` has a cycle"),
+        ],
+        "{report:#?}"
+    );
+
+    let missing_parent = valid.replace("parent: api", "parent: animals");
+    let report = generate(&missing_parent);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        invalid_input_at(&report),
+        [("/tags/1", "tag `pets` references missing parent `animals`")],
+        "{report:#?}"
+    );
+}
+
+/// Each `E011` in `report`, as its pointer and message, in report order.
+fn invalid_input_at(report: &Report) -> Vec<(&str, &str)> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::InvalidInput)
+        .map(|d| (d.pointer.as_str(), d.message.as_str()))
+        .collect()
+}
+
+/// An operation's `callbacks` describe calls the server makes, so they are acknowledged (`W002`)
+/// at the `callbacks` member and the operation itself still generates.
+#[test]
+fn w002_operation_callbacks_are_acknowledged_at_the_member() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /subscribe:
+    post:
+      operationId: subscribe
+      callbacks:
+        onEvent:
+          "{$request.body#/url}":
+            post:
+              responses:
+                "204": { description: No Content }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let flows: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::ServerInitiatedFlowIgnored)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(flows, ["/paths/~1subscribe/post/callbacks"], "{report:#?}");
+    assert!(code.contains("fn subscribe"), "{code}");
 }
 
 #[test]
@@ -619,7 +755,12 @@ item:
     let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+        // The metaschema reports a key its `propertyNames` pattern refuses at the map holding it.
+        let [(pointer, message)] = invalid_input_at(report)[..] else {
+            panic!("one E011: {report:#?}");
+        };
+        assert_eq!(pointer, "/item/additionalOperations", "{report:#?}");
+        assert!(message.contains("\"pu rge\" does not match"), "{message}");
     }
 }
 
@@ -657,7 +798,10 @@ item:
     let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+        let [(pointer, _)] = invalid_input_at(report)[..] else {
+            panic!("one E011: {report:#?}");
+        };
+        assert_eq!(pointer, "/item/additionalOperations/Get", "{report:#?}");
     }
 }
 
@@ -739,9 +883,19 @@ fn an_uppercase_extension_key_is_not_a_specification_extension() {
     );
     let inline =
         inline_spec_with_response_entries("        X-note: { description: not an extension }\n");
-    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+    // `unevaluatedProperties` reports the unexpected key at the Responses Object holding it.
+    for (report, at) in [
+        (&generated, "/get/responses"),
+        (&checked, "/get/responses"),
+        (&generate(&inline), "/paths/~1pet/get/responses"),
+        (&check(&inline), "/paths/~1pet/get/responses"),
+    ] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+        let [(pointer, message)] = invalid_input_at(report)[..] else {
+            panic!("one E011: {report:#?}");
+        };
+        assert_eq!(pointer, at, "{report:#?}");
+        assert!(message.contains("('X-note' was unexpected)"), "{message}");
     }
 }
 

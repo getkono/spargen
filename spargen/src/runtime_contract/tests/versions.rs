@@ -169,3 +169,200 @@ fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
         "{messages}"
     );
 }
+
+/// `CORE_MANIFEST` with its `reqwest` entry declared by `reqwest` (a whole line) and its package
+/// at `edition`, or at Cargo's default edition (2015) when that is `None`.
+fn reqwest_declared(edition: Option<&str>, reqwest: &str) -> String {
+    let (core_reqwest, _) = core_entry("reqwest");
+    let manifest = replace_once(CORE_MANIFEST, core_reqwest, reqwest);
+    match edition {
+        Some(edition) => replace_once(
+            &manifest,
+            "version = \"0.0.0\"\n",
+            &format!("version = \"0.0.0\"\nedition = \"{edition}\"\n"),
+        ),
+        None => manifest,
+    }
+}
+
+#[test]
+fn the_underscore_default_features_spelling_turns_defaults_off_before_edition_2024() {
+    // Cargo 1.98 accepts `default_features` (deprecated) in a 2015, 2018, or 2021 package and
+    // resolves it exactly as `default-features`, so a consumer that turned defaults off with it
+    // satisfies the contract.
+    let (_, floor) = core_entry("reqwest");
+    for edition in [None, Some("2018"), Some("2021")] {
+        let manifest = reqwest_declared(
+            edition,
+            &format!("reqwest = {{ version = \"{floor}\", default_features = false }}"),
+        );
+        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        assert!(diagnostics.is_empty(), "{edition:?}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn the_underscore_default_features_spelling_is_not_read_from_edition_2024() {
+    // Cargo 1.98 refuses the manifest instead: "`default_features` is unsupported as of the 2024
+    // edition; instead use `default-features`". The audit agrees by not reading it, so the
+    // declaration states no `default-features` and keeps its defaults.
+    let (_, floor) = core_entry("reqwest");
+    let manifest = reqwest_declared(
+        Some("2024"),
+        &format!("reqwest = {{ version = \"{floor}\", default_features = false }}"),
+    );
+    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("`reqwest` must set `default-features = false`"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn the_hyphenated_default_features_spelling_wins_over_the_underscore_one() {
+    // With both spellings in one declaration, Cargo 1.98 resolves the hyphenated key and ignores
+    // the underscore one, in either direction.
+    let (_, floor) = core_entry("reqwest");
+    let on = reqwest_declared(
+        Some("2021"),
+        &format!(
+            "reqwest = {{ version = \"{floor}\", default_features = false, default-features = true }}"
+        ),
+    );
+    let diagnostics = audit_manifest(&on, RuntimeRequirements::default());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("`reqwest` must set `default-features = false`"),
+        "{diagnostics:#?}"
+    );
+
+    let off = reqwest_declared(
+        Some("2021"),
+        &format!(
+            "reqwest = {{ version = \"{floor}\", default_features = true, default-features = false }}"
+        ),
+    );
+    let diagnostics = audit_manifest(&off, RuntimeRequirements::default());
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+/// Audits a root whose `[workspace.dependencies]` turns `reqwest`'s defaults off with the
+/// underscore spelling `default_features = false`, beside a member whose `[package]` carries
+/// `member_edition` (whole lines, possibly none) and which declares `reqwest` as
+/// `member_reqwest`. `workspace_package` is the root's `[workspace.package]` body, or empty for
+/// none. Returns every diagnostic message.
+fn underscore_root_reqwest_diagnostics(
+    workspace_package: &str,
+    member_edition: &str,
+    member_reqwest: &str,
+) -> Vec<String> {
+    let directory = Sandbox::new();
+    let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+    let member_dir = directory.path().join("client");
+    std::fs::create_dir(&member_dir).unwrap();
+    let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+    let (core_reqwest, floor) = core_entry("reqwest");
+    let root_dependencies = replace_once(
+        core_workspace_dependencies(),
+        core_reqwest,
+        &format!("reqwest = {{ version = \"{floor}\", default_features = false }}"),
+    );
+    let workspace_package = if workspace_package.is_empty() {
+        String::new()
+    } else {
+        format!("[workspace.package]\n{workspace_package}\n")
+    };
+    std::fs::write(
+        &root,
+        format!(
+            "[workspace]\nmembers = [\"client\"]\n\n{workspace_package}\
+             [workspace.dependencies]\n{root_dependencies}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &member,
+        format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n{member_edition}\n{}",
+            replace_once(CORE_INHERITED, "reqwest.workspace = true", member_reqwest)
+        ),
+    )
+    .unwrap();
+
+    let result = directory.audit(&member, &RuntimeRequirements::default());
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+        "{:#?}",
+        result.diagnostics
+    );
+    result
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+}
+
+#[test]
+fn a_root_underscore_default_features_false_turns_defaults_off_for_a_pre_2024_member() {
+    // Cargo 1.98 resolves a `[workspace.dependencies]` entry's `default_features` as
+    // `default-features` for a member below edition 2024, whether that member states its
+    // edition, inherits it, or takes the 2015 default.
+    for (workspace_package, member_edition) in [
+        ("", ""),
+        ("", "edition = \"2021\""),
+        ("edition = \"2021\"", "edition.workspace = true"),
+    ] {
+        let messages = underscore_root_reqwest_diagnostics(
+            workspace_package,
+            member_edition,
+            "reqwest.workspace = true",
+        );
+        assert!(messages.is_empty(), "{member_edition:?}: {messages:#?}");
+    }
+}
+
+#[test]
+fn a_root_underscore_default_features_is_not_read_for_an_edition_2024_member() {
+    // The edition that decides is the inheriting member's: Cargo 1.98 refuses that member's
+    // manifest ("`default_features` is unsupported as of the 2024 edition"), naming the
+    // inherited dependency, even when the root is a virtual manifest with no edition of its own.
+    for (workspace_package, member_edition) in [
+        ("", "edition = \"2024\""),
+        ("edition = \"2024\"", "edition.workspace = true"),
+    ] {
+        let messages = underscore_root_reqwest_diagnostics(
+            workspace_package,
+            member_edition,
+            "reqwest.workspace = true",
+        );
+        assert_eq!(messages.len(), 1, "{member_edition:?}: {messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_member_underscore_default_features_true_turns_on_defaults_the_root_turned_off() {
+    // The member's own flag is read under either spelling too, so a member re-enabling defaults
+    // with `default_features = true` is caught as `default-features = true` is.
+    let messages = underscore_root_reqwest_diagnostics(
+        "",
+        "edition = \"2021\"",
+        "reqwest = { workspace = true, default_features = true }",
+    );
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+    assert!(
+        messages[0].contains("`reqwest` must set `default-features = false`"),
+        "{messages:#?}"
+    );
+}

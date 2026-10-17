@@ -650,6 +650,52 @@ paths:
 }
 
 #[test]
+fn e011_querystring_parameter_without_one_content_entry() {
+    // The official 3.2 document schema requires `content` on an `in: querystring` parameter and
+    // holds `content` to exactly one entry, so neither shape reaches lowering's own `E010` arm.
+    let without_content = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: q
+          in: querystring
+          schema: { type: object }
+      responses:
+        "204": { description: No Content }
+"##;
+    let two_entries = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            application/json: { schema: { type: object } }
+            application/x-www-form-urlencoded: { schema: { type: object } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for spec in [without_content, two_entries] {
+        for report in [generate(spec), check(spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+            assert!(
+                !has_code(&report, Code::UnsupportedParameterStyle),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn allow_reserved_query_parameter_generates() {
     // `allowReserved: true` selects RFC 6570 reserved expansion — a different encoding set, not an
     // unrepresentable construct.

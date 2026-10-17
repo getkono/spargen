@@ -1820,6 +1820,14 @@ mod support {
                     });
             }
             let raw = parts.join(",");
+            if shape == HeaderShape::Json {
+                return serde_json::from_str(&raw)
+                    .map(Some)
+                    .map_err(|error| HeaderError::Parse {
+                        name,
+                        message: error.to_string(),
+                    });
+            }
             let textual = reconstruct(&raw, shape, explode, Scalars::Text);
             if let Ok(value) = serde_json::from_value(textual) {
                 return Ok(Some(value));
@@ -1858,8 +1866,9 @@ mod support {
             scalars: Scalars,
         ) -> Value {
             match shape {
-                HeaderShape::Json => serde_json::from_str(raw).unwrap_or(Value::Null),
-                HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
+                HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => {
+                    scalar(raw, scalars)
+                }
                 HeaderShape::Array => {
                     Value::Array(
                         raw.split(',').map(|part| scalar(part, scalars)).collect(),

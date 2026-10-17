@@ -1128,6 +1128,77 @@ mod tests {
             root.get("c").unwrap().node,
             Node::Number(Number::Float(0.5))
         );
+        assert_eq!(
+            root.get("d").unwrap().node,
+            Node::Number(Number::Float(1000.0))
+        );
+        assert_eq!(
+            root.get("e").unwrap().node,
+            Node::Number(Number::Float(-0.125))
+        );
+    }
+
+    /// The one diagnostic `diags` holds, which must be `E011`.
+    fn the_invalid_input(diags: &Diagnostics) -> &Diagnostic {
+        let items = diags.items();
+        assert_eq!(items.len(), 1, "{items:#?}");
+        assert_eq!(items[0].code, Code::InvalidInput, "{items:#?}");
+        &items[0]
+    }
+
+    #[test]
+    fn json_nesting_is_capped_at_the_maximum_depth() {
+        // `n` nested arrays put the innermost one at depth `n - 1`, so the deepest accepted
+        // nesting is one past the cap and the next is refused, at the array that crosses it.
+        let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        let deepest = MAX_JSON_DEPTH as usize + 1;
+        parse_json_ok(&nested(deepest));
+
+        let mut diags = Diagnostics::default();
+        assert!(parse_json(FileId(0), &nested(deepest + 1), &mut diags).is_err());
+        let diag = the_invalid_input(&diags);
+        assert!(
+            diag.message.contains("JSON nesting is too deep"),
+            "{diag:?}"
+        );
+        let span = diag.span.expect("depth diagnostic span");
+        assert_eq!((span.start.line, span.start.col), (1, 258), "{diag:?}");
+    }
+
+    #[test]
+    fn yaml_with_more_than_one_document_is_rejected() {
+        for text in ["a: 1\n---\nb: 2\n", "---\na: 1\n...\n---\na: 1\n"] {
+            let mut diags = Diagnostics::default();
+            assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
+            let diag = the_invalid_input(&diags);
+            assert_eq!(
+                diag.message, "YAML input must contain exactly one document",
+                "{diag:?}"
+            );
+            assert_eq!(diag.pointer.as_str(), "", "{diag:?}");
+        }
+    }
+
+    #[test]
+    fn a_yaml_mapping_key_that_is_not_a_string_is_rejected_at_the_key() {
+        // `1` and `true` are plain scalars that resolve to a number and a boolean, and a flow
+        // sequence is a key no JSON object can hold; each is refused at its own span.
+        for (text, line, col) in [
+            ("a: 1\n1: one\n", 2, 1),
+            ("a:\n  true: yes\n", 2, 3),
+            ("a: 1\n? [x]\n: v\n", 2, 3),
+        ] {
+            let mut diags = Diagnostics::default();
+            assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
+            let diag = the_invalid_input(&diags);
+            assert_eq!(diag.message, "YAML object keys must be strings", "{diag:?}");
+            let span = diag.span.expect("key span");
+            assert_eq!(
+                (span.start.line, span.start.col),
+                (line, col),
+                "{text}: {diag:?}"
+            );
+        }
     }
 
     #[test]
