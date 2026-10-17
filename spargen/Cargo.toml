@@ -62,7 +62,7 @@ reqwest = { workspace = true, features = [
 # reqwest's stack enables, rather than through a dev-dependency: that would put a TLS crate in
 # the default-features graph `the_all_features_workspace_graph_carries_a_tls_stack` holds free
 # of one. Removing this floor means giving that test another way to name rustls.
-rustls = { version = "0.23.45", default-features = false, optional = true }
+rustls = { version = "0.23.46", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
