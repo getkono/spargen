@@ -312,8 +312,9 @@ fn check_reports_the_same_for_every_spelling_of_the_spec_path() {
 //
 // `cli/exit.rs` declares the contract: 0 for success, 1 when error-severity diagnostics were
 // reported, 3 for a usage error spargen detects (clap's own argument errors exit 2). Every report a
-// subcommand renders as JSON goes to stdout, so it stays pipeable; a human-rendered report goes to
-// stdout when it is the subcommand's result and to stderr when it is a rejection.
+// subcommand renders as JSON goes to stdout, so it stays pipeable. A human-rendered report goes to
+// stderr when it is a rejection, and to stdout when it is the subcommand's result, except for
+// `check`: its result is a diagnostic report, so it goes to stderr on success too.
 
 /// Two operations; [`ONE_OPERATION`] removes `getPet`, a breaking (`major`) change.
 const TWO_OPERATIONS: &str = r##"
