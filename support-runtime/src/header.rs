@@ -122,6 +122,16 @@ pub fn parse_header<T: DeserializeOwned>(
             });
     }
     let raw = parts.join(",");
+    // A `content`-typed header is JSON text, with no `simple` ambiguity to resolve: it is parsed
+    // once, and text that is not JSON reports the syntax error rather than reading as `null`.
+    if shape == HeaderShape::Json {
+        return serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            });
+    }
     // `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the
     // number 1 — the encoding cannot tell them apart. The target type can: try the text as-is
     // first, and fall back to its JSON reading only if that does not deserialize. The error
@@ -161,9 +171,9 @@ pub fn require_header<T: DeserializeOwned>(
 /// Rebuild a JSON value from `simple`-style header text.
 fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
     match shape {
-        HeaderShape::Json => serde_json::from_str(raw).unwrap_or(Value::Null),
-        // Handled before any joining happens, in `parse_header`.
-        HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
+        // `SetCookie` is handled before any joining happens, and `Json` before any reconstruction,
+        // both in `parse_header`.
+        HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
         HeaderShape::Array => {
             Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
         }
