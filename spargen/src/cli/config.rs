@@ -156,13 +156,52 @@ mod tests {
             parse_pointer_flag("/paths/~1legacy"),
             OmitRule::pointer(None, "/paths/~1legacy")
         );
+        // An empty `file` before the `#` is the root document, the same rule as a bare pointer,
+        // and not a file named the empty string.
+        assert_eq!(
+            parse_pointer_flag("#/paths/~1legacy"),
+            OmitRule::pointer(None, "/paths/~1legacy")
+        );
+    }
+
+    /// The message a rejected flag value reports, which is what the user reads on stderr.
+    fn message(result: Result<OmitRule, ConfigError>) -> String {
+        result
+            .expect_err("the flag value must be rejected")
+            .to_string()
     }
 
     #[test]
     fn bad_omit_flag_syntax_errors() {
-        assert!(parse_operation_flag("get").is_err());
-        assert!(parse_operation_flag("frobnicate /x").is_err());
-        assert!(parse_component_flag("LegacyPet").is_err());
-        assert!(parse_component_flag("bogus:Name").is_err());
+        assert_eq!(
+            message(parse_operation_flag("")),
+            "--omit-operation ``: expected `METHOD /path` (e.g. `get /pets`)"
+        );
+        assert_eq!(
+            message(parse_operation_flag("get")),
+            "--omit-operation `get`: missing path; expected `METHOD /path` (e.g. `get /pets`)"
+        );
+        assert_eq!(
+            message(parse_operation_flag("get /pets extra")),
+            "--omit-operation `get /pets extra`: too many parts; expected `METHOD /path`"
+        );
+        assert_eq!(
+            message(parse_operation_flag("frobnicate /x")),
+            "unknown HTTP method: `frobnicate`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+        assert_eq!(
+            message(parse_component_flag("LegacyPet")),
+            "--omit-component `LegacyPet`: expected `kind:name` (e.g. `schema:LegacyPet`)"
+        );
+        assert_eq!(
+            message(parse_component_flag("schema: ")),
+            "--omit-component `schema: `: empty component name"
+        );
+        assert_eq!(
+            message(parse_component_flag("bogus:Name")),
+            "unknown component kind: `bogus`; expected one of \
+             schemas/responses/parameters/request_bodies/headers/security_schemes/path_items/media_types"
+        );
     }
 }

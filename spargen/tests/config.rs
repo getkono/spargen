@@ -113,6 +113,27 @@ fn bad_omit_flag_syntax_errors_cleanly() {
     let output = check(temp.path(), &spec, &["--omit-operation", "get"]);
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--omit-operation"));
+
+    // Each message is pinned by `bad_omit_flag_syntax_errors` in `cli/config.rs`; here, that every
+    // parse failure of either flag reaches the user as a usage error naming what it refused: the
+    // whole value for a malformed one, and the one token for an unknown method or kind. Each is
+    // matched in its backtick quotes, which the usage example `schema:LegacyPet` never yields.
+    for (flag, value, refused) in [
+        ("--omit-operation", "get /pets extra", "get /pets extra"),
+        ("--omit-operation", "frobnicate /pets", "frobnicate"),
+        ("--omit-component", "LegacyPet", "LegacyPet"),
+        ("--omit-component", "schema: ", "schema: "),
+        ("--omit-component", "bogus:Name", "bogus"),
+    ] {
+        let output = check(temp.path(), &spec, &[flag, value]);
+        assert_eq!(output.status.code(), Some(3), "{flag} {value}: {output:?}");
+        assert!(output.stdout.is_empty(), "{flag} {value}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("error: ") && stderr.contains(&format!("`{refused}`")),
+            "{flag} {value}: {stderr}"
+        );
+    }
 }
 
 #[cfg(feature = "cli")]
@@ -132,34 +153,274 @@ fn the_removed_features_table_names_the_migration() {
     assert!(stderr.contains("move its keys"), "{stderr}");
 }
 
+/// One `uuid` body, one `date-time` body, and one operation spargen rejects (`$dynamicRef`, E006),
+/// so `carve`, `uuid`, and `time` each have an effect a test can see: the rejection carved away
+/// (W009), and the `uuid` and `time` dependencies `deps` prints.
+#[cfg(feature = "cli")]
+const KNOBS: &str = r##"
+openapi: 3.1.0
+info: { title: Knobs, version: 1.0.0 }
+paths:
+  /id:
+    get:
+      operationId: getId
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string, format: uuid }
+  /now:
+    get:
+      operationId: getNow
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string, format: date-time }
+  /bad:
+    get:
+      operationId: getBad
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $dynamicRef: "#meta" }
+components:
+  schemas:
+    Legacy: { type: object, properties: { id: { type: string } } }
+"##;
+
+#[cfg(feature = "cli")]
+fn knobs_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, KNOBS).unwrap();
+    (temp, spec)
+}
+
 #[cfg(feature = "cli")]
 #[test]
 fn config_file_knobs_reach_the_library() {
-    // `carve` in the file must have the same effect as `--carve`: the unsupported operation is
-    // carved away (W009) instead of rejecting the run.
-    let (temp, spec) = workspace();
+    // `batch_cap` from the file is pinned by `batch_cap_from_the_config_file_truncates_the_reported_batch`.
+    let (temp, spec) = knobs_workspace();
+
+    // Without the file the `$dynamicRef` operation rejects the run, and the dependency block (with
+    // the rejection carved by the flag) carries both `uuid` and `time`.
+    let rejected = check(temp.path(), &spec, &["--format", "json"]);
+    assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("\"code\":\"E006\""));
+    let typed = deps(temp.path(), &spec, &["--carve"]);
+    assert!(typed.status.success(), "{typed:?}");
+    let typed = String::from_utf8_lossy(&typed.stdout);
+    assert!(
+        typed.contains("uuid = {") && typed.contains("time = {"),
+        "{typed}"
+    );
+
     std::fs::write(
         temp.path().join("spargen.toml"),
-        "carve = true\nbatch_cap = 7\nuuid = false\ntime = false\n",
+        "carve = true\nuuid = false\ntime = false\n",
     )
     .unwrap();
-    let output = check(temp.path(), &spec, &["--format", "json"]);
-    assert!(output.status.success(), "{output:?}");
+    // `carve` in the file has the same effect as `--carve`: the unsupported operation is carved
+    // away (W009) instead of rejecting the run.
+    let carved = check(temp.path(), &spec, &["--format", "json"]);
+    assert!(carved.status.success(), "{carved:?}");
+    let carved = String::from_utf8_lossy(&carved.stdout);
+    assert!(omits_pointer(&carved, "/paths/~1bad/get"), "{carved}");
+    // `uuid = false` and `time = false` map both formats to `String`, which needs neither crate.
+    let untyped = deps(temp.path(), &spec, &[]);
+    assert!(untyped.status.success(), "{untyped:?}");
+    let untyped = String::from_utf8_lossy(&untyped.stdout);
+    assert!(
+        !untyped.contains("uuid = {") && !untyped.contains("time = {"),
+        "{untyped}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn no_time_maps_dates_to_strings_and_drops_the_time_dependency() {
+    let (temp, spec) = knobs_workspace();
+    let typed = deps(temp.path(), &spec, &["--carve"]);
+    assert!(typed.status.success(), "{typed:?}");
+    let typed = String::from_utf8_lossy(&typed.stdout);
+    assert!(typed.contains("time = {"), "{typed}");
+
+    let untyped = deps(temp.path(), &spec, &["--carve", "--no-time"]);
+    assert!(untyped.status.success(), "{untyped:?}");
+    let untyped = String::from_utf8_lossy(&untyped.stdout);
+    assert!(!untyped.contains("time = {"), "{untyped}");
+    assert!(
+        untyped.contains("uuid = {"),
+        "`--no-time` leaves `uuid` alone: {untyped}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn error_body_cap_is_accepted_and_changes_no_analysis_output() {
+    // The cap only reaches emitted code (`max_error_body`), and these subcommands emit none. What
+    // the binary can show is that the flag parses on each subcommand that reads a spec, leaves its
+    // output byte-identical, and that clap refuses a non-number.
+    let (temp, spec) = workspace();
+    let spec = spec.to_str().unwrap();
+    for command in [&["check", spec][..], &["deps", spec], &["diff", spec, spec]] {
+        let run = |extra: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_spargen"))
+                .current_dir(temp.path())
+                .args(command)
+                .args(extra)
+                .args(["--format", "json"])
+                .output()
+                .unwrap()
+        };
+        let plain = run(&[]);
+        let capped = run(&["--error-body-cap", "7"]);
+        assert!(capped.status.success(), "{command:?}: {capped:?}");
+        assert_eq!(
+            (capped.stdout, capped.stderr),
+            (plain.stdout, plain.stderr),
+            "{command:?}"
+        );
+    }
+
+    let refused = check(temp.path(), Path::new(spec), &["--error-body-cap", "lots"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "clap's own argument errors exit 2: {refused:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--error-body-cap"),
+        "{refused:?}"
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn omit_component_and_omit_pointer_flags_apply_to_analysis() {
+    let (temp, spec) = knobs_workspace();
+    let carve = ["--carve", "--format", "json"];
+
+    let component = check(
+        temp.path(),
+        &spec,
+        &[&["--omit-component", "schema:Legacy"][..], &carve].concat(),
+    );
+    assert!(component.status.success(), "{component:?}");
+    let component = String::from_utf8_lossy(&component.stdout);
+    assert!(
+        omits_pointer(&component, "/components/schemas/Legacy"),
+        "{component}"
+    );
+
+    // A bare pointer, an empty `file#` (both the root document), and the root named by file.
+    for pointer in ["/paths/~1id", "#/paths/~1id", "openapi.yaml#/paths/~1id"] {
+        let omitted = check(
+            temp.path(),
+            &spec,
+            &[&["--omit-pointer", pointer][..], &carve].concat(),
+        );
+        assert!(omitted.status.success(), "{pointer}: {omitted:?}");
+        let omitted = String::from_utf8_lossy(&omitted.stdout);
+        assert!(
+            omits_pointer(&omitted, "/paths/~1id"),
+            "{pointer}: {omitted}"
+        );
+    }
+}
+
+/// A response body that narrows a plain `string` to two values: closed, an enum of exactly those;
+/// under `open_narrowing`, an open enum with an `Other(String)` catch-all, which `diff` reports as
+/// a variant added.
+#[cfg(feature = "cli")]
+const NARROWED: &str = r##"
+openapi: 3.1.0
+info: { title: Narrowed, version: 1.0.0 }
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: string
+                  - enum: [up, down]
+"##;
+
+#[cfg(feature = "cli")]
+fn diff(dir: &Path, old: &Path, new: &Path, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_spargen"))
+        .current_dir(dir)
+        .arg("diff")
+        .arg(old)
+        .arg(new)
+        .args(extra)
+        .output()
+        .unwrap()
 }
 
 #[cfg(feature = "cli")]
 #[test]
 fn open_narrowing_is_a_flag_and_a_config_key() {
-    // What it changes is pinned by `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed`
-    // in `e2e.rs`; here, only that both spellings reach the library.
-    let (temp, spec) = workspace();
-    let flag = check(temp.path(), &spec, &["--open-narrowing"]);
-    assert!(flag.status.success(), "{flag:?}");
-    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = true\n").unwrap();
-    let key = check(temp.path(), &spec, &[]);
+    // What it changes in emitted code is pinned by
+    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in `e2e.rs`. Here the
+    // change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
+    // document in two directories, only the new one's config opening the narrowing.
+    let temp = tempfile::tempdir().unwrap();
+    let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
+    std::fs::create_dir_all(&closed_dir).unwrap();
+    std::fs::create_dir_all(&open_dir).unwrap();
+    let (closed, open) = (
+        closed_dir.join("openapi.yaml"),
+        open_dir.join("openapi.yaml"),
+    );
+    std::fs::write(&closed, NARROWED).unwrap();
+    std::fs::write(&open, NARROWED).unwrap();
+
+    let same = diff(temp.path(), &closed, &open, &["--format", "json"]);
+    assert!(same.status.success(), "{same:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&same.stdout).trim_end(),
+        r#"{"changes":[],"bump":"patch"}"#,
+        "without a config the two sides are the same surface"
+    );
+
+    // The key, read from the new spec's directory only: if the old side read it too, or neither
+    // did, the surfaces would still match.
+    std::fs::write(open_dir.join("spargen.toml"), "open_narrowing = true\n").unwrap();
+    let key = diff(temp.path(), &closed, &open, &["--format", "json"]);
     assert!(key.status.success(), "{key:?}");
-    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = 1\n").unwrap();
-    let mistyped = check(temp.path(), &spec, &[]);
+    let key = String::from_utf8_lossy(&key.stdout);
+    assert!(
+        key.contains(r#""kind":"variant-added""#) && key.contains("Other(String)"),
+        "the new side's config opens its narrowing: {key}"
+    );
+
+    // The flag applies to both sides, so it opens the old one too and the surfaces match again.
+    let flag = diff(
+        temp.path(),
+        &closed,
+        &open,
+        &["--open-narrowing", "--format", "json"],
+    );
+    assert!(flag.status.success(), "{flag:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&flag.stdout).trim_end(),
+        r#"{"changes":[],"bump":"patch"}"#,
+        "the flag opens the old side's narrowing as well"
+    );
+
+    std::fs::write(open_dir.join("spargen.toml"), "open_narrowing = 1\n").unwrap();
+    let mistyped = check(temp.path(), &open, &[]);
     assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
 }
 
@@ -284,6 +545,41 @@ fn batch_cap_from_the_config_file_truncates_the_reported_batch() {
         capped.contains("\"truncated\":true"),
         "a capped batch must say it was truncated: {capped}"
     );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn a_cli_flag_beats_the_config_file_on_a_scalar_knob() {
+    // "defaults < `spargen.toml` < CLI flags": the file's cap admits both diagnostics, and the flag
+    // given beside it caps the batch at one.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TWO_WARNINGS).unwrap();
+    std::fs::write(temp.path().join("spargen.toml"), "batch_cap = 2\n").unwrap();
+
+    let file = check(temp.path(), &spec, &["--format", "json"]);
+    assert!(file.status.success(), "{file:?}");
+    let file = String::from_utf8_lossy(&file.stdout);
+    assert_eq!(
+        file.matches("\"code\":\"W001\"").count(),
+        2,
+        "the file's cap admits both: {file}"
+    );
+    assert!(file.contains("\"truncated\":false"), "{file}");
+
+    let flag = check(
+        temp.path(),
+        &spec,
+        &["--batch-cap", "1", "--format", "json"],
+    );
+    assert!(flag.status.success(), "{flag:?}");
+    let flag = String::from_utf8_lossy(&flag.stdout);
+    assert_eq!(
+        flag.matches("\"code\":\"W001\"").count(),
+        1,
+        "the flag must win over the file: {flag}"
+    );
+    assert!(flag.contains("\"truncated\":true"), "{flag}");
 }
 
 #[cfg(feature = "cli")]
