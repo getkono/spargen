@@ -204,6 +204,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
+    /// Report a schema whose lowering left nothing but the exact `null` where its constraints
+    /// refuse `null` ([`Self::settle_null_admission`]), so no value satisfies it, in the words
+    /// of the construct written: a `oneOf` whose every branch accepts `null` alone, the scalar
+    /// members of an `allOf`, a `$ref` and its siblings, or a schema's own `enum` / `const` (or
+    /// `anyOf`) leaving only the `null` its `type` refuses.
+    pub(super) fn reject_null_admission_denied(&mut self, schema: &Schema) -> Option<Ty> {
+        if !schema.one_of.is_empty() {
+            return self.reject_one_of_null_in_every_branch(schema);
+        }
+        if schema.reference.is_some() {
+            return self.reject_ref_sibling_intersection(schema);
+        }
+        if !schema.all_of.is_empty() {
+            return self.reject_all_of_scalars(schema);
+        }
+        // E013 case: scalar-members
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "the only value this schema's own `enum`, `const` or `anyOf` members leave is `null`, \
+             and its other keywords refuse `null`, so no value satisfies the schema",
+            ALL_OF_REMEDY,
+        )
+    }
+
     /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
     /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition an
     /// `allOf` reports — `E013` covers both spellings — but the remedy names the construct the

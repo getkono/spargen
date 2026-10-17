@@ -628,7 +628,7 @@ x-defs:
 /// `$ref` spelling generated. Each case is lowered in all three spellings as the component `Pick`,
 /// and each must reach the same outcome, report the same codes at `Pick`, and give `Pick` the same
 /// shape: branches the meet leaves as one type collapse with `W001` and keep the keyword's `null`
-/// rule, a branch the target excludes drops out, a union none of whose branches meets the target
+/// rule, a branch the target excludes drops out with `W011` (#671), a union none of whose branches meets the target
 /// is `E013`, and a union of one real branch beside `null` is met as that branch.
 #[test]
 fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_is() {
@@ -686,12 +686,14 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             vec![Code::ValidationKeywordIgnored],
             Shape::Fields(&["a", "b"], true),
         ),
+        // The branch the target excludes is reported in each spelling, as the sibling spelling
+        // reports it (#671).
         (
             "excluded branch, oneOf",
             "Name",
             "oneOf",
             enumerated,
-            vec![],
+            vec![Code::DeclarationHasNoEffect],
             Shape::Variants(&["Red", "Green"]),
         ),
         (
@@ -699,7 +701,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             "Name",
             "anyOf",
             enumerated,
-            vec![],
+            vec![Code::DeclarationHasNoEffect],
             Shape::Variants(&["Red", "Green"]),
         ),
         (
@@ -1234,7 +1236,8 @@ fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
 /// Issue #419, the `$ref` spelling of an `allOf` member beside a union (decision 10): the member
 /// is never a scoped refiner, so the union meets the target's lowered component type. A target
 /// holding only `required` lowers to an object as one holding `properties` does (#613), so the
-/// meet keeps only the object branch and the string branch drops, with no diagnostic. Neither
+/// meet keeps only the object branch and the string branch drops, reported (`W011`) as the
+/// sibling spelling reports a branch its siblings exclude (#671, #674). Neither
 /// target states a `type`, so each admits `null` without deciding it (#541), and the `null` branch
 /// survives as well: `p` is `Option<Pet>`. This pins today's behaviour of both, so a change to
 /// either is a visible diff.
@@ -1284,7 +1287,20 @@ fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
         );
         let (report, code) = generate_with_code(&spec);
         assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
-        assert!(report.diagnostics().is_empty(), "{what}: {report:#?}");
+        // The string branch the target excludes is reported as the sibling spelling reports it.
+        let excluded: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        let expected: &[&str] =
+            if union == with_string {
+                &["union member 0 cannot satisfy the enclosing schema's own constraints, so it is \
+               not a variant of the generated enum"]
+            } else {
+                &[]
+            };
+        assert_eq!(excluded, expected, "{what}: {report:#?}");
         let types = types_module(&code);
         let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
         assert_eq!(p, p_type, "{what}:\n{types}");
@@ -1299,7 +1315,12 @@ fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
             "{what}: the meet keeps only the object branch:\n{types}"
         );
         let checked = check(&spec);
-        assert!(checked.diagnostics().is_empty(), "{what}: {checked:#?}");
+        let checked_messages: Vec<&str> = checked
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(checked_messages, expected, "{what}: {checked:#?}");
     }
 }
 
@@ -3229,7 +3250,8 @@ fn an_all_of_member_of_untyped_array_applicators_refines_the_merge_s_arrays() {
         generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
     assert_check_agrees(&generated, &checked);
     assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
-    assert!(codes(&generated).is_empty(), "{generated:#?}");
+    // The excluded array branch is reported as the sibling spelling reports it (#671).
+    assert_eq!(codes(&generated), ["W011"], "{generated:#?}");
     assert_eq!(resolve(&code, "Apet"), "String", "{code}");
     assert_eq!(
         element(&code, "Zpet", "a replayed sub-file target"),

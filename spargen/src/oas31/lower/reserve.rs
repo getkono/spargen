@@ -9,7 +9,7 @@ use crate::oas31::{RefOr, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
 use super::defaults::default_display_for;
-use super::nullability::{member_is_null_only, schema_is_nullable};
+use super::nullability::{member_is_null_only, NullAdmission};
 use super::shape::schema_has_shape_constraint;
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
@@ -290,9 +290,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
     ) -> Option<Ty> {
         // A PROVISIONAL answer, needed before the body finishes so a back-edge encountered mid-body
-        // has something to carry. It is not the final one: `schema_is_nullable` is three disjuncts
-        // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
-        // `allOf`, so for any composed body it is a guess. Writing it back over the lowered result
+        // has something to carry. It is not the final one: the null decision of the body
+        // (`null_admission`) reads every composition the body spells, but a `$ref` loop back into a
+        // body still being lowered decides nothing in it, so for a recursive body it is a guess.
+        // Writing it back over the lowered result
         // discarded every decision `lower_union` makes about null the moment a union was spelled as
         // a named component — the dominant spelling in real descriptions. A guess a back-edge read
         // and the body then contradicted is reported by `settle_reservation`, and the next pass
@@ -317,6 +318,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         );
         let mut ty = lowered?;
         let noun = reservation.noun();
+        // The root's variant members, if it is a union, move with its def into the reserved slot.
+        let variant_members = self.union_variant_members.remove(&ty.id);
         let (popped_id, mut def) = self
             .pop_last_type()
             .unwrap_or_else(|| panic!("{noun} root def"));
@@ -338,9 +341,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             append_doc_note(&mut def.docs, note);
         }
         self.graph.fill(root_id, def);
+        if let Some(members) = variant_members {
+            self.union_variant_members.insert(root_id, members);
+        }
         ty.id = root_id;
-        // The BODY's answer, not the provisional one: a composed body knows things
-        // `schema_is_nullable` cannot see, and naming a schema must not change what it means. Cached
+        // The BODY's answer, not the provisional one: a recursive body knows things the guess
+        // cannot see, and naming a schema must not change what it means. Cached
         // under the same value, so a direct return and a later cache hit still yield an identical
         // `Ty`.
         let key = reservation.key().to_owned();
@@ -351,12 +357,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// The nullability a reservation opens with: an earlier pass's settled answer for it when there
-    /// is one, [`schema_is_nullable`]'s guess otherwise.
+    /// is one, and otherwise whether the body states `null` ([`Self::null_admission`]).
     fn provisional_nullability(&self, reservation: &Reservation, schema: &Schema) -> bool {
         self.settled
             .get(reservation)
             .copied()
-            .unwrap_or_else(|| schema_is_nullable(schema))
+            .unwrap_or_else(|| self.null_admission(schema) == NullAdmission::Admits)
     }
 
     /// Close a reservation's nullability bookkeeping once its body is lowered: when a back-edge read

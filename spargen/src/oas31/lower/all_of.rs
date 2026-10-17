@@ -10,9 +10,24 @@ use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::{schema_has_union, take_refiners, Contribution};
 use super::meet::same_ty;
-use super::nullability::{undecided_admits_null, union_branch_admits_null};
+use super::nullability::{
+    member_is_null_only, undecided_admits_null, union_branch_admits_null, NullAdmission,
+};
 use super::refiner::implied_applicator_category;
 use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
+
+/// A union an `allOf` meet met with its other members, for
+/// [`LowerCtx::warn_excluded_union_member_branches`].
+pub(super) struct MetUnionMember {
+    /// The type the union lowered to.
+    pub(super) union: crate::ir::TypeId,
+    /// The union's schema: the member itself, or a `$ref` member's target body.
+    pub(super) schema: Schema,
+    /// What the members the union is met with hold `null` to ([`LowerCtx::null_admission`]).
+    pub(super) conjunct: NullAdmission,
+    /// Whether those members meet in the exact null type, which keeps no branch's non-null values.
+    pub(super) conjunct_is_null: bool,
+}
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
@@ -146,12 +161,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.union_members_take_scalar_null(union_members, &mut contributions);
         }
         self.scalar_meet_value_variants = value_variants;
+        let meets_from = self.variant_meets.len();
         let met = self.combine_all_of(schema, hint, &contributions);
+        if met.is_some() {
+            let unions = self.met_union_members(schema, union_members, &contributions);
+            self.warn_excluded_union_member_branches(schema, &unions, meets_from);
+        }
         let mut held = held;
         // A met reservation's body is not known yet, so nothing is settled against it.
         if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
             let met_union = self.met_union_variants(met);
             for (provenance, lowered) in lowerings {
+                // The member's own lowering is an input to the meet, emitted as a public type
+                // nothing referred to once the meet replaced it, whatever the member order (#675).
+                self.elide_unused_union_lowering(lowered);
                 let Some(index) = held
                     .iter()
                     .position(|warning| warning.provenance == provenance)
@@ -168,10 +191,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 else {
                     continue;
                 };
-                // The meet is this union's own where it left one branch (no union), or a union
-                // that carries its variants, at the top or nested under another union member's
-                // branches, so the member order does not decide it; a union of another member's
-                // branches alone is not.
+                // Where the meet left one branch (no union) the union's variants are gone; otherwise
+                // a variant the meet kept is carried at the top or nested under another union
+                // member's branches, so the member order does not decide it. A variant the meet
+                // carries nowhere was met into another member's branches, which typed it (#675).
                 let carries = |hint: &str| {
                     met_union.as_ref().map_or(Some(None), |variants| {
                         variants
@@ -180,18 +203,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .map(Some)
                     })
                 };
-                if !held[index]
-                    .untyped
-                    .iter()
-                    .any(|(hint, _)| carries(hint).is_some())
-                {
-                    continue;
-                }
-                // The union's own lowering is an input to the meet, emitted as a public type
-                // nothing referred to once the meet replaced it, as the held-back union's lowering
-                // is ([`Self::meet_union_with_all_of`]). Where something still names the union,
-                // its `Value` variants are still emitted, and its warning stands as raised.
-                self.elide_unused_union_lowering(lowered);
+                // The union's own lowering was elided above, as the held-back union's lowering is
+                // ([`Self::meet_union_with_all_of`]). Where something still names the union, its
+                // `Value` variants are still emitted, and its warning stands as raised.
                 if !self.graph.is_elided(union_id) {
                     continue;
                 }
@@ -209,6 +223,125 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.report_held_untyped_warnings(held);
         met
+    }
+
+    /// The union members of an `allOf`'s scalar meet, for
+    /// [`Self::warn_excluded_union_member_branches`]: each member in `union_members` that is a
+    /// union, inline or as a bare `$ref` to one, with the type it lowered to
+    /// in `contributions` and what the other members hold it to.
+    fn met_union_members(
+        &self,
+        schema: &Schema,
+        union_members: &[(usize, &Schema)],
+        contributions: &[Contribution],
+    ) -> Vec<MetUnionMember> {
+        union_members
+            .iter()
+            .filter_map(|&(slot, member)| {
+                let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
+                    return None;
+                };
+                let union = if schema_has_union(member) {
+                    member.clone()
+                } else {
+                    let reference = member.reference.as_deref()?;
+                    let target = self.ref_target_body(reference, &member.provenance)?;
+                    schema_has_union(&target).then(|| target.into_owned())?
+                };
+                let conjunct_is_null = contributions.iter().enumerate().any(|(index, other)| {
+                    index != slot
+                        && matches!(other, Contribution::Scalar(other) if self.is_exact_null(*other))
+                });
+                Some(MetUnionMember {
+                    union: ty.id,
+                    schema: union,
+                    conjunct: self.null_admission_without(schema, &member.provenance),
+                    conjunct_is_null,
+                })
+            })
+            .collect()
+    }
+
+    /// Report, as the sibling spelling does (`W011`), each branch of the union members `unions`
+    /// that `schema`'s meet excludes (#671): one whose non-null values no meet
+    /// [`Self::intersect_union`] recorded since `meets_from` kept — every record for it is
+    /// excluded, or the members it is met with meet in the exact null type — and that `null`
+    /// does not satisfy beside them either ([`Self::null_admission`]), so it admits no value at
+    /// all. A branch met under several branches of another member is excluded only where none of
+    /// those meets kept it. A branch that is the exact null type on its own (`const: null`) is
+    /// the null decision's, and drops out unreported, as a `{type: 'null'}` member does in every
+    /// spelling. The members a variant came from are read from [`Self::union_variant_members`],
+    /// so the message names the positions the sibling spelling names.
+    pub(super) fn warn_excluded_union_member_branches(
+        &mut self,
+        schema: &Schema,
+        unions: &[MetUnionMember],
+        meets_from: usize,
+    ) {
+        let mut reported = HashSet::new();
+        for met in unions {
+            let union = met.union;
+            let Some(members) = self.union_variant_members.get(&union).cloned() else {
+                continue;
+            };
+            let exact_null: Vec<bool> = match self.graph.get(union).map(|def| &def.kind) {
+                Some(TypeKind::Union(lowered)) => lowered
+                    .variants
+                    .iter()
+                    .map(|variant| self.is_exact_null(variant.ty))
+                    .collect(),
+                // A reservation's body is not known yet, so nothing is reported against it.
+                Some(TypeKind::Reserved) => continue,
+                _ => continue,
+            };
+            let branches: Vec<&SchemaOr> = met
+                .schema
+                .one_of
+                .iter()
+                .chain(&met.schema.any_of)
+                .filter(|branch| !member_is_null_only(branch))
+                .collect();
+            let meets = &self.variant_meets[meets_from..];
+            let mut excluded: Vec<usize> = Vec::new();
+            for (variant, variant_members) in members.iter().enumerate() {
+                let records: Vec<bool> = meets
+                    .iter()
+                    .filter(|(id, index, _)| *id == union && *index == variant)
+                    .map(|(_, _, kept)| *kept)
+                    .collect();
+                let non_null_excluded = if met.conjunct_is_null {
+                    true
+                } else {
+                    !records.is_empty() && !records.contains(&true)
+                };
+                if !non_null_excluded || exact_null.get(variant).copied().unwrap_or(true) {
+                    continue;
+                }
+                for &member in variant_members {
+                    let null_survives = branches.get(member).is_some_and(|branch| {
+                        self.branch_null_admission(branch)
+                            .and(met.conjunct)
+                            .matches()
+                    });
+                    if !null_survives && reported.insert((union, member)) {
+                        excluded.push(member);
+                    }
+                }
+            }
+            excluded.sort_unstable();
+            for member in excluded {
+                // W011 case: excluded-union-branch
+                crate::diag::Diagnostic::warning(
+                    crate::diag::Code::DeclarationHasNoEffect,
+                    schema.provenance.clone(),
+                )
+                .message(format!(
+                    "union member {member} cannot satisfy the enclosing schema's own \
+                     constraints, so it is not a variant of the generated enum"
+                ))
+                .emit(self.diags);
+            }
+        }
     }
 
     /// Run `lower` with the `W001`s inline `oneOf`s raise for their `serde_json::Value` variants
@@ -370,6 +503,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if member.reference.is_none() {
                     lowerings.push((member.provenance.clone(), from..self.graph_mark()));
                 }
+            } else if member.reference.is_none()
+                && out.len() == slot + 1
+                && matches!(out[slot], Contribution::Scalar(ty) if matches!(
+                    self.graph.get(ty.id).map(|def| &def.kind),
+                    Some(TypeKind::Union(_))
+                ))
+            {
+                // An inline member that lowers to a union of its own (a multi-type `type` array)
+                // is an input to the meet as a union member is, and is elided alike once the meet
+                // replaced it (#675).
+                lowerings.push((member.provenance.clone(), from..self.graph_mark()));
             }
         }
         Some(())
@@ -769,6 +913,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let stated_nothing_took_null = self.take_stated_nothing_took_null(&union.provenance);
         let lowered = lowered?;
         let mark = self.graph_mark();
+        let meets_from = self.variant_meets.len();
         let mut meet = lowered;
         if let Some(composed) = composed {
             // A union uninhabited on its own (a lone `false` branch) leaves the conjunction so
@@ -819,6 +964,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             meet = met;
         }
+        // A branch the composition excludes is reported as the sibling spelling reports it (#671).
+        let conjunct = match spelling {
+            MetUnion::AllOfMember => self.null_admission_without(schema, &union.provenance),
+            MetUnion::BesideAllOf | MetUnion::RefSibling => {
+                self.union_sibling_null_admission(schema)
+            }
+        };
+        let met_union = MetUnionMember {
+            union: lowered.id,
+            schema: union.clone(),
+            conjunct,
+            conjunct_is_null: composed.is_some_and(|composed| self.is_exact_null(composed)),
+        };
+        self.warn_excluded_union_member_branches(schema, &[met_union], meets_from);
         // After the refiners, which give an untyped branch of their category a type (#535).
         if untyped_check {
             self.warn_untyped_met_variants(schema, meet, spelling);

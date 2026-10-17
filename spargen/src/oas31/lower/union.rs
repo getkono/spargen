@@ -10,9 +10,7 @@ use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
 use super::meet::NoMeet;
-use super::nullability::{
-    member_is_null_only, own_keywords_admit_null, schema_is_nullable, union_branch_admits_null,
-};
+use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
 use super::refiner::{unreached_halves, unreached_message};
 use super::shape::schema_has_shape_constraint;
@@ -91,7 +89,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // array does, where nothing else the schema states refuses it: an untyped branch, which
         // decides nothing about `null`, takes it from either, as it does in the `allOf` spelling
         // (#632).
-        let null_from_type_array = schema_is_nullable(schema) && own_keywords_admit_null(schema);
+        let null_from_type_array = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
         let mut null_from_member = false;
         // How many null-only members there are: each is a branch `null` matches, which a `oneOf`
         // counts against its exactly-one rule beside the real branches that accept `null` too.
@@ -292,6 +290,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     schema,
                     unreached_message,
                 )?;
+                // An empty lowered meet where `null` satisfies the member and the sibling alike
+                // ([`Self::null_admission`]) is `null` alone, as the multi-member path narrows such
+                // a branch (#670, #674): a `$ref` to a union `null` matches through an untyped
+                // branch of its own lowered non-null.
+                let met = match met {
+                    Err(NoMeet::Empty)
+                        if self
+                            .branch_null_admission(real_members[0])
+                            .and(self.union_sibling_null_admission(schema))
+                            .matches() =>
+                    {
+                        Ok(self.insert_type(
+                            &constrained_hint,
+                            TypeKind::Null,
+                            crate::ir::Docs::default(),
+                            None,
+                        ))
+                    }
+                    met => met,
+                };
                 let Ok(constrained) = met else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
                     // left to collapse to. The terminal code matches the multi-variant path below,
@@ -408,6 +426,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
         // a `oneOf` drops them where it counts them and `null` matches another branch too (#657).
         let mut own_nulls: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
+        // Whether `null` satisfies a branch met with the sibling, by the one decision
+        // ([`Self::null_admission`]), for a meet that lowered empty.
+        let sibling_admission = self.union_sibling_null_admission(schema);
+        let null_survives = |ctx: &Self, member: &SchemaOr| {
+            ctx.branch_null_admission(member)
+                .and(sibling_admission)
+                .matches()
+        };
         for (index, member) in real_members.iter().enumerate() {
             let lowered_from = self.graph_mark();
             let (mut ty, ref_name) =
@@ -524,6 +550,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         }
                         intersection
                     }
+                    // The lowered meet is empty, but `null` satisfies the branch and the sibling
+                    // alike ([`Self::null_admission`]): a `$ref` to a union `null` matches through
+                    // an untyped branch of its own, which lowered non-null. The meet is `null`
+                    // alone, as the same branch written inline narrows to, so the branch is one
+                    // `null` matches, not one the sibling excludes (#670).
+                    Err(NoMeet::Empty) if null_survives(self, member) => {
+                        met_into_null.insert(index);
+                        let null = self.insert_type(
+                            &format!("{hint}Variant{index}Constrained"),
+                            TypeKind::Null,
+                            crate::ir::Docs::default(),
+                            None,
+                        );
+                        // One of this branch's meet inserts, elided with them once dropped.
+                        if let Some(inserts) = meet_inserts.last_mut() {
+                            inserts.end = self.graph_mark();
+                        }
+                        null
+                    }
+                    // A branch that is the exact null type on its own (`const: null`), beside a
+                    // sibling that denies `null`, accepts nothing: it drops out unreported, as a
+                    // `{type: 'null'}` member does, since whether `null` is valid is the one null
+                    // decision's to say ([`Self::null_admission`]) and every spelling drops it alike.
+                    Err(NoMeet::Empty) if null_before => continue,
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
@@ -792,11 +842,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
         // decodes with any one match, so it does too. A `$ref`'s own `oneOf` sibling is collapsed
         // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]).
+        // The members each kept variant stands for, its own first: a merge folds several into one.
+        let mut merged_members: Vec<Vec<usize>> =
+            variant_members.iter().map(|&member| vec![member]).collect();
         if mode == UnionMode::OneOf
             && schema.discriminator.is_none()
             && self.unmerged_union.as_ref() != Some(&schema.provenance)
         {
-            self.merge_indistinguishable_variants(
+            merged_members = self.merge_indistinguishable_variants(
                 schema,
                 &mut variants,
                 &mut ref_names,
@@ -819,6 +872,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             variants.truncate(1);
             ref_names.truncate(1);
             variant_members.truncate(1);
+            merged_members.truncate(1);
         }
         if variants.len() == 1 {
             let inner = variants[0].ty;
@@ -952,6 +1006,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
+        self.union_variant_members.insert(ty.id, merged_members);
         ty.nullable = nullable;
         Some(ty)
     }
@@ -1071,6 +1126,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `variant_members` aligned with `variants`, and report the merge as
     /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_closed`]
     /// counts the branches that accept it before any merge, across the merged sets and the rest.
+    /// Returns the members each kept variant stands for, aligned with `variants`.
     ///
     /// [`TypeGraph::same_decoded_values`]: crate::ir::TypeGraph::same_decoded_values
     fn merge_indistinguishable_variants(
@@ -1079,7 +1135,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         variants: &mut Vec<UnionVariant>,
         ref_names: &mut Vec<Option<String>>,
         variant_members: &mut Vec<usize>,
-    ) {
+    ) -> Vec<Vec<usize>> {
         // Each kept variant, with the members merged into it.
         let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
         for (index, variant) in variants.iter().enumerate() {
@@ -1093,7 +1149,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         if groups.len() == variants.len() {
-            return;
+            return groups.into_iter().map(|(_, members)| members).collect();
         }
         let merged: Vec<String> = groups
             .iter()
@@ -1129,6 +1185,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         keep(variants, &kept);
         keep(ref_names, &kept);
         keep(variant_members, &kept);
+        groups.into_iter().map(|(_, members)| members).collect()
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —

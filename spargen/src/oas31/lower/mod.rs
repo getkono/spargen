@@ -92,12 +92,12 @@ fn memoised_decision(
 
 /// [`memoised_decision`] with `provisional` as the answer a walk that loops back to `target` reads
 /// while `target` is still being answered.
-fn memoised_answer(
-    memo: &RefCell<HashMap<String, bool>>,
+fn memoised_answer<T: Copy>(
+    memo: &RefCell<HashMap<String, T>>,
     target: &Schema,
-    provisional: bool,
-    decide: impl FnOnce() -> bool,
-) -> bool {
+    provisional: T,
+    decide: impl FnOnce() -> T,
+) -> T {
     let Some(key) = resolved_identity(&target.provenance) else {
         return decide();
     };
@@ -139,8 +139,9 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 /// Lowering runs as one or more whole passes over the document, and only the last one's IR and
 /// diagnostics are kept. A back-edge — a `$ref` taken while its target's body is still being
 /// lowered — has to be typed before that body has decided whether the target is nullable, so it is
-/// typed from a reserve-time guess ([`schema_is_nullable`], which cannot see a `null` that a union
-/// member, an `allOf`, or a referenced component supplies). When the body then decides otherwise,
+/// typed from a reserve-time guess ([`LowerCtx::null_admission`] of the body, which reads every
+/// composition the body spells but cannot read the answer of a body still being lowered, so a `$ref`
+/// loop decides nothing in it). When the body then decides otherwise,
 /// every field that took the back-edge disagrees with every field that referenced the finished
 /// component, and the one that took it cannot decode a value its schema admits (issue #222). A pass
 /// that found such a disagreement is discarded and the document is lowered again with the body's
@@ -149,8 +150,6 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 /// Each extra pass settles at least one reservation it had not settled before, and a settled value
 /// is never revised, so the loop ends within one pass per reservation plus one. A document with no
 /// such back-edge — every one without a recursive nullable component — is lowered exactly once.
-///
-/// [`schema_is_nullable`]: nullability::schema_is_nullable
 pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
@@ -239,6 +238,7 @@ fn lower_pass(
         target_decides_null_memo: RefCell::new(HashMap::new()),
         resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
         admits_null_undecided_memo: RefCell::new(HashMap::new()),
+        null_admission_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
@@ -253,6 +253,8 @@ fn lower_pass(
         stated_nothing_took_null: None,
         held_untyped_warnings: None,
         scalar_meet_value_variants: HashSet::new(),
+        union_variant_members: HashMap::new(),
+        variant_meets: Vec::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -849,10 +851,16 @@ struct LowerCtx<'a, 'doc> {
     /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
     /// end it.
     admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
-    /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
-    /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
+    /// [`Self::null_admission`]'s answer for each `$ref` target body it has read, keyed as
+    /// [`Self::target_decides_null_memo`] is, so a reuse graph that branches is read once per
+    /// target. A body being read records [`NullAdmission::Undecided`] before its keywords are
+    /// ([`memoised_answer`]), so a loop through it ends there.
     ///
-    /// [`schema_is_nullable`]: nullability::schema_is_nullable
+    /// [`NullAdmission::Undecided`]: nullability::NullAdmission::Undecided
+    null_admission_memo: RefCell<HashMap<String, nullability::NullAdmission>>,
+    /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
+    /// wrong reserve-time guess; consulted before [`Self::null_admission`] when a reservation
+    /// opens.
     settled: &'a HashMap<Reservation, bool>,
     /// Open reservations whose provisional nullability a back-edge has read during this pass.
     guessed: HashSet<Reservation>,
@@ -923,6 +931,17 @@ struct LowerCtx<'a, 'doc> {
     /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
     /// is counted once (#660).
     scalar_meet_value_variants: HashSet<String>,
+    /// For each union [`Self::lower_union_closed`] lowered to an enum of two or more variants, the
+    /// members each variant came from (more than one where indistinguishable branches merged), by
+    /// their positions among the union's real members (the positions a `W011` names). Kept aligned
+    /// when a variant is dropped in place ([`Self::settle_null_admission`]), and moved with the
+    /// union's def into a reservation.
+    union_variant_members: HashMap<TypeId, Vec<Vec<usize>>>,
+    /// Every branch [`Self::intersect_union`] met, in order: the union's id, the variant's
+    /// position, and whether the meet kept it. An `allOf`'s scalar meet reads the records its own
+    /// meet made to report, as `W011`, a union member's branch it kept nowhere
+    /// ([`Self::warn_excluded_union_member_branches`]).
+    variant_meets: Vec<(TypeId, usize, bool)>,
 }
 
 /// The options that change what lowering produces.

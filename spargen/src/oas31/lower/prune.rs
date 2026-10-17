@@ -81,6 +81,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let popped = self.graph.pop_last();
         if let Some((id, _)) = &popped {
             self.meet_locations.remove(id);
+            self.union_variant_members.remove(id);
         }
         popped
     }
