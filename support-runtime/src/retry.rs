@@ -409,6 +409,54 @@ mod tests {
         assert!(outcome.result().is_ok());
     }
 
+    /// `RetryOutcome::is_transient` documents itself as exactly what `Error::is_transient` answers
+    /// for the error the outcome becomes. For a response that is every status-carrying class:
+    /// documented (`Api`), undocumented (`UnexpectedStatus`), and undecodable (`Decode`). Both
+    /// sides are held to that agreement, and to the rule itself (`429` or `5xx`), at every
+    /// status code from `100` to `599`.
+    #[test]
+    fn a_response_outcome_is_transient_exactly_when_its_error_is() {
+        use bytes::Bytes;
+        use reqwest::header::HeaderMap;
+        use reqwest::StatusCode;
+
+        use crate::{Error, ResponseValue};
+
+        for code in 100u16..=599 {
+            let status = StatusCode::from_u16(code).expect("a three-digit status");
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .status(code)
+                    .body(String::new())
+                    .expect("valid synthetic response"),
+            );
+            let outcome = RetryOutcome::Response(&response).is_transient();
+            let errors: [Error<String>; 3] = [
+                Error::Api(ResponseValue::new(status, HeaderMap::new(), String::new())),
+                Error::UnexpectedStatus {
+                    status,
+                    headers: HeaderMap::new(),
+                    body: Bytes::new(),
+                },
+                Error::Decode {
+                    status,
+                    headers: HeaderMap::new(),
+                    path: "x".to_owned(),
+                    body: Bytes::new(),
+                    truncated: false,
+                },
+            ];
+            for error in &errors {
+                assert_eq!(outcome, error.is_transient(), "{code}: {error}");
+            }
+            assert_eq!(
+                outcome,
+                code == 429 || (500..=599).contains(&code),
+                "{code}"
+            );
+        }
+    }
+
     /// Counts executions while delegating to the real reqwest transport, so a test can see how
     /// many times `RetryBackend` re-sent a request that reqwest refuses before any I/O.
     #[derive(Debug)]
