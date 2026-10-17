@@ -62,6 +62,12 @@ sha2 = "0.10"
 # `cargo bench`.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
+# The test suites run the generator in-process thousands of times, mostly inside dependency code
+# (jsonschema, syn/prettyplease, serde_json); at opt-level 0 that made them ~2.5x slower. `"*"`
+# matches only non-workspace packages, so spargen itself keeps fast rebuilds and debug assertions.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 strip = true
 lto = "thin"

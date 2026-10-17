@@ -50,7 +50,7 @@ allow-wildcard-paths = true
 # cargo-deny reads `crate = "name@<X"` as the exact release `X`. `advisory_floors_are_manifest_requirements`
 # in `spargen/tests/corpus_manifest.rs` holds both.
 deny = [
-    { name = "rustls", version = "<0.23.45", reason = "RUSTSEC-2026-0285" },
+    { name = "rustls", version = "<0.23.46", reason = "RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, RUSTSEC-2026-0349" },
 ]
 
 [sources]
