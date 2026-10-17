@@ -27,6 +27,7 @@ mod runtime;
 mod ty;
 mod union;
 
+use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::ir::Api;
 use crate::name::Names;
 use quote::{format_ident, quote};
@@ -73,10 +74,16 @@ pub(crate) struct GeneratedCode {
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
-/// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
-/// `W003`, lower to typed per-operation response enums).
-pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> GeneratedCode {
+/// produces stable diffs. Every spec construct is decided during lowering (multi-status responses,
+/// once degraded under the retired `W003`, lower to typed per-operation response enums). A
+/// formatter failure is an internal codegen bug, reported as `E011` and returned as an error
+/// instead of generated source.
+pub(crate) fn generate(
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+    diags: &mut Diagnostics,
+) -> Result<GeneratedCode, ()> {
     let uses_streams = api.uses_streams();
     // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
     // and the newtypes would be dead weight.
@@ -111,13 +118,66 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
         #client
         #blocking
     };
-    let contents = format_tokens(tokens).unwrap_or_else(|error| {
-        format!(
-            "compile_error!({:?});\n",
-            format!("spargen internal codegen error: {error}")
-        )
-    });
-    GeneratedCode {
+    format_generated(tokens, diags)
+}
+
+/// Format a completed generated module. A token stream that does not parse is an internal
+/// invariant failure: reject the pipeline so no output or cache entry can be written.
+fn format_generated(
+    tokens: proc_macro2::TokenStream,
+    diags: &mut Diagnostics,
+) -> Result<GeneratedCode, ()> {
+    let contents = match format_tokens(tokens) {
+        Ok(contents) => contents,
+        Err(error) => {
+            Diagnostic::error(
+                Code::InvalidInput,
+                Provenance::new(JsonPointer::root(), None),
+            )
+            .message(format!(
+                "internal code generation error: generated Rust could not be formatted: {error}"
+            ))
+            .remedy("Please report this spargen bug with a minimal reproducer; no output was generated.")
+            .emit(diags);
+            return Err(());
+        }
+    };
+    Ok(GeneratedCode {
         files: vec![GeneratedFile { contents }],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_generated;
+    use crate::diag::{Code, Diagnostics};
+    use quote::quote;
+
+    #[test]
+    fn unparseable_generated_tokens_reject_with_e011() {
+        let mut diags = Diagnostics::new(4);
+        let result = format_generated(quote! { fn broken() -> }, &mut diags);
+
+        assert!(
+            result.is_err(),
+            "invalid tokens must not become generated code"
+        );
+        assert_eq!(diags.items().len(), 1, "{:#?}", diags.items());
+        assert_eq!(diags.items()[0].code, Code::InvalidInput);
+        assert!(
+            diags.items()[0]
+                .message
+                .contains("internal code generation error"),
+            "{:#?}",
+            diags.items()[0]
+        );
+        assert!(
+            diags.items()[0]
+                .remedy
+                .as_deref()
+                .is_some_and(|remedy| remedy.contains("no output was generated")),
+            "{:#?}",
+            diags.items()[0]
+        );
     }
 }
