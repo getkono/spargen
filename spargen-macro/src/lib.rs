@@ -523,7 +523,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use super::{config, Args, Consumer};
+    use super::{config, failure_message, spec_for, tracking, Args, Consumer};
     use spargen::{ComponentKind, OmitMethod, OmitRule, Spec};
 
     fn os(value: &str) -> Option<std::ffi::OsString> {
@@ -690,5 +690,311 @@ mod tests {
                 .batch_cap(9)
                 .omit_rule(OmitRule::path("/from-macro"))
         );
+    }
+
+    /// A directory under the system temporary directory, removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("spargen-macro-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        /// The UTF-8 path of `relative` inside this directory.
+        fn path(&self, relative: &str) -> String {
+            self.0.join(relative).to_str().unwrap().to_owned()
+        }
+
+        /// Write `text` to `relative`, creating its parent, and return its path.
+        fn write(&self, relative: &str, text: &str) -> String {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            self.path(relative)
+        }
+
+        /// The consumer whose crate directory this is, with its `Cargo.toml` as the manifest.
+        fn consumer(&self) -> Consumer {
+            Consumer {
+                dir: self.path(""),
+                manifest: self.path("Cargo.toml"),
+            }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A spec that generates, its one schema reached through a relative-file `$ref`.
+    const SPLIT_SPEC: &str = r#"openapi: 3.1.0
+info: { title: Split, version: "1" }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "schemas.yaml#/Pet" }
+"#;
+
+    const SPLIT_SCHEMAS: &str = "Pet:\n  type: object\n  properties:\n    name: { type: string }\n";
+
+    fn args(source: &str) -> Args {
+        match syn::parse_str(source) {
+            Ok(args) => args,
+            Err(error) => panic!("`{source}` did not parse: {error}"),
+        }
+    }
+
+    fn parse_error(source: &str) -> String {
+        match syn::parse_str::<Args>(source) {
+            Ok(_) => panic!("`{source}` parsed"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_config_file_leaves_the_spec_at_its_defaults() {
+        let scratch = Scratch::new("no-config");
+        let spec = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+        assert_eq!(spec, Spec::new(scratch.path("openapi.yaml")));
+    }
+
+    /// The `spargen.toml` read is the one beside the spec, not the one beside the consumer's
+    /// `Cargo.toml`, and the macro arguments override it.
+    #[test]
+    fn the_config_file_beside_the_spec_is_applied_under_the_arguments() {
+        let scratch = Scratch::new("config-beside-spec");
+        scratch.write("spargen.toml", "open_narrowing = true\n");
+        scratch.write("api/spargen.toml", "carve = true\nbatch_cap = 3\n");
+
+        let spec = spec_for(&args(r#""api/openapi.yaml""#), &scratch.consumer()).unwrap();
+        assert_eq!(
+            spec,
+            Spec::new(scratch.path("api/openapi.yaml"))
+                .carve(true)
+                .batch_cap(3)
+        );
+
+        let spec = spec_for(
+            &args(r#""api/openapi.yaml", batch_cap = 9"#),
+            &scratch.consumer(),
+        )
+        .unwrap();
+        assert_eq!(
+            spec,
+            Spec::new(scratch.path("api/openapi.yaml"))
+                .carve(true)
+                .batch_cap(9)
+        );
+    }
+
+    #[test]
+    fn an_invalid_config_file_is_an_error_naming_it() {
+        let scratch = Scratch::new("invalid-config");
+        let config = scratch.write("spargen.toml", "[features]\ncarve = true\n");
+        let error = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid config file `{config}`: the `[features]` table was removed; move its \
+                 keys (`carve`, `batch_cap`, …) to the top level of the file"
+            )
+        );
+    }
+
+    #[test]
+    fn a_generated_preview_is_no_failure() {
+        let scratch = Scratch::new("generated");
+        let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
+        scratch.write("schemas.yaml", SPLIT_SCHEMAS);
+        let preview = spargen::__private::preview(&Spec::new(spec));
+        assert_eq!(failure_message("openapi.yaml", &preview), None);
+    }
+
+    /// The `compile_error!` text: the spec as the macro was given it, then one line per
+    /// error-severity diagnostic with its code, message and pointer.
+    #[test]
+    fn a_rejected_spec_renders_each_error_with_its_code_and_pointer() {
+        let scratch = Scratch::new("rejected");
+        let spec = scratch.write(
+            "openapi.yaml",
+            "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
+        );
+        let preview = spargen::__private::preview(&Spec::new(spec));
+        // A root-level diagnostic's pointer is empty, and renders as `(at )`.
+        assert_eq!(
+            failure_message("specs/old.yaml", &preview).unwrap(),
+            "spargen could not generate a client from `specs/old.yaml`\n  \
+             error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
+             3.2.x (at )"
+        );
+    }
+
+    /// Several errors are one line each, in the report's order; a warning beside them is not
+    /// rendered.
+    #[test]
+    fn every_error_is_its_own_line_and_warnings_are_left_out() {
+        let scratch = Scratch::new("several");
+        let spec = scratch.write(
+            "openapi.yaml",
+            r##"openapi: 3.1.0
+info: { title: Dangling, version: "1" }
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - { name: q, in: query, schema: { type: string, pattern: "^a" } }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Missing" }
+  /b:
+    get:
+      operationId: getB
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlsoMissing" }
+"##,
+        );
+        let preview = spargen::__private::preview(&Spec::new(spec));
+        assert!(
+            preview
+                .report
+                .diagnostics()
+                .iter()
+                .any(|d| d.severity == spargen::Severity::Warning),
+            "the fixture must carry a warning for its omission to be observed"
+        );
+        assert_eq!(
+            failure_message("openapi.yaml", &preview).unwrap(),
+            "spargen could not generate a client from `openapi.yaml`\n  \
+             error[E004]: unresolved schema reference `#/components/schemas/Missing` \
+             (at /paths/~1a/get/responses/200/content/application~1json/schema)\n  \
+             error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing` \
+             (at /paths/~1b/get/responses/200/content/application~1json/schema)"
+        );
+    }
+
+    /// The files a successful expansion `include_bytes!`s, and so the files whose edit makes
+    /// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, and
+    /// a `spargen.lock` beside the spec. The `spargen.toml` beside the spec is not among them.
+    #[test]
+    fn tracking_includes_the_spec_its_refs_the_manifest_and_the_lock() {
+        let scratch = Scratch::new("tracking");
+        let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
+        let schemas = scratch.write("schemas.yaml", SPLIT_SCHEMAS);
+        let lock = scratch.write("spargen.lock", "version = 1\n");
+        scratch.write("spargen.toml", "carve = false\n");
+        let requirements = spargen::requirements(&Spec::new(spec.clone())).unwrap();
+        let manifest = scratch.write(
+            "Cargo.toml",
+            &format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{}",
+                requirements.manifest_block()
+            ),
+        );
+
+        let preview = spargen::__private::preview_for_macro(&Spec::new(spec.clone()), &manifest);
+        assert_eq!(failure_message("openapi.yaml", &preview), None);
+        let mut expected = vec![manifest, spec, schemas, lock];
+        expected.sort();
+        assert_eq!(
+            tracking(&preview).to_string(),
+            quote::quote! { #(const _: &[u8] = include_bytes!(#expected);)* }.to_string()
+        );
+    }
+
+    #[test]
+    fn every_argument_parse_error_names_what_was_wrong() {
+        let cases: &[(&str, &str)] = &[
+            (r#""a.yaml", "b.yaml""#, "spec path given more than once"),
+            (
+                r#""a.yaml", spec = "b.yaml""#,
+                "spec path given more than once",
+            ),
+            (r#"spec "a.yaml""#, "expected `=`"),
+            (r#"spec = 1"#, "expected string literal"),
+            (r#"42"#, "expected identifier"),
+            (
+                r#""a.yaml", uuid"#,
+                "unknown argument `uuid`; expected a spec path or one of: no_uuid, no_time, \
+                 carve, open_narrowing, error_body_cap, batch_cap, omit",
+            ),
+            (r#""a.yaml" no_uuid"#, "expected `,`"),
+            (
+                "no_uuid",
+                "unexpected end of input, expected a spec path, e.g. \
+                 generate_api!(\"openapi.yaml\")",
+            ),
+            (
+                r#""a.yaml", error_body_cap = "big""#,
+                "expected integer literal",
+            ),
+            (
+                r#""a.yaml", error_body_cap = 99999999999999999999999"#,
+                "number too large to fit in target type",
+            ),
+            (r#""a.yaml", batch_cap 3"#, "expected `=`"),
+            (
+                r#""a.yaml", batch_cap = -1"#,
+                "invalid digit found in string",
+            ),
+            (r#""a.yaml", omit ( )"#, "expected curly braces"),
+            (
+                r#""a.yaml", omit { schemas { } }"#,
+                "unknown omit section `schemas`",
+            ),
+            (
+                r#""a.yaml", omit { operations { fetch "/a"; } }"#,
+                "unknown HTTP method: `fetch`",
+            ),
+            (
+                r#""a.yaml", omit { operations { get "/a" } }"#,
+                "expected `;`",
+            ),
+            (r#""a.yaml", omit { paths { "/a" } }"#, "expected `;`"),
+            (
+                r#""a.yaml", omit { components { models { "A"; } } }"#,
+                "unknown component kind: `models`; expected one of \
+                 schemas/responses/parameters/request_bodies/headers/security_schemes/\
+                 path_items/media_types",
+            ),
+            (r#""a.yaml", omit { pointers { "/a" } }"#, "expected `;`"),
+            (
+                r#""a.yaml", omit { file("b.yaml") { paths { "/a"; } } }"#,
+                "expected `pointers`",
+            ),
+            (
+                r#""a.yaml", omit { file { pointers { "/a"; } } }"#,
+                "expected parentheses",
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (source, expected) in cases {
+            let actual = parse_error(source);
+            if actual != *expected {
+                mismatches.push(format!(
+                    "{source}\n  expected: {expected}\n  actual:   {actual}"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 }
