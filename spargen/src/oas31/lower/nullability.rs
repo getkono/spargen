@@ -864,7 +864,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `oneOf` does, so a `$ref` member to `Wrap` denies it as a `$ref` member to the `oneOf`
     /// does, the same target [`Self::union_members_take_scalar_null`] reads through
     /// [`Self::all_of_wraps_undecided_union`] (#673). `depth` bounds the walk; a chain past it
-    /// answers `false`.
+    /// answers `false`. Each member's target is read once per pass and its answer replayed
+    /// ([`Self::one_of_matches_null_twice_memo`]).
     fn one_of_matches_null_twice(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH {
             return false;
@@ -885,9 +886,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         schema.all_of.iter().any(|member| match member {
             SchemaOr::Bool(_) => false,
-            SchemaOr::Schema(member) => self
-                .union_member_target(member)
-                .is_some_and(|target| self.one_of_matches_null_twice(&target, depth + 1)),
+            SchemaOr::Schema(member) => self.union_member_target(member).is_some_and(|target| {
+                memoised_answer(&self.one_of_matches_null_twice_memo, &target, false, || {
+                    self.one_of_matches_null_twice(&target, depth + 1)
+                })
+            }),
         })
     }
 }

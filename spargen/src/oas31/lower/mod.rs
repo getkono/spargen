@@ -239,6 +239,7 @@ fn lower_pass(
         target_decides_null_memo: RefCell::new(HashMap::new()),
         resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
         admits_null_undecided_memo: RefCell::new(HashMap::new()),
+        one_of_matches_null_twice_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
@@ -849,6 +850,12 @@ struct LowerCtx<'a, 'doc> {
     /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
     /// end it.
     admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
+    /// [`Self::one_of_matches_null_twice`]'s answer for each `allOf` member's target, keyed as
+    /// [`Self::target_decides_null_memo`] is: a reuse graph that branches (`C<i>: allOf [$ref
+    /// C<i+1>, $ref C<i+1>]`) is otherwise re-read once per path, in time exponential in its depth.
+    /// A target being read records `false` (no `oneOf` `null` matches twice) before its members
+    /// are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would end it.
+    one_of_matches_null_twice_memo: RefCell<HashMap<String, bool>>,
     /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
     /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
     ///
