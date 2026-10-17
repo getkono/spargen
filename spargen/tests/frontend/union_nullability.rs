@@ -1158,33 +1158,39 @@ fn a_oneof_branch_the_sibling_narrows_to_null_beside_a_typed_branch_is_no_varian
             }
         }
     }
-    // A bare `$ref` member to a `oneOf` component that `null` matches twice denies it alike, in
-    // either member order (#673).
+    // A bare `$ref` member to a `oneOf` component that `null` matches twice, or to an `allOf`
+    // wrapping one, denies it alike, in either member order (#673), as the inline wrapping
+    // spelling above does.
     for members in ["[ {}, {} ]", "[ {}, { type: 'null' } ]"] {
         let ty = "{ type: [string, 'null'] }";
         let union = "{ $ref: '#/components/schemas/U' }";
-        for site in [
-            format!("{{ allOf: [ {ty}, {union} ] }}"),
-            format!("{{ allOf: [ {union}, {ty} ] }}"),
+        for body in [
+            format!("{{ oneOf: {members} }}"),
+            format!("{{ allOf: [ {{ oneOf: {members} }} ] }}"),
         ] {
-            let spec = with_schemas(
-                "3.1.0",
-                &format!(
-                    "    U: {{ oneOf: {members} }}\n    Pick: {site}\n    Holder:\n      type: \
-                     object\n      properties:\n        pick: {{ $ref: '#/components/schemas/Pick' \
-                     }}\n      required: [pick]\n"
-                ),
-            );
-            let (report, code) = generate_with_code(&spec);
-            let types = types_module(&code);
-            if report.outcome() == Outcome::Rejected
-                || field_type(&types, "pub pick").as_deref() != Some("Pick")
-                || !types.contains("pub type Pick = String;")
-            {
-                mismatches.push(format!(
-                    "U: {{ oneOf: {members} }}, Pick: {site}: not `Pick = String` as `Pick`: \
-                     {report:#?} {types}"
-                ));
+            for site in [
+                format!("{{ allOf: [ {ty}, {union} ] }}"),
+                format!("{{ allOf: [ {union}, {ty} ] }}"),
+            ] {
+                let spec = with_schemas(
+                    "3.1.0",
+                    &format!(
+                        "    U: {body}\n    Pick: {site}\n    Holder:\n      type: object\n      \
+                         properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                         required: [pick]\n"
+                    ),
+                );
+                let (report, code) = generate_with_code(&spec);
+                let types = types_module(&code);
+                if report.outcome() == Outcome::Rejected
+                    || field_type(&types, "pub pick").as_deref() != Some("Pick")
+                    || !types.contains("pub type Pick = String;")
+                {
+                    mismatches.push(format!(
+                        "U: {body}, Pick: {site}: not `Pick = String` as `Pick`: {report:#?} \
+                         {types}"
+                    ));
+                }
             }
         }
     }

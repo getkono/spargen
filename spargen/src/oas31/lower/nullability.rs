@@ -828,7 +828,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Whether some `allOf` member in `members`, gathered as the scalar `contributions[slot]`, is a
-    /// `oneOf` its own lowering left as no union, and at least two of whose branches state nothing
+    /// `oneOf` its own lowering left as no union, or an `allOf` wrapping one
+    /// ([`Self::one_of_matches_null_twice`]), and at least two of whose branches state nothing
     /// (`true`, `{}`, an annotation) or are the null type (`{ type: 'null' }`): `null` matches each
     /// such branch, so it fails exactly-one, and no value of the merge is `null` (#673). Its
     /// branches collapsed to one `serde_json::Value` (`[ {}, {} ]`), or a `null` branch was folded
@@ -851,23 +852,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ) {
                 return false;
             }
-            self.union_member_target(member).is_some_and(|target| {
-                target.any_of.is_empty()
-                    && target
-                        .one_of
-                        .iter()
-                        .filter(|branch| {
-                            member_is_null_only(branch)
-                                || match branch {
-                                    SchemaOr::Bool(accepts) => *accepts,
-                                    SchemaOr::Schema(branch) => {
-                                        !schema_has_shape_constraint(branch)
-                                    }
-                                }
-                        })
-                        .count()
-                        >= 2
+            self.union_member_target(member)
+                .is_some_and(|target| self.one_of_matches_null_twice(&target, 0))
+        })
+    }
+
+    /// Whether `schema` is a `oneOf`, with no `anyOf`, at least two of whose branches state
+    /// nothing or are the null type, or an `allOf` with such a member, inline or as a bare `$ref`
+    /// to it ([`Self::union_member_target`]): `null` fails that `oneOf`, so it fails every
+    /// intersection holding it. `Wrap: { allOf: [ { oneOf: [ {}, {} ] } ] }` denies `null` as the
+    /// `oneOf` does, so a `$ref` member to `Wrap` denies it as a `$ref` member to the `oneOf`
+    /// does, the same target [`Self::union_members_take_scalar_null`] reads through
+    /// [`Self::all_of_wraps_undecided_union`] (#673). `depth` bounds the walk; a chain past it
+    /// answers `false`.
+    fn one_of_matches_null_twice(&self, schema: &Schema, depth: u32) -> bool {
+        if depth >= MAX_SCHEMA_DEPTH {
+            return false;
+        }
+        let matches_null = schema
+            .one_of
+            .iter()
+            .filter(|branch| {
+                member_is_null_only(branch)
+                    || match branch {
+                        SchemaOr::Bool(accepts) => *accepts,
+                        SchemaOr::Schema(branch) => !schema_has_shape_constraint(branch),
+                    }
             })
+            .count();
+        if schema.any_of.is_empty() && matches_null >= 2 {
+            return true;
+        }
+        schema.all_of.iter().any(|member| match member {
+            SchemaOr::Bool(_) => false,
+            SchemaOr::Schema(member) => self
+                .union_member_target(member)
+                .is_some_and(|target| self.one_of_matches_null_twice(&target, depth + 1)),
         })
     }
 }
