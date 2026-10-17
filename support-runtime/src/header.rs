@@ -122,6 +122,16 @@ pub fn parse_header<T: DeserializeOwned>(
             });
     }
     let raw = parts.join(",");
+    // A `content`-typed header is JSON text, with no `simple` ambiguity to resolve: it is parsed
+    // once, and text that is not JSON reports the syntax error rather than reading as `null`.
+    if shape == HeaderShape::Json {
+        return serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            });
+    }
     // `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the
     // number 1 — the encoding cannot tell them apart. The target type can: try the text as-is
     // first, and fall back to its JSON reading only if that does not deserialize. The error
@@ -161,9 +171,9 @@ pub fn require_header<T: DeserializeOwned>(
 /// Rebuild a JSON value from `simple`-style header text.
 fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
     match shape {
-        HeaderShape::Json => serde_json::from_str(raw).unwrap_or(Value::Null),
-        // Handled before any joining happens, in `parse_header`.
-        HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
+        // `SetCookie` is handled before any joining happens, and `Json` before any reconstruction,
+        // both in `parse_header`.
+        HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
         HeaderShape::Array => {
             Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
         }
@@ -338,6 +348,50 @@ mod tests {
         let parsed: serde_json::Map<String, Value> =
             require_header(&map, "x-payload", HeaderShape::Json, false).unwrap();
         assert_eq!(parsed.get("id"), Some(&Value::Number(7.into())));
+    }
+
+    /// #692: a nullable or optional target accepts `null`, so text that is not JSON at all must
+    /// not be read as `null`; it is a `Parse` error carrying the syntax error.
+    #[test]
+    fn a_malformed_json_content_header_is_a_parse_error_for_a_nullable_target() {
+        let map = headers(&[("x-meta", "{bad")]);
+        let parsed = parse_header::<Option<serde_json::Map<String, Value>>>(
+            &map,
+            "x-meta",
+            HeaderShape::Json,
+            false,
+        );
+        let Err(HeaderError::Parse { message, .. }) = parsed else {
+            panic!("malformed JSON must not deserialize: {parsed:?}");
+        };
+        assert!(message.contains("line 1 column"), "{message}");
+    }
+
+    /// #692: for a non-nullable target the message is the syntax error, not a type mismatch
+    /// against a `null` the server never sent.
+    #[test]
+    fn a_malformed_json_content_header_reports_the_syntax_error() {
+        let map = headers(&[("x-meta", "{bad")]);
+        let parsed = require_header::<serde_json::Map<String, Value>>(
+            &map,
+            "x-meta",
+            HeaderShape::Json,
+            false,
+        );
+        let Err(HeaderError::Parse { message, .. }) = parsed else {
+            panic!("malformed JSON must not deserialize: {parsed:?}");
+        };
+        assert!(!message.contains("null"), "{message}");
+        assert!(message.contains("line 1 column"), "{message}");
+    }
+
+    /// A JSON-content header that really is `null` still reads as `null`.
+    #[test]
+    fn a_json_null_content_header_is_null() {
+        let map = headers(&[("x-meta", "null")]);
+        let parsed: Option<Option<serde_json::Map<String, Value>>> =
+            parse_header(&map, "x-meta", HeaderShape::Json, false).unwrap();
+        assert_eq!(parsed, Some(None));
     }
 
     #[test]
