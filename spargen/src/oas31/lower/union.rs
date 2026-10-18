@@ -286,9 +286,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // An untyped member accepts the `null` the `type` array permits (#574), as the
             // multi-member path's untyped variants do, before the sibling meet so the other
-            // sibling keywords can still take it away. Without a sibling to meet (a multi-type
-            // array dropped for lowering) it is then a branch `null` matches; with one, the meet
-            // below recounts it.
+            // sibling keywords can still take it away. Without a sibling to meet it is then a
+            // branch `null` matches; with one, the meet below recounts it.
             if null_from_type_array && member_untyped {
                 inner.nullable = true;
                 member_takes_null = true;
@@ -549,8 +548,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
             // sibling meet so the other sibling keywords can still take it away, and is then
-            // counted as a branch `null` matches. Without a sibling to meet (a multi-type array
-            // dropped for lowering) nothing else would give it the array's `null`.
+            // counted as a branch `null` matches. Without a sibling to meet (a cycle-closing branch
+            // a multi-category `type` array alone admits) nothing else would give it the array's
+            // `null`.
             if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
                 ty.nullable = true;
             }

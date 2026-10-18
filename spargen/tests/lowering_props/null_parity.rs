@@ -6,15 +6,14 @@
 
 use super::*;
 
-/// The `type` (and its own `enum` / `const`) one constraint set holds the union to.
-///
-/// A `type` array of two or more non-null categories is held out until #677 lands: beside a union
-/// with no other keyword the sibling spelling drops it for lowering and restricts no branch, so the
-/// spellings differ in which branches they keep, not in `null`. Its fixed rows (#675) still run.
-const NULL_CONJUNCTS: [&str; 8] = [
+/// The `type` (and its own `enum` / `const`) one constraint set holds the union to, a `type` array
+/// of two non-null categories included (#677).
+const NULL_CONJUNCTS: [&str; 10] = [
     "type: [string, 'null']",
     "type: [integer, 'null']",
     "type: string",
+    "type: [string, integer]",
+    "type: [string, integer, 'null']",
     "type: [string, 'null'], enum: [a]",
     "type: [string, 'null'], enum: [a, null]",
     "type: [string, 'null'], const: a",
@@ -634,4 +633,97 @@ fn unreferenced_member_types(source: &str) -> Vec<String> {
             .any(|use_site| source.contains(use_site.as_str()))
         })
         .collect()
+}
+
+#[test]
+#[ignore]
+fn zz_exhaustive() {
+    let conjuncts: Vec<&str> = std::env::var("CONJ")
+        .map(|c| {
+            c.split(';')
+                .map(|s| &*Box::leak(s.to_owned().into_boxed_str()))
+                .collect()
+        })
+        .unwrap_or_else(|_| vec!["type: [string, integer]", "type: [string, integer, 'null']"]);
+    let max: usize = std::env::var("MAXLEN").map_or(2, |m| m.parse().unwrap());
+    let mut combos: Vec<Vec<&'static str>> = NULL_BRANCHES.iter().map(|b| vec![*b]).collect();
+    if max >= 2 {
+        for a in NULL_BRANCHES {
+            for b in NULL_BRANCHES {
+                combos.push(vec![a, b]);
+            }
+        }
+    }
+    let mut failures = 0;
+    for conjunct in &conjuncts {
+        for one_of in [false, true] {
+            for branches in &combos {
+                let case = NullCase {
+                    conjunct,
+                    one_of,
+                    branches: branches.clone(),
+                };
+                if let Err(error) = assert_null_parity(&case) {
+                    failures += 1;
+                    let text = error.to_string();
+                    let head = text.lines().next().unwrap_or_default().to_owned();
+                    let summary: Vec<&str> = text
+                        .lines()
+                        .filter(|l| l.contains("NullAnswer") || l.contains("disagree"))
+                        .collect();
+                    eprintln!(
+                        "FAIL {conjunct} {} :: {head} :: {}",
+                        case.union(),
+                        summary.join(" | ")
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("failures: {failures}");
+}
+
+#[test]
+#[ignore]
+fn zz_probe() {
+    if let Ok(raw) = std::env::var("PROBE_RAW") {
+        for spec in raw.split("\n---\n") {
+            let (report, source) = generate_module(spec);
+            eprintln!("=== {spec}\n{report:?}\n{source}");
+        }
+        return;
+    }
+    let list = std::env::var("PROBE").unwrap();
+    for line in list.split(';') {
+        let (conjunct, rest) = line.split_once('|').unwrap();
+        let (kw, branches) = rest.split_once('|').unwrap();
+        let case = NullCase {
+            conjunct: Box::leak(conjunct.to_owned().into_boxed_str()),
+            one_of: kw == "oneOf",
+            branches: branches
+                .split('#')
+                .map(|b| &*Box::leak(b.to_owned().into_boxed_str()))
+                .collect(),
+        };
+        for spelling in NullSpelling::ALL {
+            let spec = case.spec(spelling);
+            let (report, source) = generate_module(&spec);
+            let pick: Vec<&str> = source
+                .lines()
+                .filter(|l| {
+                    l.contains("Pick")
+                        && (l.contains("pub type")
+                            || l.contains("pub enum")
+                            || l.contains("Variant")
+                            || l.contains("pub pick"))
+                })
+                .collect();
+            eprintln!(
+                "== {spelling:?} {line}\n{:?}\n{}\n{:?}",
+                codes(&report),
+                pick.join("\n"),
+                null_answer(&report, &source)
+            );
+        }
+    }
 }
