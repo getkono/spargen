@@ -114,3 +114,53 @@ fn a_cycle_closing_branch_a_multi_category_type_array_omits_is_rejected() {
         assert_eq!(codes(&report), ["E013"], "{shape}: {report:#?}");
     }
 }
+
+/// A cycle-closing `$ref` branch whose target states its `type` (`object`) beside a
+/// multi-category `type` array alone that admits it is kept as the boxed back-edge, beside a
+/// branch the array admits and alone, while a branch of a category the array omits still drops
+/// with `W011`.
+#[test]
+fn a_cycle_closing_branch_of_a_typed_target_the_array_admits_generates() {
+    for (shape, child, variants, warned) in [
+        (
+            "beside an admitted and an omitted branch",
+            "type: [object, string], oneOf: [ { $ref: '#/components/schemas/Holder' }, { type: \
+             string }, { type: boolean } ]",
+            2,
+            1,
+        ),
+        (
+            "alone",
+            "type: [object, string], oneOf: [ { $ref: '#/components/schemas/Holder' } ]",
+            0,
+            0,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Holder: {{ type: object, properties: {{ child: {{ {child} }} }}, required: \
+                 [child] }}\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        let types = types_module(&code);
+        let child = field_type(&types, "pub child")
+            .unwrap_or_else(|| panic!("{shape}: no `child`: {types}"));
+        if variants == 0 {
+            assert_eq!(child, "Box<Holder>", "{shape}: {types}");
+        } else {
+            assert_eq!(
+                enum_variants(&types, &child).len(),
+                variants,
+                "{shape}: {types}"
+            );
+        }
+        assert_eq!(
+            messages_for(&report, Code::DeclarationHasNoEffect).len(),
+            warned,
+            "{shape}: {report:#?}"
+        );
+    }
+}
