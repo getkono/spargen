@@ -459,8 +459,44 @@ mod tests {
 
     #[test]
     fn the_accepted_lists_name_each_variant_exactly_once() {
-        // The exhaustive matches stop compiling when a variant lands, so its canonical spelling
-        // cannot be left out of the list an `UnknownOmitToken` prints.
+        // Each `match` names every variant's canonical spelling, so a new variant stops this test
+        // compiling until its spelling is written here. The assertions then hold `CANONICAL` to
+        // those spellings: entry `i` parses to the variant declared `i`th, whose spelling it is,
+        // and every variant listed below maps, in declaration order, onto `CANONICAL` exactly.
+        fn kind_spelling(kind: ComponentKind) -> &'static str {
+            match kind {
+                ComponentKind::Schemas => "schemas",
+                ComponentKind::Responses => "responses",
+                ComponentKind::Parameters => "parameters",
+                ComponentKind::RequestBodies => "request_bodies",
+                ComponentKind::Headers => "headers",
+                ComponentKind::SecuritySchemes => "security_schemes",
+                ComponentKind::PathItems => "path_items",
+                ComponentKind::MediaTypes => "media_types",
+            }
+        }
+        fn method_spelling(method: OmitMethod) -> &'static str {
+            match method {
+                OmitMethod::Get => "get",
+                OmitMethod::Put => "put",
+                OmitMethod::Post => "post",
+                OmitMethod::Delete => "delete",
+                OmitMethod::Options => "options",
+                OmitMethod::Head => "head",
+                OmitMethod::Patch => "patch",
+                OmitMethod::Trace => "trace",
+                OmitMethod::Query => "query",
+            }
+        }
+
+        for (index, token) in ComponentKind::CANONICAL.iter().enumerate() {
+            let kind: ComponentKind = token.parse().unwrap();
+            assert_eq!(
+                kind as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(kind_spelling(kind), *token);
+        }
         let kinds = [
             ComponentKind::Schemas,
             ComponentKind::Responses,
@@ -471,24 +507,16 @@ mod tests {
             ComponentKind::PathItems,
             ComponentKind::MediaTypes,
         ];
-        for kind in kinds {
-            match kind {
-                ComponentKind::Schemas
-                | ComponentKind::Responses
-                | ComponentKind::Parameters
-                | ComponentKind::RequestBodies
-                | ComponentKind::Headers
-                | ComponentKind::SecuritySchemes
-                | ComponentKind::PathItems
-                | ComponentKind::MediaTypes => {}
-            }
-        }
-        let parsed: Vec<ComponentKind> = ComponentKind::CANONICAL
-            .iter()
-            .map(|token| token.parse().unwrap())
-            .collect();
-        assert_eq!(parsed, kinds);
+        assert_eq!(kinds.map(kind_spelling), ComponentKind::CANONICAL);
 
+        for (index, token) in OmitMethod::CANONICAL.iter().enumerate() {
+            let method: OmitMethod = token.parse().unwrap();
+            assert_eq!(
+                method as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(method_spelling(method), *token);
+        }
         let methods = [
             OmitMethod::Get,
             OmitMethod::Put,
@@ -500,24 +528,7 @@ mod tests {
             OmitMethod::Trace,
             OmitMethod::Query,
         ];
-        for method in methods {
-            match method {
-                OmitMethod::Get
-                | OmitMethod::Put
-                | OmitMethod::Post
-                | OmitMethod::Delete
-                | OmitMethod::Options
-                | OmitMethod::Head
-                | OmitMethod::Patch
-                | OmitMethod::Trace
-                | OmitMethod::Query => {}
-            }
-        }
-        let parsed: Vec<OmitMethod> = OmitMethod::CANONICAL
-            .iter()
-            .map(|token| token.parse().unwrap())
-            .collect();
-        assert_eq!(parsed, methods);
+        assert_eq!(methods.map(method_spelling), OmitMethod::CANONICAL);
 
         assert_eq!(
             "nope".parse::<ComponentKind>().unwrap_err().to_string(),
