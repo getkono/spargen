@@ -72,6 +72,74 @@ components:
     assert!(has_code(&checked, Code::DuplicateObjectKey), "{checked:#?}");
 }
 
+/// A document whose one schema's `maximum` is the YAML scalar `value`, on line 8.
+fn maximum_document(value: &str) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+         schemas:\n    N:\n      type: number\n      maximum: {value}\n"
+    )
+}
+
+#[test]
+fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
+    // Issue #707: YAML's special floats used to fail Rust's `f64` parse and fall back to `0.0`, so
+    // `maximum: .inf` silently read as a maximum of 0, and an overflowing `1e999` read as infinity
+    // where the JSON parser rejects it. OpenAPI's JSON data model has neither infinities nor NaN,
+    // so every non-finite value is `E011`, at the member that holds it, in both entry points.
+    for value in [
+        ".inf",
+        ".Inf",
+        "+.INF",
+        "-.inf",
+        ".nan",
+        ".NaN",
+        "1e999",
+        "-1e999",
+        "!!float .inf",
+        "!!float 1e999",
+    ] {
+        let spec = maximum_document(value);
+        let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{value}: {report:#?}");
+            let literal = value.trim_start_matches("!!float ");
+            let diag = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::InvalidInput)
+                .unwrap_or_else(|| panic!("{value}: no E011 in {report:#?}"));
+            assert_eq!(
+                diag.pointer.as_str(),
+                "/components/schemas/N/maximum",
+                "{value}: {diag:#?}"
+            );
+            assert!(
+                diag.message.contains(&format!("`{literal}`")),
+                "{value}: {diag:#?}"
+            );
+            assert_eq!(diag.span.expect("span").start.line, 8, "{value}: {diag:#?}");
+        }
+    }
+
+    // The JSON parser's verdict on the overflowing literal, which the YAML one now shares.
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {},
+        "components": {"schemas": {"N": {"type": "number", "maximum": 1e999}}}}"#;
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.json", json)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+
+    // A finite float in the same position, including YAML-only spellings, still generates.
+    for value in ["1.5e3", "-0.5", "!!float 5", "1e308"] {
+        let spec = maximum_document(value);
+        let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Generated, "{value}: {report:#?}");
+        }
+    }
+}
+
 #[test]
 fn oas32_document_with_compatible_constructs_generates() {
     // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
