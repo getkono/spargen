@@ -821,6 +821,94 @@ components:
     );
 }
 
+/// Issue #702: JSON Schema compares numbers by value, so a `default` written `3.0` is the integer 3.
+/// On an `integer` field it is applied exactly as `3` would be — under the same width check, and as
+/// a variant of an integer enum — while a fractional float, or an integral one outside the field's
+/// width, is still reported (`W005`). A `number` field's `3.0` stays a float.
+const INTEGRAL_FLOAT_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Page:
+      type: object
+      properties:
+        size: { type: integer, default: 3.0 }
+        narrow: { type: integer, format: int32, default: 7.0 }
+        level: { type: integer, enum: [1, 2], default: 2.0 }
+        ratio: { type: number, default: 4.0 }
+        half: { type: integer, default: 3.5 }
+        wide: { type: integer, format: int32, default: 5000000000.0 }
+        huge: { type: integer, default: 1.0e19 }
+"##;
+
+#[test]
+fn an_integral_float_default_is_the_integer_it_equals() {
+    for (entry, report) in [
+        ("generate", generate(INTEGRAL_FLOAT_DEFAULT_SPEC)),
+        ("check", check(INTEGRAL_FLOAT_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/Page/properties/half",
+                "/components/schemas/Page/properties/huge",
+                "/components/schemas/Page/properties/wide",
+            ],
+            "{entry}: only the fractional and out-of-width defaults are dropped: {report:#?}"
+        );
+    }
+
+    let (report, code) = generate_with_code(INTEGRAL_FLOAT_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for applied in [
+        "Default: `3`.",
+        "Default: `7`.",
+        "Default: `2`.",
+        "Default: `4`.",
+    ] {
+        assert!(code.contains(applied), "`{applied}` is documented: {code}");
+    }
+    for dropped in [
+        "Default (not applied): `3.5`.",
+        "Default (not applied): `5000000000`.",
+        "Default (not applied): `10000000000000000000`.",
+    ] {
+        assert!(code.contains(dropped), "`{dropped}` is documented: {code}");
+    }
+    assert_eq!(
+        code.matches("default = \"default_").count(),
+        4,
+        "`size`, `narrow`, `level` and `ratio` apply their defaults: {code}"
+    );
+    // Each provider returns the literal its field's type takes: an integer for the three `integer`
+    // fields, a float for the `number` one.
+    for (field, literal) in [
+        ("size", "Some(3)"),
+        ("narrow", "Some(7)"),
+        ("level", "Some(2)"),
+        ("ratio", "Some(4.0)"),
+    ] {
+        let start = code
+            .find(&format!("fn default_0_{field}()"))
+            .unwrap_or_else(|| panic!("`{field}` has a default provider: {code}"));
+        let provider = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            provider.contains(literal),
+            "`{field}` defaults to `{literal}`: {provider}"
+        );
+    }
+}
+
 /// A component that is a bare `$ref` with a sibling `default` drops the default when the reference
 /// resolves; it must be acknowledged with W005 rather than lost silently, and still generate.
 #[test]
