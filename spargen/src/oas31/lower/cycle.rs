@@ -141,7 +141,7 @@ fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonP
                     return false;
                 }
             }
-            "additionalProperties" | "items" | "contentSchema" => {}
+            "additionalProperties" | "items" => {}
             _ => return false,
         }
     }
@@ -157,7 +157,10 @@ fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonP
 /// the validation-only applicators — `not`, `if`/`then`/`else`, `contains`, `propertyNames`,
 /// `unevaluated*`, `dependentSchemas` — are deliberately NOT walked: lowering never enters them, so
 /// a `$ref` reachable only that way can never put a component mid-flight and can never yield the
-/// placeholder this predicate exists to detect. Counting them made an unreferenced `$defs` entry —
+/// placeholder this predicate exists to detect. Nor is `contentSchema`: lowering a schema clears
+/// it, and the one `contentSchema` that is lowered — the `data` property's in a 3.2
+/// `text/event-stream` envelope — is lowered as the stream's item type on its own, never inside
+/// the envelope's frame. Counting them made an unreferenced `$defs` entry —
 /// zero emitted bytes, not one instance added or removed — flip a document into a hard rejection
 /// whose message asserted a dependence that does not exist. [`lowering_encloses`] accepts exactly
 /// the same keywords, so the two halves of the predicate agree on what "inside" means.
@@ -183,7 +186,7 @@ fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
             }
         }
     }
-    for keyword in ["additionalProperties", "items", "contentSchema"] {
+    for keyword in ["additionalProperties", "items"] {
         if let Some(child) = object.get(keyword) {
             collect_node_refs(child, out);
         }

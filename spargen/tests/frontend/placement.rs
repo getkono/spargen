@@ -1231,6 +1231,109 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
     }
 }
 
+/// #698: the cycle walk followed `contentSchema` as an edge, but lowering a schema clears
+/// `contentSchema` rather than descending into it, so a target that reached back only through a
+/// `contentSchema` made a `$ref` with shape-bearing siblings look cycle-closing, and the document
+/// was rejected as `E013` although no generated type recurses through that edge. Each document
+/// below reaches back only that way and generates through both entry points: the issue's
+/// reproducer, the same back edge under a property, and an OpenAPI 3.2 `text/event-stream`
+/// envelope, where the `data.contentSchema` the SSE codec consumes is lowered as the stream's item
+/// type on its own, not inside the envelope it is written in.
+#[test]
+fn a_back_edge_only_through_content_schema_closes_no_cycle() {
+    let head = "info: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    let cases = [
+        (
+            "the issue's reproducer",
+            format!(
+                "openapi: 3.1.0\n{head}paths: {{}}\n\
+                 components:\n  \
+                 schemas:\n    \
+                 A: {{ $ref: '#/components/schemas/B', type: string }}\n    \
+                 B:\n      \
+                 type: string\n      \
+                 contentSchema: {{ $ref: '#/components/schemas/A' }}\n"
+            ),
+        ),
+        (
+            "a contentSchema under a property",
+            format!(
+                "openapi: 3.1.0\n{head}paths: {{}}\n\
+                 components:\n  \
+                 schemas:\n    \
+                 Holder:\n      \
+                 type: object\n      \
+                 properties:\n        \
+                 l:\n          \
+                 $ref: '#/components/schemas/Leaf'\n          \
+                 type: object\n          \
+                 properties: {{ x: {{ type: string }} }}\n    \
+                 Leaf:\n      \
+                 type: object\n      \
+                 properties:\n        \
+                 s:\n          \
+                 type: string\n          \
+                 contentMediaType: application/json\n          \
+                 contentSchema: {{ $ref: '#/components/schemas/Holder' }}\n"
+            ),
+        ),
+        (
+            "an SSE envelope's consumed data.contentSchema",
+            format!(
+                "openapi: 3.2.0\n{head}\
+                 paths:\n  \
+                 /events:\n    \
+                 get:\n      \
+                 operationId: events\n      \
+                 responses:\n        \
+                 '200':\n          \
+                 description: ok\n          \
+                 content:\n            \
+                 text/event-stream:\n              \
+                 itemSchema: {{ $ref: '#/components/schemas/Envelope' }}\n\
+                 components:\n  \
+                 schemas:\n    \
+                 Envelope:\n      \
+                 type: object\n      \
+                 required: [data]\n      \
+                 properties:\n        \
+                 data:\n          \
+                 type: string\n          \
+                 contentMediaType: application/json\n          \
+                 contentSchema:\n            \
+                 $ref: '#/components/schemas/Payload'\n            \
+                 type: object\n            \
+                 properties: {{ x: {{ type: string }} }}\n    \
+                 Payload:\n      \
+                 type: object\n      \
+                 properties:\n        \
+                 env: {{ $ref: '#/components/schemas/Envelope' }}\n"
+            ),
+        ),
+    ];
+    for (what, spec) in &cases {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} through {entry}: lowering never descends into `contentSchema`, so it \
+                 closes no cycle: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{what} through {entry}: {report:#?}"
+            );
+        }
+    }
+    // The envelope's `data.contentSchema` is still the one consumed as the stream's item type.
+    let (_, code) = generate_with_code(&cases[2].1);
+    let flat = code.split_whitespace().collect::<String>();
+    assert!(
+        flat.contains("EventStream<types::"),
+        "the SSE envelope's contentSchema must stay the stream's item type: {code}"
+    );
+}
+
 /// Whether `report` carries `code` at `pointer`.
 fn has_code_at(report: &Report, code: Code, pointer: &str) -> bool {
     report
