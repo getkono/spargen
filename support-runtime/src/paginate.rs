@@ -566,11 +566,72 @@ mod tests {
         assert!(!empty.has_next());
     }
 
-    /// A real end-to-end drive of `next_page` over an in-memory response would need a live socket for
-    /// `send()`, which the runtime's poll-once test harness cannot provide; the step-wise test above
-    /// exercises every non-socket branch (`next_link_target` + `decode_success` + re-arm) that
-    /// `next_page` composes. This test pins that `next_page` is a thin await-chain around them by
-    /// constructing the paginator and asserting it is armed/disarmed as expected.
+    /// A relative `next` target is resolved against the URL of the page just fetched, as RFC 3986
+    /// reference resolution reads it: a path-absolute target keeps the origin, and a query-only
+    /// target keeps the path too.
+    #[test]
+    fn a_relative_next_link_resolves_against_the_fetched_page_url() {
+        for (target, resolved) in [
+            ("/items?page=2", "https://x/items?page=2"),
+            ("?page=3", "https://x/api/items?page=3"),
+            ("more?page=4", "https://x/api/more?page=4"),
+        ] {
+            let mut pager: LinkPaginator<Vec<i64>> = LinkPaginator::new(
+                core(),
+                reqwest::Url::parse("https://x/api/items?page=1").unwrap(),
+            );
+            let url = pager.next.take().expect("seeded first url");
+            let link = format!(r#"<{target}>; rel="next""#);
+            let page = ok_page("[1]", Some(&link));
+            let decoded = poll_ready(pager.handle_response(url, page))
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded.into_inner(), vec![1]);
+            assert_eq!(
+                pager.next.as_ref().map(reqwest::Url::as_str),
+                Some(resolved),
+                "{target}"
+            );
+        }
+    }
+
+    /// `from_headers` has no fetched URL to resolve against, so it follows only an absolute
+    /// `next`: a relative one leaves the paginator with nothing to fetch.
+    #[test]
+    fn from_headers_refuses_a_relative_next_link() {
+        for target in ["/items?page=2", "?page=2", "items/2"] {
+            let headers = link_headers(&[&format!(r#"<{target}>; rel="next""#)]);
+            assert_eq!(next_link_target(&headers).as_deref(), Some(target));
+            assert!(next_link(&headers).is_none(), "{target}");
+            let pager: LinkPaginator<Vec<i64>> = LinkPaginator::from_headers(core(), &headers);
+            assert!(!pager.has_next(), "{target}");
+        }
+    }
+
+    /// A `2xx` page whose body does not decode as `T` surfaces as `Decode` with the page's status,
+    /// and terminates the chain: the `rel="next"` link it carried is not followed.
+    #[test]
+    fn a_success_page_that_fails_to_decode_terminates_as_a_decode_error() {
+        let mut pager: LinkPaginator<Vec<i64>> =
+            LinkPaginator::new(core(), reqwest::Url::parse("https://x/1").unwrap());
+        let url = pager.next.take().expect("seeded");
+        let page = response_with(
+            203,
+            r#"{"not":"a list"}"#,
+            Some(r#"<https://x/2>; rel="next""#),
+        );
+        match poll_ready(pager.handle_response(url, page)) {
+            Some(Err(Error::Decode { status, .. })) => assert_eq!(status.as_u16(), 203),
+            other => panic!("expected a Decode error, got {other:?}"),
+        }
+        assert!(!pager.has_next());
+        assert!(poll_ready(pager.next_page()).is_none());
+    }
+
+    /// A paginator seeded with no next link answers `None` on its first pull without building or
+    /// sending a request. A `next_page` that does have a URL to fetch reaches `send`, which needs
+    /// a live socket this poll-once harness cannot provide, so its post-`send` half is driven
+    /// through `handle_response` in the tests above instead.
     #[test]
     fn paginator_disarms_when_seeded_empty() {
         let empty: LinkPaginator<Vec<i64>> = LinkPaginator::from_headers(core(), &HeaderMap::new());
