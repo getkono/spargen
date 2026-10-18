@@ -8835,9 +8835,29 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
         spec.open_narrowing(true)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(
-        report.diagnostics().is_empty(),
-        "the option reports nothing: {report:#?}"
+    // The option reports nothing of its own. The `424`/`425` unions' `integer` branch, which the
+    // `type: string` member excludes, is reported (`W011`) as the sibling spelling reports it
+    // (#671), with the option on or off.
+    let reported: Vec<(&str, &str)> = report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.pointer.as_str()))
+        .collect();
+    assert_eq!(
+        reported,
+        [
+            (
+                "W011",
+                "/paths/~1problems/post/responses/424/content/application~1json/schema/properties/\
+                 kind"
+            ),
+            (
+                "W011",
+                "/paths/~1problems/post/responses/425/content/application~1json/schema/properties/\
+                 kind"
+            ),
+        ],
+        "the option reports nothing of its own: {report:#?}"
     );
     // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
     // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of

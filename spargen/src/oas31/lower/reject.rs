@@ -204,6 +204,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
+    /// Report a schema whose lowering left nothing but the exact `null` where its constraints
+    /// refuse `null` ([`Self::settle_null_admission`]), so no value satisfies it, in the words
+    /// of the construct written: a `oneOf` whose every branch accepts `null` alone, the scalar
+    /// members of an `allOf`, a `$ref` and its siblings, or a schema's own `enum` / `const` (or
+    /// `anyOf`) leaving only the `null` its `type` refuses.
+    pub(super) fn reject_null_admission_denied(&mut self, schema: &Schema) -> Option<Ty> {
+        if !schema.one_of.is_empty() {
+            return self.reject_one_of_null_in_every_branch(schema);
+        }
+        if schema.reference.is_some() {
+            return self.reject_ref_sibling_intersection(schema);
+        }
+        if !schema.all_of.is_empty() {
+            return self.reject_all_of_scalars(schema);
+        }
+        // E013 case: null-only-left
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "the only value this schema's own `enum`, `const` or `anyOf` members leave is `null`, \
+             and its other keywords refuse `null`, so no value satisfies the schema",
+            NULL_ONLY_LEFT_REMEDY,
+        )
+    }
+
     /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
     /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition an
     /// `allOf` reports — `E013` covers both spellings — but the remedy names the construct the
@@ -367,6 +392,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// The remedy every `allOf` rejection (`E013`) gives.
 const ALL_OF_REMEDY: &str =
     "restructure the composition so members agree, or omit this API segment with spargen::omit!";
+
+/// The remedy for a schema whose own `enum`, `const` or `anyOf` leaves only the `null` its other
+/// keywords refuse (`E013`): no composition was written, so it names the keywords that disagree.
+const NULL_ONLY_LEFT_REMEDY: &str = "add `null` to the schema's `type`, or give its `enum`, \
+                                     `const` or `anyOf` a value that `type` accepts, or omit \
+                                     this API segment with spargen::omit!";
 
 /// The remedy every `$ref`-sibling intersection rejection (`E013`) gives, naming the construct the
 /// author wrote rather than an `allOf` they did not.

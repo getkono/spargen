@@ -1368,7 +1368,9 @@ components:
 /// `anyOf` beside `const: null` denied `null` there, and a `oneOf` beside a nullable typed branch
 /// counted `null` in one branch alone and admitted it. The `oneOf` rows of `const: null` beside
 /// the untyped object branch emit no `()` variant for it either: `null` fails exactly-one, and the
-/// branch accepts nothing else (#657).
+/// branch accepts nothing else (#657). Where `null` is admitted it is carried once: an `anyOf`'s
+/// `const: null` branch is `Pick`'s `()` arm, so the field naming it is `Pick`, not `Option<Pick>`
+/// (#674's Decision 3); the other rows are `Option<Pick>`.
 #[test]
 fn a_union_of_a_nullable_typed_branch_beside_an_untyped_one_agrees_across_spellings() {
     let u = "$ref: '#/components/schemas/U'";
@@ -1449,10 +1451,25 @@ components:
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
-        if pick.starts_with("Option<") != admits {
+        // `null` is carried once: by the field's `Option`, or by `Pick`'s `()` arm.
+        let unit_arm = types
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("pub type ")?
+                    .strip_suffix(" = ();")
+            })
+            .any(|unit| types.contains(&format!("(Box<{unit}>)")));
+        let optional = pick.starts_with("Option<");
+        if (optional || unit_arm) != admits {
             let validity = if admits { "valid" } else { "invalid" };
             mismatches.push(format!(
                 "{site}: `pick` is `{pick}`, but `null` is {validity} here"
+            ));
+        }
+        if optional && unit_arm {
+            mismatches.push(format!(
+                "{site}: `pick` is `{pick}` and `Pick` has a `()` arm: `null` is carried twice"
             ));
         }
         if no_unit && types.contains("= ();") {
@@ -3332,10 +3349,12 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
 
 /// A schema must lower to the same nullability whether it is written inline or named as a
 /// component. `ensure_component` computed `schema_is_nullable(schema)` *before* the body was
-/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` is three
-/// disjuncts over `types`, `enum_values` and `const_value` that never look at `oneOf`, `anyOf`,
+/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` was three
+/// disjuncts over `types`, `enum_values` and `const_value` that never looked at `oneOf`, `anyOf`,
 /// `$ref` or `allOf`. So **every decision `lower_union` makes about null was discarded at a
-/// `components.schemas` boundary**, which is the dominant spelling in real descriptions.
+/// `components.schemas` boundary**, which is the dominant spelling in real descriptions. The
+/// reserve-time guess is now `null_admission`, which reads every composition, and the body's
+/// answer is the one kept whatever the guess says; the cases below pin the kept answer.
 ///
 /// The comment there claimed nullability was "a pure function of the component's own schema — the
 /// same inputs `lower_schema`/`lower_enum` use". That is true for a plain type/enum/const body and
@@ -3440,7 +3459,7 @@ fn a_component_and_an_inline_schema_agree_about_null() {
 
     // (what it exercises, the schema body, whether `null` satisfies it)
     let cases: &[(&str, &str, bool)] = &[
-        // `schema_is_nullable` sees the `"null"` in the type array and says nullable. The union says
+        // `schema_is_nullable` saw the `"null"` in the type array and said nullable. The union says
         // otherwise, and the union is right: with no null MEMBER there is no branch for `null` to
         // match, so `oneOf` fails.
         (
@@ -3459,8 +3478,8 @@ fn a_component_and_an_inline_schema_agree_about_null() {
             "type: [object, array, 'null']\nproperties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
             true,
         ),
-        // The sibling denies null through `enum`, which `schema_is_nullable` also reads — but it
-        // reads the ENUM, not the intersection, so it must still agree.
+        // The sibling denies null through `enum`, which `schema_is_nullable` also read — but it
+        // read the ENUM, not the intersection, so it must still agree.
         (
             "a union whose `enum` sibling excludes null",
             "enum: ['a', 'b']\noneOf: [{ type: string }, { type: 'null' }]",

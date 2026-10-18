@@ -64,7 +64,16 @@ pub(super) fn check_dependency(
                 diagnostics.push(diagnostic(check.audited, missing_message(check.dependency)));
                 return;
             };
-            check_declaration(workspace, declaration, &check, true, "", diagnostics);
+            let underscore = reads_underscore_default_features(manifest, workspace);
+            check_declaration(
+                workspace,
+                declaration,
+                &check,
+                true,
+                underscore,
+                "",
+                diagnostics,
+            );
         }
         Placement::NativeTarget => {
             check_native_target(manifest, workspace, &check, target, diagnostics);
@@ -249,13 +258,22 @@ fn check_native_target(
     let several = counting.len() > 1;
     let mut resolved = Vec::new();
     let mut all_resolved = true;
+    let underscore = reads_underscore_default_features(manifest, workspace);
     for (table, declaration, applies) in &counting {
         let location = if several {
             format!(" (in {table})")
         } else {
             String::new()
         };
-        match check_declaration(workspace, declaration, check, false, &location, diagnostics) {
+        match check_declaration(
+            workspace,
+            declaration,
+            check,
+            false,
+            underscore,
+            &location,
+            diagnostics,
+        ) {
             Some(features) => resolved.push((features, applies)),
             None => all_resolved = false,
         }
@@ -291,8 +309,8 @@ fn check_native_target(
 }
 
 /// The rules every declaration that counts is held to: `workspace = true` resolution, version,
-/// features (when `check_features`), `default-features`, `optional` both ways, and renames.
-/// `location` is appended to each message.
+/// features (when `check_features`), `default-features` (also spelled `default_features` when
+/// `underscore`), `optional` both ways, and renames. `location` is appended to each message.
 ///
 /// Returns the declaration's resolved feature set, or `None` when its inheritance could not be
 /// resolved (already reported).
@@ -301,6 +319,7 @@ fn check_declaration<'v>(
     declaration: &'v toml::Value,
     check: &DependencyCheck<'_>,
     check_features: bool,
+    underscore: bool,
     location: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<BTreeSet<&'v str>> {
@@ -384,10 +403,10 @@ fn check_declaration<'v>(
         }
     }
     let defaults = if let Some(workspace_declaration) = workspace_declaration {
-        declaration_bool(workspace_declaration, "default-features").unwrap_or(true)
-            || declaration_bool(declaration, "default-features") == Some(true)
+        declaration_default_features(workspace_declaration, underscore).unwrap_or(true)
+            || declaration_default_features(declaration, underscore) == Some(true)
     } else {
-        declaration_bool(declaration, "default-features").unwrap_or(true)
+        declaration_default_features(declaration, underscore).unwrap_or(true)
     };
     if check.require_no_defaults && defaults {
         diagnostics.push(diagnostic(check.audited, format!(
@@ -463,6 +482,43 @@ fn declaration_features(value: &toml::Value) -> BTreeSet<&str> {
 
 fn declaration_bool(value: &toml::Value, key: &str) -> Option<bool> {
     value.get(key).and_then(toml::Value::as_bool)
+}
+
+/// A declaration's `default-features`, as Cargo resolves it. Below edition 2024 Cargo also
+/// accepts the deprecated `default_features` (`underscore`), and with both keys present the
+/// hyphenated one wins; from edition 2024 it refuses the manifest instead, so the underscore key
+/// is not read there and the declaration keeps its defaults.
+fn declaration_default_features(value: &toml::Value, underscore: bool) -> Option<bool> {
+    declaration_bool(value, "default-features").or_else(|| {
+        underscore
+            .then(|| declaration_bool(value, "default_features"))
+            .flatten()
+    })
+}
+
+/// Whether Cargo reads the underscore `default_features` spelling in the audited `manifest`:
+/// only when its package's edition is below 2024. The edition is the package's own, or its
+/// `[workspace.package]` one under `edition.workspace = true`, and 2015 when none is stated —
+/// also for a `[workspace.dependencies]` entry, which Cargo judges by the inheriting member's
+/// edition. An edition that does not resolve to a known year is treated as 2024 or later.
+fn reads_underscore_default_features(
+    manifest: &toml::Value,
+    workspace: Option<&toml::Value>,
+) -> bool {
+    let Some(package) = manifest.get("package") else {
+        return true;
+    };
+    let edition = match package.get("edition") {
+        None => return true,
+        Some(edition) if edition.get("workspace").and_then(toml::Value::as_bool) == Some(true) => {
+            workspace.and_then(|root| dotted_get(root, "workspace.package", "edition"))
+        }
+        Some(edition) => Some(edition),
+    };
+    edition
+        .and_then(toml::Value::as_str)
+        .and_then(|year| year.parse::<u16>().ok())
+        .is_some_and(|year| year < 2024)
 }
 
 pub(super) fn supported_requirement(raw: &str, dependency: Dependency) -> bool {

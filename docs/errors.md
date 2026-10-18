@@ -11,13 +11,13 @@ the library API.
 | `E004` | Error | unresolved `$ref` |
 | `E005` | Error | `patternProperties` not representable as a typed map |
 | `E006` | Error | dynamic reference unsupported |
-| `E007` | Error | union applicators cannot be represented |
+| `E007` | Error | union cannot be represented as a generated enum |
 | `E008` | Error | enum values are not homogeneous scalars |
 | `E009` | Error | unsupported media type |
 | `E010` | Error | unsupported parameter style |
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
-| `E013` | Error | irreconcilable composition (an `allOf` merge, or a `$ref` and the keywords beside it) |
+| `E013` | Error | irreconcilable composition (an `allOf` merge, a `$ref` and the keywords beside it, or a schema's own `enum`, `const` or `anyOf` leaving only a `null` its `type` refuses) |
 | `E014` | Error | schema nesting is too deep to lower |
 | `E015` | Error | variable-length tuple not representable |
 | `E016` | Error | specification-undefined construct |

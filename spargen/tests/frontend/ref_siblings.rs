@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// The `W011` a union sibling's second branch draws where the `$ref` target excludes it.
+const EXCLUDED_MEMBER_1: &str = "union member 1 cannot satisfy the enclosing schema's own \
+                                 constraints, so it is not a variant of the generated enum";
+
 #[test]
 fn schema_ref_siblings_are_intersected_not_dropped() {
     let spec = r##"
@@ -173,13 +177,22 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
                 Outcome::Rejected,
                 "{keyword} in a {position}: {report:#?}\n{spec}"
             );
-            assert!(
-                report.diagnostics().is_empty(),
+            // The integer branch the target excludes is reported as the inline sibling spelling
+            // reports it (#671).
+            assert_eq!(
+                messages_for(&report, Code::DeclarationHasNoEffect),
+                [EXCLUDED_MEMBER_1],
+                "{keyword} in a {position}: {report:#?}"
+            );
+            assert_eq!(
+                codes(&report),
+                ["W011"],
                 "{keyword} in a {position}: {report:#?}"
             );
             let checked = check(&spec);
-            assert!(
-                checked.diagnostics().is_empty(),
+            assert_eq!(
+                codes(&checked),
+                ["W011"],
                 "{keyword} in a {position} via check: {checked:#?}"
             );
             let types = types_module(&code);
@@ -1105,8 +1118,15 @@ fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
                     Outcome::Rejected,
                     "{keyword} beside a {outer} member via {entry}: {report:#?}\n{narrowing}"
                 );
-                assert!(
-                    report.diagnostics().is_empty(),
+                // The integer branch `Name` excludes is reported (#671).
+                assert_eq!(
+                    messages_for(report, Code::DeclarationHasNoEffect),
+                    [EXCLUDED_MEMBER_1],
+                    "{keyword} beside a {outer} member via {entry}: {report:#?}"
+                );
+                assert_eq!(
+                    codes(report),
+                    ["W011"],
                     "{keyword} beside a {outer} member via {entry}: {report:#?}"
                 );
             }
