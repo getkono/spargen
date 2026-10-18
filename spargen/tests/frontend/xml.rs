@@ -659,3 +659,383 @@ paths:
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
+
+// --- Root and `items` XML Objects (#703) ----------------------------------------------------
+//
+// Only a property's own `xml` object used to be read. The one on a schema's root, which names the
+// element a body serializes as, and the one on an array's `items`, which names each list element,
+// were dropped with no diagnostic, so a `Pet` with `xml: { name: pet, namespace: ... }` went on
+// the wire as `<Pet>` with no namespace and nothing said so.
+
+/// The attribute lines directly above `pub struct {ty} {` in the generated `types` module.
+fn struct_attributes(code: &str, ty: &str) -> Vec<String> {
+    let types = types_module(code);
+    let declaration = format!("pub struct {ty} {{");
+    let at = types
+        .find(&declaration)
+        .unwrap_or_else(|| panic!("no `{declaration}` in the generated module:\n{code}"));
+    types[..at]
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| line.trim_start().starts_with("#["))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+/// A component root's `xml.name` names the element an XML body serializes as. A serde container
+/// rename reaches no JSON wire (serde_json never reads a struct's name), so unlike a field rename it
+/// is applied even where the type also travels as JSON.
+#[test]
+fn root_xml_name_renames_the_element_a_body_serializes_as() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/Pet' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Pet' } }
+components:
+  schemas:
+    Pet:
+      type: object
+      xml: { name: pet }
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    assert!(
+        struct_attributes(&code, "Pet").contains(&r#"#[serde(rename = "pet")]"#.to_owned()),
+        "{code}"
+    );
+}
+
+/// The inline schema of an XML body has no component name to infer the element from, so OpenAPI
+/// requires its `xml.name`; that name is honoured the same way.
+#[test]
+fn an_inline_xml_body_root_name_is_honoured() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /docs:
+    post:
+      operationId: putDocument
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              xml: { name: document }
+              properties:
+                animals: { type: string }
+      responses:
+        '204': { description: ok }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    assert!(code.contains(r#"#[serde(rename = "document")]"#), "{code}");
+}
+
+/// The issue's reproduction: a root namespace the codec cannot write, on a type an XML body
+/// serializes. Ignoring it would put un-namespaced XML on the wire while reporting success.
+#[test]
+fn e009_root_xml_namespace_on_an_xml_body_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/Pet' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    Pet:
+      type: object
+      xml: { name: pet, namespace: 'urn:x' }
+      properties:
+        id: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
+        assert!(
+            messages.iter().any(|m| m.contains("`namespace`")),
+            "{report:#?}"
+        );
+    }
+}
+
+/// The same namespace on a type no XML body reaches changes no wire, so it warns.
+#[test]
+fn w006_root_xml_namespace_on_a_never_xml_type_warns() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/Pet' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    Pet:
+      type: object
+      xml: { name: pet, prefix: p, namespace: 'urn:x' }
+      properties:
+        id: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::XmlHintIgnored);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("`namespace`") && m.contains("`prefix`")),
+            "{report:#?}"
+        );
+    }
+}
+
+/// A root node type the codec cannot produce — a text node, no element at all for an object, or an
+/// attribute — is dispositioned rather than dropped.
+#[test]
+fn e009_a_root_node_type_the_codec_cannot_produce_is_rejected() {
+    for xml in [
+        "{ nodeType: text }",
+        "{ nodeType: none }",
+        "{ nodeType: attribute }",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: {{ schema: {{ $ref: '#/components/schemas/Pet' }} }}
+      responses:
+        '204': {{ description: ok }}
+components:
+  schemas:
+    Pet:
+      type: object
+      xml: {xml}
+      properties:
+        id: {{ type: integer }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{xml}: {report:#?}");
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "{xml}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// `xml.name` on a root that is no struct (here a string component) has no container to rename.
+#[test]
+fn e009_a_root_name_on_a_type_with_no_element_of_its_own_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/Wrapper' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    Wrapper:
+      type: object
+      properties:
+        code: { $ref: '#/components/schemas/Code' }
+    Code:
+      type: string
+      xml: { name: code-value }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
+        assert!(messages.iter().any(|m| m.contains("`name`")), "{report:#?}");
+    }
+}
+
+/// An array's `xml.name` names nothing while the array stays unwrapped (its node type defaults to
+/// `none`, under which the name SHALL be ignored), so restating it takes no disposition at all.
+#[test]
+fn a_root_array_name_under_its_default_node_type_is_a_no_op() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/Holder' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        tags: { $ref: '#/components/schemas/Tags' }
+    Tags:
+      type: array
+      xml: { name: tags }
+      items: { type: string }
+"##;
+    let (report, _) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+}
+
+/// The specification's own "XML Arrays" examples: an unwrapped array's items are emitted directly
+/// under the parent, each named by `items.xml.name`, and the array's own `xml.name` has no effect.
+#[test]
+fn items_xml_name_names_each_list_element() {
+    for array_name in ["", "xml: { name: aliens }"] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /docs:
+    post:
+      operationId: putDocument
+      requestBody:
+        content:
+          application/xml: {{ schema: {{ $ref: '#/components/schemas/Document' }} }}
+      responses:
+        '204': {{ description: ok }}
+components:
+  schemas:
+    Document:
+      type: object
+      xml: {{ name: document }}
+      properties:
+        animals:
+          type: array
+          {array_name}
+          items:
+            type: string
+            xml: {{ name: animal }}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+        assert!(
+            code.contains(r#"#[serde(rename = "animal""#),
+            "{array_name}: {code}"
+        );
+        assert!(!code.contains("aliens"), "{array_name}: {code}");
+    }
+}
+
+/// An `items` hint the codec cannot write, on a list an XML body serializes: rejected, and named as
+/// the items' hint so the author can find it.
+#[test]
+fn e009_an_unsupported_items_hint_on_an_xml_body_is_rejected() {
+    for (version, items_xml) in [
+        ("3.1.0", "{ namespace: 'urn:x' }"),
+        ("3.1.0", "{ prefix: p }"),
+        ("3.1.0", "{ attribute: true }"),
+        ("3.2.0", "{ nodeType: cdata }"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /docs:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              xml: {{ name: document }}
+              properties:
+                animals:
+                  type: array
+                  items: {{ type: string, xml: {items_xml} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{items_xml}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedMediaType);
+            assert!(
+                messages.iter().any(|m| m.contains("`items.")),
+                "{items_xml}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The same `items` hint where no XML body reaches the list warns instead.
+#[test]
+fn w006_an_unsupported_items_hint_on_a_never_xml_type_warns() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /docs:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                animals:
+                  type: array
+                  items: { type: string, xml: { namespace: 'urn:x' } }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::XmlHintIgnored);
+        assert!(
+            messages.iter().any(|m| m.contains("`items.namespace`")),
+            "{report:#?}"
+        );
+    }
+}
