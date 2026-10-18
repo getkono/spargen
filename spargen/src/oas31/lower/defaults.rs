@@ -228,12 +228,17 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
     }
 }
 
-/// Classify a float as JSON Schema compares numbers, by value: an integral float inside `i64`'s
-/// range is that integer (`3.0` is `3`), so an `integer` field admits it under the same width check
-/// as an integer literal. Anything else — a fraction, or a value outside `i64` — stays a float.
+/// Classify a float as JSON Schema compares numbers, by value: an integral float of magnitude
+/// below 2^53 is that integer (`3.0` is `3`), so an `integer` field admits it under the same width
+/// check as an integer literal. Anything else — a fraction, or a magnitude of 2^53 or more — stays a
+/// float.
 fn classify_float(value: f64) -> RawDefault {
-    // `i64::MIN` is exactly representable; `i64::MAX as f64` rounds up to 2^63, one past the range.
-    if value.fract() == 0.0 && value >= i64::MIN as f64 && value < i64::MAX as f64 {
+    // At 2^53 and above, consecutive `f64` values are 2 or more apart, so every one of them is
+    // integral: `12345678901234567.5` parses to `12345678901234568.0`, and its fraction is gone
+    // before this sees it. Below 2^53 every integer is exact, so an integral float there names the
+    // integer its literal wrote, to the precision every float default is parsed at.
+    const EXACT_INTEGER_BOUND: f64 = 9_007_199_254_740_992.0; // 2^53
+    if value.fract() == 0.0 && value.abs() < EXACT_INTEGER_BOUND {
         RawDefault::Int(value as i64)
     } else {
         RawDefault::Float(value)
