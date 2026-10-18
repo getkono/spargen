@@ -525,7 +525,7 @@ fn reads_underscore_default_features(
 ///
 /// It must parse as exactly one comparator with no pre-release, using either
 ///
-/// - the caret operator, spelled bare (`1.12.1`) or with `^` (`^1.12.1`), or
+/// - the caret operator, spelled bare (`x.y.z`) or with `^` (`^x.y.z`), or
 /// - the exact operator, `=x.y.z` (or a partial `=x.y`),
 ///
 /// and the lowest version it names, with omitted components read as `0`, must be at or above
