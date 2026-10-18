@@ -166,6 +166,77 @@ paths:
 }
 
 #[test]
+fn e011_server_url_with_malformed_braces() {
+    // Regression: an unmatched `{` was kept as literal text, so `https://{host` generated a client
+    // whose base URL carried a literal `{host`, and the only diagnostic was the unused-variable
+    // `W011`, naming the wrong cause. The template grammar admits a brace only as one side of a
+    // `{name}` reference with a non-empty name, so every other brace is rejected at the server.
+    for url in [
+        "https://{host",
+        "https://{host}.example.com/{base",
+        "https://host}.example.com",
+        "https://{ho{host}.example.com",
+        "https://{}.example.com",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+servers:
+  - url: "{url}"
+    variables:
+      host: {{ default: example.com }}
+      base: {{ default: v1 }}
+paths:
+  /x:
+    get:
+      responses:
+        "204": {{ description: No Content }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{url}: {report:#?}");
+            assert!(has_code(&report, Code::InvalidInput), "{url}: {report:#?}");
+            // Reported at the server, as the template's cause rather than an unused variable.
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|diag| diag.code == Code::InvalidInput
+                        && diag.pointer.as_str() == "/servers/0"
+                        && diag.message.contains("brace")),
+                "{url}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e011_server_override_with_an_unmatched_brace() {
+    // The override goes through the same `lower_server`, so the brace grammar holds there too
+    // rather than rendering a literal `{stage` into the per-call base URL.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
+paths:
+  /x:
+    get:
+      servers:
+        - url: "https://{stage.example.net"
+          variables:
+            stage: { default: prod }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
 fn e011_server_override_variables_are_validated_like_the_document_s() {
     // The override goes through the same `lower_server`, so a template naming an undeclared
     // variable is rejected wherever it appears rather than only at the document root.
