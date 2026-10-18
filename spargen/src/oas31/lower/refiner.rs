@@ -4,7 +4,7 @@
 use indexmap::IndexMap;
 
 use crate::ir::{Docs, JsonCategory, Ty, TypeKind, Union, UnionVariant};
-use crate::oas31::{JsonType, Schema, ValidationKeywords};
+use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 
 use super::combine::schema_is_object_like;
 use super::meet::{same_ty, value_category, NoMeet};
@@ -15,20 +15,22 @@ use super::{CategoryMask, LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSi
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` (the schema without its union and
-    /// `discriminator`) so every branch is intersected with them. A multi-non-null `type` array is
-    /// already expressed by the union members and is removed here. Its `null` only permits
-    /// `null`: the union admits it through a branch `null` matches (#574), which a branch whose own
-    /// keywords leave `null` undecided takes from the array
+    /// `discriminator`) so every branch is intersected with them. A `type` array's `null` only
+    /// permits `null`: the union admits it through a branch `null` matches (#574), which a branch
+    /// whose own keywords leave `null` undecided takes from the array
     /// ([`Self::branch_takes_permitted_null`]), and which [`Self::lower_type_array`] spells as a
     /// `null` member of the union it synthesizes.
     ///
-    /// Answers `Some(None)` when what is left carries no shape constraint, so there is nothing to
+    /// Answers `Some(None)` when the sibling carries no shape constraint, so there is nothing to
     /// meet. Untyped object or array applicators (one [`implied_applicator_category`] answers for)
     /// lower to a [`Refiner::Scoped`] sibling that refines only the branches of its own category,
-    /// limited to the categories a removed `type` array names and admitting `null` unless that
-    /// array omits it. Any other sibling lowers whole to a [`Refiner::Whole`], which takes back the
-    /// removed array's `null`. The answer carries whether the sibling's own keywords say anything
-    /// about `null`. `None` where the sibling fails to lower, which has reported why.
+    /// limited to the categories a multi-category `type` array beside them names
+    /// ([`ScopedRefiners::allowed`]) and admitting `null` unless that array omits it. Any other
+    /// sibling, a multi-category `type` array included, lowers whole to a [`Refiner::Whole`], which
+    /// for such an array is the union [`Self::lower_type_array`] synthesizes: a branch of a category
+    /// the array omits meets it in nothing, and is excluded as the `allOf` spelling excludes it
+    /// (#677). The answer carries whether the sibling's own keywords say anything about `null`.
+    /// `None` where the sibling fails to lower, which has reported why.
     pub(super) fn lower_union_sibling(
         &mut self,
         schema: &Schema,
@@ -39,31 +41,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         sibling.any_of.clear();
         sibling.discriminator = None;
 
-        // Asked of the sibling's OWN keywords, and asked BEFORE the type array is deleted below.
-        // `type`, `enum`, `const`, `$ref` and `allOf` each state something about `null` — an `enum`
-        // either lists it or does not, a `$ref`'s target carries its own nullability. The object and
-        // array applicators (`properties`, `patternProperties`, `required`, `additionalProperties`,
-        // `items`, `prefixItems`) state nothing: in 2020-12 they are vacuously satisfied by every
-        // instance of another category, `null` included.
+        // Asked of the sibling's OWN keywords. `type`, `enum`, `const`, `$ref` and `allOf` each
+        // state something about `null` — an `enum` either lists it or does not, a `$ref`'s target
+        // carries its own nullability. The object and array applicators (`properties`,
+        // `patternProperties`, `required`, `additionalProperties`, `items`, `prefixItems`) state
+        // nothing: in 2020-12 they are vacuously satisfied by every instance of another category,
+        // `null` included.
         let speaks_about_null = !sibling.types.types.is_empty()
             || sibling.enum_values.is_some()
             || sibling.const_value.is_some()
             || sibling.reference.is_some()
             || !sibling.all_of.is_empty();
-        let declared_types_admit_null = sibling.types.types.contains(&JsonType::Null);
-
-        let non_null_types = sibling
-            .types
-            .types
-            .iter()
-            .filter(|kind| **kind != JsonType::Null)
-            .count();
-        // More than one non-null type has no single lowered representation, so the array is dropped
-        // for lowering. That is a lowering convenience, not a statement about the document.
-        let types_deleted = non_null_types > 1;
-        if types_deleted {
-            sibling.types.types.clear();
-        }
         if !schema_has_shape_constraint(&sibling) {
             return Some(None);
         }
@@ -74,25 +62,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // vacuous for the strings, and reading it as an object would drop that branch. Each set
         // refines the branches of its own category instead.
         //
-        // A multi-type array deleted above still says which categories the union admits, so it
-        // goes with them: the branches of the categories it omits are excluded as they would be
-        // against it.
-        if implied_applicator_category(&sibling).is_some() {
-            let admits_null = !types_deleted || declared_types_admit_null;
-            let allowed = types_deleted.then(|| CategoryMask::of(&schema.types.types));
-            let scoped = self.lower_scoped_refiners(&sibling, admits_null, allowed, hint)?;
+        // A multi-category `type` array beside them names no single category for them to take, so
+        // it is set apart and goes with them as the categories the union admits: the branches of
+        // the categories it omits are excluded as they would be against it.
+        let categories = multi_category_types(&sibling);
+        let mut applicators = sibling.clone();
+        if categories.is_some() {
+            applicators.types.types.clear();
+        }
+        if implied_applicator_category(&applicators).is_some() {
+            let admits_null = categories.is_none() || sibling.types.types.contains(&JsonType::Null);
+            let scoped = self.lower_scoped_refiners(&applicators, admits_null, categories, hint)?;
             return Some(Some(UnionSibling {
                 refiner: Refiner::Scoped(scoped),
                 speaks_about_null,
             }));
         }
-        let mut ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
-        if types_deleted {
-            // Restore the one piece of the deleted array that still has a faithful representation.
-            // Without this the lowered sibling reads as null-rejecting for an array that admitted
-            // null, and the union's acceptance is removed by a deletion the author never wrote.
-            ty.nullable = declared_types_admit_null;
-        }
+        let ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
         Some(Some(UnionSibling {
             refiner: Refiner::Whole(ty),
             speaks_about_null,
@@ -599,6 +585,67 @@ pub(super) fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCate
         (false, true) => Some(ImpliedCategory::Only(JsonType::Array)),
         (true, true) => Some(ImpliedCategory::Conflicting),
         (false, false) => None,
+    }
+}
+
+/// The categories `schema`'s `type` array names, where it names two or more non-null types: such
+/// an array has no single lowered category of its own.
+pub(super) fn multi_category_types(schema: &Schema) -> Option<CategoryMask> {
+    let non_null = schema
+        .types
+        .types
+        .iter()
+        .filter(|kind| **kind != JsonType::Null)
+        .count();
+    (non_null > 1).then(|| CategoryMask::of(&schema.types.types))
+}
+
+/// The categories of a multi-category `type` array ([`multi_category_types`]) that is the only
+/// shape-bearing keyword beside `schema`'s `oneOf`/`anyOf`: the sibling
+/// [`LowerCtx::lower_union_sibling`] lowers to the union the array synthesizes, and that constrains
+/// nothing but each branch's category and `null`.
+pub(super) fn union_sibling_is_categories_alone(schema: &Schema) -> Option<CategoryMask> {
+    let categories = multi_category_types(schema)?;
+    let mut rest = schema.clone();
+    rest.one_of.clear();
+    rest.any_of.clear();
+    rest.discriminator = None;
+    rest.types.types.clear();
+    (!schema_has_shape_constraint(&rest)).then_some(categories)
+}
+
+impl LowerCtx<'_, '_> {
+    /// Whether `member`, a union branch that is a bare `$ref` closing a reference cycle, is of a
+    /// category `allowed` admits, read from its target's own keywords: its non-null `type`s, or
+    /// the category its untyped object or array keywords establish. Beside a sibling that is a
+    /// multi-category `type` array alone ([`union_sibling_is_categories_alone`]) such a branch
+    /// meets the sibling in itself, so it is kept unmet rather than met with a target that is
+    /// still a reservation. A branch whose category cannot be read, or that `allowed` omits,
+    /// answers `false`, and is refused as a cycle-closing branch is beside any other sibling.
+    pub(super) fn cycle_branch_within(&self, member: &SchemaOr, allowed: CategoryMask) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        let Some(reference) = member.reference.as_deref() else {
+            return false;
+        };
+        let mut rest = member.as_ref().clone();
+        rest.reference = None;
+        if schema_has_shape_constraint(&rest) {
+            return false;
+        }
+        let Some(target) = self.ref_target_body(reference, &member.provenance) else {
+            return false;
+        };
+        let categories = if target.types.types.is_empty() {
+            match self.untyped_shape_category(&target, 0) {
+                Some(category) => CategoryMask::of(&[category]),
+                None => return false,
+            }
+        } else {
+            CategoryMask::of(&target.types.types)
+        };
+        categories.is_within(allowed)
     }
 }
 

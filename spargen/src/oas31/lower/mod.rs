@@ -664,6 +664,11 @@ impl CategoryMask {
     fn admits_besides(self, category: JsonCategory) -> bool {
         self.0 & !Self::bit(category) != 0
     }
+
+    /// Whether the set names a category, and only categories `outer` admits too.
+    fn is_within(self, outer: Self) -> bool {
+        self.0 != 0 && self.0 & !outer.0 == 0
+    }
 }
 
 /// What a [`Refiner::Scoped`] meeting found across the branches it visited: which halves reached
