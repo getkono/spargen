@@ -1312,7 +1312,7 @@ fn a_back_edge_only_through_content_schema_closes_no_cycle() {
         ),
     ];
     for (what, spec) in &cases {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
             assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
