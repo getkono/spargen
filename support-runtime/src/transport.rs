@@ -86,7 +86,6 @@ impl HttpBackend for ReqwestBackend {
 
 #[cfg(test)]
 mod tests {
-
     use std::sync::{Arc, Mutex};
 
     use reqwest::{Method, Request};

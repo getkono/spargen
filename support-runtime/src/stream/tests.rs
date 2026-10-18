@@ -231,8 +231,8 @@ fn well_formed_json_frame_deserializes() {
     assert_eq!(decoded.unwrap(), serde_json::json!({"a": 1}));
 }
 
-// A poll-once driver (noop waker, no async runtime) proving the async `next` await-loop threads
-// the pure framing correctly over an in-memory `reqwest::Response`.
+// The tests below drive the async `next` await-loop poll-once (noop waker, no async runtime),
+// proving it threads the pure framing correctly over an in-memory `reqwest::Response`.
 use crate::tests::poll_ready;
 
 fn response(body: &str) -> reqwest::Response {
