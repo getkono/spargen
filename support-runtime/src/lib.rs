@@ -27,10 +27,10 @@
 #![allow(clippy::result_large_err)]
 mod auth;
 // The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
-// dependency and is compiled only under the `blocking` feature. A generated client embeds this
-// module unconditionally but gates it on the same feature, so nothing tokio-related is referenced
-// unless the consumer opts in.
-#[cfg(feature = "blocking")]
+// dependency and is compiled only under the `blocking` feature on a non-`wasm32` target, the same
+// `cfg` a generated client gates its embedded copy on: nothing tokio-related is referenced unless
+// the consumer opts in, and a wasm build never reaches it.
+#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 mod blocking;
 mod client;
 // The RFC 3339 `DateTime`/`Date` newtypes pull in the optional `time` dependency, so they are
@@ -61,7 +61,7 @@ pub use auth::{
     AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
     TokenProvider,
 };
-#[cfg(feature = "blocking")]
+#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
 #[cfg(feature = "time")]
