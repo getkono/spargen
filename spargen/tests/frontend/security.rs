@@ -49,6 +49,56 @@ components:
 }
 
 #[test]
+fn an_http_authentication_scheme_matches_in_any_letter_case() {
+    // OpenAPI makes the `http` scheme's `scheme` value case-insensitive (RFC 9110), and
+    // `Bearer` is a common spelling. Matching only the lowercase literals rejected it with E012,
+    // so every spelling here must lower to the scheme its lowercase form names.
+    for (spelling, kind) in [
+        ("bearer", "Bearer"),
+        ("Bearer", "Bearer"),
+        ("BEARER", "Bearer"),
+        ("bEaReR", "Bearer"),
+        ("basic", "Basic"),
+        ("Basic", "Basic"),
+        ("BASIC", "Basic"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      security:
+        - token: []
+      responses:
+        "204": {{ description: No Content }}
+components:
+  securitySchemes:
+    token: {{ type: http, scheme: {spelling} }}
+"##
+        );
+        let report = check(&spec);
+        assert!(
+            !has_code(&report, Code::UnknownSecurityScheme),
+            "`{spelling}`: {report:#?}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{spelling}`: {report:#?}"
+        );
+        let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let attached = format!("name:\"token\",kind:support::AuthKind::{kind},");
+        assert!(
+            compact.contains(&attached),
+            "`{spelling}` must attach as `AuthKind::{kind}`:\n{code}"
+        );
+    }
+}
+
+#[test]
 fn e004_a_security_scheme_ref_that_cannot_be_followed_says_why() {
     // A security scheme `$ref` is followed one hop into this document's
     // `#/components/securitySchemes/`. Each way that fails used to share one message,
