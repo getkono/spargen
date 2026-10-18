@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use camino::Utf8PathBuf;
 
-use spargen::{ComponentKind, ConfigError, OmitMethod, OmitRule, Spec};
+use spargen::{ComponentKind, ConfigError, OmitMethod, OmitRule, Spec, UnknownOmitToken};
 
 use super::args::SpecArgs;
 
@@ -110,24 +110,19 @@ fn parse_pointer_flag(value: &str) -> OmitRule {
     }
 }
 
-/// Parse an omit HTTP method, mapping the shared `FromStr` error into a CLI-shaped one.
+/// Parse an omit HTTP method through the shared `FromStr`, whose error already names every
+/// accepted method.
 fn parse_method(method: &str) -> Result<OmitMethod, ConfigError> {
-    method.parse().map_err(|parse_error| {
-        error(format!(
-            "{parse_error}; expected one of get/put/post/delete/options/head/patch/trace/query"
-        ))
-    })
+    method
+        .parse()
+        .map_err(|parse_error: UnknownOmitToken| error(parse_error.to_string()))
 }
 
 /// Parse an omit component kind. Snake_case is canonical (it is what `omit!` writes), and the
 /// singular and camelCase OAS spellings are accepted so one rule reads the same everywhere.
 fn parse_component_kind(kind: &str) -> Result<ComponentKind, ConfigError> {
-    kind.parse().map_err(|parse_error| {
-        error(format!(
-            "{parse_error}; expected one of \
-             schemas/responses/parameters/request_bodies/headers/security_schemes/path_items/media_types"
-        ))
-    })
+    kind.parse()
+        .map_err(|parse_error: UnknownOmitToken| error(parse_error.to_string()))
 }
 
 fn error(message: String) -> ConfigError {

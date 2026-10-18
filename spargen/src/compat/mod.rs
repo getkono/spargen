@@ -458,6 +458,80 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn the_accepted_lists_name_each_variant_exactly_once() {
+        // The exhaustive matches stop compiling when a variant lands, so its canonical spelling
+        // cannot be left out of the list an `UnknownOmitToken` prints.
+        let kinds = [
+            ComponentKind::Schemas,
+            ComponentKind::Responses,
+            ComponentKind::Parameters,
+            ComponentKind::RequestBodies,
+            ComponentKind::Headers,
+            ComponentKind::SecuritySchemes,
+            ComponentKind::PathItems,
+            ComponentKind::MediaTypes,
+        ];
+        for kind in kinds {
+            match kind {
+                ComponentKind::Schemas
+                | ComponentKind::Responses
+                | ComponentKind::Parameters
+                | ComponentKind::RequestBodies
+                | ComponentKind::Headers
+                | ComponentKind::SecuritySchemes
+                | ComponentKind::PathItems
+                | ComponentKind::MediaTypes => {}
+            }
+        }
+        let parsed: Vec<ComponentKind> = ComponentKind::CANONICAL
+            .iter()
+            .map(|token| token.parse().unwrap())
+            .collect();
+        assert_eq!(parsed, kinds);
+
+        let methods = [
+            OmitMethod::Get,
+            OmitMethod::Put,
+            OmitMethod::Post,
+            OmitMethod::Delete,
+            OmitMethod::Options,
+            OmitMethod::Head,
+            OmitMethod::Patch,
+            OmitMethod::Trace,
+            OmitMethod::Query,
+        ];
+        for method in methods {
+            match method {
+                OmitMethod::Get
+                | OmitMethod::Put
+                | OmitMethod::Post
+                | OmitMethod::Delete
+                | OmitMethod::Options
+                | OmitMethod::Head
+                | OmitMethod::Patch
+                | OmitMethod::Trace
+                | OmitMethod::Query => {}
+            }
+        }
+        let parsed: Vec<OmitMethod> = OmitMethod::CANONICAL
+            .iter()
+            .map(|token| token.parse().unwrap())
+            .collect();
+        assert_eq!(parsed, methods);
+
+        assert_eq!(
+            "nope".parse::<ComponentKind>().unwrap_err().to_string(),
+            "unknown component kind: `nope`; expected one of schemas/responses/parameters/\
+             request_bodies/headers/security_schemes/path_items/media_types"
+        );
+        assert_eq!(
+            "nope".parse::<OmitMethod>().unwrap_err().to_string(),
+            "unknown HTTP method: `nope`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+    }
+
+    #[test]
     fn glob_matcher_semantics() {
         // Exact literals.
         assert!(glob_match("/pets", "/pets"));

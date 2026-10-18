@@ -45,7 +45,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::compat::{Omit, OmitRule};
+use crate::compat::{Omit, OmitRule, UnknownOmitToken};
 
 /// The default cap on bytes of a response body retained on generated error variants.
 pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
@@ -385,24 +385,18 @@ impl OmitToml {
         if let Some(component) = &self.component {
             let name = self.name.as_ref().ok_or("`component` requires a `name`")?;
             return Ok(OmitRule::Component {
-                kind: component.parse().map_err(|error| {
-                    format!(
-                        "{error}; expected one of \
-                         schemas/responses/parameters/request_bodies/headers/security_schemes"
-                    )
-                })?,
+                kind: component
+                    .parse()
+                    .map_err(|error: UnknownOmitToken| error.to_string())?,
                 name: name.clone().into(),
             });
         }
         if let Some(path) = &self.path {
             return match &self.method {
                 Some(method) => Ok(OmitRule::Operation {
-                    method: method.parse().map_err(|error| {
-                        format!(
-                            "{error}; expected one of \
-                             get/put/post/delete/options/head/patch/trace"
-                        )
-                    })?,
+                    method: method
+                        .parse()
+                        .map_err(|error: UnknownOmitToken| error.to_string())?,
                     path: path.clone().into(),
                 }),
                 None => Ok(OmitRule::Path {
