@@ -1668,6 +1668,55 @@ fn basic_spec_module_without_type_mapping_features_is_pinned() {
     insta::assert_snapshot!("basic_spec_module_no_features", module);
 }
 
+/// The variant names of the runtime enum `name`, read from the runtime source file `file` that the
+/// generated module embeds.
+fn runtime_enum_variants(file: &str, name: &str) -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/support/runtime")
+        .join(file);
+    let source = std::fs::read_to_string(&path).unwrap();
+    let open = format!("pub enum {name} {{\n");
+    let start = source
+        .find(&open)
+        .unwrap_or_else(|| panic!("{path:?} declares `{name}`"))
+        + open.len();
+    let body = &source[start..start + source[start..].find("\n}").unwrap()];
+    let variants: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.starts_with('#'))
+        .map(|line| {
+            line.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert!(!variants.is_empty(), "`{name}` has no variants in {path:?}");
+    variants
+}
+
+/// Every `support::AuthKind` and every `support::Framing` the runtime declares is emitted by
+/// [`BASIC_SPEC`] or [`OAS32_SPEC`], the two specs whose fixture crates
+/// `generated_module_compiles_in_basic_oas31_crate` and
+/// `generated_module_compiles_in_oas32_crate_with_query_method` hold to `cargo check` and
+/// `cargo clippy -D warnings`. A variant neither emits is generated code no gate compiles: extend
+/// one of the specs until it emits it.
+#[test]
+fn the_compiled_specs_emit_every_auth_kind_and_stream_framing() {
+    let emitted =
+        basic_spec_module(|spec| spec) + &spec_module("openapi.yaml", OAS32_SPEC, |spec| spec);
+    for (file, name) in [("auth.rs", "AuthKind"), ("stream.rs", "Framing")] {
+        for variant in runtime_enum_variants(file, name) {
+            let path = format!("support::{name}::{variant}");
+            assert!(
+                emitted.contains(&format!("{path},")) || emitted.contains(&format!("{path}(")),
+                "no compiled e2e spec emits `{path}`"
+            );
+        }
+    }
+}
+
 /// `value` as JSON text, keeping YAML's key order — `serde_json::Map` would sort the keys, and
 /// document order is what orders the emitted items.
 fn yaml_as_json(value: &yaml_rust2::Yaml, out: &mut String) {
@@ -3328,7 +3377,15 @@ fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
         serde_json::to_value(ambiguous),
         "OneOverlap serializing a value both branches accept",
     );
-    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""other""#).is_ok());
+    // A value only the broad branch accepts decodes as that branch, carrying the value.
+    let other: basic_client::types::OneOverlap = serde_json::from_str(r#""other""#).unwrap();
+    assert!(
+        matches!(
+            &other,
+            basic_client::types::OneOverlap::OneOverlapVariant0(inner) if inner.as_str() == "other"
+        ),
+        "{other:?}"
+    );
 }
 
 #[test]
@@ -4528,8 +4585,7 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
         "streaming operation should emit a client method"
     );
     assert!(
-        flat.contains("support :: EventStream < types :: AdminEvent >")
-            || flat.contains("support::EventStream<types::AdminEvent>"),
+        flat.contains("support::EventStream<types::AdminEvent>"),
         "SSE contentSchema must type EventStream as the JSON payload: {flat}"
     );
 
@@ -6734,6 +6790,18 @@ paths:
             text/event-stream:
               itemSchema:
                 $ref: "#/components/schemas/SseEnvelope"
+  # An `itemSchema` whose `data` carries no JSON content schema types each item as the whole
+  # event, so the stream decodes with `support::Framing::SseEvent` rather than `SseJsonData`.
+  /events/raw:
+    get:
+      operationId: streamRawEvents
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseTextEvent"
   # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
   # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
   # response is a discriminated union with `defaultMapping` — three constructs that each emit code
@@ -6777,6 +6845,12 @@ components:
             $ref: "#/components/schemas/AdminEvent"
         id: { type: [string, "null"] }
         retry: { type: [integer, "null"] }
+    SseTextEvent:
+      type: object
+      required: [data]
+      properties:
+        event: { type: string }
+        data: { type: string }
     AdminEvent:
       type: object
       required: [kind]
@@ -7117,12 +7191,16 @@ components:
         "{:#?}",
         preview.report
     );
-    // The requirement set really did include both crates: the module uses them. `mod stream` is
-    // embedded only for a sequential response (the word `EventStream` alone rides in doc comments
-    // every module carries), and `Uuid` appears only through the `format: uuid` mapping.
+    // The requirement set really did include both crates: the module uses them. The `stream`
+    // module is embedded only for a sequential response, and `Event`'s `id` field type is an alias
+    // of the `format: uuid` mapping. Each assertion names the emitted item: the bare words `stream`, `EventStream` and
+    // `uuid::Uuid` also ride in the runtime's doc comments, which every module carries.
     let generated = preview.contents.expect("generated module");
-    assert!(generated.contains("mod stream"), "{generated}");
-    assert!(generated.contains("Uuid"), "{generated}");
+    assert!(generated.contains("mod stream {"), "{generated}");
+    assert!(
+        generated.contains("pub type Eventid = uuid::Uuid;"),
+        "{generated}"
+    );
     // The root is part of the input set — an edit there changes what the audit sees.
     assert!(
         preview
@@ -9002,11 +9080,15 @@ fn the_ref_sibling_spelling_opens_and_a_value_spelled_other_keeps_its_name() {
 #[test]
 fn a_union_and_a_component_stay_closed() {
     // Each union variant still refuses the other's type, so exactly one matches...
-    assert!(decode(
+    let b = decode(
         PostProblemsError::Status400,
         r#"{"type":"https://example.com/probs/b","title":"t"}"#,
     )
-    .is_ok());
+    .expect("the variant listing `b` decodes it");
+    assert_eq!(
+        format!("{b:?}"),
+        r#"ResponseBodyVariant1(ResponseBodyVariant1 { type: HttpsExampleComProbsB, title: "t", detail: None })"#
+    );
     // ...and a type neither lists matches neither.
     assert_refused(
         decode(
@@ -9194,8 +9276,15 @@ fn a_ref_member_of_untyped_array_applicators_keeps_its_narrowing_closed() {
         !module.contains(catch_all),
         "the `$ref` member stays closed:\n{module}"
     );
+    // The body's items are exactly the closed `[a, b]` enum: the embedded runtime declares enums
+    // and unit variants of its own, so the items' type is asserted by name.
     assert!(
-        module.contains("pub enum") && module.contains("    A,") && module.contains("    B,"),
+        module.contains("pub type ResponseBody = Vec<ResponseBodyMember1ConstraintItem>;")
+            && module.contains(
+                "pub enum ResponseBodyMember1ConstraintItem {\n        \
+                 #[serde(rename = \"a\")]\n        A,\n        \
+                 #[serde(rename = \"b\")]\n        B,\n    }"
+            ),
         "the `$ref` member still narrows the items to `[a, b]`:\n{module}"
     );
 }
