@@ -6,8 +6,8 @@ use crate::ir::{
     BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle, PropertyEncoding, Ty, TypeKind,
 };
 use crate::oas31::media::{
-    classify_media, first_list_element, media_essence, media_type_is_well_formed,
-    media_type_with_parameters, ParameterFault,
+    classify_media, first_list_element, is_field_name, is_field_value, media_essence,
+    media_type_is_well_formed, media_type_with_parameters, ParameterFault,
 };
 use crate::oas31::{EncodingObject, MediaTypeObject, RefOr, Schema};
 
@@ -114,7 +114,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (name, field_ty) in fields {
             let declared = object.encoding.get(&name);
             let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
-            let headers = self.encoding_headers(declared, media, &name);
+            let headers = self.encoding_headers(declared, media, &name)?;
             properties.push(PropertyEncoding {
                 name,
                 mode,
@@ -437,17 +437,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
     /// through `const`, or `default` in its absence — gives a client something to send.
+    ///
+    /// What is sent is held to RFC 9110: a name that is not a `token`, or a pinned literal that
+    /// is not a field value, is refused (`E009`), so `None` is returned once every such header
+    /// has been reported.
     fn encoding_headers(
         &mut self,
         declared: Option<&EncodingObject>,
         media: MediaType,
         name: &str,
-    ) -> Vec<(String, String)> {
+    ) -> Option<Vec<(String, String)>> {
         let Some(encoding) = declared else {
-            return Vec::new();
+            return Some(Vec::new());
         };
         if encoding.headers.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         if media != MediaType::Multipart {
             // W011 case: encoding-headers-non-multipart
@@ -456,9 +460,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     "`encoding.{name}.headers` applies only to `multipart` content"
                 ))
                 .emit(self.diags);
-            return Vec::new();
+            return Some(Vec::new());
         }
         let mut headers = Vec::new();
+        let mut refused = false;
         for (header_name, header) in &encoding.headers {
             // `Content-Type` is described by `contentType`, not here.
             if header_name.eq_ignore_ascii_case("content-type") {
@@ -484,6 +489,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 },
             };
             match literal {
+                // The pair is sent verbatim as a part header, so a name or value the HTTP field
+                // grammar refuses would otherwise generate and fail, or be dropped, only when a
+                // request is built.
+                Some(_) if !is_field_name(header_name) => {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers` names `{}`, which is not an HTTP field \
+                             name: RFC 9110 § 5.1 requires a token, one or more letters, \
+                             digits, or characters among !#$%&'*+-.^_`|~",
+                            header_name.escape_debug()
+                        ))
+                        .remedy("rename the header, or omit this API segment with spargen::omit!")
+                        .emit(self.diags);
+                    refused = true;
+                }
+                Some(value) if !is_field_value(&value) => {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers.{header_name}` pins `{}`, which is not an \
+                             HTTP field value: RFC 9110 § 5.5 admits no control character and no \
+                             leading or trailing whitespace",
+                            value.escape_debug()
+                        ))
+                        .remedy(
+                            "pin a value of visible characters, with spaces or tabs only between \
+                             them",
+                        )
+                        .emit(self.diags);
+                    refused = true;
+                }
                 Some(value) => headers.push((header_name.clone(), value)),
                 None => {
                     // W011 case: encoding-header-no-value
@@ -497,7 +532,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
-        headers
+        (!refused).then_some(headers)
     }
 
     /// The literal value a header schema pins, if any.

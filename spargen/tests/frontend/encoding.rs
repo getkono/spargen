@@ -1161,6 +1161,163 @@ paths:
     }
 }
 
+/// An `encoding.headers` entry that pins a literal is sent as a part header, so its name must be
+/// an RFC 9110 § 5.6.2 token and its literal an RFC 9110 § 5.5 field value. The generated client
+/// once skipped a header whose name or value its HTTP stack refused, on every request, with
+/// nothing reported at generation or at call time. Each case below is now `E009`.
+#[test]
+fn e009_an_encoding_header_that_is_not_an_http_field_is_unsupported() {
+    let cases = [
+        // A space is no `tchar`.
+        ("Bad Name", r#""1""#),
+        // `:` would end the field name on the wire.
+        ("X-A:B", r#""1""#),
+        // A control character is no `field-vchar`.
+        ("X-Part", r#""a\u0001b""#),
+        // A line break would end the field.
+        ("X-Part", r#""a\nb""#),
+        // DEL is no `field-vchar` either.
+        ("X-Part", r#""a\u007fb""#),
+        // A field value neither begins nor ends with whitespace.
+        ("X-Part", r#"" padded""#),
+        ("X-Part", r#""padded\t""#),
+    ];
+    for (name, literal) in cases {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: {{ type: string }}
+            encoding:
+              file:
+                headers:
+                  "{name}":
+                    schema: {{ type: string, const: {literal} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{name}: {literal}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "{name}: {literal}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The field-name rule admits every `tchar` (RFC 9110 § 5.6.2), and the field-value rule what
+/// RFC 9110 § 5.5 does: interior spaces and tabs, every visible ASCII character (0x21 through
+/// 0x7E, the non-`tchar` delimiters among them), and `obs-text` (bytes above 0x7F, here UTF-8).
+/// Each generates.
+#[test]
+fn an_encoding_header_that_is_an_http_field_generates() {
+    // Every `tchar`: the fifteen punctuation characters, then digits and letters.
+    let name = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    // Every visible ASCII character, as a YAML double-quoted scalar.
+    let visible: String = (0x21u8..=0x7e)
+        .map(char::from)
+        .map(|c| match c {
+            '"' | '\\' => format!("\\{c}"),
+            c => c.to_string(),
+        })
+        .collect();
+    for literal in [
+        r#""a b\tc""#.to_owned(),
+        format!("\"{visible}\""),
+        r#""café""#.to_owned(),
+        "7".to_owned(),
+        "true".to_owned(),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: {{ type: string }}
+            encoding:
+              file:
+                headers:
+                  "{name}":
+                    schema: {{ const: {literal} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{literal}: {report:#?}"
+        );
+        assert!(code.contains(name), "{literal}: {code}");
+    }
+}
+
+/// Every offending header of one property is reported, not only the first, so one generation
+/// names every header the author must fix before the body is refused.
+#[test]
+fn e009_every_encoding_header_that_is_not_an_http_field_is_reported() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string }
+            encoding:
+              file:
+                headers:
+                  "Bad Name":
+                    schema: { type: string, const: "1" }
+                  X-Part:
+                    schema: { type: string, const: "a\nb" }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_with_code(&report, Code::UnsupportedMediaType);
+        assert_eq!(messages.len(), 2, "{report:#?}");
+        assert!(
+            messages.iter().any(|m| m.contains("Bad Name")),
+            "{messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("headers.X-Part")),
+            "{messages:#?}"
+        );
+    }
+}
+
 // --- Media Type Object dispositions outside the request body -------------------------------
 //
 // `resolve_media_object` is the seam every Media Type Object passes through. Before these

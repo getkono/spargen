@@ -163,6 +163,48 @@ pub(super) fn first_list_element(list: &str) -> &str {
     list.trim()
 }
 
+/// An RFC 9110 § 5.6.2 `tchar`.
+fn tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// Whether `name` is an RFC 9110 § 5.1 field name: a `token`, one or more `tchar`.
+pub(super) fn is_field_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(tchar)
+}
+
+/// Whether `value` is an RFC 9110 § 5.5 field value: `field-vchar` (visible ASCII or `obs-text`,
+/// any byte above 0x7F) with spaces and tabs only between two of them.
+///
+/// Every value this admits is one the generated client's `HeaderValue::try_from` accepts too,
+/// which refuses only control characters other than a tab, and DEL.
+pub(super) fn is_field_value(value: &str) -> bool {
+    let vchar = |byte: u8| byte.is_ascii_graphic() || byte >= 0x80;
+    let bytes = value.as_bytes();
+    bytes
+        .iter()
+        .all(|&byte| vchar(byte) || matches!(byte, b' ' | b'\t'))
+        && bytes.first().is_none_or(|&byte| vchar(byte))
+        && bytes.last().is_none_or(|&byte| vchar(byte))
+}
+
 /// Why a media type's parameter list cannot be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ParameterFault {
@@ -183,26 +225,6 @@ pub(super) enum ParameterFault {
 /// dropped, since the multipart transport's parser refuses whitespace before a `;` and an empty
 /// parameter, both of which RFC 9110 admits.
 pub(super) fn media_type_with_parameters(media: &str) -> Result<String, ParameterFault> {
-    fn tchar(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-    }
     fn ows(bytes: &[u8], mut at: usize) -> usize {
         while matches!(bytes.get(at), Some(b' ' | b'\t')) {
             at += 1;

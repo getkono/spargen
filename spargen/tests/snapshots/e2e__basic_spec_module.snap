@@ -9418,6 +9418,15 @@ Response `409`: Conflict*/
         part = part
             .mime_str("text/plain")
             .map_err(support::Error::request_construction)?;
+        let mut part_headers = reqwest::header::HeaderMap::new();
+        part_headers
+            .insert(
+                reqwest::header::HeaderName::try_from("X-Part-Kind")
+                    .map_err(support::Error::request_construction)?,
+                reqwest::header::HeaderValue::try_from("caption text")
+                    .map_err(support::Error::request_construction)?,
+            );
+        part = part.headers(part_headers);
         form = form.part("caption", part);
         if let Some(value) = &body.count {
             let mut part = reqwest::multipart::Part::text(value.to_string());
