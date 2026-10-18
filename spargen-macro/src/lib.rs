@@ -903,10 +903,13 @@ paths:
         let lock = scratch.write("spargen.lock", "version = 1\n");
         scratch.write("spargen.toml", "carve = false\n");
         let requirements = spargen::requirements(&Spec::new(spec.clone())).unwrap();
+        // `[workspace]` makes the fixture its own workspace root, so the audit's walk upward for
+        // one stops here instead of reading an ancestor manifest above the temporary directory.
         let manifest = scratch.write(
             "Cargo.toml",
             &format!(
-                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{}",
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [workspace]\n\n{}",
                 requirements.manifest_block()
             ),
         );
