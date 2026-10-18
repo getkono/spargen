@@ -338,6 +338,59 @@ fn every_fixture_bounds_its_walk_by_its_own_sandbox() {
 }
 
 #[test]
+fn the_build_script_manifest_is_the_manifest_path_else_cargo_toml_in_the_manifest_dir() {
+    use std::env::VarError::{NotPresent, NotUnicode};
+    let path = || Ok("/work/client/Cargo.toml".to_owned());
+    let directory = || Ok("/work/other".to_owned());
+    // `CARGO_MANIFEST_PATH` wins whenever it is set.
+    assert_eq!(
+        manifest_from(path(), directory()),
+        Some(Utf8PathBuf::from("/work/client/Cargo.toml"))
+    );
+    assert_eq!(
+        manifest_from(path(), Err(NotPresent)),
+        Some(Utf8PathBuf::from("/work/client/Cargo.toml"))
+    );
+    // Otherwise `Cargo.toml` inside `CARGO_MANIFEST_DIR`, and with neither, nothing.
+    assert_eq!(
+        manifest_from(Err(NotPresent), directory()),
+        Some(Utf8PathBuf::from("/work/other/Cargo.toml"))
+    );
+    assert_eq!(manifest_from(Err(NotPresent), Err(NotPresent)), None);
+    assert_eq!(
+        manifest_from(Err(NotPresent), Err(NotUnicode("/work/\u{fffd}".into()))),
+        None
+    );
+}
+
+#[test]
+fn a_non_utf8_manifest_path_falls_back_to_the_manifest_dir() {
+    // The first edge case `manifest_from_env` documents: a value that is not UTF-8 counts as
+    // unset, so the directory is used silently rather than reported.
+    let not_unicode = || Err(std::env::VarError::NotUnicode("/work/\u{fffd}".into()));
+    assert_eq!(
+        manifest_from(not_unicode(), Ok("/work/client".to_owned())),
+        Some(Utf8PathBuf::from("/work/client/Cargo.toml"))
+    );
+    assert_eq!(manifest_from(not_unicode(), not_unicode()), None);
+}
+
+#[test]
+fn an_empty_manifest_variable_is_taken_as_given() {
+    // The second documented edge case: an empty `CARGO_MANIFEST_PATH` names the empty path (and
+    // still wins over the directory), and an empty `CARGO_MANIFEST_DIR` names a relative
+    // `Cargo.toml`.
+    assert_eq!(
+        manifest_from(Ok(String::new()), Ok("/work/client".to_owned())),
+        Some(Utf8PathBuf::new())
+    );
+    assert_eq!(
+        manifest_from(Err(std::env::VarError::NotPresent), Ok(String::new())),
+        Some(Utf8PathBuf::from("Cargo.toml"))
+    );
+}
+
+#[test]
 fn a_manifest_path_with_a_line_break_is_never_written_as_a_directive() {
     // Deleting the guard left the whole suite green (#202). Written out, the text after the
     // break would reach Cargo as a directive of its own, so a crafted directory name could
