@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
 
@@ -18,6 +18,10 @@ pub(crate) struct TypeGraph {
     defs: IndexMap<TypeId, TypeDef>,
     /// The definitions [`elide`](Self::elide) withheld from the output.
     elided: BTreeSet<TypeId>,
+    /// The XML element name a struct serializes as at the root of an XML body, from the root
+    /// `xml.name` of the schema it was lowered from (see
+    /// [`set_xml_root_name`](Self::set_xml_root_name)).
+    xml_root_names: BTreeMap<TypeId, String>,
 }
 
 impl TypeGraph {
@@ -85,6 +89,25 @@ impl TypeGraph {
     pub(crate) fn elide(&mut self, id: TypeId) {
         debug_assert!(self.defs.contains_key(&id), "elide of an absent id");
         self.elided.insert(id);
+    }
+
+    /// Name the XML element the struct at `id` serializes as when it is the root of an XML body:
+    /// codegen emits it as a serde container `rename`, which quick-xml takes as the root element's
+    /// name. Every other serde format the generated client uses ignores a struct's name, so unlike
+    /// a field's [`XmlField`] rename this changes no non-XML wire. Set only after lowering, once
+    /// ids are final.
+    pub(crate) fn set_xml_root_name(&mut self, id: TypeId, name: String) {
+        debug_assert!(
+            matches!(self.get(id).map(|def| &def.kind), Some(TypeKind::Struct(_))),
+            "an XML root name on a definition that is not a struct"
+        );
+        self.xml_root_names.insert(id, name);
+    }
+
+    /// The XML root element name [`set_xml_root_name`](Self::set_xml_root_name) gave the struct at
+    /// `id`, if any.
+    pub(crate) fn xml_root_name(&self, id: TypeId) -> Option<&str> {
+        self.xml_root_names.get(&id).map(String::as_str)
     }
 
     /// Whether the definition at `id` is withheld from the output (see [`elide`](Self::elide)).
@@ -658,20 +681,23 @@ pub(crate) struct Field {
     pub(crate) undeclared: bool,
 }
 
-/// The supported XML representation hints for a struct field, lowered from the OpenAPI `xml` object.
-/// Only `name` (element/attribute rename) and `attribute` (serialize as an XML attribute) are
-/// honored; unsupported hints (namespace/prefix/wrapped arrays) are reported as `W006` during
-/// lowering and otherwise ignored. Applied via serde `rename` at emit time — attributes use
-/// quick-xml's `@name` convention.
+/// The XML representation hints for a struct field, lowered from the property's OpenAPI `xml`
+/// object and, for an array property, its `items`' one. Only `name` (element/attribute rename) and
+/// `attribute` (serialize as an XML attribute) are honored, applied via serde `rename` at emit
+/// time — attributes use quick-xml's `@name` convention. Every other hint is kept in `unsupported`
+/// and reported after lowering, as `E009` on a type serialized as XML and `W006` elsewhere.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct XmlField {
-    /// `xml.name`: the wire element (or attribute) name, overriding the property name.
+    /// The wire element (or attribute) name, overriding the property name: the property's
+    /// `xml.name`, or for an array property, whose items are emitted directly under the parent,
+    /// its `items`' `xml.name`.
     pub(crate) name: Option<String>,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub(crate) attribute: bool,
     /// XML hints that change the wire but have no faithful mapping — `namespace`, `prefix`,
-    /// `wrapped`, and the 3.2 node types other than `element`/`attribute`. Their disposition
+    /// `wrapped`, and the 3.2 node types other than `element`/`attribute` — each spelled as the
+    /// key it was written under, with an `items.` prefix for one on the items. Their disposition
     /// depends on whether the owning type is ever serialized as XML, which is only known once the
     /// whole type graph exists, so it is decided after lowering.
     pub(crate) unsupported: Vec<String>,

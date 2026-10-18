@@ -8,6 +8,7 @@ use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlFie
 use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::undeclared_required;
+use super::xml::field_xml;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -25,10 +26,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let required = schema.required.iter().cloned().collect::<HashSet<_>>();
         let mut fields = Vec::new();
         for (name, child) in &schema.properties {
+            self.claim_field_xml(child);
             let ty = self.lower_schema_or(child, &format!("{hint}{name}"))?;
             let is_required = required.contains(name);
             let default = self.field_default(child, ty, is_required);
-            let xml = self.field_xml(child);
+            let xml = field_xml(child);
             let (deprecated, read_only, write_only) = field_flags(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },

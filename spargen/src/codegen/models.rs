@@ -166,6 +166,12 @@ fn emit_type_def(
         TypeKind::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
+            // A root `xml.name` names the element quick-xml writes for this struct at the root of
+            // an XML body. serde hands a struct's (renamed) name to the serializer, and only
+            // quick-xml reads it, so this changes no other wire.
+            let xml_root = types
+                .xml_root_name(id)
+                .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
                 .iter()
@@ -189,6 +195,7 @@ fn emit_type_def(
                 #docs
                 #deprecated
                 #[derive(Debug, Clone, Serialize, Deserialize)]
+                #xml_root
                 #deny_unknown
                 pub struct #ident {
                     #(#fields)*

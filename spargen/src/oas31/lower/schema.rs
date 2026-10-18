@@ -103,6 +103,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !schema_has_shape_constraint(&sibling) {
                 // No shape to compose, so a cycle-closing reference here is the ordinary recursive
                 // schema: it boxes and generates. Only the intersection below needs a real target.
+                self.record_ref_xml(schema, referenced.id);
                 return Some(referenced);
             }
             // Whether this `$ref` closes a reference cycle back through a schema whose lowering
@@ -672,8 +673,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Insert the definition `schema` lowered to, located at `schema`, and read its `xml` object as
+    /// the schema's root ([`Self::record_root_xml`]).
     pub(super) fn insert_schema_type(&mut self, schema: &Schema, hint: &str, kind: TypeKind) -> Ty {
-        self.insert_type(
+        let ty = self.insert_type(
             hint,
             kind,
             Docs {
@@ -683,7 +686,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ..Docs::default()
             },
             Some(schema.provenance.clone()),
-        )
+        );
+        if let Some(hints) = &schema.xml {
+            self.record_root_xml(schema, hints);
+        }
+        ty
     }
 
     pub(super) fn insert_type(

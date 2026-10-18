@@ -956,7 +956,7 @@ components:
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
         assert!(
-            code.contains(r#"#[serde(rename = "animal""#),
+            code.contains(r#"rename = "animal","#),
             "{array_name}: {code}"
         );
         assert!(!code.contains("aliens"), "{array_name}: {code}");
@@ -1007,6 +1007,92 @@ paths:
             );
         }
     }
+}
+
+/// An `xml` object beside a bare `$ref` names the referenced type's element at one use, but that
+/// type is shared with every other use, so no rename can honour it: `E009` on an XML body (here the
+/// specification's own "named root element set at the point of use" example and its 3.1 spelling),
+/// and on a component alias, whose `$ref` resolves to the same shared type.
+#[test]
+fn e009_an_xml_name_beside_a_bare_ref_is_rejected() {
+    for (version, schema, alias) in [
+        (
+            "3.2.0",
+            "{ $ref: '#/components/schemas/Documentation', xml: { nodeType: element, name: StoredDocument } }",
+            "",
+        ),
+        (
+            "3.1.0",
+            "{ $ref: '#/components/schemas/Documentation', xml: { name: StoredDocument } }",
+            "",
+        ),
+        (
+            "3.1.0",
+            "{ $ref: '#/components/schemas/Stored' }",
+            "Stored: { $ref: '#/components/schemas/Documentation', xml: { name: StoredDocument } }",
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /docs:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema: {schema}
+components:
+  schemas:
+    {alias}
+    Documentation:
+      type: object
+      properties:
+        content: {{ type: string }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedMediaType);
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("`name`") && m.contains("beside a `$ref`")),
+                "{schema}: {report:#?}"
+            );
+        }
+    }
+    // Under a JSON body nothing is serialized as XML, so the same hint only warns.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /docs:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Documentation', xml: { name: StoredDocument } }
+components:
+  schemas:
+    Documentation:
+      type: object
+      properties:
+        content: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::XmlHintIgnored)
+            .iter()
+            .any(|m| m.contains("beside a `$ref`")),
+        "{report:#?}"
+    );
 }
 
 /// The same `items` hint where no XML body reaches the list warns instead.

@@ -3586,6 +3586,9 @@ fn xml_body_types_carry_attribute_and_rename() {
     let xml = quick_xml::se::to_string(&order).unwrap();
     assert!(xml.contains("id=\"42\""), "{xml}");
     assert!(xml.contains("<sku>ABC</sku>"), "{xml}");
+    // The root `xml.name` names the body's root element, in place of the Rust type's name.
+    assert!(xml.starts_with("<order "), "{xml}");
+    assert!(xml.ends_with("</order>"), "{xml}");
 
     let receipt: basic_client::types::XmlReceipt =
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
@@ -3615,6 +3618,8 @@ fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     assert!(back.contains(r#""sku":"Z9""#), "{back}");
     assert!(!back.contains("@id"), "{back}");
     assert!(!back.contains("ProductSku"), "{back}");
+    // `JsonMeta`'s root `xml.name` is a container rename, which serde_json never reads.
+    assert_eq!(back, r#"{"id":5,"sku":"Z9"}"#);
 }
 
 #[test]
@@ -6525,9 +6530,11 @@ components:
       properties:
         delta:
           type: string
-    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element.
+    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element, and the
+    # root `xml.name` names the element the body serializes as (a serde container rename).
     XmlOrder:
       type: object
+      xml: { name: order }
       required: [id, sku]
       properties:
         id:
@@ -6549,9 +6556,11 @@ components:
     # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
     # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
-    # hint genuinely has no effect, so it warns rather than rejecting.
+    # hint genuinely has no effect, so it warns rather than rejecting. Its root `xml.name` is
+    # applied all the same: a container rename reaches no JSON wire.
     JsonMeta:
       type: object
+      xml: { name: meta }
       required: [id, sku]
       properties:
         id:

@@ -6231,6 +6231,7 @@ pub mod types {
     }
     pub type ChatChunkdelta = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "order")]
     pub struct XmlOrder {
         #[serde(rename = "@id")]
         pub id: XmlOrderid,
@@ -6254,6 +6255,7 @@ pub mod types {
     pub type XmlReceiptcode = String;
     pub type XmlReceiptnote = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "meta")]
     pub struct JsonMeta {
         #[serde(rename = "id")]
         pub id: JsonMetaid,
