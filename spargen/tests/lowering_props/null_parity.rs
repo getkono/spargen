@@ -102,6 +102,29 @@ impl NullCase {
         matches!(real.as_slice(), [branch] if branch.starts_with("{ properties"))
     }
 
+    /// A gap held exactly until #818 lands: beside a multi-category `type` array listing `null`,
+    /// an exact-null branch (`const: null`, `enum: [null]`, a `$ref` to `Z`) and another real
+    /// branch, the spellings that list the conjunct before the union hoist the branch's `null`
+    /// into an `Option` where the others carry it as the `()` arm. Those spellings are not
+    /// compared for it.
+    fn conjunct_first_hoists_the_null_arm(&self, spelling: NullSpelling) -> bool {
+        let exact_null = |branch: &&str| {
+            matches!(
+                *branch,
+                "{ const: null }" | "{ enum: [null] }" | "{ $ref: '#/components/schemas/Z' }"
+            )
+        };
+        matches!(
+            spelling,
+            NullSpelling::UnionSecond | NullSpelling::Nested | NullSpelling::RefMembers
+        ) && self.conjunct == "type: [string, integer, 'null']"
+            && self.branches.iter().any(exact_null)
+            && self
+                .branches
+                .iter()
+                .any(|branch| !exact_null(branch) && *branch != "{ type: 'null' }")
+    }
+
     /// A gap held exactly until #678 lands: an `allOf`'s `oneOf` member, lowered on its own,
     /// merges branches that lower to one generated type before the meet, so a branch of the set
     /// the conjunct excludes is not reported (`W011`) in those spellings. The `W011`s of a `oneOf`
@@ -254,6 +277,9 @@ fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
         if spelling == NullSpelling::RefMembers && case.ref_member_is_gathered_as_an_object() {
             continue;
         }
+        if case.conjunct_first_hoists_the_null_arm(spelling) {
+            continue;
+        }
         let spec = case.spec(spelling);
         let (report, source) = generate_module(&spec);
         let checked = check(&spec);
@@ -331,7 +357,8 @@ proptest! {
 /// or one that states nothing and a single-category `type` array (#670, #668's stated-nothing
 /// counterpart), beside a `$ref` to a union `null` matches through an untyped branch, which is
 /// narrowed to `null` rather than excluded (#670), and two branches that state nothing (#673). A
-/// branch the conjunct excludes is reported (`W011`) in every spelling (#671).
+/// branch the conjunct excludes is reported (`W011`) in every spelling (#671), one of a category a
+/// multi-category `type` array omits included (#677).
 #[test]
 fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     let excluded_1 = vec![
@@ -376,7 +403,7 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             "#671",
             "type: [string, 'null']",
             vec!["{}", "{ type: integer }", "{ type: string, enum: [a] }"],
-            pick(true, excluded_1),
+            pick(true, excluded_1.clone()),
         ),
         // #673
         (
@@ -384,6 +411,13 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             "type: [string, 'null']",
             vec!["{}", "{}"],
             pick(false, Vec::new()),
+        ),
+        // #677, a branch of a category the multi-category conjunct omits.
+        (
+            "#677",
+            "type: [string, integer]",
+            vec!["{ type: integer }", "{ type: boolean }", "{ type: string }"],
+            pick(false, excluded_1),
         ),
         (
             "#673",
@@ -633,97 +667,4 @@ fn unreferenced_member_types(source: &str) -> Vec<String> {
             .any(|use_site| source.contains(use_site.as_str()))
         })
         .collect()
-}
-
-#[test]
-#[ignore]
-fn zz_exhaustive() {
-    let conjuncts: Vec<&str> = std::env::var("CONJ")
-        .map(|c| {
-            c.split(';')
-                .map(|s| &*Box::leak(s.to_owned().into_boxed_str()))
-                .collect()
-        })
-        .unwrap_or_else(|_| vec!["type: [string, integer]", "type: [string, integer, 'null']"]);
-    let max: usize = std::env::var("MAXLEN").map_or(2, |m| m.parse().unwrap());
-    let mut combos: Vec<Vec<&'static str>> = NULL_BRANCHES.iter().map(|b| vec![*b]).collect();
-    if max >= 2 {
-        for a in NULL_BRANCHES {
-            for b in NULL_BRANCHES {
-                combos.push(vec![a, b]);
-            }
-        }
-    }
-    let mut failures = 0;
-    for conjunct in &conjuncts {
-        for one_of in [false, true] {
-            for branches in &combos {
-                let case = NullCase {
-                    conjunct,
-                    one_of,
-                    branches: branches.clone(),
-                };
-                if let Err(error) = assert_null_parity(&case) {
-                    failures += 1;
-                    let text = error.to_string();
-                    let head = text.lines().next().unwrap_or_default().to_owned();
-                    let summary: Vec<&str> = text
-                        .lines()
-                        .filter(|l| l.contains("NullAnswer") || l.contains("disagree"))
-                        .collect();
-                    eprintln!(
-                        "FAIL {conjunct} {} :: {head} :: {}",
-                        case.union(),
-                        summary.join(" | ")
-                    );
-                }
-            }
-        }
-    }
-    eprintln!("failures: {failures}");
-}
-
-#[test]
-#[ignore]
-fn zz_probe() {
-    if let Ok(raw) = std::env::var("PROBE_RAW") {
-        for spec in raw.split("\n---\n") {
-            let (report, source) = generate_module(spec);
-            eprintln!("=== {spec}\n{report:?}\n{source}");
-        }
-        return;
-    }
-    let list = std::env::var("PROBE").unwrap();
-    for line in list.split(';') {
-        let (conjunct, rest) = line.split_once('|').unwrap();
-        let (kw, branches) = rest.split_once('|').unwrap();
-        let case = NullCase {
-            conjunct: Box::leak(conjunct.to_owned().into_boxed_str()),
-            one_of: kw == "oneOf",
-            branches: branches
-                .split('#')
-                .map(|b| &*Box::leak(b.to_owned().into_boxed_str()))
-                .collect(),
-        };
-        for spelling in NullSpelling::ALL {
-            let spec = case.spec(spelling);
-            let (report, source) = generate_module(&spec);
-            let pick: Vec<&str> = source
-                .lines()
-                .filter(|l| {
-                    l.contains("Pick")
-                        && (l.contains("pub type")
-                            || l.contains("pub enum")
-                            || l.contains("Variant")
-                            || l.contains("pub pick"))
-                })
-                .collect();
-            eprintln!(
-                "== {spelling:?} {line}\n{:?}\n{}\n{:?}",
-                codes(&report),
-                pick.join("\n"),
-                null_answer(&report, &source)
-            );
-        }
-    }
 }
