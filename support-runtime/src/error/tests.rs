@@ -1,5 +1,3 @@
-use std::future::Future;
-
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
@@ -645,14 +643,8 @@ fn from_reqwest_classifies_a_refused_request_as_request_construction() {
             .build()
             .expect("reqwest builds the request; it refuses it only at execute");
         // reqwest answers without touching the network, so the first poll is ready.
-        let mut future = std::pin::pin!(client.execute(request));
-        match future
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-        {
-            std::task::Poll::Ready(result) => result.expect_err("reqwest refuses the request"),
-            std::task::Poll::Pending => panic!("reqwest touched the network for {url}"),
-        }
+        crate::tests::poll_ready(client.execute(request))
+            .expect_err(&format!("reqwest refuses the request for {url}"))
     };
     for source in [
         reqwest_error(),

@@ -233,19 +233,7 @@ fn well_formed_json_frame_deserializes() {
 
 // A poll-once driver (noop waker, no async runtime) proving the async `next` await-loop threads
 // the pure framing correctly over an in-memory `reqwest::Response`.
-use std::future::Future;
-use std::task::{Context, Poll, Waker};
-
-fn poll_ready<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(value) => value,
-        Poll::Pending => panic!("future was not immediately ready"),
-    }
-}
+use crate::tests::poll_ready;
 
 fn response(body: &str) -> reqwest::Response {
     response_with_status(200, body)

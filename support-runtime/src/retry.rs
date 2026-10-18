@@ -239,28 +239,14 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
-    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use reqwest::{Method, Request};
 
+    use crate::tests::poll_ready;
     use crate::transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 
     use super::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
-
-    /// The retry loop never actually suspends here: the inner backend's canned responses are ready
-    /// immediately and the test policy's wait is an already-ready future, so a single poll with a
-    /// noop waker drives the whole thing — no async runtime, no real sleep.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("future was not immediately ready"),
-        }
-    }
 
     /// An inner backend that returns a canned response with the status at each call index, counting
     /// how many times it was executed. The last status repeats once the sequence is exhausted.

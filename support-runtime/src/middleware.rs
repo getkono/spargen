@@ -184,28 +184,15 @@ mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::{Context, Poll, Waker};
 
     use reqwest::header::{HeaderName, HeaderValue};
     use reqwest::{Method, Request, Response, StatusCode};
 
+    use crate::tests::poll_ready;
     use crate::transport::{ExecuteFuture, HttpBackend};
     use crate::RetryBackend;
 
     use super::{Middleware, MiddlewareBackend, Next};
-
-    /// The chain never actually suspends on a socket here: the inner backend's canned response is
-    /// ready immediately, so one poll with a noop waker drives the whole thing — no async runtime.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("future was not immediately ready"),
-        }
-    }
 
     fn canned(status: u16) -> Response {
         Response::from(

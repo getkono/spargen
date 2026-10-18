@@ -1,26 +1,13 @@
-use std::future::Future;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use secrecy::SecretString;
 
 use crate::{AuthError, AuthKind, AuthScheme, ClientCore, Credential, RequestError, TokenFuture};
 
 use super::attach_auth;
+use crate::tests::poll_ready;
 use bytes::Bytes;
-
-/// The static-credential paths never actually suspend, so a single poll with a noop waker is
-/// enough — no async runtime needed in the runtime's own test suite.
-fn poll_ready<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(value) => value,
-        Poll::Pending => panic!("future was not immediately ready"),
-    }
-}
 
 fn core() -> ClientCore {
     ClientCore::new("https://example.com").unwrap()

@@ -93,3 +93,26 @@ pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
+
+// Shared by every module's tests. `lib.rs` is never embedded (the generated `support` module
+// replaces it), and this module is its last item, so the embed's split on the test marker in each
+// runtime source is unaffected.
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// Drives `future` with one poll and a noop waker, panicking if it is not ready. The runtime's
+    /// tests use no async runtime: their transports answer from canned in-memory responses and
+    /// their waits are already-ready futures, so the first poll completes them.
+    pub(crate) fn poll_ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("future was not immediately ready"),
+        }
+    }
+}

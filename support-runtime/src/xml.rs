@@ -141,19 +141,7 @@ mod tests {
     /// must honour that too, not retain the whole response.
     #[test]
     fn xml_decode_failure_honours_the_error_body_cap() {
-        use std::future::Future;
-        use std::task::{Context, Poll, Waker};
-
-        fn poll_ready<F: Future>(future: F) -> F::Output {
-            let mut future = std::pin::pin!(future);
-            match future
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-            {
-                Poll::Ready(value) => value,
-                Poll::Pending => panic!("future was not immediately ready"),
-            }
-        }
+        use crate::tests::poll_ready;
 
         let mut core = crate::ClientCore::new("https://example.com").unwrap();
         core.config_mut().max_error_body = 16;
@@ -183,19 +171,7 @@ mod tests {
     /// own, so neither a hard-coded status nor an empty header map can pass.
     #[test]
     fn xml_decode_failures_keep_the_response_status_and_headers() {
-        use std::future::Future;
-        use std::task::{Context, Poll, Waker};
-
-        fn poll_ready<F: Future>(future: F) -> F::Output {
-            let mut future = std::pin::pin!(future);
-            match future
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-            {
-                Poll::Ready(value) => value,
-                Poll::Pending => panic!("future was not immediately ready"),
-            }
-        }
+        use crate::tests::poll_ready;
         fn response(status: u16, retry_after: &'static str) -> reqwest::Response {
             reqwest::Response::from(
                 http::Response::builder()
@@ -246,19 +222,7 @@ mod tests {
     /// `decode_xml_body` a multi-status enum uses.
     #[test]
     fn xml_codec_rejects_a_zero_length_success_body() {
-        use std::future::Future;
-        use std::task::{Context, Poll, Waker};
-
-        fn poll_ready<F: Future>(future: F) -> F::Output {
-            let mut future = std::pin::pin!(future);
-            match future
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-            {
-                Poll::Ready(value) => value,
-                Poll::Pending => panic!("future was not immediately ready"),
-            }
-        }
+        use crate::tests::poll_ready;
 
         assert!(decode_xml_body::<Point>(b"").is_err());
         assert!(decode_xml_body::<String>(b"").is_err());

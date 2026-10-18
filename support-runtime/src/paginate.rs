@@ -303,12 +303,10 @@ fn split_params(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-
     use reqwest::header::{HeaderMap, HeaderValue};
 
     use super::{next_link, next_link_target, LinkPaginator};
+    use crate::tests::poll_ready;
     use crate::{ClientCore, Error};
 
     fn link_headers(values: &[&str]) -> HeaderMap {
@@ -447,19 +445,6 @@ mod tests {
         assert_eq!(url.as_str(), "https://api.example.com/items?page=2");
         // No Link header at all → no next url.
         assert!(next_link(&HeaderMap::new()).is_none());
-    }
-
-    // A poll-once driver (noop waker, no async runtime) proving `next_page` GETs a page, decodes it,
-    // advances `next` from the `Link` header, and terminates when the header is absent.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("future was not immediately ready"),
-        }
     }
 
     /// Synthesize an in-memory `reqwest::Response` (no server, no runtime) with a status, JSON body,
