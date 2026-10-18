@@ -41,6 +41,7 @@ mod schemas;
 mod security;
 mod servers;
 mod union_nullability;
+mod union_nullability_refs;
 mod unions;
 mod xml;
 
