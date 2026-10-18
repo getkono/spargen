@@ -1220,16 +1220,28 @@ paths:
     }
 }
 
-/// The field-value rule admits what RFC 9110 § 5.5 does: interior spaces and tabs, every
-/// visible ASCII character, and `obs-text` (bytes above 0x7F, here UTF-8). Each generates.
+/// The field-name rule admits every `tchar` (RFC 9110 § 5.6.2), and the field-value rule what
+/// RFC 9110 § 5.5 does: interior spaces and tabs, every visible ASCII character (0x21 through
+/// 0x7E, the non-`tchar` delimiters among them), and `obs-text` (bytes above 0x7F, here UTF-8).
+/// Each generates.
 #[test]
 fn an_encoding_header_that_is_an_http_field_generates() {
+    // Every `tchar`: the fifteen punctuation characters, then digits and letters.
+    let name = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    // Every visible ASCII character, as a YAML double-quoted scalar.
+    let visible: String = (0x21u8..=0x7e)
+        .map(char::from)
+        .map(|c| match c {
+            '"' | '\\' => format!("\\{c}"),
+            c => c.to_string(),
+        })
+        .collect();
     for literal in [
-        r#""a b\tc""#,
-        r#""!#$%&'*+-.^_`|~""#,
-        r#""café""#,
-        "7",
-        "true",
+        r#""a b\tc""#.to_owned(),
+        format!("\"{visible}\""),
+        r#""café""#.to_owned(),
+        "7".to_owned(),
+        "true".to_owned(),
     ] {
         let spec = format!(
             r##"
@@ -1248,7 +1260,7 @@ paths:
             encoding:
               file:
                 headers:
-                  "X-Part_Kind.v1~":
+                  "{name}":
                     schema: {{ const: {literal} }}
       responses:
         '204': {{ description: ok }}
@@ -1260,7 +1272,49 @@ paths:
             Outcome::Rejected,
             "{literal}: {report:#?}"
         );
-        assert!(code.contains("X-Part_Kind.v1~"), "{literal}: {code}");
+        assert!(code.contains(name), "{literal}: {code}");
+    }
+}
+
+/// Every offending header of one property is reported, not only the first, so one generation
+/// names every header the author must fix before the body is refused.
+#[test]
+fn e009_every_encoding_header_that_is_not_an_http_field_is_reported() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string }
+            encoding:
+              file:
+                headers:
+                  "Bad Name":
+                    schema: { type: string, const: "1" }
+                  X-Part:
+                    schema: { type: string, const: "a\nb" }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_with_code(&report, Code::UnsupportedMediaType);
+        assert_eq!(messages.len(), 2, "{report:#?}");
+        assert!(
+            messages.iter().any(|m| m.contains("Bad Name")),
+            "{messages:#?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("headers.X-Part")),
+            "{messages:#?}"
+        );
     }
 }
 
