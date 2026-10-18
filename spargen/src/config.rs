@@ -530,6 +530,27 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_omit_token_names_every_value_the_parser_accepts() {
+        let component = apply("[[omit]]\ncomponent = \"path_itemz\"\nname = \"Foo\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            component,
+            "invalid config file `spargen.toml`: omit rule #1: unknown component kind: \
+             `path_itemz`; expected one of schemas/responses/parameters/request_bodies/headers/\
+             security_schemes/path_items/media_types"
+        );
+        let method = apply("[[omit]]\nmethod = \"qeury\"\npath = \"/pets\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            method,
+            "invalid config file `spargen.toml`: omit rule #1: unknown HTTP method: `qeury`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
         assert!(apply("frobnicate = true\n").is_err());
     }

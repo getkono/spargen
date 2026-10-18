@@ -966,7 +966,8 @@ paths:
             ),
             (
                 r#""a.yaml", omit { operations { fetch "/a"; } }"#,
-                "unknown HTTP method: `fetch`",
+                "unknown HTTP method: `fetch`; \
+                 expected one of get/put/post/delete/options/head/patch/trace/query",
             ),
             (
                 r#""a.yaml", omit { operations { get "/a" } }"#,
