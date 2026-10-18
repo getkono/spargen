@@ -282,14 +282,10 @@ fn blocking_may_enable_tokio_through_its_implicit_feature_or_dep_syntax() {
 
 #[test]
 fn blocking_that_enables_anything_but_tokio_is_not_wired() {
-    // Neither a feature *of* tokio (`tokio/rt`) nor a near-miss name enables the optional
-    // dependency itself, so each is reported exactly as an empty entry is.
-    for blocking in [
-        "[]",
-        "[\"tokio/rt\"]",
-        "[\"dep:tokio-util\"]",
-        "[\"tokio?/rt\"]",
-    ] {
+    // Neither a weak dependency feature (`tokio?/rt`, which enables `rt` only if something else
+    // already enables tokio) nor a near-miss name enables the optional dependency itself, so
+    // each is reported exactly as an empty entry is.
+    for blocking in ["[]", "[\"dep:tokio-util\"]", "[\"tokio?/rt\"]"] {
         let diagnostics =
             audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
         assert_eq!(
