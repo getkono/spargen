@@ -7193,8 +7193,9 @@ components:
     );
     // The requirement set really did include both crates: the module uses them. The `stream`
     // module is embedded only for a sequential response, and `Event`'s `id` field type is an alias
-    // of the `format: uuid` mapping. Each assertion names the emitted item: the bare words `stream`, `EventStream` and
-    // `uuid::Uuid` also ride in the runtime's doc comments, which every module carries.
+    // of the `format: uuid` mapping. Each assertion names the emitted item: the bare words
+    // `stream`, `EventStream` and `uuid::Uuid` also ride in the runtime's doc comments, which
+    // every module carries.
     let generated = preview.contents.expect("generated module");
     assert!(generated.contains("mod stream {"), "{generated}");
     assert!(
