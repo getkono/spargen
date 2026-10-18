@@ -220,14 +220,18 @@ fn emit_multipart_body(
             .map(|property| property.headers.as_slice())
             .unwrap_or(&[]);
         let extra_headers = (!headers.is_empty()).then(|| {
+            // Lowering admits only an RFC 9110 field name and value here (`E009` otherwise), and
+            // both conversions accept every such pair. Were one refused, the call fails as a
+            // request-construction error, as `mime_str` does below, rather than sending the part
+            // without a header the document declared.
             let inserts = headers.iter().map(|(name, value)| {
                 quote! {
-                    if let (Ok(name), Ok(value)) = (
-                        reqwest::header::HeaderName::try_from(#name),
-                        reqwest::header::HeaderValue::try_from(#value),
-                    ) {
-                        part_headers.insert(name, value);
-                    }
+                    part_headers.insert(
+                        reqwest::header::HeaderName::try_from(#name)
+                            .map_err(support::Error::request_construction)?,
+                        reqwest::header::HeaderValue::try_from(#value)
+                            .map_err(support::Error::request_construction)?,
+                    );
                 }
             });
             quote! {

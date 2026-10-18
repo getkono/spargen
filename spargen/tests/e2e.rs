@@ -2343,7 +2343,8 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
 
 /// Every multipart part carries a resolved `Content-Type`: the specification's defaulting table
 /// picks `application/octet-stream` for a binary property, `text/plain` for a scalar, and
-/// `application/json` for an object or array.
+/// `application/json` for an object or array. A header an Encoding Object pins rides on its own
+/// part beside that `Content-Type`.
 #[test]
 fn multipart_parts_carry_their_resolved_content_types() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2370,6 +2371,12 @@ fn multipart_parts_carry_their_resolved_content_types() {
             assert!(
                 header.contains(&format!("Content-Type: {content_type}")),
                 "part `{part}` must declare {content_type}: {header}"
+            );
+            // The one pinned encoding header rides on its own part and on no other.
+            assert_eq!(
+                header.contains("x-part-kind: caption text"),
+                part == "caption",
+                "part `{part}`: {header}"
             );
         }
 
@@ -5487,6 +5494,12 @@ paths:
                   type: array
                   items:
                     type: string
+            # A pinned part header: sent on `caption`'s part, beside its default `text/plain`.
+            encoding:
+              caption:
+                headers:
+                  X-Part-Kind:
+                    schema: { type: string, const: caption text }
       responses:
         "204":
           description: No Content
