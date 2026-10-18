@@ -1221,36 +1221,6 @@ fn textual_codec_uses_raw_utf8_as_a_typed_json_string() {
     assert_eq!(value.into_inner(), "<p>raw</p>");
 }
 
-/// An empty body under a status that documents a textual body is the zero-length text, so
-/// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
-/// format) that has no empty member still fails with `Decode`, because the codec decodes the
-/// empty text rather than special-casing it. A documented bodyless status never reaches this
-/// codec: beside a documented body it is a unit variant of the response enum (#121, #204), and
-/// otherwise `()` on the success side or `Error::UnexpectedStatus` on the error side.
-#[test]
-fn textual_codec_reads_an_empty_body_as_the_empty_string() {
-    assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
-    assert!(decode_text_body::<TextChoice>(b"").is_err());
-
-    let value = poll_ready(decode_success_text::<String>(
-        &core(),
-        json_response(200, ""),
-    ))
-    .unwrap();
-    assert_eq!(value.into_inner(), "");
-
-    match poll_ready(decode_success_text::<TextChoice>(
-        &core(),
-        json_response(200, ""),
-    )) {
-        Err(Error::Decode { status, body, .. }) => {
-            assert_eq!(status.as_u16(), 200);
-            assert!(body.is_empty());
-        }
-        other => panic!("expected a Decode error, got {other:?}"),
-    }
-}
-
 #[test]
 fn binary_codec_preserves_success_and_documented_error_bytes() {
     let success = poll_ready(decode_success_bytes(
@@ -1891,6 +1861,13 @@ enum TextChoiceWithEmpty {
 /// The text codec decodes a zero-length body as the string `""`, so whether it succeeds is
 /// `T`'s decision, not the codec's. Pinned for each textual `T` the generator can emit, through
 /// both the single-body codec and the per-arm `decode_text_body` a multi-status enum uses.
+///
+/// An empty body under a status that documents a textual body is the zero-length text, so
+/// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
+/// format) that has no empty member still fails with `Decode`, because the codec decodes the
+/// empty text rather than special-casing it. A documented bodyless status never reaches this
+/// codec: beside a documented body it is a unit variant of the response enum (#121, #204), and
+/// otherwise `()` on the success side or `Error::UnexpectedStatus` on the error side.
 #[test]
 fn text_codec_decodes_a_zero_length_success_body_as_the_empty_string() {
     // Accepts `""`: `String` — also what `format: uuid`/`date-time`/`date` lower to with the

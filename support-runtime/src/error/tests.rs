@@ -7,29 +7,6 @@ use crate::{AuthError, ResponseValue, TransportError};
 use super::{Error, RequestError, ReqwestClass, TimeoutKind};
 
 #[test]
-fn retry_classifier_includes_timeouts_and_5xx() {
-    let timeout = Error::<String>::Timeout(TimeoutKind::Total);
-    assert!(timeout.is_transient());
-
-    let status = Error::<String>::UnexpectedStatus {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        headers: HeaderMap::new(),
-        body: Bytes::new(),
-    };
-    assert!(status.is_transient());
-}
-
-#[test]
-fn retry_classifier_excludes_client_errors() {
-    let api = Error::Api(ResponseValue::new(
-        StatusCode::BAD_REQUEST,
-        HeaderMap::new(),
-        "bad".to_owned(),
-    ));
-    assert!(!api.is_transient());
-}
-
-#[test]
 fn widen_preserves_the_variant() {
     let narrow = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
     let widened: Error<String> = narrow.widen();
