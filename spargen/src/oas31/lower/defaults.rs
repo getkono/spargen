@@ -183,18 +183,13 @@ pub(super) fn retype_field_defaults(
 }
 
 /// Recover the JSON value a representable default was decided from, so it can be decided again
-/// against another type. An integral float is classified as the integer JSON Schema says it is: a
-/// `number` field's `3` is carried as `3.0`, and the `integer` it narrows to admits it.
+/// against another type. A float is classified by [`classify_float`]: a `number` field's `3` is
+/// carried as `3.0`, and the `integer` it narrows to admits it.
 pub(super) fn reclassify_default(value: &DefaultValue) -> RawDefault {
     match value {
         DefaultValue::Bool(value) => RawDefault::Bool(*value),
         DefaultValue::Int(value) => RawDefault::Int(*value),
-        DefaultValue::Float(value)
-            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 =>
-        {
-            RawDefault::Int(*value as i64)
-        }
-        DefaultValue::Float(value) => RawDefault::Float(*value),
+        DefaultValue::Float(value) => classify_float(*value),
         DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
             RawDefault::Str(value.clone())
         }
@@ -227,9 +222,21 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
         Node::Number(Number::UInt(value)) => {
             i64::try_from(*value).map_or(RawDefault::Float(*value as f64), RawDefault::Int)
         }
-        Node::Number(Number::Float(value)) => RawDefault::Float(*value),
+        Node::Number(Number::Float(value)) => classify_float(*value),
         Node::String(value) => RawDefault::Str(value.clone()),
         Node::Null | Node::Array(_) | Node::Object(_) => RawDefault::Other,
+    }
+}
+
+/// Classify a float as JSON Schema compares numbers, by value: an integral float inside `i64`'s
+/// range is that integer (`3.0` is `3`), so an `integer` field admits it under the same width check
+/// as an integer literal. Anything else — a fraction, or a value outside `i64` — stays a float.
+fn classify_float(value: f64) -> RawDefault {
+    // `i64::MIN` is exactly representable; `i64::MAX as f64` rounds up to 2^63, one past the range.
+    if value.fract() == 0.0 && value >= i64::MIN as f64 && value < i64::MAX as f64 {
+        RawDefault::Int(value as i64)
+    } else {
+        RawDefault::Float(value)
     }
 }
 
