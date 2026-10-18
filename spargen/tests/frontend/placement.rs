@@ -1311,7 +1311,7 @@ fn a_back_edge_only_through_content_schema_closes_no_cycle() {
             ),
         ),
     ];
-    for (what, spec) in cases {
+    for (what, spec) in &cases {
         for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
             assert_ne!(
                 report.outcome(),
@@ -1325,6 +1325,13 @@ fn a_back_edge_only_through_content_schema_closes_no_cycle() {
             );
         }
     }
+    // The envelope's `data.contentSchema` is still the one consumed as the stream's item type.
+    let (_, code) = generate_with_code(&cases[2].1);
+    let flat = code.split_whitespace().collect::<String>();
+    assert!(
+        flat.contains("EventStream<types::"),
+        "the SSE envelope's contentSchema must stay the stream's item type: {code}"
+    );
 }
 
 /// Whether `report` carries `code` at `pointer`.
