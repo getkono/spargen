@@ -777,6 +777,101 @@ components:
         }
     }
 
+    /// The messages of every `E019` in `diags`, in emission order.
+    fn invalid_rule_messages(diags: &Diagnostics) -> Vec<&str> {
+        diags
+            .items()
+            .iter()
+            .filter(|d| d.code == Code::InvalidOmitRule)
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    /// How many `W009`s — removed constructs — `diags` carries.
+    fn omitted_count(diags: &Diagnostics) -> usize {
+        diags
+            .items()
+            .iter()
+            .filter(|d| d.code == Code::OmittedConstruct)
+            .count()
+    }
+
+    /// A pointer rule with a glob metacharacter resolves through its own arm (every node pointer
+    /// of the file, filtered by the pattern), not the path/operation/component ones above.
+    #[test]
+    fn glob_pointer_rule_removes_every_matching_node() {
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        let omit = omit_of(vec![pointer_rule(None, "/components/schemas/Legacy*")]);
+        omit.apply(&mut bundle, &mut diags).unwrap();
+        assert_eq!(
+            keys_under(&bundle, "components", Some("schemas")),
+            vec!["Pet".to_owned()],
+            "both Legacy* schemas gone"
+        );
+        assert_eq!(omitted_count(&diags), 2, "{:#?}", diags.items());
+        assert!(invalid_rule_messages(&diags).is_empty());
+    }
+
+    /// A glob pointer whose matches nest — each schema and the `type` member inside it — removes
+    /// every one of them, children before parents, with one `W009` each. This is why the glob
+    /// arm's `!removed_any` E019 cannot fire once the match list is non-empty: the first pointer in
+    /// removal order is a deepest one, nothing has been removed before it, and it was read off the
+    /// very value it is removed from. The empty-match E019 above it is the reachable one
+    /// (`glob_rule_matching_nothing_is_e019`).
+    #[test]
+    fn a_glob_pointer_matching_nested_nodes_removes_each_once() {
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        let omit = omit_of(vec![pointer_rule(None, "/components/schemas/**")]);
+        omit.apply(&mut bundle, &mut diags).unwrap();
+        assert!(keys_under(&bundle, "components", Some("schemas")).is_empty());
+        // Three schemas and their three `type` members.
+        assert_eq!(omitted_count(&diags), 6, "{:#?}", diags.items());
+        assert!(invalid_rule_messages(&diags).is_empty());
+    }
+
+    /// The empty pointer names the whole document, which no rule may remove.
+    #[test]
+    fn an_empty_pointer_rule_is_e019() {
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        let omit = omit_of(vec![pointer_rule(None, "")]);
+        assert!(omit.apply(&mut bundle, &mut diags).is_err());
+        assert_eq!(
+            invalid_rule_messages(&diags),
+            ["omit rules cannot remove the document root: pointer "],
+            "{:#?}",
+            diags.items()
+        );
+        assert_eq!(omitted_count(&diags), 0);
+        assert!(bundle.root().get("openapi").is_some());
+    }
+
+    /// A file-scoped pointer rule naming a file the bundle never loaded is E019 rather than a
+    /// silent no-op, and the bundle is left as it was.
+    #[test]
+    fn a_pointer_rule_into_an_unloaded_file_is_e019() {
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        let omit = omit_of(vec![pointer_rule(
+            Some("missing.yaml"),
+            "/components/schemas/Pet",
+        )]);
+        assert!(omit.apply(&mut bundle, &mut diags).is_err());
+        assert_eq!(
+            invalid_rule_messages(&diags),
+            ["omit rule references an unloaded file: pointer missing.yaml#/components/schemas/Pet"],
+            "{:#?}",
+            diags.items()
+        );
+        assert_eq!(omitted_count(&diags), 0);
+        assert_eq!(
+            keys_under(&bundle, "components", Some("schemas")),
+            ["LegacyPet", "LegacyOwner", "Pet"]
+        );
+    }
+
     #[test]
     fn carve_rules_map_pointers_to_enclosing_constructs() {
         // Operation pointer → operation.

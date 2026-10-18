@@ -301,6 +301,123 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
     assert!(rejection.new_spec().is_some());
 }
 
+/// A document that never lowers, for the rejection fixtures.
+const UNLOWERABLE: &str = "not: a valid openapi document\n";
+
+/// `spargen::diff` over two inline specs that are expected not to lower together.
+fn rejection(old_spec: &str, new_spec: &str) -> spargen::DiffRejection {
+    let temp = tempfile::tempdir().unwrap();
+    let old_path = temp.path().join("old.yaml");
+    let new_path = temp.path().join("new.yaml");
+    std::fs::write(&old_path, old_spec).unwrap();
+    std::fs::write(&new_path, new_spec).unwrap();
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+    spargen::diff(&old, &new).expect_err("a side does not lower, so there is no diff")
+}
+
+/// The top-level keys of a rejection's JSON rendering, in the order they are written.
+fn json_keys(rejection: &spargen::DiffRejection) -> Vec<String> {
+    let rendered = serde_json::to_string(rejection).expect("a rejection serializes");
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("a rejection serializes as an object")
+        .keys()
+        .cloned()
+        .collect();
+    // `serde_json::Map` may re-sort, so order by where each key appears in the written text.
+    keys.sort_by_key(|key| rendered.find(&format!("\"{key}\":")).unwrap());
+    keys
+}
+
+/// Each side that failed to lower is reported under its own label, old before new, in the
+/// accessors, `rejections`, `Display` and the JSON keys alike; a side that lowered is absent from
+/// all four.
+#[test]
+fn a_rejection_names_exactly_the_sides_that_failed() {
+    let new_only = rejection(&base(), UNLOWERABLE);
+    let old_only = rejection(UNLOWERABLE, &base());
+    let both = rejection(UNLOWERABLE, UNLOWERABLE);
+
+    let sides = |rejection: &spargen::DiffRejection| {
+        rejection
+            .rejections()
+            .map(|(side, _)| side.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sides(&new_only), ["new"]);
+    assert_eq!(sides(&old_only), ["old"]);
+    assert_eq!(sides(&both), ["old", "new"]);
+    assert_eq!(spargen::Side::Old.as_str(), "old");
+    assert_eq!(spargen::Side::New.as_str(), "new");
+
+    let old_report = old_only.old_spec().expect("the old side failed");
+    assert!(old_only.new_spec().is_none());
+    assert_eq!(old_report.outcome(), spargen::Outcome::Rejected);
+    assert!(old_report.errors().next().is_some(), "{old_report:#?}");
+    let new_report = new_only.new_spec().expect("the new side failed");
+    assert!(new_only.old_spec().is_none());
+    assert_eq!(new_report.outcome(), spargen::Outcome::Rejected);
+    assert!(both.old_spec().is_some() && both.new_spec().is_some());
+
+    // `Display` frames each failing side's report with a `<side> spec rejected:` line.
+    assert_eq!(
+        new_only.to_string(),
+        format!("new spec rejected:\n{new_report}")
+    );
+    assert_eq!(
+        old_only.to_string(),
+        format!("old spec rejected:\n{old_report}")
+    );
+    assert_eq!(
+        both.to_string(),
+        format!(
+            "old spec rejected:\n{}new spec rejected:\n{}",
+            both.old_spec().unwrap(),
+            both.new_spec().unwrap()
+        )
+    );
+
+    // The JSON rendering keys each report by the same label, and serializes it as the report.
+    assert_eq!(json_keys(&new_only), ["new"]);
+    assert_eq!(json_keys(&old_only), ["old"]);
+    assert_eq!(json_keys(&both), ["old", "new"]);
+    let value = serde_json::to_value(&old_only).unwrap();
+    assert_eq!(value["old"], serde_json::to_value(old_report).unwrap());
+}
+
+/// A report carrying breaking and additive changes: `summary` counts each impact, and `Display`
+/// lists every change, then the summary, then the bump. The display snapshot records today's bytes.
+#[test]
+fn a_mixed_report_summarizes_and_displays_every_change() {
+    let only_id = "        id: { type: integer }\n";
+    let report = diff(&base(), &spec(PARAM_REQUIRED_INT, "id", only_id, EXTRA_OP));
+    assert_eq!(report.bump, Impact::Major);
+    assert_eq!(report.summary(), "major: 2 breaking, 1 additive change(s)");
+
+    let rendered = report.to_string();
+    let lines: Vec<&str> = rendered.lines().collect();
+    assert_eq!(lines.len(), report.changes.len() + 2, "{rendered}");
+    for (line, change) in lines.iter().zip(&report.changes) {
+        assert_eq!(*line, change.to_string());
+    }
+    assert_eq!(lines[report.changes.len()], report.summary());
+    assert_eq!(lines[report.changes.len() + 1], "recommended bump: major");
+    assert!(!rendered.ends_with('\n'), "{rendered:?}");
+    insta::assert_snapshot!(
+        "a_mixed_report_summarizes_and_displays_every_change-display",
+        rendered
+    );
+
+    // A report with only additive changes is summarized under its own bump.
+    let additive = diff(&base(), &spec("", "id", PET_PROPS, EXTRA_OP));
+    assert_eq!(
+        additive.summary(),
+        "minor: 0 breaking, 1 additive change(s)"
+    );
+}
+
 // --- The remaining change kinds -----------------------------------------------------------------
 //
 // The nine kinds above were the ones with fixtures. The rest were classified by policy alone, with
