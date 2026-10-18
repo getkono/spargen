@@ -824,7 +824,9 @@ components:
 /// Issue #702: JSON Schema compares numbers by value, so a `default` written `3.0` is the integer 3.
 /// On an `integer` field it is applied exactly as `3` would be — under the same width check, and as
 /// a variant of an integer enum — while a fractional float, or an integral one outside the field's
-/// width, is still reported (`W005`). A `number` field's `3.0` stays a float.
+/// width, is still reported (`W005`). So is a fraction written at or above 2^53, where `f64` has
+/// already rounded it to an integer (`12345678901234567.5` parses as `12345678901234568.0`). A
+/// `number` field's `3.0` stays a float.
 const INTEGRAL_FLOAT_DEFAULT_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -841,6 +843,7 @@ components:
         half: { type: integer, default: 3.5 }
         wide: { type: integer, format: int32, default: 5000000000.0 }
         huge: { type: integer, default: 1.0e19 }
+        imprecise: { type: integer, default: 12345678901234567.5 }
 "##;
 
 #[test]
@@ -862,9 +865,10 @@ fn an_integral_float_default_is_the_integer_it_equals() {
             [
                 "/components/schemas/Page/properties/half",
                 "/components/schemas/Page/properties/huge",
+                "/components/schemas/Page/properties/imprecise",
                 "/components/schemas/Page/properties/wide",
             ],
-            "{entry}: only the fractional and out-of-width defaults are dropped: {report:#?}"
+            "{entry}: only the fractional, imprecise and out-of-width defaults are dropped: {report:#?}"
         );
     }
 
