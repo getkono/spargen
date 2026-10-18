@@ -1161,6 +1161,109 @@ paths:
     }
 }
 
+/// An `encoding.headers` entry that pins a literal is sent as a part header, so its name must be
+/// an RFC 9110 § 5.6.2 token and its literal an RFC 9110 § 5.5 field value. The generated client
+/// once skipped a header whose name or value its HTTP stack refused, on every request, with
+/// nothing reported at generation or at call time. Each case below is now `E009`.
+#[test]
+fn e009_an_encoding_header_that_is_not_an_http_field_is_unsupported() {
+    let cases = [
+        // A space is no `tchar`.
+        ("Bad Name", r#""1""#),
+        // `:` would end the field name on the wire.
+        ("X-A:B", r#""1""#),
+        // A control character is no `field-vchar`.
+        ("X-Part", r#""a\u0001b""#),
+        // A line break would end the field.
+        ("X-Part", r#""a\nb""#),
+        // DEL is no `field-vchar` either.
+        ("X-Part", r#""a\u007fb""#),
+        // A field value neither begins nor ends with whitespace.
+        ("X-Part", r#"" padded""#),
+        ("X-Part", r#""padded\t""#),
+    ];
+    for (name, literal) in cases {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: {{ type: string }}
+            encoding:
+              file:
+                headers:
+                  "{name}":
+                    schema: {{ type: string, const: {literal} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{name}: {literal}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "{name}: {literal}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The field-value rule admits what RFC 9110 § 5.5 does: interior spaces and tabs, every
+/// visible ASCII character, and `obs-text` (bytes above 0x7F, here UTF-8). Each generates.
+#[test]
+fn an_encoding_header_that_is_an_http_field_generates() {
+    for literal in [
+        r#""a b\tc""#,
+        r#""!#$%&'*+-.^_`|~""#,
+        r#""café""#,
+        "7",
+        "true",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: {{ type: string }}
+            encoding:
+              file:
+                headers:
+                  "X-Part_Kind.v1~":
+                    schema: {{ const: {literal} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{literal}: {report:#?}"
+        );
+        assert!(code.contains("X-Part_Kind.v1~"), "{literal}: {code}");
+    }
+}
+
 // --- Media Type Object dispositions outside the request body -------------------------------
 //
 // `resolve_media_object` is the seam every Media Type Object passes through. Before these
