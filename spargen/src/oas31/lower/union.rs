@@ -48,7 +48,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// and is no variant, and with every member so narrowed the union is the null type. A `oneOf`
     /// in which `null` matches more than one branch admits no `null`. The union is rejected
     /// (`None`) with `E007` where one node declares both `oneOf` and `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
-    /// be met with a member that closes a reference cycle, with a member that states no category
+    /// be met with a member that closes a reference cycle (but for one of a category a sibling that
+    /// is a multi-category `type` array alone admits, which is kept unmet,
+    /// [`Self::cycle_branch_within`]), with a member that states no category
     /// for untyped sibling keywords to establish, or with a member it shares values with that no
     /// single Rust type represents, or where it meets every one of several `oneOf` members, or one
     /// beside a `null` member, in `null` alone, which then matches them all.
@@ -497,10 +499,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // that its own keywords decide nothing. A nested union `null` matches through its own
             // branches is such a branch too (#628).
             let leaves_null_undecided = self.branch_matches_null_undecided(member, ty);
-            // The reservation half of the cycle test again, on a multi-variant union. Same fact,
-            // same wording, same place in the order: before anything tries to intersect against the
-            // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
-            // `oneOf` still boxes its back-edge and generates.
             // A cycle-closing branch a multi-category `type` array alone admits meets that sibling
             // in itself: it is the variant it is without one.
             let sibling =
@@ -510,6 +508,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     sibling
                 };
+            // The reservation half of the cycle test again, on a multi-variant union. Same fact,
+            // same wording, same place in the order: before anything tries to intersect against the
+            // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
+            // `oneOf` still boxes its back-edge and generates.
             if sibling.is_some() && self.is_in_progress_root(ty.id) {
                 return self.reject_union_member_cycle(schema);
             }
