@@ -97,32 +97,24 @@ impl Api {
     /// containing one other than a whole non-streaming `bytes` body, which is sent and read raw.
     /// Drives the `serde` feature of the `bytes` requirement.
     pub(crate) fn uses_bytes_serde(&self) -> bool {
-        let model_needs_serde =
-            self.types
-                .iter()
-                .any(|(_, definition)| match &definition.kind {
-                    TypeKind::Struct(object) => {
-                        object.fields.iter().any(|field| {
-                            contains_bytes(&self.types, field.ty.id, &mut BTreeSet::new())
-                        }) || match &object.additional {
-                            AdditionalProps::Typed(ty) => {
-                                contains_bytes(&self.types, ty.id, &mut BTreeSet::new())
-                            }
-                            AdditionalProps::Allow | AdditionalProps::Deny => false,
-                        }
-                    }
-                    TypeKind::Union(union) => union.variants.iter().any(|variant| {
-                        contains_bytes(&self.types, variant.ty.id, &mut BTreeSet::new())
-                    }),
-                    // Requirements are derived only from an `Api` that passed `check_invariants`,
-                    // which rejects a surviving reservation. Answering `false` would under-declare
-                    // a runtime dependency for a shape nobody computed.
-                    TypeKind::Reserved => unreachable!(
-                        "a reservation reached the runtime contract; `check_invariants` should \
-                         have rejected it"
-                    ),
-                    _ => false,
-                });
+        let model_needs_serde = self
+            .types
+            .iter()
+            .any(|(id, definition)| match &definition.kind {
+                // A model whose fields, additional-properties value or variants reach `bytes`:
+                // exactly what `contains_bytes` walks from the model itself.
+                TypeKind::Struct(_) | TypeKind::Union(_) => {
+                    contains_bytes(&self.types, id, &mut BTreeSet::new())
+                }
+                // Requirements are derived only from an `Api` that passed `check_invariants`,
+                // which rejects a surviving reservation. Answering `false` would under-declare
+                // a runtime dependency for a shape nobody computed.
+                TypeKind::Reserved => unreachable!(
+                    "a reservation reached the runtime contract; `check_invariants` should \
+                     have rejected it"
+                ),
+                _ => false,
+            });
         model_needs_serde
             || self.operations.iter().any(|operation| {
                 operation.params.iter().any(|parameter| {
