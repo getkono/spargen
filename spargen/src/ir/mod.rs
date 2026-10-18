@@ -62,11 +62,8 @@ impl Api {
                 .is_some_and(|body| body.media == MediaType::Xml);
             let response_xml = operation
                 .responses
-                .by_status
-                .iter()
-                .map(|(_, response)| response)
-                .chain(operation.responses.default.as_ref())
-                .any(|response| response.media == Some(MediaType::Xml));
+                .entries()
+                .any(|(_, response)| response.media == Some(MediaType::Xml));
             request_xml || response_xml
         })
     }
@@ -134,19 +131,13 @@ impl Api {
                 }) || operation.request_body.as_ref().is_some_and(|body| {
                     body.ty
                         .is_some_and(|ty| self.typed_body_needs_bytes_serde(body.media, ty.id))
-                }) || operation
-                    .responses
-                    .by_status
-                    .iter()
-                    .map(|(_, response)| response)
-                    .chain(operation.responses.default.iter())
-                    .any(|response| {
-                        response.body.is_some_and(|ty| {
-                            response.media.is_some_and(|media| {
-                                self.typed_body_needs_bytes_serde(media, ty.id)
-                            })
-                        })
+                }) || operation.responses.entries().any(|(_, response)| {
+                    response.body.is_some_and(|ty| {
+                        response
+                            .media
+                            .is_some_and(|media| self.typed_body_needs_bytes_serde(media, ty.id))
                     })
+                })
             })
     }
 

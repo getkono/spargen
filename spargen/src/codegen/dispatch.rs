@@ -80,23 +80,14 @@ pub(super) fn error_branch_tokens(
         // A single documented error body, the operation's only error entry: classify against its
         // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
         // status). A bodyless entry beside it makes the shape an enum, so the filters below keep
-        // exactly that entry.
+        // exactly that entry; a `default` one maps to `Any`.
         ErrorShape::Single(body_ty) => {
-            let mut documented = operation
+            let documented = operation
                 .responses
-                .by_status
-                .iter()
+                .entries()
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
-                .map(|(status, _)| runtime_status_spec(*status))
+                .map(|(status, _)| runtime_status_spec(status))
                 .collect::<Vec<_>>();
-            if operation
-                .responses
-                .default
-                .as_ref()
-                .is_some_and(|default| default.body.is_some())
-            {
-                documented.push(quote! { support::StatusSpec::Any });
-            }
             let classify = if is_bytes_ty(api, *body_ty) {
                 quote! {
                     support::classify_error_bytes(
@@ -415,22 +406,13 @@ fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
     }
 }
 
-/// The chosen media type of the response a shape entry was built from: the `default` response for
-/// [`StatusSpec::Default`](crate::ir::StatusSpec), otherwise the `by_status` entry with exactly
-/// that selector.
+/// The chosen media type of the response a shape entry was built from (see
+/// [`Responses::get`](crate::ir::Responses::get)).
 fn response_media_for_spec(
     responses: &crate::ir::Responses,
     spec: crate::ir::StatusSpec,
 ) -> Option<MediaType> {
-    let response = match spec {
-        crate::ir::StatusSpec::Default => responses.default.as_ref(),
-        crate::ir::StatusSpec::Exact(_) | crate::ir::StatusSpec::Range(_) => responses
-            .by_status
-            .iter()
-            .find(|(candidate, _)| *candidate == spec)
-            .map(|(_, response)| response),
-    };
-    response.and_then(|response| response.media)
+    responses.get(spec).and_then(|response| response.media)
 }
 
 /// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
