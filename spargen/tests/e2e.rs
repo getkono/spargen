@@ -5740,6 +5740,41 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/ChatChunk"
+  # The two non-SSE stream framings, JSON Lines and RFC 7464 JSON Text Sequences, so the
+  # `support::Framing::Ndjson` and `support::Framing::JsonSequence` arms the generator emits are
+  # compiled and linted in the consumer crate like the SSE one above.
+  /chat/lines:
+    get:
+      operationId: streamChatLines
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
+  /chat/sequence:
+    get:
+      operationId: streamChatSequence
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json-seq:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
+  # The scheme kinds `/conjunction` leaves out: HTTP Basic and an API key carried in the query
+  # string or in a cookie, as three alternatives, so every `support::AuthKind` the generator emits
+  # is compiled and linted in the consumer crate.
+  /alternate-auth:
+    get:
+      operationId: getAlternateAuth
+      security:
+        - basic: []
+        - queryKey: []
+        - cookieKey: []
+      responses:
+        "204": { description: No Content }
   # The complete RFC 6570 style table on ONE request, so the wire test below can assert every
   # style, `explode` setting, and `allowReserved` in a single request line. The invariant under
   # test: a style's delimiters are emitted literally while every data byte is percent-encoded, so a
@@ -5982,6 +6017,17 @@ components:
       name: X-Tenant
     mtls:
       type: mutualTLS
+    basic:
+      type: http
+      scheme: basic
+    queryKey:
+      type: apiKey
+      in: query
+      name: api_key
+    cookieKey:
+      type: apiKey
+      in: cookie
+      name: session
   schemas:
     # A flat object, so `deepObject` is defined for it (the specification leaves nested objects
     # and arrays inside a deepObject value undefined, and spargen rejects those).
