@@ -1079,6 +1079,19 @@ mod tests {
             default: None,
         };
         assert!(responses.xml_in_multi_status());
+
+        // The error side follows the same rule: one XML error body beside a bodyless `default` is
+        // one body, and a second bodied error (here the `default`) makes the rejected combination.
+        let errors = |default: Option<u32>| Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(None)),
+                (StatusSpec::Exact(404), xml(Some(1))),
+            ],
+            default: Some(resp(default)),
+        };
+        assert!(matches!(errors(None).error(), ErrorShape::Enum(_)));
+        assert!(!errors(None).xml_in_multi_status());
+        assert!(errors(Some(2)).xml_in_multi_status());
     }
 
     #[test]
