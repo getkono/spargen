@@ -1319,6 +1319,43 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_yaml_float_points_at_its_element_or_at_the_mapping_holding_its_key() {
+        // An array element is addressed by its index; a key has no pointer of its own, so a
+        // non-finite float used as a key is addressed by the mapping that holds it, and is
+        // refused for its value before the key's type is ever looked at.
+        for (text, pointer, message) in [
+            (
+                "a:\n  enum: [1, .inf]\n",
+                "/a/enum/1",
+                "malformed YAML: number `.inf` is infinite, which JSON cannot represent \
+                 at line 2 column 13",
+            ),
+            (
+                "a:\n  - 0\n  - -1e999\n",
+                "/a/1",
+                "malformed YAML: number `-1e999` is out of range at line 3 column 5",
+            ),
+            (
+                "a:\n  .nan: x\n",
+                "/a",
+                "malformed YAML: number `.nan` is NaN, which JSON cannot represent \
+                 at line 2 column 3",
+            ),
+            (
+                "1e999: x\n",
+                "",
+                "malformed YAML: number `1e999` is out of range at line 1 column 1",
+            ),
+        ] {
+            let mut diags = Diagnostics::default();
+            assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
+            let diag = the_invalid_input(&diags);
+            assert_eq!(diag.pointer.as_str(), pointer, "{text}: {diag:?}");
+            assert_eq!(diag.message, message, "{text}: {diag:?}");
+        }
+    }
+
+    #[test]
     fn yaml_rejects_duplicate_mapping_key() {
         let mut diags = Diagnostics::default();
         // `a` appears twice; the duplicate is on line 2.
