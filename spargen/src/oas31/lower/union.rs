@@ -312,8 +312,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     |ctx, reach| {
                         // A member uninhabited on its own leaves the union so whatever the
                         // sibling is (#615), rather than an empty meet that rejects it below.
-                        let met =
-                            ctx.meet_refiner(inner, sibling.refiner, reach, &constrained_hint);
+                        let met = ctx.meet_union_sibling(
+                            schema,
+                            inner,
+                            sibling.refiner,
+                            reach,
+                            &constrained_hint,
+                        );
                         ctx.uninhabited_union_meet(inner, met)
                     },
                     |ctx| {
@@ -573,7 +578,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
                 let null_before = self.is_exact_null(ty);
-                let met = self.meet_refiner(
+                let met = self.meet_union_sibling(
+                    schema,
                     ty,
                     sibling.refiner,
                     &mut reach,

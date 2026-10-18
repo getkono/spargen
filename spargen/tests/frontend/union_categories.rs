@@ -164,3 +164,119 @@ fn a_cycle_closing_branch_of_a_typed_target_the_array_admits_generates() {
         );
     }
 }
+
+/// A multi-category `type` array that only restates its union's branch categories leaves every
+/// branch its own type: the generated types are those of the same union without the array, which
+/// is what the sibling spelling emitted before the array restricted anything. Each branch is its
+/// variant's payload, and no type of the union the array synthesizes (`…Constraint…`) or of a meet
+/// with it (`…Constrained…`) is emitted. The `milestone` row is GitHub 3.1's shape, a
+/// `[null, string, integer]` array beside `oneOf: [string, integer]` in a property.
+#[test]
+fn a_type_array_restating_its_union_branches_keeps_their_types() {
+    let rows = [
+        (
+            "Pick",
+            "    Pick: { type: [object, string], oneOf: [ { type: object, properties: { a: { type: \
+             string } } }, { type: string } ] }\n",
+        ),
+        (
+            "Pick",
+            "    Pick: { type: [object, string], oneOf: [ { type: object }, { type: string } ] }\n",
+        ),
+        (
+            "Pick",
+            "    Pick: { type: [string, array], anyOf: [ { type: array, items: { type: object, \
+             properties: { b: { type: integer } } } }, { type: string, enum: [x, y] } ] }\n",
+        ),
+        (
+            "Pick",
+            "    Pick: { type: [string, integer], oneOf: [ { type: string, format: uuid }, { type: \
+             integer, format: int32 }, { type: boolean } ] }\n",
+        ),
+        (
+            "Bodymilestone",
+            "    Body: { type: object, properties: { milestone: { oneOf: [ { type: string }, { \
+             type: integer } ], type: ['null', string, integer] } } }\n",
+        ),
+    ];
+    // Every declaration and every variant payload of the types module.
+    let surface = |types: &str| -> Vec<String> {
+        types
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("pub type ")
+                    || line.starts_with("pub struct ")
+                    || line.starts_with("pub enum ")
+                    || line.contains("(Box<")
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    for (union, schemas) in rows {
+        let (report, code) = generate_with_code(&with_schemas("3.1.0", schemas));
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schemas}: {report:#?}"
+        );
+        let types = types_module(&code);
+        let without_array = schemas
+            .replace("type: [object, string], ", "")
+            .replace("type: [string, array], ", "")
+            .replace("type: [string, integer], ", "")
+            .replace(", type: ['null', string, integer]", "");
+        assert_ne!(without_array, schemas);
+        let (_, bare) = generate_with_code(&with_schemas("3.1.0", &without_array));
+        let mut expected = surface(&types_module(&bare));
+        let actual = surface(&types);
+        // The one branch the `[string, integer]` row's array omits is no variant, with `W011`; its
+        // own type is lowered before the meet excludes it, as for any excluded branch.
+        if schemas.contains("type: boolean") {
+            expected.retain(|line| !line.starts_with("PickVariant2("));
+            assert_eq!(
+                messages_for(&report, Code::DeclarationHasNoEffect).len(),
+                1,
+                "{report:#?}"
+            );
+        }
+        assert_eq!(actual, expected, "{schemas}:\n{types}");
+        for variant in enum_variants(&types, union) {
+            let index = variant.find('(').expect("a newtype variant");
+            let name = &variant[..index];
+            assert_eq!(
+                &variant[index..],
+                format!("(Box<{name}>)"),
+                "{schemas}:\n{types}"
+            );
+        }
+    }
+}
+
+/// A `type` array that narrows a branch inside its category is met with it rather than restating
+/// it: `[string, integer]` beside a `number` branch leaves an integer, as the `allOf` spelling does.
+#[test]
+fn a_type_array_naming_integer_narrows_a_number_branch() {
+    for site in [
+        "{ type: [string, integer], anyOf: [ { type: string }, { type: number } ] }",
+        "{ allOf: [ { type: [string, integer] }, { anyOf: [ { type: string }, { type: number } ] \
+         } ] }",
+    ] {
+        let (report, code) =
+            generate_with_code(&with_schemas("3.1.0", &format!("    Pick: {site}\n")));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let payloads: Vec<Option<String>> = enum_variants(&types, "Pick")
+            .iter()
+            .map(|variant| {
+                let payload = variant.split_once("(Box<")?.1.trim_end_matches(">)");
+                alias_target(&types, payload)
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            [Some("String".to_owned()), Some("i64".to_owned())],
+            "{site}:\n{types}"
+        );
+    }
+}

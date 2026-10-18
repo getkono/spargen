@@ -3,7 +3,7 @@
 
 use indexmap::IndexMap;
 
-use crate::ir::{Docs, JsonCategory, Ty, TypeKind, Union, UnionVariant};
+use crate::ir::{Docs, JsonCategory, Prim, Ty, TypeKind, Union, UnionVariant};
 use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 
 use super::combine::schema_is_object_like;
@@ -647,6 +647,49 @@ impl LowerCtx<'_, '_> {
         };
         categories.is_within(allowed)
     }
+
+    /// Meet `branch`, a member of `schema`'s `oneOf`/`anyOf`, with `refiner`, the union's lowered
+    /// sibling ([`Self::meet_refiner`]). Where that sibling is a multi-category `type` array alone
+    /// ([`union_sibling_is_categories_alone`]) and the array already admits every value of the
+    /// branch's category, the array only restates the branch: the branch keeps its own type, and
+    /// only its `null` is met, kept where the array lists `null` too. Meeting it with the union the
+    /// array synthesizes would give the same values a new type of that union's naming, and leave
+    /// the branch's own type emitted beside it, unused.
+    pub(super) fn meet_union_sibling(
+        &mut self,
+        schema: &Schema,
+        branch: Ty,
+        refiner: Refiner,
+        reach: &mut ScopeReach,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        if let Some(allowed) = union_sibling_is_categories_alone(schema) {
+            let restated = self
+                .graph
+                .get(branch.id)
+                .is_some_and(|def| array_admits_all_of(&def.kind, allowed, &schema.types.types));
+            if restated {
+                let mut kept = branch;
+                kept.nullable = branch.nullable && schema.types.types.contains(&JsonType::Null);
+                return Ok(kept);
+            }
+        }
+        self.meet_refiner(branch, refiner, reach, hint)
+    }
+}
+
+/// Whether a `type` array naming `types` (categories `allowed`) admits every non-null value of a
+/// branch lowered to `kind`: the branch's category is among them, and the array narrows nothing
+/// inside it. That holds for every category but numbers, where an array naming `integer` without
+/// `number` narrows an `f64` branch to integers. A branch of no single category (a union, `Any`,
+/// `null`, an uninhabited type, a reservation) answers `false`.
+fn array_admits_all_of(kind: &TypeKind, allowed: CategoryMask, types: &[JsonType]) -> bool {
+    let Some(category) = value_category(kind) else {
+        return false;
+    };
+    let narrows_to_integers =
+        matches!(kind, TypeKind::Primitive(Prim::F64)) && !types.contains(&JsonType::Number);
+    allowed.admits(category) && !narrows_to_integers
 }
 
 /// Split the siblings of a `$ref` (`sibling`, the reference already stripped) that carry a
