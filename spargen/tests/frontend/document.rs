@@ -130,13 +130,16 @@ fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }
 
-    // A finite float in the same position, including YAML-only spellings, still generates.
+    // A finite float in the same position, tagged or plain, up to the edge of `f64`, still passes.
     for value in ["1.5e3", "-0.5", "!!float 5", "1e308"] {
         let spec = maximum_document(value);
         let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
-        for report in [&generated, &checked] {
-            assert_eq!(report.outcome(), Outcome::Generated, "{value}: {report:#?}");
-        }
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "{value}: {generated:#?}"
+        );
+        assert_eq!(checked.outcome(), Outcome::Clean, "{value}: {checked:#?}");
     }
 }
 
