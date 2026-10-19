@@ -76,8 +76,8 @@ impl InputBundle {
         bundle.vendor_dir = spec_dir.join(VENDOR_DIR);
         bundle.lock = load_lock(&spec_dir.join(LOCK_FILE_NAME), diags)?;
 
-        // Nothing refers to the root document, so a failure to read it is about the input as a
-        // whole and is located at its root.
+        // The root document is read before any reference is walked, so a failure to read it is
+        // about the input as a whole and is located at its root.
         let root_site = Provenance::new(JsonPointer::root(), None);
         let root_id = bundle.load_file(root.to_path_buf(), root_site, diags)?;
         bundle.root = Some(root_id);
