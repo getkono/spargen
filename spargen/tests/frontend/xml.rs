@@ -1056,6 +1056,101 @@ components:
     }
 }
 
+/// A component struct reached as an array property's items names each list element by its own
+/// root `xml.name`, as OpenAPI 3.2's "XML Arrays" reads a `$ref` item (node type `none`, so the
+/// referenced schema produces its element). quick-xml writes a nested struct under the field's
+/// name and never reads the struct's container rename there, so the root name has to become the
+/// field's: without it each element went on the wire as `<pets>` while `check` printed `clean`.
+/// A name written beside the `$ref` on the items still wins, and an owner that also travels as
+/// JSON keeps its field name under the shared-type `W006`, like every other field rename.
+#[test]
+fn a_component_root_name_names_each_element_of_an_array_property_of_it() {
+    let pet = "Pet: { type: object, xml: { name: pet }, properties: { id: { type: integer } } }";
+    for (version, pets, list, element) in [
+        (
+            "3.1.0",
+            "{ type: array, items: { $ref: '#/components/schemas/Pet' } }",
+            "",
+            "pet",
+        ),
+        (
+            "3.2.0",
+            "{ type: array, items: { $ref: '#/components/schemas/Pet' } }",
+            "",
+            "pet",
+        ),
+        (
+            "3.2.0",
+            "{ $ref: '#/components/schemas/PetList' }",
+            "PetList: { type: array, items: { $ref: '#/components/schemas/Pet' } }",
+            "pet",
+        ),
+        (
+            "3.2.0",
+            "{ type: array, items: { $ref: '#/components/schemas/Pet', xml: { name: critter } } }",
+            "",
+            "critter",
+        ),
+    ] {
+        for shared in [false, true] {
+            let json_use = if shared {
+                "
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Owner' } }"
+            } else {
+                ""
+            };
+            let spec = format!(
+                r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /owners:
+    post:
+      requestBody:
+        content:
+          application/xml: {{ schema: {{ $ref: '#/components/schemas/Owner' }} }}
+      responses:
+        '204': {{ description: ok }}{json_use}
+components:
+  schemas:
+    Owner:
+      type: object
+      properties:
+        pets: {pets}
+    {pet}
+    {list}
+"##
+            );
+            let case = format!("{version} {pets} shared={shared}");
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            let field_rename = format!(r#"rename = "{element}","#);
+            if shared {
+                assert!(
+                    messages_for(&report, Code::XmlHintIgnored)
+                        .iter()
+                        .any(|m| m.contains("shared between an XML body")),
+                    "{case}: {report:#?}"
+                );
+                assert!(!code.contains(&field_rename), "{case}: {code}");
+            } else {
+                assert!(
+                    !has_code(&report, Code::XmlHintIgnored),
+                    "{case}: {report:#?}"
+                );
+                assert!(code.contains(&field_rename), "{case}: {code}");
+            }
+            assert!(
+                struct_attributes(&code, "Pet").contains(&r#"#[serde(rename = "pet")]"#.to_owned()),
+                "{case}: {code}"
+            );
+        }
+    }
+}
+
 /// An `items` hint the codec cannot write, on a list an XML body serializes: rejected, and named as
 /// the items' hint so the author can find it.
 #[test]
