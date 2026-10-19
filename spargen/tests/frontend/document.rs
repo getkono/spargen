@@ -175,19 +175,22 @@ paths:
 #[test]
 fn oas30_document_still_rejected_e001() {
     // Widening to accept 3.2 must not accept 3.0: it uses different schema semantics and stays
-    // rejected with `E001`.
-    let report = generate(
-        r##"
-openapi: 3.0.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        has_code(&report, Code::UnsupportedOpenApiVersion),
-        "{report:#?}"
-    );
+    // rejected with `E001`, by `check` as by `generate`, on the first and on a later patch release.
+    for version in ["3.0.0", "3.0.3"] {
+        let spec =
+            format!("openapi: {version}\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n");
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{version} through {entry}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedOpenApiVersion),
+                "{version} through {entry}: {report:#?}"
+            );
+        }
+    }
 }
 
 #[test]

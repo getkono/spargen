@@ -1301,8 +1301,9 @@ mod tests {
             ("CargoIntegrationDegraded", "config.rs"),
             ("CargoIntegrationRequired", "config.rs"),
             // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
-            // run over the real fetcher can produce it.
-            ("RemoteFetchFailed", "vendor_remote.rs"),
+            // run over the real fetcher can produce it. Its one positive assertion is the
+            // `fetch_failure` helper, which `vendor_remote.rs` and `tls_strictness.rs` both call.
+            ("RemoteFetchFailed", "shared/remote.rs"),
         ];
 
         let Some(root) = repo_root() else {
