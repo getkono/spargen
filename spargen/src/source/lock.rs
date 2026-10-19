@@ -300,13 +300,28 @@ fn sanitize_segment(segment: &str) -> String {
         .collect()
 }
 
+/// `line` up to the `#` that starts its comment, if any. As in TOML, a `#` outside a quoted string
+/// starts a comment and a `#` inside one is part of the value; inside a string, `\` escapes the
+/// next character, so `\"` does not close it (the escapes `toml_string` writes).
 fn strip_comment(line: &str) -> &str {
-    // Comments only start a line or follow whitespace; `#` inside a quoted value is preserved
-    // because values here are URLs/hashes/paths that never contain `#` after fragment stripping.
-    match line.find('#') {
-        Some(idx) => &line[..idx],
-        None => line,
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == '#' {
+            return &line[..idx];
+        }
     }
+    line
 }
 
 #[cfg(feature = "remote-fetch")]
@@ -412,6 +427,38 @@ mod tests {
         let file = redirected.replace("https://h/new.yaml", "file:///etc/new.yaml");
         let err = Lock::parse(&file).unwrap_err();
         assert!(err.0.contains("http(s)"), "{err}");
+    }
+
+    /// A `#` inside a quoted value is part of the value; only a `#` outside quotes starts a
+    /// comment (#710). An escaped quote does not close the string, so a `#` after it is still
+    /// inside the value.
+    #[test]
+    fn a_hash_inside_a_quoted_value_is_part_of_the_value() {
+        let text =
+            "# leading comment\nversion = 1 # trailing comment\n[[remote]] # table comment\n\
+                    url = \"https://h/a.yaml\" # pin comment\n\
+                    retrieval_url = \"https://h/b.yaml#x\"\n\
+                    sha256 = \"a\"#no space before this comment\n\
+                    path = \"h/a\\\\b\\\"#c.yaml\"\n";
+        let lock = Lock::parse(text).unwrap();
+        let entry = lock.get("https://h/a.yaml").unwrap();
+        assert_eq!(entry.base_url(), "https://h/b.yaml#x");
+        assert_eq!(entry.sha256, "a");
+        assert_eq!(entry.path, "h/a\\b\"#c.yaml");
+    }
+
+    #[cfg(feature = "remote-fetch")]
+    #[test]
+    fn a_value_holding_a_hash_round_trips() {
+        let mut lock = Lock::default();
+        lock.upsert(RemoteEntry {
+            url: "https://h/a.yaml".to_owned(),
+            sha256: "a".to_owned(),
+            path: "h/a#\"\\.yaml".to_owned(),
+            retrieval_url: Some("https://h/b.yaml#x".to_owned()),
+        });
+        let toml = lock.to_toml();
+        assert_eq!(Lock::parse(&toml).unwrap(), lock, "{toml}");
     }
 
     #[test]
