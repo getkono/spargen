@@ -1,12 +1,14 @@
 name: Benchmarks
 
-# Benchmarks are a RECORD, not a gate. They run on release tags and on demand, and upload their
-# results as a downloadable artifact — so anyone can read the numbers without setting up the harness
-# locally. Absolute numbers from a shared CI runner are noisy; the durable signal is the ratios and
-# the trend across releases.
+# Benchmarks are a RECORD, not a gate. They run on demand, and once per `spargen` release on its
+# `spargen-v<version>` tag, and upload their results as a downloadable artifact — so anyone can read
+# the numbers without setting up the harness locally. Absolute numbers from a shared CI runner are
+# noisy; the durable signal is the ratios and the trend across releases.
+#
+# The release run is dispatched by `release-plz.yml`'s `benchmarks` job, not by a `push: tags:`
+# filter: release-plz pushes its tags with `GITHUB_TOKEN`, and a push made with that token starts
+# no workflow (#685).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 env:

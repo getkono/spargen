@@ -7,7 +7,8 @@
 //!
 //! Inputs: a tiny inline spec (fixed cost floor), the 3.1 petstore example, and the real-world
 //! Ollama spec (a mid-sized generating corpus case). Run with `cargo bench` or
-//! `mise run bench`; CI uploads the results as a release artifact.
+//! `mise run bench`; CI's `benchmarks.yml` uploads the results as a workflow artifact, on demand
+//! and on each `spargen` release tag (`release-plz.yml` dispatches it).
 
 use std::hint::black_box;
 
