@@ -3193,10 +3193,7 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
     );
     let (base_report, base_code) = generate_with_code(&baseline);
     assert_ne!(base_report.outcome(), Outcome::Rejected, "{base_report:#?}");
-    let base_types = base_code
-        .find("pub mod types {")
-        .map(|i| base_code[i..].to_owned())
-        .unwrap_or_default();
+    let base_types = types_module(&base_code);
 
     // Each of these adds a back-edge through a keyword lowering does not traverse. None changes the
     // instance set, and none can produce a placeholder.
@@ -3237,10 +3234,7 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
         // Stronger than "still generates": the emitted types are the ones the baseline emits, so
         // the keyword is confirmed inert rather than merely tolerated.
         let (_, code) = generate_with_code(&spec);
-        let types = code
-            .find("pub mod types {")
-            .map(|i| code[i..].to_owned())
-            .unwrap_or_default();
+        let types = types_module(&code);
         assert_eq!(
             types, base_types,
             "`{what}` changed the emitted types, so it is not inert after all"

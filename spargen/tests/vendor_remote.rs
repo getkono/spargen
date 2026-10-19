@@ -20,7 +20,12 @@ use std::sync::{Arc, Mutex};
 
 use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
-use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{CargoIntegration, Outcome, Spec};
+
+#[path = "shared/remote.rs"]
+mod remote;
+
+use remote::fetch_failure;
 
 /// What the mock server answers for one path.
 #[derive(Clone)]
@@ -117,47 +122,10 @@ const TAG_YAML: &str = "type: object\n\
                         properties:\n  \
                         label: { type: string }\n";
 
-/// A root description whose two operations both `$ref` the same remote document.
-fn root_spec(remote: &str) -> String {
-    root_spec_naming(remote, remote)
-}
-
-/// A root description whose first operation `$ref`s `first` and whose second `$ref`s `second`,
-/// in that document order.
-fn root_spec_naming(first: &str, second: &str) -> String {
-    format!(
-        "openapi: 3.1.0\n\
-         info: {{ title: T, version: 1.0.0 }}\n\
-         servers: [{{ url: 'https://e.com' }}]\n\
-         paths:\n  \
-         /pet:\n    \
-         get:\n      \
-         operationId: getPet\n      \
-         responses:\n        \
-         '200':\n          \
-         description: ok\n          \
-         content:\n            \
-         application/json:\n              \
-         schema: {{ $ref: '{first}' }}\n  \
-         /pet/again:\n    \
-         get:\n      \
-         operationId: getPetAgain\n      \
-         responses:\n        \
-         '200':\n          \
-         description: ok\n          \
-         content:\n            \
-         application/json:\n              \
-         schema: {{ $ref: '{second}' }}\n"
-    )
-}
-
-/// Write `root_spec(remote)` into a fresh tempdir and return the dir and the spec path.
+/// A root description whose two operations both `$ref` the same remote document, in a fresh
+/// tempdir: the dir and the spec path.
 fn workspace(remote: &str) -> (tempfile::TempDir, Utf8PathBuf) {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let spec = dir.join("openapi.yaml");
-    std::fs::write(&spec, root_spec(remote)).unwrap();
-    (temp, spec)
+    remote::workspace(&[remote, remote])
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -165,16 +133,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-/// The single diagnostic a failed fetch reports — `E025`, and never `E003` "not pinned", which
-/// would blame the document for a network failure — with its message.
-fn fetch_failure(report: &Report) -> String {
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    let diagnostics = report.diagnostics();
-    assert_eq!(diagnostics.len(), 1, "{report:#?}");
-    assert_eq!(diagnostics[0].code, Code::RemoteFetchFailed, "{report:#?}");
-    diagnostics[0].message.clone()
 }
 
 #[test]
@@ -239,13 +197,8 @@ fn an_http_error_status_is_e025_naming_the_url_and_the_status() {
 
     let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
 
-    let message = fetch_failure(&report);
-    assert!(message.contains(&url), "{message}");
+    let message = fetch_failure(&report, &spec_path, &url);
     assert!(message.contains("410"), "{message}");
-    assert!(
-        !spec_path.with_file_name(".spargen").exists(),
-        "a failed fetch must vendor nothing"
-    );
 }
 
 #[test]
@@ -403,10 +356,7 @@ fn a_spec_naming_a_redirect_and_its_target_pins_what_the_build_reads_in_either_o
     let tag_url = server.url("/new/tag.yaml");
 
     // Target first: every named URL is fetched once, and both are pinned.
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let spec_path = dir.join("openapi.yaml");
-    std::fs::write(&spec_path, root_spec_naming(&retrieved, &requested)).unwrap();
+    let (_temp, spec_path) = remote::workspace(&[&retrieved, &requested]);
     let report =
         spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
     assert_eq!(
@@ -434,10 +384,7 @@ fn a_spec_naming_a_redirect_and_its_target_pins_what_the_build_reads_in_either_o
     assert_eq!(server.hits().len(), 4, "generation must not fetch");
 
     // Redirect first: the target is the document already retrieved, so it is not pinned again.
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let spec_path = dir.join("openapi.yaml");
-    std::fs::write(&spec_path, root_spec_naming(&requested, &retrieved)).unwrap();
+    let (_temp, spec_path) = remote::workspace(&[&requested, &retrieved]);
     let report =
         spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
     assert_eq!(
@@ -535,10 +482,9 @@ fn a_refused_connection_is_e025_naming_the_url() {
     let url = format!("http://127.0.0.1:{port}/pet.yaml");
     let (_temp, spec_path) = workspace(&url);
 
-    let report = spargen::vendor(&Spec::new(spec_path)).unwrap_err();
+    let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
 
-    let message = fetch_failure(&report);
-    assert!(message.contains(&url), "{message}");
+    let message = fetch_failure(&report, &spec_path, &url);
     // The cause, not only reqwest's "error sending request": the refused connect's own I/O
     // error, whose std rendering always carries the OS error number.
     assert!(message.contains("(os error "), "{message}");

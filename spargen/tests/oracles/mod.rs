@@ -112,10 +112,21 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Viola
 }
 
 /// Everything from the generated `types` module to the end of the file, or nothing when no module
-/// was emitted. The embedded runtime before it is not generated from the document.
-fn types_module(code: &str) -> &str {
+/// was emitted: the provenance header and the embedded runtime before it are stripped, since they
+/// are not generated from the document.
+///
+/// It is **not** bounded at the module's closing brace: the returned text also carries the
+/// `Client` impl and the emitted scaffolding after `types`. A `.contains(…)` on it can therefore
+/// match client code rather than a lowered type; a check that must pin a lowered type should match
+/// a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
+///
+/// Two generations of the *same* spec already differ as whole files: the header carries the output
+/// path and a per-run `input-sha256`/`content-sha256`. So comparing two generated clients whole
+/// proves nothing about what they lowered to. Comparing from `pub mod types {` onward compares
+/// what the two documents actually lowered to.
+pub fn types_module(code: &str) -> String {
     code.find("pub mod types {")
-        .map_or("", |start| &code[start..])
+        .map_or_else(String::new, |start| code[start..].to_owned())
 }
 
 /// The item declarations of a generated module, keyed by name: each `pub type`, `pub struct` and
@@ -239,7 +250,7 @@ impl Declarations {
 /// rest. That is the faithful lowering of what the document says, so it is not reported.
 pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
     let types = types_module(code);
-    let declarations = Declarations::read(types);
+    let declarations = Declarations::read(&types);
     let mut violations = Vec::new();
     for (name, (kind, _, body)) in &declarations.items {
         if *kind != "enum" || !types.contains(&format!("serde::Deserialize<'de> for {name} {{")) {
@@ -312,7 +323,7 @@ pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
 /// it reaches expanded, so two modules that lower one schema under different names agree. `name`
 /// itself when the module declares nothing by that name.
 pub fn shape(code: &str, name: &str) -> String {
-    Declarations::read(types_module(code)).shape_of(name, 8)
+    Declarations::read(&types_module(code)).shape_of(name, 8)
 }
 
 /// A YAML string scalar.
