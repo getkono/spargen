@@ -44,7 +44,7 @@ pub(crate) struct RemoteEntry {
     /// Path of the vendored copy, relative to [`VENDOR_DIR`].
     pub(crate) path: String,
     /// Where `url`'s redirects ended, when they ended somewhere else: the document's base URI
-    /// (RFC 3986 §5.1.3), against which its relative `$ref`s resolve. `None` (no
+    /// (RFC 3986 §5.1.3, fragment stripped), against which its relative `$ref`s resolve. `None` (no
     /// `retrieval_url` key) when the document was retrieved from `url` itself.
     pub(crate) retrieval_url: Option<String>,
 }
@@ -185,7 +185,7 @@ impl Lock {
     }
 
     fn push_partial(&mut self, partial: PartialEntry, lineno: usize) -> Result<(), LockError> {
-        let entry = partial.finish().ok_or_else(|| {
+        let mut entry = partial.finish().ok_or_else(|| {
             LockError(format!(
                 "spargen.lock: [[remote]] before line {} is missing url/sha256/path",
                 lineno + 1
@@ -198,11 +198,18 @@ impl Lock {
         validate_vendor_path(&entry.path)?;
         // A base URI is what the document's relative references resolve against, and only an
         // `http`/`https` fetch can have produced one.
-        if let Some(retrieval_url) = &entry.retrieval_url {
+        // A base URI carries no fragment (RFC 3986 §5.1): one left in a hand-edited value would
+        // otherwise be joined into every relative reference resolved against it, and would key
+        // the document under a URL no reference names. It is dropped here, as `spargen lock`
+        // drops it before writing.
+        if let Some(retrieval_url) = &mut entry.retrieval_url {
             if !(retrieval_url.starts_with("http://") || retrieval_url.starts_with("https://")) {
                 return Err(LockError(format!(
                     "spargen.lock: retrieval_url `{retrieval_url}` must be an http(s) URL"
                 )));
+            }
+            if let Some(hash) = retrieval_url.find('#') {
+                retrieval_url.truncate(hash);
             }
         }
         self.entries.push(entry);
@@ -431,7 +438,8 @@ mod tests {
 
     /// A `#` inside a quoted value is part of the value; only a `#` outside quotes starts a
     /// comment (#710). An escaped quote does not close the string, so a `#` after it is still
-    /// inside the value.
+    /// inside the value. A fragment in `retrieval_url` is read and then dropped, because a base
+    /// URI carries none.
     #[test]
     fn a_hash_inside_a_quoted_value_is_part_of_the_value() {
         let text =
@@ -442,7 +450,7 @@ mod tests {
                     path = \"h/a\\\\b\\\"#c.yaml\"\n";
         let lock = Lock::parse(text).unwrap();
         let entry = lock.get("https://h/a.yaml").unwrap();
-        assert_eq!(entry.base_url(), "https://h/b.yaml#x");
+        assert_eq!(entry.base_url(), "https://h/b.yaml");
         assert_eq!(entry.sha256, "a");
         assert_eq!(entry.path, "h/a\\b\"#c.yaml");
     }
@@ -455,7 +463,7 @@ mod tests {
             url: "https://h/a.yaml".to_owned(),
             sha256: "a".to_owned(),
             path: "h/a#\"\\.yaml".to_owned(),
-            retrieval_url: Some("https://h/b.yaml#x".to_owned()),
+            retrieval_url: Some("https://h/b.yaml".to_owned()),
         });
         let toml = lock.to_toml();
         assert_eq!(Lock::parse(&toml).unwrap(), lock, "{toml}");
