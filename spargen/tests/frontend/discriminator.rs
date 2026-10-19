@@ -1311,3 +1311,69 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
+
+/// A 3.2 `Pet` over three members, each requiring its own `kind`, falling back to `fallback`; and
+/// `Wet`: `Pet` with a sibling narrowing `kind` to `dog` or `fish`, which `Cat` (`kind: cat`)
+/// cannot meet. `Wet` is the union of `Dog` and `Fish` alone, so its strategy is `Pet`'s
+/// restricted to those two.
+fn wet_pet(fallback: &str) -> String {
+    format!(
+        "openapi: 3.2.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n    \
+         Pet:\n      \
+         oneOf:\n        \
+         - {{ $ref: '#/components/schemas/Cat' }}\n        \
+         - {{ $ref: '#/components/schemas/Dog' }}\n        \
+         - {{ $ref: '#/components/schemas/Fish' }}\n      \
+         discriminator:\n        \
+         propertyName: kind\n        \
+         mapping: {{ cat: Cat, dog: Dog, fish: Fish }}\n        \
+         defaultMapping: {fallback}\n    \
+         Wet: {{ $ref: '#/components/schemas/Pet', properties: {{ kind: {{ enum: [dog, fish] }} }} }}\n    \
+         Cat: {{ type: object, required: [kind], properties: {{ kind: {{ const: cat }} }} }}\n    \
+         Dog: {{ type: object, required: [kind], properties: {{ kind: {{ const: dog }}, bark: {{ type: boolean }} }} }}\n    \
+         Fish: {{ type: object, required: [kind], properties: {{ kind: {{ const: fish }}, fins: {{ type: integer }} }} }}\n"
+    )
+}
+
+/// The `Deserialize` impl `ty`'s discriminated union emits: from its `impl` line to the next one.
+fn deserialize_impl(code: &str, ty: &str) -> String {
+    let head = format!("Deserialize<'de> for {ty} ");
+    let start = code
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `Deserialize` impl for {ty}: {code}"));
+    let rest = &code[start..];
+    rest[..rest[1..].find("\nimpl").map_or(rest.len(), |end| end + 1)].to_owned()
+}
+
+#[test]
+fn a_restricted_discriminated_union_keeps_its_fallback_at_the_fallback_s_new_position() {
+    // `Cat` is dropped from before `Fish`, so the fallback moves from the third variant to the
+    // second: an absent or unknown tag still decodes as `Fish`.
+    let (report, code) = generate_with_code(&wet_pet("Fish"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(enum_variants(&code, "Wet").len(), 2, "{code}");
+    let wet = deserialize_impl(&code, "Wet");
+    // `Fish` decodes under its own tag, an absent tag and an unknown one; `Dog` under its tag only.
+    assert_eq!(wet.matches("map(Wet::Fish)").count(), 3, "{wet}");
+    assert_eq!(wet.matches("map(Wet::Dog)").count(), 1, "{wet}");
+    assert!(!wet.contains("missing discriminator field"), "{wet}");
+    assert!(!wet.contains("unknown discriminator value"), "{wet}");
+}
+
+#[test]
+fn a_restricted_discriminated_union_whose_fallback_is_dropped_has_none() {
+    // The fallback was `Cat`, the member the restriction drops, so `Wet` has no fallback: an
+    // absent or unknown tag is an error, not a decode as whichever member took `Cat`'s position.
+    let (report, code) = generate_with_code(&wet_pet("Cat"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(enum_variants(&code, "Wet").len(), 2, "{code}");
+    let wet = deserialize_impl(&code, "Wet");
+    assert_eq!(wet.matches("map(Wet::Dog)").count(), 1, "{wet}");
+    assert_eq!(wet.matches("map(Wet::Fish)").count(), 1, "{wet}");
+    assert!(wet.contains("missing discriminator field"), "{wet}");
+    assert!(wet.contains("unknown discriminator value"), "{wet}");
+}
