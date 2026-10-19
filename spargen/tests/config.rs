@@ -243,6 +243,31 @@ components:
     Legacy: { type: object, properties: { id: { type: string } } }
 "##;
 
+#[test]
+fn the_macro_tracks_the_config_file_it_applied() {
+    // `generate_api!` re-expands only when a file it `include_bytes!`s changes, so the
+    // `spargen.toml` it applied must be among them, or an edit to that file alone leaves the
+    // previous client in place (#686).
+    let temp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let spec_path = root.join("openapi.yaml");
+    std::fs::write(&spec_path, SPEC).unwrap();
+    let config = root.join("spargen.toml");
+    std::fs::write(&config, "batch_cap = 7\n").unwrap();
+
+    let spec = spargen::Spec::new(&spec_path)
+        .discover_config_file()
+        .unwrap();
+    let preview = spargen::__private::preview(&spec);
+    assert_eq!(
+        preview.report.outcome(),
+        spargen::Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    assert_eq!(preview.source_files, [spec_path, config]);
+}
+
 #[cfg(feature = "cli")]
 fn knobs_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();

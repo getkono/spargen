@@ -27,7 +27,9 @@ setters, so a new knob is additive rather than breaking.
 and `open_narrowing` (see [problem details](./runtime.md#problem-details)). They can equally be read from a `spargen.toml` (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
-authoritative.
+authoritative. `generate` names each applied file as a `cargo:rerun-if-changed` path, so editing
+it regenerates the client; a `spargen.toml` created after the last build is picked up only once
+the build reruns for another reason, such as touching the spec.
 
 `Report` reads through accessors — `report.diagnostics()`, `report.outcome()`, and
 `report.truncated()`. A run that reaches `batch_cap` stops collecting and drops the rest;
@@ -121,8 +123,8 @@ mod api {
 It accepts a positional schema path or `spec = "..."`, plus the same controls as `Spec`:
 `no_uuid`, `no_time`, `carve`, `open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an
 `omit { ... }`
-profile. Cargo and rustc track the root schema, every transitive source file, and
-`spargen.lock` through the expansion. See the
+profile. Cargo and rustc track the root schema, every transitive source file,
+`spargen.lock`, and the `spargen.toml` it applied through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
 
 ## The generated client API
