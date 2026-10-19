@@ -258,3 +258,57 @@ paths:
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
+
+#[test]
+fn e011_server_variable_repeated_in_its_url() {
+    // The variable is declared, so the undeclared-variable gate beside this one stays silent; the
+    // message is what tells the repetition gate from its `E011` siblings.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.{region}.example.com"
+    variables:
+      region: { default: us }
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            messages_for(&report, Code::InvalidInput)
+                .iter()
+                .any(|m| m.contains("server variable `region` appears more than once")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_server_variable_absent_from_its_url_has_no_effect() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.example.com"
+    variables:
+      region: { default: us }
+      stage: { default: prod }
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::DeclarationHasNoEffect),
+            ["server variable `stage` is declared but does not appear in `https://{region}.example.com`"],
+            "{report:#?}"
+        );
+    }
+}
