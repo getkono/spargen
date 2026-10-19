@@ -3,7 +3,7 @@
 
 use indexmap::IndexMap;
 
-use crate::ir::{Docs, JsonCategory, Prim, Ty, TypeKind, Union, UnionVariant};
+use crate::ir::{Docs, JsonCategory, Prim, Ty, TypeGraph, TypeId, TypeKind, Union, UnionVariant};
 use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 
 use super::combine::schema_is_object_like;
@@ -664,10 +664,13 @@ impl LowerCtx<'_, '_> {
         hint: &str,
     ) -> Result<Ty, NoMeet> {
         if let Some(allowed) = union_sibling_is_categories_alone(schema) {
-            let restated = self
-                .graph
-                .get(branch.id)
-                .is_some_and(|def| array_admits_all_of(&def.kind, allowed, &schema.types.types));
+            let restated = array_admits_all_of(
+                &self.graph,
+                branch.id,
+                allowed,
+                &schema.types.types,
+                &mut Vec::new(),
+            );
             if restated {
                 let mut kept = branch;
                 kept.nullable = branch.nullable && schema.types.types.contains(&JsonType::Null);
@@ -678,17 +681,42 @@ impl LowerCtx<'_, '_> {
     }
 }
 
-/// Whether a `type` array naming `types` (categories `allowed`) admits every non-null value of a
-/// branch lowered to `kind`: the branch's category is among them, and the array narrows nothing
+/// Whether a `type` array naming `types` (categories `allowed`) admits every non-null value of the
+/// branch lowered to `id`: the branch's category is among them, and the array narrows nothing
 /// inside it. That holds for every category but numbers, where an array naming `integer` without
-/// `number` narrows an `f64` branch to integers. A branch of no single category (a union, `Any`,
-/// `null`, an uninhabited type, a reservation) answers `false`.
-fn array_admits_all_of(kind: &TypeKind, allowed: CategoryMask, types: &[JsonType]) -> bool {
-    let Some(category) = value_category(kind) else {
+/// `number` narrows an `f64` branch to integers. A branch that is itself a union is admitted when
+/// every variant is, a nullable variant only where the array lists `null`, so the array admits
+/// every category the union spans. `visiting` holds the unions already on the path, and a union
+/// reached again answers `false`. Any other branch of no single category (`Any`, `null`, an
+/// uninhabited type, a reservation) answers `false`.
+fn array_admits_all_of(
+    graph: &TypeGraph,
+    id: TypeId,
+    allowed: CategoryMask,
+    types: &[JsonType],
+    visiting: &mut Vec<TypeId>,
+) -> bool {
+    let Some(def) = graph.get(id) else {
+        return false;
+    };
+    if let TypeKind::Union(union) = &def.kind {
+        if visiting.contains(&id) {
+            return false;
+        }
+        visiting.push(id);
+        let admitted = !union.variants.is_empty()
+            && union.variants.iter().all(|variant| {
+                (!variant.ty.nullable || types.contains(&JsonType::Null))
+                    && array_admits_all_of(graph, variant.ty.id, allowed, types, visiting)
+            });
+        visiting.pop();
+        return admitted;
+    }
+    let Some(category) = value_category(&def.kind) else {
         return false;
     };
     let narrows_to_integers =
-        matches!(kind, TypeKind::Primitive(Prim::F64)) && !types.contains(&JsonType::Number);
+        matches!(def.kind, TypeKind::Primitive(Prim::F64)) && !types.contains(&JsonType::Number);
     allowed.admits(category) && !narrows_to_integers
 }
 
