@@ -639,6 +639,9 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
         "    NB:\n      type: [object, 'null']\n      properties:\n        a: { type: \
                          string }\n        b: { type: string }\n";
     let name = "    Name: { type: string }\n";
+    let other =
+        "    Other:\n      type: object\n      required: [a]\n      properties:\n        c: \
+                 { type: integer }\n";
     // Branches that state nothing, so each meets the target to the target itself. Untyped
     // `required` branches no longer do: each establishes an object that requires its key (#613).
     let keywordless = "[ {}, {} ]";
@@ -646,6 +649,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     let single =
         "[ { type: object, required: [a], properties: { c: { type: integer } } }, { type: \
                   'null' } ]";
+    let single_ref = "[ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
     // (case, target, keyword, branches, the codes reported at `Pick`, `Pick`'s shape). `Fields`
     // carries whether the required `pick` property is `Option`, that is, whether `null` is valid.
     enum Shape {
@@ -719,6 +723,25 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             single,
             vec![],
             Shape::Fields(&["a", "b", "c"], false),
+        ),
+        // The same with its real branch a `$ref` (#491): met as `Other`, so `Pick` is `Base` and
+        // `Other` merged. Beside the nullable target `null` matches the target and exactly one
+        // branch, so the `oneOf` admits it.
+        (
+            "single nullable $ref branch",
+            "Base",
+            "oneOf",
+            single_ref,
+            vec![],
+            Shape::Fields(&["a", "b", "c"], false),
+        ),
+        (
+            "nullable target, single nullable $ref branch",
+            "NB",
+            "oneOf",
+            single_ref,
+            vec![],
+            Shape::Fields(&["a", "b", "c"], true),
         ),
     ];
     // A further conjunct `required: [a]`, which every instance satisfies as well, written as an
@@ -822,7 +845,7 @@ paths:
             application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
 components:
   schemas:
-{base}{nullable_base}{name}    Pick: {site}
+{base}{nullable_base}{name}{other}    Pick: {site}
     Holder:
       type: object
       properties:
@@ -864,15 +887,52 @@ components:
     }
 }
 
-/// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
-/// nest one union in another's branches, so the composition is rejected with the stable `E013` it
-/// has always drawn rather than emitting a union of identical variants (#463).
+/// An `allOf` with a union member takes its `null` from every conjunct, the enclosing schema's own
+/// `type` among them, exactly as `{$ref: T, type: …, oneOf|anyOf: […]}` and the union written
+/// beside the `allOf` do (#491). The `allOf` path once read nullability from the enclosing `type`
+/// alone after the meet (`with_all_of_nullability`), so beside a nullable target the spellings
+/// could differ in `Option<_>`. Each case is lowered in the three spellings as `Pick`, held by a
+/// required `pick`, and each must make `pick` optional exactly where `null` satisfies the target,
+/// the `type`, and the union (`oneOf`: exactly one branch).
 #[test]
-fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
-    let spec = r##"
+fn an_all_of_union_member_takes_null_from_every_conjunct_as_the_ref_spelling_does() {
+    let any_required = "anyOf: [ { required: [a] }, { required: [b] } ]";
+    let any_null_branch = "anyOf: [ { required: [a] }, { type: 'null' }, { required: [b] } ]";
+    let one_ref_or_null = "oneOf: [ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
+    let any_ref_or_null = "anyOf: [ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
+    // (target, the enclosing `type` keyword or none, the union, whether `pick` is optional).
+    let cases = [
+        ("NB", Some("[object, 'null']"), any_required, true),
+        ("Base", Some("[object, 'null']"), any_required, false),
+        ("NB", None, any_null_branch, true),
+        ("NB", None, one_ref_or_null, true),
+        ("NB", Some("object"), one_ref_or_null, false),
+        ("Base", Some("[object, 'null']"), one_ref_or_null, false),
+        ("NB", Some("[object, 'null']"), one_ref_or_null, true),
+        ("NB", None, any_ref_or_null, true),
+    ];
+    for (target, types, union, optional) in cases {
+        let target_ref = format!("'#/components/schemas/{target}'");
+        let types = types.map_or_else(String::new, |types| format!("type: {types}, "));
+        for (spelling, site) in [
+            (
+                "allOf member",
+                format!("{{ {types}allOf: [ {{ $ref: {target_ref} }}, {{ {union} }} ] }}"),
+            ),
+            (
+                "$ref sibling",
+                format!("{{ $ref: {target_ref}, {types}{union} }}"),
+            ),
+            (
+                "beside allOf",
+                format!("{{ {types}allOf: [ {{ $ref: {target_ref} }} ], {union} }}"),
+            ),
+        ] {
+            let spec = format!(
+                r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
 paths:
   /p:
     get:
@@ -881,30 +941,181 @@ paths:
         '200':
           description: ok
           content:
-            application/json: { schema: { $ref: '#/components/schemas/Pick' } }
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
 components:
   schemas:
     Base:
       type: object
       properties:
-        a: { type: string }
-        b: { type: string }
-    Pick:
-      allOf:
-        - $ref: '#/components/schemas/Base'
-        - oneOf: [ { required: [a] }, { required: [b] } ]
-        - anyOf: [ { required: [a] }, { required: [b] } ]
-"##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
+        a: {{ type: string }}
+        b: {{ type: string }}
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Other:
+      type: object
+      required: [a]
+      properties:
+        c: {{ type: integer }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+            );
+            let label = format!("{target}, {types}{union}, {spelling}");
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+            let types_code = types_module(&code);
+            let pick = field_type(&types_code, "pub pick")
+                .unwrap_or_else(|| panic!("{label}: no `pick` field: {types_code}"));
+            assert_eq!(
+                pick.starts_with("Option<"),
+                optional,
+                "{label}: `pick` is `{pick}`: {types_code}"
+            );
+        }
+    }
+}
+
+/// Object members are met with one `oneOf`/`anyOf` union branch by branch (#463); a second union
+/// would nest one union's branches under the other's, so an object composition with two or more
+/// unions to meet is rejected with `E013`'s `several-unions` case (#491), in every place an
+/// `allOf` gathers a union from: a second inline member, a `$ref` member to a union component, a
+/// union nested in an inner `allOf` (flattened into the merge), the schema's own object keywords
+/// beside two inline unions, and the union written beside the `allOf`. Before #491 each was
+/// reported as an object/scalar mix, which names no member the document wrote. The controls
+/// keep the rule to what it says: one union beside a `$ref` to a plain object component, a
+/// union of one real branch beside `null` (no union once lowered), and two unions with no object
+/// member (met as scalars) still generate.
+#[test]
+fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
+    let one = "{ oneOf: [ { required: [a] }, { required: [b] } ] }";
+    let any = "{ anyOf: [ { required: [a] }, { required: [b] } ] }";
+    let base = "{ $ref: '#/components/schemas/Base' }";
+    let union_ref = "{ $ref: '#/components/schemas/U' }";
+    let rejected = [
+        (
+            "oneOf and anyOf members",
+            format!("{{ allOf: [ {base}, {one}, {any} ] }}"),
+        ),
+        (
+            "two oneOf members",
+            format!("{{ allOf: [ {base}, {one}, {one} ] }}"),
+        ),
+        (
+            "a $ref member to a union",
+            format!("{{ allOf: [ {base}, {one}, {union_ref} ] }}"),
+        ),
+        (
+            "a union nested in an inner allOf",
+            format!("{{ allOf: [ {base}, {one}, {{ allOf: [ {any} ] }} ] }}"),
+        ),
+        (
+            "two unions nested in an inner allOf",
+            format!("{{ allOf: [ {base}, {{ allOf: [ {one}, {any} ] }} ] }}"),
+        ),
+        (
+            "the schema's own object keywords",
+            format!(
+                "{{ type: object, properties: {{ a: {{ type: string }} }}, allOf: [ {one}, {any} \
+                 ] }}"
+            ),
+        ),
+        (
+            "an inline member beside a union beside the allOf",
+            format!(
+                "{{ allOf: [ {base}, {any} ], oneOf: [ {{ required: [a] }}, {{ required: [b] }} \
+                 ] }}"
+            ),
+        ),
+        (
+            "a $ref member beside a union beside the allOf",
+            format!(
+                "{{ allOf: [ {base}, {union_ref} ], oneOf: [ {{ required: [a] }}, {{ required: \
+                 [b] }} ] }}"
+            ),
+        ),
+    ];
+    let generated = [
+        (
+            "one union beside a $ref to an object",
+            format!("{{ allOf: [ {base}, {one}, {{ $ref: '#/components/schemas/Other' }} ] }}"),
+        ),
+        (
+            "a union of one real branch beside null",
+            format!(
+                "{{ allOf: [ {base}, {{ oneOf: [ {{ $ref: '#/components/schemas/Other' }}, {{ \
+                 type: 'null' }} ] }} ] }}"
+            ),
+        ),
+        (
+            "two unions and no object member",
+            "{ allOf: [ { oneOf: [ { type: string }, { type: integer } ] }, { anyOf: [ { type: \
+             string }, { type: integer } ] } ] }"
+                .to_owned(),
+        ),
+    ];
+    let several = "more than one `oneOf`/`anyOf` union";
+    for (case, pick, expect_rejected) in rejected
+        .iter()
+        .map(|(case, pick)| (case, pick, true))
+        .chain(generated.iter().map(|(case, pick)| (case, pick, false)))
+    {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Pick' }} }}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Other:
+      type: object
+      properties:
+        c: {{ type: integer }}
+    U:
+      anyOf: [ {{ required: [a] }}, {{ required: [b] }} ]
+    Pick: {pick}
+"##
+        );
+        let report = generate(&spec);
+        let at_pick: Vec<&str> = report
             .diagnostics()
             .iter()
-            .any(|d| d.code == Code::AllOfIrreconcilable
-                && d.pointer.as_str() == "/components/schemas/Pick"),
-        "{report:#?}"
-    );
+            .filter(|d| {
+                d.code == Code::AllOfIrreconcilable
+                    && d.pointer.as_str() == "/components/schemas/Pick"
+            })
+            .map(|d| d.message.as_str())
+            .collect();
+        if expect_rejected {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                at_pick.len() == 1 && at_pick[0].contains(several),
+                "{case}: {report:#?}"
+            );
+        } else {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        }
+    }
 }
 
 /// Issue #419: a schema carrying `allOf` and `oneOf`/`anyOf` together lowered through the `allOf`
