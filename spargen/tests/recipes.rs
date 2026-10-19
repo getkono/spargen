@@ -22,7 +22,12 @@
 //! reads local files (no network).
 
 use camino::Utf8PathBuf;
-use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{Code, Outcome, Report, Spec};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::generate_to_string;
 
 /// Absolute path to a vendored recipe spec (workspace root is one level up from this crate).
 fn recipe_path(name: &str) -> Utf8PathBuf {
@@ -41,15 +46,7 @@ fn check(name: &str) -> Report {
 /// Run `generate` on a vendored recipe spec (optionally with `--carve`), returning the report and
 /// the emitted module text (when generation ran). Output goes to a throwaway tempdir.
 fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
-    let temp = tempfile::tempdir().unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let build = Spec::new(recipe_path(name))
-        .carve(carve)
-        .build(out.clone())
-        .cargo(CargoIntegration::Off);
-    let report = spargen::generate(&build);
-    let text = std::fs::read_to_string(out).ok();
-    (report, text)
+    generate_to_string(Spec::new(recipe_path(name)).carve(carve))
 }
 
 fn has_code(report: &Report, code: Code) -> bool {

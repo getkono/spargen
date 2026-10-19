@@ -24,22 +24,10 @@ use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
 use spargen::{Outcome, Severity, Spec};
 
-#[derive(serde::Deserialize)]
-struct Manifest {
-    #[serde(rename = "case")]
-    cases: Vec<Case>,
-}
+#[path = "shared/corpus.rs"]
+mod corpus;
 
-#[derive(serde::Deserialize)]
-struct Case {
-    id: String,
-    path: String,
-    /// The pinned content hash of `path`. Not optional: a case that omits it would vendor a spec
-    /// nothing pins, which is the drift this field exists to prevent.
-    sha256: String,
-    /// `generate` or `reject:E###`.
-    expect: String,
-}
+use corpus::{manifest, Case};
 
 fn workspace_root() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,25 +40,6 @@ fn read(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{path} must be readable: {error}"))
-}
-
-/// The parsed manifest. Every test that loops over its cases reads it here, so an empty case list
-/// fails each of them instead of letting every loop pass by checking nothing.
-fn manifest() -> Manifest {
-    let manifest: Manifest =
-        toml::from_str(&read("corpus/manifest.toml")).expect("corpus/manifest.toml must parse");
-    assert!(
-        !manifest.cases.is_empty(),
-        "corpus/manifest.toml declares no `[[case]]`, so every corpus check would pass vacuously"
-    );
-    manifest
-}
-
-impl Case {
-    /// The diagnostic code a `reject:E###` expectation names, or `None` for `generate`.
-    fn rejection_code(&self) -> Option<&str> {
-        self.expect.strip_prefix("reject:")
-    }
 }
 
 #[test]

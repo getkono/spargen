@@ -37,6 +37,12 @@ use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 #[path = "lowering_props/null_parity.rs"]
 mod null_parity;
 mod oracles;
+#[path = "lowering_props/strategies.rs"]
+mod strategies;
+
+use strategies::{
+    category_strategy, key_set_strategy, member_strategy, Category, Member, PropType, KEYS,
+};
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.
 fn check(spec: &str) -> Report {
@@ -142,17 +148,6 @@ fn has_code(report: &Report, code: Code) -> bool {
 
 // JSON-type-category disjointness is sound.
 
-/// A JSON primitive category to place in a union variant. `Integer` and `Number` deliberately share
-/// the numeric wire category — the lowering must never treat them as disjoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Category {
-    String,
-    Integer,
-    Number,
-    Boolean,
-    Array,
-}
-
 impl Category {
     /// The variant's `oneOf` schema line.
     fn schema_line(self) -> &'static str {
@@ -164,16 +159,6 @@ impl Category {
             Category::Array => "        - { type: array, items: { type: string } }",
         }
     }
-}
-
-fn category_strategy() -> impl Strategy<Value = Category> {
-    prop_oneof![
-        Just(Category::String),
-        Just(Category::Integer),
-        Just(Category::Number),
-        Just(Category::Boolean),
-        Just(Category::Array),
-    ]
 }
 
 fn category_union_spec(variants: &[Category]) -> String {
@@ -188,14 +173,6 @@ fn category_union_spec(variants: &[Category]) -> String {
 }
 
 // Required-key disjointness (closed objects) is sound.
-
-/// The candidate property names for the closed-object variants. Each is a single lowercase letter so
-/// its wire name equals its Rust field ident.
-const KEYS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn key_set_strategy() -> impl Strategy<Value = BTreeSet<usize>> {
-    proptest::collection::btree_set(0usize..KEYS.len(), 1..=KEYS.len())
-}
 
 fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
     let mut spec = String::from(
@@ -216,12 +193,6 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
 
 // The allOf merge reconciles member constraints exactly.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PropType {
-    String,
-    Integer,
-}
-
 impl PropType {
     fn schema(self) -> &'static str {
         match self {
@@ -229,20 +200,6 @@ impl PropType {
             PropType::Integer => "{ type: integer }",
         }
     }
-}
-
-/// One `allOf` member: property name → (type, required).
-type Member = BTreeMap<usize, (PropType, bool)>;
-
-fn member_strategy() -> impl Strategy<Value = Member> {
-    proptest::collection::btree_map(
-        0usize..KEYS.len(),
-        (
-            prop_oneof![Just(PropType::String), Just(PropType::Integer)],
-            any::<bool>(),
-        ),
-        1..=KEYS.len(),
-    )
 }
 
 fn all_of_spec(members: &[Member]) -> String {
