@@ -655,8 +655,9 @@ paths:
 /// generate a client whose call failed at request time with the runtime's `ExpectedComposite`
 /// or `ExpectedObject` whenever it was sent — on every call for a scalar schema. So a schema
 /// that admits any value the style cannot serialize rejects with `E010`: a scalar, a
-/// `oneOf`/`anyOf` with a scalar member, or `null` on a required parameter. An optional
-/// nullable parameter is fine, since its `None` is simply not sent.
+/// `oneOf`/`anyOf` with a scalar member, `null` on a required parameter, or a `oneOf` member
+/// that is `null` (here through a `$ref`) on any parameter. An optional nullable parameter is
+/// fine, since its `None` is simply not sent.
 #[test]
 fn e010_a_query_style_over_a_schema_admitting_a_value_it_cannot_serialize() {
     const TEMPLATE: &str = r##"
@@ -769,6 +770,38 @@ paths:
                 "{style} {schema}: {report:#?}"
             );
         }
+    }
+    // A `null` member reached through a `$ref` is not folded into the root the way the inline
+    // `{ type: 'null' }` control above is: it stays a union member, whose `null` is the whole
+    // value and is sent even on an optional parameter, so it rejects.
+    let member_null = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: spaceDelimited
+          required: false
+          schema: { oneOf: [{ $ref: '#/components/schemas/Arr' }, { $ref: '#/components/schemas/Nil' }] }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Arr: { type: array, items: { type: string } }
+    Nil: { type: 'null' }
+"##;
+    for report in [generate(member_null), check(member_null)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("`style: spaceDelimited` serializes only arrays and objects")
+                && messages[0].contains("`f`"),
+            "{messages:?}"
+        );
     }
 }
 
