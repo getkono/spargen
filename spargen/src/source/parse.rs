@@ -50,7 +50,8 @@ pub(crate) fn parse_json(
 /// Parse a YAML 1.2 document into a span-preserving [`SpannedValue`] tree.
 ///
 /// YAML is restricted to the JSON-compatible subset OAS 3.1 prescribes: aliases expand to clones
-/// of their anchored nodes, and constructs outside that subset (non-string keys, multiple
+/// of their anchored nodes, within [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] nodes per parse event,
+/// and constructs outside that subset (non-string keys, multiple
 /// documents) are diagnosed. The low-level event API
 /// (`yaml_rust2::parser::Parser` + a [`MarkedEventReceiver`]) is used instead of `YamlLoader` so
 /// that each event's source [`Marker`] can be turned into a per-node span. Errors are reported
@@ -96,6 +97,11 @@ pub(crate) fn parse_yaml(
         positions: &positions,
         idx: 0,
         anchors: std::collections::HashMap::new(),
+        nodes: 0,
+        node_budget: sink
+            .events
+            .len()
+            .saturating_mul(ALIAS_EXPANSION_BUDGET_PER_EVENT),
     };
     builder.build(diags)
 }
@@ -621,10 +627,21 @@ struct YamlBuilder<'a> {
     events: &'a [(Event, Marker)],
     positions: &'a Positions,
     idx: usize,
-    /// Anchor id → the node it labels, so aliases can be expanded exactly as `YamlLoader` does.
-    /// Populated post-order as each anchored node completes.
-    anchors: std::collections::HashMap<usize, SpannedValue>,
+    /// Anchor id → the node it labels and that node's expanded node count, so aliases can be
+    /// expanded exactly as `YamlLoader` does and charged for what they copy. Populated post-order
+    /// as each anchored node completes.
+    anchors: std::collections::HashMap<usize, (SpannedValue, usize)>,
+    /// Nodes in the tree built so far, each alias counted as the expanded size of its copy.
+    nodes: usize,
+    /// The most nodes the built tree may hold: [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] per event.
+    node_budget: usize,
 }
+
+/// The nodes the built YAML tree may hold per event the parser produced. Without aliases a tree
+/// holds at most one node per event; each alias adds a copy of its anchored subtree, and nested
+/// anchors that alias the level below compound exponentially ("billion laughs"), so the copies
+/// are budgeted against the document's own size rather than left to exhaust memory.
+const ALIAS_EXPANSION_BUDGET_PER_EVENT: usize = 100;
 
 /// Why [`YamlBuilder::build_node`] stopped.
 enum YamlFailure {
@@ -645,13 +662,23 @@ enum YamlFailure {
         span: Span,
         message: String,
     },
+    /// Expanding the alias at `span` would grow the tree past `budget` nodes. `path` is built
+    /// exactly as [`YamlFailure::DuplicateKey`]'s is.
+    ExpansionBudget {
+        path: Vec<Segment>,
+        span: Span,
+        budget: usize,
+    },
 }
 
 impl YamlFailure {
     /// The failure as seen from the container one level up, which holds the failing node under
     /// `segment`.
     fn within(mut self, segment: Segment) -> Self {
-        if let Self::DuplicateKey { path, .. } | Self::InvalidScalar { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. }
+        | Self::InvalidScalar { path, .. }
+        | Self::ExpansionBudget { path, .. } = &mut self
+        {
             path.push(segment);
         }
         self
@@ -660,7 +687,10 @@ impl YamlFailure {
     /// The failure as seen from a mapping whose key failed to build: a key has no pointer of its
     /// own, so a duplicate inside it is addressed by the mapping that holds the key.
     fn in_key(mut self) -> Self {
-        if let Self::DuplicateKey { path, .. } | Self::InvalidScalar { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. }
+        | Self::InvalidScalar { path, .. }
+        | Self::ExpansionBudget { path, .. } = &mut self
+        {
             path.clear();
         }
         self
@@ -709,6 +739,23 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
+            YamlFailure::ExpansionBudget { path, span, budget } => {
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: the alias at line {} column {} expands the document past \
+                     {budget} nodes ({ALIAS_EXPANSION_BUDGET_PER_EVENT} per parse event)",
+                    span.start.line, span.start.col
+                ))
+                .remedy(
+                    "write the repeated content out, or share it with a `$ref` instead of nested \
+                     YAML anchors and aliases",
+                )
+                .emit(diags);
+                Aborted
+            }
         })
     }
 
@@ -717,6 +764,7 @@ impl YamlBuilder<'_> {
         let positions = self.positions;
         let (event, marker) = &events[self.idx];
         let start = positions.loc(marker.index());
+        let nodes_before = self.nodes;
         // The anchor id (0 = none) labelling this node, captured before it is built so the
         // completed node can be registered for later alias expansion.
         let anchor_id = match event {
@@ -740,10 +788,12 @@ impl YamlBuilder<'_> {
                     }
                 })?;
                 self.idx += 1;
+                self.nodes += 1;
                 SpannedValue::new(node, span)
             }
             Event::SequenceStart(..) => {
                 self.idx += 1;
+                self.nodes += 1;
                 let mut items = Vec::new();
                 while !matches!(events[self.idx].0, Event::SequenceEnd) {
                     let item = self
@@ -764,6 +814,7 @@ impl YamlBuilder<'_> {
             }
             Event::MappingStart(..) => {
                 self.idx += 1;
+                self.nodes += 1;
                 let mut map = SpannedMap::default();
                 while !matches!(events[self.idx].0, Event::MappingEnd) {
                     let key = self.build_node(diags).map_err(YamlFailure::in_key)?;
@@ -808,12 +859,27 @@ impl YamlBuilder<'_> {
             Event::Alias(id) => {
                 // Expand the alias to a clone of its anchored node, mirroring `YamlLoader`:
                 // aliases resolve to concrete values and so stay within the JSON-compatible
-                // subset. An unknown anchor resolves to null, exactly as `YamlLoader` does.
+                // subset. An unknown anchor resolves to null, exactly as `YamlLoader` does. The
+                // copy is charged at its expanded size before it is made, so a document whose
+                // aliases compound is rejected at the alias that crosses the budget.
                 let id = *id;
-                self.idx += 1;
-                return Ok(self.anchors.get(&id).cloned().unwrap_or_else(|| {
+                let (anchored, size) = self
+                    .anchors
+                    .get(&id)
+                    .map_or((None, 1), |(value, size)| (Some(value), *size));
+                if size > self.node_budget.saturating_sub(self.nodes) {
+                    return Err(YamlFailure::ExpansionBudget {
+                        path: Vec::new(),
+                        span: Span::point(self.file, start),
+                        budget: self.node_budget,
+                    });
+                }
+                let value = anchored.cloned().unwrap_or_else(|| {
                     SpannedValue::new(Node::Null, Span::point(self.file, start))
-                }));
+                });
+                self.idx += 1;
+                self.nodes += size;
+                return Ok(value);
             }
             // The remaining events (stream/document delimiters, container ends) are consumed by
             // their openers and never begin a node.
@@ -828,7 +894,8 @@ impl YamlBuilder<'_> {
             }
         };
         if anchor_id > 0 {
-            self.anchors.insert(anchor_id, value.clone());
+            self.anchors
+                .insert(anchor_id, (value.clone(), self.nodes - nodes_before));
         }
         Ok(value)
     }
@@ -1401,6 +1468,13 @@ mod tests {
         let root = parse_yaml_ok("a: &anchor 1\nb: *anchor\n");
         assert_eq!(root.get("a").unwrap().node, Node::Number(Number::Int(1)));
         assert_eq!(root.get("b").unwrap().node, Node::Number(Number::Int(1)));
+    }
+
+    #[test]
+    fn the_e011_explain_text_states_the_alias_expansion_budget() {
+        // `spargen explain E011` restates the budget as a literal, so it follows the constant.
+        let stated = format!("{ALIAS_EXPANSION_BUDGET_PER_EVENT} nodes per parse event");
+        assert!(Code::InvalidInput.explain().contains(&stated), "{stated}");
     }
 
     #[test]
