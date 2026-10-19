@@ -885,6 +885,99 @@ components:
     }
 }
 
+/// A root `xml.name` on a struct names an element only where the schema is a component or a Media
+/// Type Object's schema. An array component's inline `items` object and a `oneOf` member are never
+/// an XML document's root, so a container rename there names nothing: the name is unsupported,
+/// `E009` where an XML body reaches the struct and `W006` where none does, and the struct carries
+/// no container rename.
+#[test]
+fn a_root_name_on_a_struct_that_names_no_element_of_its_own_is_dispositioned() {
+    let sites = [
+        (
+            "an array component's items",
+            r##"
+    Holder:
+      type: object
+      properties:
+        pets: { $ref: '#/components/schemas/Pets' }
+    Pets:
+      type: array
+      items:
+        type: object
+        xml: { name: pet }
+        properties:
+          id: { type: integer }
+"##,
+        ),
+        (
+            "a oneOf member",
+            r##"
+    Holder:
+      type: object
+      properties:
+        choice:
+          oneOf:
+            - type: object
+              xml: { name: left }
+              required: [l]
+              properties:
+                l: { type: integer }
+              additionalProperties: false
+            - type: object
+              required: [r]
+              properties:
+                r: { type: string }
+              additionalProperties: false
+"##,
+        ),
+    ];
+    for (site, schemas) in sites {
+        for (media, xml_body) in [("application/xml", true), ("application/json", false)] {
+            let spec = format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          {media}: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+      responses:
+        '204': {{ description: ok }}
+components:
+  schemas:{schemas}"##
+            );
+            let expected = if xml_body {
+                Code::UnsupportedMediaType
+            } else {
+                Code::XmlHintIgnored
+            };
+            for report in [generate(&spec), check(&spec)] {
+                assert_eq!(
+                    report.outcome() == Outcome::Rejected,
+                    xml_body,
+                    "{site} under {media}: {report:#?}"
+                );
+                assert!(
+                    messages_for(&report, expected)
+                        .iter()
+                        .any(|m| m.contains("`name` on the schema's own `xml` object")),
+                    "{site} under {media}: {report:#?}"
+                );
+            }
+            if !xml_body {
+                let (_, code) = generate_with_code(&spec);
+                assert!(
+                    !code.contains(r#"#[serde(rename = "pet")]"#)
+                        && !code.contains(r#"#[serde(rename = "left")]"#),
+                    "{site} under {media}: {code}"
+                );
+            }
+        }
+    }
+}
+
 /// An array's `xml.name` names nothing while the array stays unwrapped (its node type defaults to
 /// `none`, under which the name SHALL be ignored), so restating it takes no disposition at all.
 #[test]
