@@ -97,7 +97,16 @@ pub(crate) fn parse_yaml(
         positions: &positions,
         idx: 0,
         anchors: std::collections::HashMap::new(),
+        aliased: sink
+            .events
+            .iter()
+            .filter_map(|(event, _)| match event {
+                Event::Alias(id) => Some(*id),
+                _ => None,
+            })
+            .collect(),
         nodes: 0,
+        kept: 0,
         node_budget: sink
             .events
             .len()
@@ -629,11 +638,17 @@ struct YamlBuilder<'a> {
     idx: usize,
     /// Anchor id → the node it labels and that node's expanded node count, so aliases can be
     /// expanded exactly as `YamlLoader` does and charged for what they copy. Populated post-order
-    /// as each anchored node completes.
+    /// as each anchored node in [`YamlBuilder::aliased`] completes.
     anchors: std::collections::HashMap<usize, (SpannedValue, usize)>,
+    /// The anchor ids some alias in the document names: only these anchored nodes are copied
+    /// into [`YamlBuilder::anchors`].
+    aliased: std::collections::HashSet<usize>,
     /// Nodes in the tree built so far, each alias counted as the expanded size of its copy.
     nodes: usize,
-    /// The most nodes the built tree may hold: [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] per event.
+    /// Nodes in the copies [`YamlBuilder::anchors`] keeps.
+    kept: usize,
+    /// The most nodes the built tree and the kept copies may hold together:
+    /// [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] per event.
     node_budget: usize,
 }
 
@@ -662,13 +677,24 @@ enum YamlFailure {
         span: Span,
         message: String,
     },
-    /// Expanding the alias at `span` would grow the tree past `budget` nodes. `path` is built
-    /// exactly as [`YamlFailure::DuplicateKey`]'s is.
+    /// Copying the node at `span` (an alias's expansion, or an anchored node kept for its
+    /// aliases, as `site` says) would grow what the builder holds past `budget` nodes. `path` is
+    /// built exactly as [`YamlFailure::DuplicateKey`]'s is.
     ExpansionBudget {
         path: Vec<Segment>,
         span: Span,
+        site: BudgetSite,
         budget: usize,
     },
+}
+
+/// The copy that crossed the alias expansion budget.
+#[derive(Clone, Copy)]
+enum BudgetSite {
+    /// An alias expanded to a copy of its anchored node.
+    Alias,
+    /// An anchored node copied into the anchor table for the aliases that name it.
+    Anchor,
 }
 
 impl YamlFailure {
@@ -698,6 +724,11 @@ impl YamlFailure {
 }
 
 impl YamlBuilder<'_> {
+    /// The nodes another copy may add before the tree and the kept copies cross the budget.
+    fn headroom(&self) -> usize {
+        self.node_budget.saturating_sub(self.nodes + self.kept)
+    }
+
     fn build(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, Aborted> {
         // Advance to the (single) document's first node event.
         while self.idx < self.events.len()
@@ -739,13 +770,22 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
-            YamlFailure::ExpansionBudget { path, span, budget } => {
+            YamlFailure::ExpansionBudget {
+                path,
+                span,
+                site,
+                budget,
+            } => {
+                let what = match site {
+                    BudgetSite::Alias => "the alias",
+                    BudgetSite::Anchor => "the copy kept for aliases of the anchored node",
+                };
                 Diagnostic::error(
                     Code::InvalidInput,
                     Provenance::new(pointer_of(&path), Some(span)),
                 )
                 .message(format!(
-                    "malformed YAML: the alias at line {} column {} expands the document past \
+                    "malformed YAML: {what} at line {} column {} expands the document past \
                      {budget} nodes ({ALIAS_EXPANSION_BUDGET_PER_EVENT} per parse event)",
                     span.start.line, span.start.col
                 ))
@@ -867,10 +907,11 @@ impl YamlBuilder<'_> {
                     .anchors
                     .get(&id)
                     .map_or((None, 1), |(value, size)| (Some(value), *size));
-                if size > self.node_budget.saturating_sub(self.nodes) {
+                if size > self.headroom() {
                     return Err(YamlFailure::ExpansionBudget {
                         path: Vec::new(),
                         span: Span::point(self.file, start),
+                        site: BudgetSite::Alias,
                         budget: self.node_budget,
                     });
                 }
@@ -893,9 +934,20 @@ impl YamlBuilder<'_> {
                 return Err(YamlFailure::Reported(Aborted));
             }
         };
-        if anchor_id > 0 {
-            self.anchors
-                .insert(anchor_id, (value.clone(), self.nodes - nodes_before));
+        // Keep a copy only for an anchor some alias names, and charge it like any other copy: a
+        // stack of nested anchors would otherwise each keep everything beneath it.
+        if anchor_id > 0 && self.aliased.contains(&anchor_id) {
+            let size = self.nodes - nodes_before;
+            if size > self.headroom() {
+                return Err(YamlFailure::ExpansionBudget {
+                    path: Vec::new(),
+                    span: Span::point(self.file, start),
+                    site: BudgetSite::Anchor,
+                    budget: self.node_budget,
+                });
+            }
+            self.kept += size;
+            self.anchors.insert(anchor_id, (value.clone(), size));
         }
         Ok(value)
     }
