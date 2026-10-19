@@ -243,7 +243,8 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
 ///
 /// It also settles each schema's root `xml` object (`root_xml`, less the sites a field reads): a
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
-/// whoever else uses the type, and every hint the codec cannot honour — a field's, an items', or a
+/// whoever else uses the type, and the field name of an array property whose items are that struct
+/// (unless the items name their elements themselves), and every hint the codec cannot honour — a field's, an items', or a
 /// root's — is `E009` on a type an XML body reaches and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
@@ -370,6 +371,40 @@ pub(super) fn gate_xml_field_renames(
                 unsupported.join("`, `")
             ),
         ));
+    }
+    // A struct with an XML root name, reached as the items of an array property, is each element
+    // of that list: OpenAPI 3.2 has a `$ref` item (node type `none`) produce the referenced
+    // schema's own element. quick-xml writes a nested struct under the field's name and never
+    // reads its container rename there, so the root name becomes the field's, unless the items
+    // already gave one. It is then a field rename like any other, suppressed below (`W006`) on an
+    // owner that is not exclusively XML.
+    let view: &TypeGraph = graph;
+    let item_names: Vec<(TypeId, usize, String)> = view
+        .emitted()
+        .filter_map(|(id, def)| {
+            let TypeKind::Struct(object) = &def.kind else {
+                return None;
+            };
+            Some((id, object))
+        })
+        .flat_map(|(id, object)| {
+            object
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| field.xml.name.is_none() && !field.xml.attribute)
+                .filter_map(move |(index, field)| {
+                    let TypeKind::Array(item) = &view.get(field.ty.id)?.kind else {
+                        return None;
+                    };
+                    Some((id, index, view.xml_root_name(item.id)?.to_owned()))
+                })
+        })
+        .collect();
+    for (id, index, name) in item_names {
+        if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+            object.fields[index].xml.name = Some(name);
+        }
     }
     for (_, root, target, at) in ref_sites {
         unsupported_reports.push((

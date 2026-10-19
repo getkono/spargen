@@ -690,7 +690,7 @@ pub(crate) struct Field {
 pub(crate) struct XmlField {
     /// The wire element (or attribute) name, overriding the property name: the property's
     /// `xml.name`, or for an array property, whose items are emitted directly under the parent,
-    /// its `items`' `xml.name`.
+    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to.
     pub(crate) name: Option<String>,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
