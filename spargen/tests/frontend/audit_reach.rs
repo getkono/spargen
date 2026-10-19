@@ -245,6 +245,59 @@ fn a_positional_encoding_header_schema_is_audited() {
     );
 }
 
+/// An OpenAPI 3.2 SSE envelope whose `data` `contentMediaType`/`contentSchema` lowering consumes
+/// is no `W001` under a referenced or component Path Item, now that the audit reaches it there,
+/// just as it is none under an inline one; the envelope's own validation keyword still warns.
+#[test]
+fn a_consumed_sse_envelope_under_a_referenced_path_item_does_not_warn() {
+    let spec = "openapi: 3.2.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                servers: [{ url: 'https://e.com' }]\n\
+                paths:\n  \
+                /events: { $ref: '#/components/pathItems/Events' }\n  \
+                /more: { $ref: './item.yaml' }\n\
+                components:\n  \
+                pathItems:\n    \
+                Events:\n      \
+                get:\n        \
+                operationId: events\n        \
+                responses:\n          \
+                '200':\n            \
+                description: ok\n            \
+                content:\n              \
+                text/event-stream:\n                \
+                itemSchema:\n                  \
+                type: object\n                  \
+                required: [data]\n                  \
+                properties:\n                    \
+                data:\n                      \
+                type: string\n                      \
+                maxLength: 99\n                      \
+                contentMediaType: application/json\n                      \
+                contentSchema: { type: object, properties: { id: { type: string } } }\n";
+    let item = "get:\n  \
+                operationId: more\n  \
+                responses:\n    \
+                '200':\n      \
+                description: ok\n      \
+                content:\n        \
+                text/event-stream:\n          \
+                itemSchema:\n            \
+                type: object\n            \
+                required: [data]\n            \
+                properties:\n              \
+                data:\n                \
+                type: string\n                \
+                contentMediaType: application/json\n                \
+                contentSchema: { type: object, properties: { id: { type: string } } }\n";
+    assert_sites(
+        &[("openapi.yaml", spec), ("item.yaml", item)],
+        Code::ValidationKeywordIgnored,
+        false,
+        &["/components/pathItems/Events/get/responses/200/content/text~1event-stream/itemSchema/properties/data"],
+    );
+}
+
 /// A Path Item `$ref` chain that returns to itself is lowering's `E004`, which declines every
 /// chained Path Item reference; the audit's walk over it terminates and reaches no schema twice.
 #[test]
