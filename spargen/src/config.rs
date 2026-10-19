@@ -140,7 +140,7 @@ impl Spec {
     /// A *success* body that fails to decode is capped on retention only, on every target:
     /// deserialization needs the whole body, so it is always read whole. See
     /// `ClientConfig::max_error_body` in the emitted runtime for the full disposition, including
-    /// the two paths that are not capped at all.
+    /// the one path that is not capped at all.
     pub fn error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
