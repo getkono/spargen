@@ -2968,6 +2968,67 @@ components:
     assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
 }
 
+/// A relative-file `$ref` whose target cannot be read is an `E011` located at that `$ref`, with its
+/// value's span in the file that holds it, not at the root document's root (#711): from the root
+/// document and from a referenced file, through `check` and `generate` alike.
+#[test]
+fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
+    let root = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths:\n\
+                \x20 /pet:\n\
+                \x20   get:\n\
+                \x20     responses:\n\
+                \x20       '200':\n\
+                \x20         description: ok\n\
+                \x20         content:\n\
+                \x20           application/json:\n\
+                \x20             schema: { $ref: 'TARGET#/Pet' }\n";
+    let lib = "Pet:\n\
+               \x20 type: object\n\
+               \x20 properties:\n\
+               \x20   tag: { $ref: './missing.yaml#/Tag' }\n";
+    for (target, file, pointer, line) in [
+        (
+            "./missing.yaml",
+            0,
+            "/paths/~1pet/get/responses/200/content/application~1json/schema/$ref",
+            11,
+        ),
+        ("lib.yaml", 1, "/Pet/properties/tag/$ref", 4),
+    ] {
+        for check_only in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+            std::fs::write(dir.join("openapi.yaml"), root.replace("TARGET", target)).unwrap();
+            std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+            let input = Spec::new(dir.join("openapi.yaml"));
+            let report = if check_only {
+                run_check(&input)
+            } else {
+                run_generate(
+                    &input
+                        .build(dir.join("client.rs"))
+                        .cargo(CargoIntegration::Off),
+                )
+            };
+            let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
+            assert_eq!(reported, [Code::InvalidInput], "{report:#?}");
+            let diag = &report.diagnostics()[0];
+            assert!(
+                diag.message.contains("failed to read") && diag.message.contains("missing.yaml"),
+                "{diag:?}"
+            );
+            let span = diag.span.expect("located at a span");
+            assert_eq!(
+                (diag.pointer.as_str(), span.file.0, span.start.line),
+                (pointer, file, line),
+                "{target}, check only: {check_only}: {diag:?}"
+            );
+        }
+    }
+}
+
 /// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
 /// in a tempdir with a hand-written lock + vendored file (no network) and run `generate`/`check`.
 mod remote {
@@ -3833,7 +3894,8 @@ mod remote {
     }
 
     /// A vendored file whose bytes match the pin but are not UTF-8 is `E011` naming the URL it
-    /// was vendored for, not drift: the hash already agrees.
+    /// was vendored for, not drift: the hash already agrees. It is located at the `$ref` that
+    /// names the URL, as `E003` and `E021` are, not at the root (#711).
     #[test]
     fn a_vendored_file_that_is_not_utf8_is_e011() {
         use sha2::{Digest, Sha256};
@@ -3843,9 +3905,13 @@ mod remote {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         let message = format!("vendored file for `{GIZMO_URL}` is not valid UTF-8");
+        let pointer = "/paths/~1gizmo/get/responses/200/content/application~1json/schema/$ref";
         assert_eq!(
             invalid_input_with_bytes(lock(&sha256).as_bytes(), Some(bytes)),
-            [(String::new(), message.clone()), (String::new(), message)]
+            [
+                (pointer.to_owned(), message.clone()),
+                (pointer.to_owned(), message)
+            ]
         );
     }
 
