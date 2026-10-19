@@ -744,6 +744,11 @@ paths:
             false,
             "{ type: [array, 'null'], items: { type: string } }".to_owned(),
         ),
+        (
+            "spaceDelimited",
+            false,
+            format!("{{ oneOf: [{array}, {{ type: 'null' }}] }}"),
+        ),
         ("deepObject", true, object.to_owned()),
         (
             "deepObject",

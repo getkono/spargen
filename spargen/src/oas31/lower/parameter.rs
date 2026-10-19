@@ -334,10 +334,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             )
             .message(format!(
                 "`style: {style_name}` serializes {}, but the schema of parameter `{}` admits \
-                 another value (a scalar, or `null` on a required parameter), which the style \
-                 has no serialization for",
+                 another value ({}, or `null` on a required parameter), which the style has no \
+                 serialization for",
                 domain.describe(),
-                parameter.name
+                parameter.name,
+                match domain {
+                    StyleDomain::ArrayOrObject => "a scalar",
+                    StyleDomain::Object => "a scalar or an array",
+                }
             ))
             .remedy(match domain {
                 StyleDomain::ArrayOrObject => {
@@ -562,9 +566,9 @@ impl StyleDomain {
 
     /// Whether every value `ty` admits is one this domain holds. `null_sent` says whether a
     /// `null` the root admits reaches the serializer: it does for a required parameter, while an
-    /// optional one's `None` is not sent and a form body omits a `null` property. A `null` a
-    /// `oneOf`/`anyOf` member admits is the value itself, so it is judged by the same flag only
-    /// where the call site drops a `null` value wholesale (`member_null_sent`).
+    /// optional one's `None` is not sent and a form body omits a `null` property.
+    /// `member_null_sent` says the same of a `null` a `oneOf`/`anyOf` member admits, which is the
+    /// whole value: a parameter sends it, optional or not, and a form body omits it.
     pub(super) fn admits_only(
         self,
         graph: &TypeGraph,
