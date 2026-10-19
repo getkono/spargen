@@ -107,6 +107,13 @@ fn encoding_header_schema_ref_is_resolved_and_pins_its_literal() {
             "    V: { type: string, const: \"4\" }",
             "4",
         ),
+        // A target that is itself a `$ref` beside a sibling keyword is followed to what its own
+        // reference names.
+        (
+            "{ $ref: '#/components/schemas/V' }",
+            "    V: { $ref: '#/components/schemas/W', type: string }\n    W: { const: \"7\" }",
+            "7",
+        ),
         // A literal beside the `$ref` is the one sent, as it is without the `$ref`.
         (
             "{ $ref: '#/components/schemas/V', const: \"5\" }",
@@ -183,6 +190,26 @@ fn e004_an_unresolvable_encoding_header_schema_ref_does_not_also_warn() {
                 "{schema}: {report:#?}"
             );
         }
+    }
+}
+
+/// A header schema read through a cycle of `$ref`s that each carry a sibling keyword never
+/// reaches a target. That is the cycle's defect, `E013`, reported where the components are
+/// lowered, and not also "pins no value".
+#[test]
+fn e013_an_encoding_header_schema_ref_cycle_does_not_also_warn() {
+    let spec = encoding_header_schema_document(
+        "{ $ref: '#/components/schemas/V' }",
+        "    V: { $ref: '#/components/schemas/W', type: string }\n    W: { $ref: \
+         '#/components/schemas/V', type: string }",
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
     }
 }
 
