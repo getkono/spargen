@@ -639,6 +639,42 @@ paths:
 }
 
 #[test]
+fn w011_a_response_header_schema_simple_serialization_cannot_express_is_reported() {
+    // The `schema:` spelling's own raise site: `simple` serializes a scalar, an array or an object,
+    // and a union of a string and an integer is none of them, so no accessor can decode it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              schema:
+                oneOf: [{ type: string }, { type: integer }]
+          content:
+            application/json: { schema: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert!(!code.contains("pub x_detail:"), "{code}");
+    for report in [report, check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::DeclarationHasNoEffect),
+            [
+                "response header `X-Detail` has a shape `simple` serialization cannot express, so \
+                 no typed accessor is generated"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn w011_a_textual_content_response_header_that_is_not_a_single_value_is_reported() {
     // Textual content carries the field value verbatim, so a list says nothing about how the value
     // is framed — and `simple` is not that framing.

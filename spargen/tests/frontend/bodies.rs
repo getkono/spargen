@@ -237,6 +237,37 @@ paths:
 }
 
 #[test]
+fn oas32_item_schema_on_a_non_streaming_request_body_warns_w010() {
+    // The request-body counterpart of the response fixture above, lowered by its own site: the
+    // body is sent by `schema`, and the `itemSchema` beside it is acknowledged, not dropped.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /thing:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { type: string }
+            itemSchema: { type: integer }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::Oas32ConstructIgnored),
+            [
+                "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; on this \
+                 request body it is not used"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn validation_keywords_in_reusable_stream_item_schema_warn_w001() {
     let spec = r##"
 openapi: 3.2.0

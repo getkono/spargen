@@ -58,8 +58,8 @@ mod wasm;
 mod xml;
 
 pub use auth::{
-    AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
-    TokenProvider,
+    attach_auth, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString,
+    TokenFuture, TokenProvider,
 };
 #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
 pub use blocking::BlockingRuntime;
@@ -67,9 +67,9 @@ pub use client::{ClientConfig, ClientCore};
 #[cfg(feature = "time")]
 pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
-    attach_auth, build_url, build_url_on, build_url_with_query_string,
-    build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text,
-    decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body,
+    build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on,
+    classify_error, classify_error_bytes, classify_error_text, decode_success,
+    decode_success_bytes, decode_success_text, decode_text_body, read_error_body,
     read_success_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{

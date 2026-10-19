@@ -35,12 +35,15 @@ impl InputSnapshot {
             .collect::<Vec<_>>();
         let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
         let lock = spec_dir.join("spargen.lock");
-        if lock.is_file() {
-            match std::fs::read(&lock) {
-                Ok(bytes) => inputs.push((lock, bytes)),
+        // The applied config files are read like `spargen.lock`: a file that existed when it was
+        // applied and cannot be read now fails the build rather than dropping out of the inputs.
+        let lock = lock.is_file().then_some(lock);
+        for path in lock.iter().chain(&spec.config_files) {
+            match std::fs::read(path) {
+                Ok(bytes) => inputs.push((path.clone(), bytes)),
                 Err(error) => {
                     diagnostics.emit(cache_diagnostic(format!(
-                        "failed to read build input `{lock}`: {error}"
+                        "failed to read build input `{path}`: {error}"
                     )));
                     return Err(diagnostics);
                 }
@@ -87,12 +90,13 @@ pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) 
 }
 
 /// One `cargo:rerun-if-changed` line per input the snapshot read (only the root spec when there is
-/// no snapshot) and for the output module, sorted and deduplicated. A path carrying a line break is
-/// left out, as [`rerun_if_changed_lines`] describes.
+/// no snapshot), per applied config file, and for the output module, sorted and deduplicated. A
+/// path carrying a line break is left out, as [`rerun_if_changed_lines`] describes.
 fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
         .unwrap_or_else(|| vec![build.spec.path.clone()]);
+    paths.extend(build.spec.config_files.iter().cloned());
     paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
@@ -426,6 +430,55 @@ components:
     }
 
     #[test]
+    fn an_applied_config_file_is_a_rerun_trigger_and_a_fingerprinted_input() {
+        // Editing only `spargen.toml` changes what is generated, so Cargo must rerun the build
+        // script for it (#686). Both the discovered file and an explicitly named one count, with
+        // and without a snapshot.
+        let (temp, build) = fixture();
+        let discovered = temp.path().join("spargen.toml");
+        std::fs::write(&discovered, "batch_cap = 7\n").unwrap();
+        let discovered = Utf8PathBuf::from_path_buf(discovered).unwrap();
+        let explicit = Utf8PathBuf::from_path_buf(temp.path().join("other.toml")).unwrap();
+        std::fs::write(&explicit, "carve = true\n").unwrap();
+        let spec = build
+            .spec
+            .clone()
+            .discover_config_file()
+            .unwrap()
+            .config_file(&explicit)
+            .unwrap();
+        let configured = Build {
+            spec,
+            ..build.clone()
+        };
+
+        let snapshot = InputSnapshot::load(&configured.spec).unwrap();
+        for path in [&discovered, &explicit] {
+            assert!(snapshot.paths.contains(path), "{:?}", snapshot.paths);
+            let directive = format!("cargo:rerun-if-changed={path}");
+            for directives in [
+                rerun_directives(&configured, Some(&snapshot)),
+                rerun_directives(&configured, None),
+            ] {
+                assert!(directives.contains(&directive), "{directives:#?}");
+            }
+        }
+
+        // A comment-only edit applies the same knobs, yet the file's bytes are a build input
+        // like `spargen.lock`'s, so the digest moves with them.
+        std::fs::write(&discovered, "batch_cap = 7 # edited\n").unwrap();
+        assert_ne!(
+            InputSnapshot::load(&configured.spec).unwrap().digest,
+            snapshot.digest
+        );
+
+        // No file beside the spec: nothing is recorded, so nothing absent is named to Cargo.
+        std::fs::remove_file(&discovered).unwrap();
+        let undiscovered = build.spec.clone().discover_config_file().unwrap();
+        assert!(undiscovered.config_files.is_empty());
+    }
+
+    #[test]
     fn a_replayed_diagnostic_makes_the_claim_the_fresh_one_made() {
         // A cache hit replays the fresh run's warnings under `Outcome::Cached`. The claim is not
         // re-derived from the code, so one that differs from its severity's survives the replay.
@@ -619,7 +672,11 @@ components:
             batch_cap,
             carve,
             open_narrowing,
+            config_files,
         } = &base;
+        assert!(config_files.is_empty());
+        let config = Utf8PathBuf::from_path_buf(temp.path().join("spargen.toml")).unwrap();
+        std::fs::write(&config, "# applies nothing\n").unwrap();
 
         // Byte-identical content at a different path is still a different build input, because
         // the provenance header records the path.
@@ -684,6 +741,14 @@ components:
                 "open_narrowing",
                 Spec {
                     open_narrowing: !open_narrowing,
+                    ..base.clone()
+                },
+            ),
+            (
+                // A file that sets no knob still moves the digest: its bytes are an input.
+                "config_files",
+                Spec {
+                    config_files: vec![config],
                     ..base.clone()
                 },
             ),

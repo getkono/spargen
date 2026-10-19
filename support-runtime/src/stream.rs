@@ -200,7 +200,9 @@ impl<T> EventStream<T> {
         Ok(self)
     }
 
-    /// The latest SSE event ID, including an empty ID that resets replay state.
+    /// The latest SSE event ID, including an empty ID that resets replay state. An automatic
+    /// reconnect sends it as `Last-Event-ID` when it is a valid header value; an empty ID, or one
+    /// holding a control character a header value refuses, reconnects without that header.
     pub fn last_event_id(&self) -> Option<&str> {
         self.last_event_id.as_deref()
     }
@@ -372,15 +374,19 @@ impl<T> EventStream<T> {
         let reconnect = self.reconnect.as_ref()?;
         let core = reconnect.core.clone();
         let mut request = reconnect.request.try_clone()?;
-        match self.last_event_id.as_deref() {
-            Some("") => {
-                request.headers_mut().remove("last-event-id");
+        // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
+        // (the framer keeps every control character but NUL, CR and LF): the server's latest
+        // resume point cannot be sent, and replaying an older one would claim a position it has
+        // superseded, so the reconnect proceeds as a fresh subscription instead of ending.
+        if let Some(id) = self.last_event_id.as_deref() {
+            match reqwest::header::HeaderValue::from_str(id) {
+                Ok(value) if !id.is_empty() => {
+                    request.headers_mut().insert("last-event-id", value);
+                }
+                _ => {
+                    request.headers_mut().remove("last-event-id");
+                }
             }
-            Some(id) => {
-                let value = reqwest::header::HeaderValue::from_str(id).ok()?;
-                request.headers_mut().insert("last-event-id", value);
-            }
-            None => {}
         }
         Some(Box::pin(async move {
             let response = send(&core, request).await?;

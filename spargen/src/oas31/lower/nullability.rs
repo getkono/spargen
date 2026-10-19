@@ -599,7 +599,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// since they then establish the array category; and `None` where no member constrains.
     /// Anything else (a scalar keyword, a union, object and array applicators in one member)
     /// answers `None`. `depth` bounds the walk.
-    fn untyped_shape_category(&self, schema: &Schema, depth: u32) -> Option<JsonType> {
+    pub(super) fn untyped_shape_category(&self, schema: &Schema, depth: u32) -> Option<JsonType> {
         if depth >= MAX_SCHEMA_DEPTH {
             return None;
         }

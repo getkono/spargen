@@ -1591,7 +1591,6 @@ const OVER_LENGTH_BASELINE: &[&str] = &[
     "spargen/tests/frontend/ref_siblings.rs",
     "spargen/tests/frontend/refs.rs",
     "spargen/tests/frontend/unions.rs",
-    "support-runtime/src/dispatch/tests.rs",
 ];
 
 /// Directories of vendored text, copied verbatim from upstream rather than written here.
