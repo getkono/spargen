@@ -31,6 +31,7 @@ mod diagnostics_meta;
 mod discriminator;
 mod document;
 mod encoding;
+mod encoding_style;
 mod parameters;
 mod placement;
 mod recursion;
