@@ -1,7 +1,7 @@
 //! Casing conversions for identifier allocation. Segmentation keeps ASCII alphanumerics and treats
 //! every other character as a separator, so the output is always a subset of the XID characters a
-//! Rust identifier admits — a non-ASCII hint segments to nothing and takes the caller's fallback
-//! rather than producing an identifier that only some editions accept. `heck` is deliberately not
+//! Rust identifier admits — a non-ASCII hint segments to nothing and takes the conversion's own
+//! fallback (`Generated` / `generated`) rather than producing an identifier that only some editions accept. `heck` is deliberately not
 //! used: its boundary rules differ, and identifier allocation needs a segmentation this crate pins.
 
 /// Convert `raw` to `PascalCase` (for types and variants).

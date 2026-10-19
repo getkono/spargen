@@ -108,6 +108,56 @@ fn malformed_or_missing_config_errors_cleanly() {
 
 #[cfg(feature = "cli")]
 #[test]
+fn an_unknown_omit_token_names_the_same_accepted_values_in_the_file_and_on_the_command_line() {
+    // `UnknownOmitToken`'s own message carries the accepted list, so a mistyped token is answered
+    // identically wherever it was written.
+    const COMPONENTS: &str = "expected one of schemas/responses/parameters/request_bodies/\
+                              headers/security_schemes/path_items/media_types";
+    const METHODS: &str = "expected one of get/put/post/delete/options/head/patch/trace/query";
+    let (temp, spec) = workspace();
+    for (config, flags, token, accepted) in [
+        (
+            "[[omit]]\ncomponent = \"path_itemz\"\nname = \"Foo\"\n",
+            &[][..],
+            "path_itemz",
+            COMPONENTS,
+        ),
+        (
+            "[[omit]]\nmethod = \"qeury\"\npath = \"/pets\"\n",
+            &[][..],
+            "qeury",
+            METHODS,
+        ),
+        (
+            "",
+            &["--omit-component", "path_itemz:Foo"][..],
+            "path_itemz",
+            COMPONENTS,
+        ),
+        (
+            "",
+            &["--omit-operation", "qeury /pets"][..],
+            "qeury",
+            METHODS,
+        ),
+    ] {
+        std::fs::write(temp.path().join("spargen.toml"), config).unwrap();
+        let output = check(temp.path(), &spec, flags);
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{config}{flags:?}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("`{token}`; {accepted}\n")),
+            "{config}{flags:?}: {stderr}"
+        );
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn bad_omit_flag_syntax_errors_cleanly() {
     let (temp, spec) = workspace();
     let output = check(temp.path(), &spec, &["--omit-operation", "get"]);

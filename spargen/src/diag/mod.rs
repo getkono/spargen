@@ -23,6 +23,7 @@ mod span;
 pub use code::{Code, UnknownCode};
 pub(crate) use collect::{Aborted, Diagnostics};
 pub use interp::InterpId;
+pub(crate) use pointer::escape_token;
 pub use pointer::JsonPointer;
 pub(crate) use provenance::Provenance;
 pub use severity::Severity;

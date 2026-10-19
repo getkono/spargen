@@ -69,16 +69,25 @@ impl OmitRule {
     }
 }
 
-/// A string that names no known omit component kind or HTTP method.
+/// A string that names no known omit component kind or HTTP method. Its message names the
+/// rejected token and one canonical spelling of every value the parser accepts, so `omit!`, the
+/// command line, and `spargen.toml` answer a mistyped token with the same list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownOmitToken {
     token: String,
-    expected: &'static str,
+    noun: &'static str,
+    accepted: &'static [&'static str],
 }
 
 impl std::fmt::Display for UnknownOmitToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "unknown {}: `{}`", self.expected, self.token)
+        write!(
+            formatter,
+            "unknown {}: `{}`; expected one of {}",
+            self.noun,
+            self.token,
+            self.accepted.join("/")
+        )
     }
 }
 
@@ -107,7 +116,8 @@ impl std::str::FromStr for ComponentKind {
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
-                    expected: "component kind",
+                    noun: "component kind",
+                    accepted: ComponentKind::CANONICAL,
                 })
             }
         })
@@ -137,7 +147,8 @@ impl std::str::FromStr for OmitMethod {
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
-                    expected: "HTTP method",
+                    noun: "HTTP method",
+                    accepted: OmitMethod::CANONICAL,
                 })
             }
         })
@@ -182,6 +193,12 @@ pub enum OmitMethod {
 }
 
 impl OmitMethod {
+    /// One spelling per method, as an [`UnknownOmitToken`] lists them; `FromStr` also accepts any
+    /// ASCII case of each.
+    pub(crate) const CANONICAL: &'static [&'static str] = &[
+        "get", "put", "post", "delete", "options", "head", "patch", "trace", "query",
+    ];
+
     /// The Path Item field this method names in an OpenAPI document.
     pub fn as_oas_key(self) -> &'static str {
         match self {
@@ -215,6 +232,20 @@ pub enum ComponentKind {
 }
 
 impl ComponentKind {
+    /// One spelling per kind, the snake_case plural [`omit!`](crate::omit) writes, as an
+    /// [`UnknownOmitToken`] lists them; `FromStr` also accepts the singular and the camelCase OAS
+    /// key.
+    pub(crate) const CANONICAL: &'static [&'static str] = &[
+        "schemas",
+        "responses",
+        "parameters",
+        "request_bodies",
+        "headers",
+        "security_schemes",
+        "path_items",
+        "media_types",
+    ];
+
     /// The `components` map key this kind names in an OpenAPI document.
     pub fn as_oas_key(self) -> &'static str {
         match self {

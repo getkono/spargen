@@ -304,13 +304,7 @@ pub(super) fn gate_xml_field_renames(
                 }
             }
         }
-        let responses = operation
-            .responses
-            .by_status
-            .iter()
-            .map(|(_, response)| response)
-            .chain(operation.responses.default.as_ref());
-        for response in responses {
+        for (_, response) in operation.responses.entries() {
             if let Some(ty) = response.body {
                 if response.media == Some(MediaType::Xml) {
                     xml_roots.push(ty.id);

@@ -5,6 +5,7 @@ use reqwest::{Method, Request};
 
 use super::{
     next_frame, EventStream, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
+    SseMetadata,
 };
 use crate::{ClientCore, Error, ExecuteFuture, HttpBackend};
 
@@ -230,21 +231,9 @@ fn well_formed_json_frame_deserializes() {
     assert_eq!(decoded.unwrap(), serde_json::json!({"a": 1}));
 }
 
-// A poll-once driver (noop waker, no async runtime) proving the async `next` await-loop threads
-// the pure framing correctly over an in-memory `reqwest::Response`.
-use std::future::Future;
-use std::task::{Context, Poll, Waker};
-
-fn poll_ready<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(value) => value,
-        Poll::Pending => panic!("future was not immediately ready"),
-    }
-}
+// The tests below drive the async `next` await-loop poll-once (noop waker, no async runtime),
+// proving it threads the pure framing correctly over an in-memory `reqwest::Response`.
+use crate::tests::poll_ready;
 
 fn response(body: &str) -> reqwest::Response {
     response_with_status(200, body)
@@ -487,4 +476,237 @@ fn next_resumes_after_a_decode_error() {
         serde_json::json!({"a": 1})
     );
     assert!(poll_ready(stream.next()).is_none());
+}
+
+/// The reconnect `attempt` a policy sees resets after a successfully decoded item, and only
+/// then: a frame that fails to decode leaves the count where it was.
+#[test]
+fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_error() {
+    let backend = Arc::new(SequenceBackend::new([
+        (200, "data: {\"seq\":2}\n\n"),
+        (200, "data: not json\n\n"),
+        (200, ""),
+    ]));
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 2,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = reconnectable_stream("data: {\"seq\":1}\n\n", backend, policy.clone());
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    // EOF at attempt 0 reconnects; the decoded item resets the count to 0.
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    // EOF at attempt 0 again reconnects; the undecodable frame does not reset the count.
+    assert!(matches!(
+        poll_ready(stream.next()).unwrap(),
+        Err(Error::Decode { .. })
+    ));
+    // EOF at attempt 1 reconnects to an empty body; EOF at attempt 2 is declined.
+    assert!(poll_ready(stream.next()).is_none());
+    assert_eq!(
+        policy
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(attempt, reason, _)| (*attempt, *reason))
+            .collect::<Vec<_>>(),
+        vec![(0, "eof"), (0, "eof"), (1, "eof"), (2, "eof")]
+    );
+}
+
+/// A stream built without a replayable request refuses a reconnect policy rather than
+/// accepting one it could never act on.
+#[test]
+fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
+    let policy: Arc<dyn ReconnectPolicy> = Arc::new(ImmediateReconnect::default());
+    let core = ClientCore::new("https://example.com").unwrap();
+    for stream in [
+        EventStream::<serde_json::Value>::new(response(""), Framing::Sse),
+        EventStream::new_reconnectable(response(""), Framing::Sse, core, None),
+    ] {
+        match stream.with_reconnect(policy.clone()) {
+            Err(Error::RequestConstruction(cause)) => assert_eq!(
+                cause.to_string(),
+                "this streaming request cannot be cloned safely for automatic reconnect"
+            ),
+            Err(error) => panic!("expected RequestConstruction, got {error}"),
+            Ok(_) => panic!("a stream without a request accepted a reconnect policy"),
+        }
+    }
+}
+
+/// A request whose body is a one-shot stream cannot be cloned for the replay. Once the policy's
+/// wait elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
+#[test]
+fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
+    let backend = Arc::new(SequenceBackend::new([]));
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 5,
+        ..ImmediateReconnect::default()
+    });
+    let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    let request = core
+        .http()
+        .request(Method::POST, "https://example.com/events")
+        .body(reqwest::Body::wrap(reqwest::Body::from("one-shot")))
+        .build()
+        .unwrap();
+    assert!(request.try_clone().is_none());
+    let stream: EventStream<serde_json::Value> =
+        EventStream::new_reconnectable(response(""), Framing::SseJsonData, core, Some(request));
+    let mut stream = match stream.with_reconnect(policy.clone()) {
+        Ok(stream) => stream,
+        Err(error) => panic!("the stream holds a request, so reconnect is available: {error}"),
+    };
+
+    match poll_ready(stream.next()) {
+        Some(Err(Error::RequestConstruction(cause))) => assert_eq!(
+            cause.to_string(),
+            "streaming request could not be cloned for reconnect"
+        ),
+        other => panic!("expected RequestConstruction, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+    assert!(backend.headers.lock().unwrap().is_empty());
+    assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
+}
+
+/// An `id` field holding a NUL byte is ignored, as the SSE specification requires, so the
+/// stream keeps the last ID it accepted.
+#[test]
+fn an_sse_id_holding_nul_is_ignored() {
+    let mut buf = b"id: a\0b\ndata: 1\n\n".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::SseJsonData, false),
+        FramePoll::Item {
+            payload: b"1".to_vec(),
+            metadata: SseMetadata::default(),
+        }
+    );
+    let mut stream: EventStream<serde_json::Value> = EventStream::new(
+        response("id: one\ndata: 1\n\nid: t\0wo\ndata: 2\n\n"),
+        Framing::SseJsonData,
+    );
+    assert_eq!(poll_ready(stream.next()).unwrap().unwrap(), 1);
+    assert_eq!(poll_ready(stream.next()).unwrap().unwrap(), 2);
+    assert_eq!(stream.last_event_id(), Some("one"));
+}
+
+/// A `retry` field counts only when its value is one or more ASCII digits that fit a `u64`;
+/// anything else is ignored.
+#[test]
+fn an_sse_retry_counts_only_as_ascii_digits() {
+    for (field, retry) in [
+        ("retry: 0042", Some(42)),
+        ("retry: 12a", None),
+        ("retry: -5", None),
+        ("retry: 1.5", None),
+        ("retry:  7", None),
+        ("retry:", None),
+        ("retry: 99999999999999999999999", None),
+    ] {
+        let mut buf = format!("{field}\ndata: 1\n\n").into_bytes();
+        assert_eq!(
+            next_frame(&mut buf, Framing::SseJsonData, false),
+            FramePoll::Item {
+                payload: b"1".to_vec(),
+                metadata: SseMetadata { id: None, retry },
+            },
+            "{field}"
+        );
+    }
+    // An event carrying only an ignored `retry` dispatches nothing at all.
+    let mut buf = b"retry: soon\n\n".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::SseJsonData, false),
+        FramePoll::NeedMore
+    );
+    assert!(buf.is_empty());
+}
+
+/// A line with no colon is a field name with an empty value: a bare `data` dispatches an empty
+/// payload, a bare `event` names the empty event type, a bare `id` resets the last ID, and an
+/// unknown bare name is ignored.
+#[test]
+fn an_sse_line_without_a_colon_is_a_field_with_an_empty_value() {
+    let mut buf = b"data\n\n".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Sse, false);
+    assert_eq!(items, vec![""]);
+
+    let mut buf = b"event\ndata: x\n\n".to_vec();
+    let (items, _) = drain(&mut buf, Framing::SseEvent, false);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&items[0]).unwrap(),
+        serde_json::json!({"data": "x", "event": ""})
+    );
+
+    let mut buf = b"unknown\n\n".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::Sse, false),
+        FramePoll::NeedMore
+    );
+    assert!(buf.is_empty());
+
+    let mut stream: EventStream<serde_json::Value> = EventStream::new(
+        response("id: one\ndata: 1\n\nid\ndata: 2\n\n"),
+        Framing::SseJsonData,
+    );
+    assert_eq!(poll_ready(stream.next()).unwrap().unwrap(), 1);
+    assert_eq!(stream.last_event_id(), Some("one"));
+    assert_eq!(poll_ready(stream.next()).unwrap().unwrap(), 2);
+    assert_eq!(stream.last_event_id(), Some(""));
+}
+
+/// JSON text sequences: bytes before the first record separator are discarded, a buffer with
+/// no separator is held until EOF and dropped there, and an empty record frames nothing and is
+/// consumed so the next call reaches the record after it.
+#[test]
+fn json_sequence_discards_junk_and_skips_empty_records() {
+    let mut buf = b"junk\x1e1\n".to_vec();
+    let (items, done) = drain(&mut buf, Framing::JsonSequence, true);
+    assert_eq!(items, vec!["1"]);
+    assert!(!done);
+    assert!(buf.is_empty());
+
+    let mut buf = b"no separator yet".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::JsonSequence, false),
+        FramePoll::NeedMore
+    );
+    assert_eq!(buf, b"no separator yet");
+    assert_eq!(
+        next_frame(&mut buf, Framing::JsonSequence, true),
+        FramePoll::NeedMore
+    );
+    assert!(buf.is_empty());
+
+    // A record still open before EOF waits for its terminating separator.
+    let mut buf = b"\x1e{\"a\":".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::JsonSequence, false),
+        FramePoll::NeedMore
+    );
+    assert_eq!(buf, b"\x1e{\"a\":");
+
+    let mut buf = b"\x1e \n\x1e2\n".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::JsonSequence, true),
+        FramePoll::NeedMore
+    );
+    assert_eq!(buf, b"\x1e2\n");
+    assert_eq!(
+        next_frame(&mut buf, Framing::JsonSequence, true),
+        FramePoll::Item {
+            payload: b"2".to_vec(),
+            metadata: SseMetadata::default(),
+        }
+    );
+    assert!(buf.is_empty());
 }

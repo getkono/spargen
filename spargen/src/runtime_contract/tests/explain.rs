@@ -174,13 +174,16 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     );
 
     // The two version and feature rules the audit rejects a violation of. The first fixture
-    // accepts each floor and a higher compatible caret and refuses a range reaching the next
-    // incompatible release; the second rejects a requirement admitting a release below it.
+    // accepts each floor, a higher compatible caret, and `=` at or above the floor on that line,
+    // and refuses a range reaching the next incompatible release; the second rejects a
+    // requirement admitting a release below it; the third audits a manifest pinning `=floor`.
     promises(
-        "Use the documented tested lower bounds (or a higher semver-compatible caret floor)",
+        "Use the documented tested lower bounds (or a higher semver-compatible caret floor, or an \
+         exact `=x.y.z` requirement at or above the floor on the same semver-compatible line)",
         &[
             "exact_floors_and_higher_compatible_caret_requirements_are_supported",
             "a_requirement_that_admits_a_version_below_the_floor_is_rejected",
+            "an_exact_requirement_at_the_floor_passes_the_audit",
         ],
     );
     promises(

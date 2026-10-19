@@ -21,15 +21,8 @@ use super::ty::ty_tokens;
 pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> TokenStream {
     let responses = operation
         .responses
-        .by_status
-        .iter()
-        .map(|(spec, response)| (crate::name::status_label(*spec), response))
-        .chain(operation.responses.default.as_ref().map(|response| {
-            (
-                crate::name::status_label(crate::ir::StatusSpec::Default),
-                response,
-            )
-        }));
+        .entries()
+        .map(|(spec, response)| (crate::name::status_label(spec), response));
     let structs = responses.filter_map(|(label, response)| {
         if response.headers.is_empty() {
             return None;

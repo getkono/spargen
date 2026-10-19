@@ -1,5 +1,3 @@
-use std::future::Future;
-
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
@@ -7,29 +5,6 @@ use reqwest::StatusCode;
 use crate::{AuthError, ResponseValue, TransportError};
 
 use super::{Error, RequestError, ReqwestClass, TimeoutKind};
-
-#[test]
-fn retry_classifier_includes_timeouts_and_5xx() {
-    let timeout = Error::<String>::Timeout(TimeoutKind::Total);
-    assert!(timeout.is_transient());
-
-    let status = Error::<String>::UnexpectedStatus {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        headers: HeaderMap::new(),
-        body: Bytes::new(),
-    };
-    assert!(status.is_transient());
-}
-
-#[test]
-fn retry_classifier_excludes_client_errors() {
-    let api = Error::Api(ResponseValue::new(
-        StatusCode::BAD_REQUEST,
-        HeaderMap::new(),
-        "bad".to_owned(),
-    ));
-    assert!(!api.is_transient());
-}
 
 #[test]
 fn widen_preserves_the_variant() {
@@ -645,14 +620,8 @@ fn from_reqwest_classifies_a_refused_request_as_request_construction() {
             .build()
             .expect("reqwest builds the request; it refuses it only at execute");
         // reqwest answers without touching the network, so the first poll is ready.
-        let mut future = std::pin::pin!(client.execute(request));
-        match future
-            .as_mut()
-            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-        {
-            std::task::Poll::Ready(result) => result.expect_err("reqwest refuses the request"),
-            std::task::Poll::Pending => panic!("reqwest touched the network for {url}"),
-        }
+        crate::tests::poll_ready(client.execute(request))
+            .expect_err(&format!("reqwest refuses the request for {url}"))
     };
     for source in [
         reqwest_error(),

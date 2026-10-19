@@ -7301,6 +7301,12 @@ pub type PostJsonMetaError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type StreamChatError = std::convert::Infallible;
 #[allow(dead_code)]
+pub type StreamChatLinesError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type StreamChatSequenceError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type GetAlternateAuthError = std::convert::Infallible;
+#[allow(dead_code)]
 pub type SerializeStylesError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type SerializeContentParamsError = std::convert::Infallible;
@@ -7621,6 +7627,9 @@ impl Client {
     ///- `apiKey` — `apiKey`.
     ///- `tenant` — `apiKey`.
     ///- `mtls` — `mutualTLS`.
+    ///- `basic` — `http` (`basic`).
+    ///- `queryKey` — `apiKey`.
+    ///- `cookieKey` — `apiKey`.
     #[must_use]
     pub fn with_credential(
         mut self,
@@ -9183,6 +9192,15 @@ Response `409`: Conflict*/
         part = part
             .mime_str("text/plain")
             .map_err(support::Error::request_construction)?;
+        let mut part_headers = reqwest::header::HeaderMap::new();
+        part_headers
+            .insert(
+                reqwest::header::HeaderName::try_from("X-Part-Kind")
+                    .map_err(support::Error::request_construction)?,
+                reqwest::header::HeaderValue::try_from("caption text")
+                    .map_err(support::Error::request_construction)?,
+            );
+        part = part.headers(part_headers);
         form = form.part("caption", part);
         if let Some(value) = &body.count {
             let mut part = reqwest::multipart::Part::text(value.to_string());
@@ -9845,6 +9863,127 @@ Response `409`: binary error*/
         } else {
             Err(
                 support::unexpected_status::<StreamChatError>(&self.core, response).await,
+            )
+        }
+    }
+    ///Response `200`: OK
+    #[inline]
+    pub async fn stream_chat_lines(
+        &self,
+    ) -> Result<
+        support::EventStream<types::ChatChunk>,
+        support::Error<StreamChatLinesError>,
+    > {
+        let mut path = "/chat/lines".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let reconnect_request = request.try_clone();
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            Ok(
+                support::EventStream::new_reconnectable(
+                    response,
+                    support::Framing::Ndjson,
+                    self.core.clone(),
+                    reconnect_request,
+                ),
+            )
+        } else {
+            Err(
+                support::unexpected_status::<StreamChatLinesError>(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `200`: OK
+    #[inline]
+    pub async fn stream_chat_sequence(
+        &self,
+    ) -> Result<
+        support::EventStream<types::ChatChunk>,
+        support::Error<StreamChatSequenceError>,
+    > {
+        let mut path = "/chat/sequence".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let reconnect_request = request.try_clone();
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            Ok(
+                support::EventStream::new_reconnectable(
+                    response,
+                    support::Framing::JsonSequence,
+                    self.core.clone(),
+                    reconnect_request,
+                ),
+            )
+        } else {
+            Err(
+                support::unexpected_status::<
+                    StreamChatSequenceError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn get_alternate_auth(
+        &self,
+    ) -> Result<support::ResponseValue<()>, support::Error<GetAlternateAuthError>> {
+        let mut path = "/alternate-auth".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        request = support::attach_auth(
+                &self.core,
+                request,
+                &[
+                    &[
+                        support::AuthScheme {
+                            name: "basic",
+                            kind: support::AuthKind::Basic,
+                        },
+                    ][..],
+                    &[
+                        support::AuthScheme {
+                            name: "queryKey",
+                            kind: support::AuthKind::ApiKeyQuery("api_key"),
+                        },
+                    ][..],
+                    &[
+                        support::AuthScheme {
+                            name: "cookieKey",
+                            kind: support::AuthKind::ApiKeyCookie("session"),
+                        },
+                    ][..],
+                ],
+            )
+            .await
+            .map_err(support::Error::widen)?;
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<GetAlternateAuthError>(&self.core, response)
+                    .await,
             )
         }
     }
@@ -11018,6 +11157,36 @@ Response `409`: binary error*/
             support::Error<StreamChatError>,
         > {
             self.runtime.block_on(self.inner.stream_chat())
+        }
+        ///Response `200`: OK
+        #[allow(deprecated)]
+        #[inline]
+        pub fn stream_chat_lines(
+            &self,
+        ) -> Result<
+            support::EventStream<types::ChatChunk>,
+            support::Error<StreamChatLinesError>,
+        > {
+            self.runtime.block_on(self.inner.stream_chat_lines())
+        }
+        ///Response `200`: OK
+        #[allow(deprecated)]
+        #[inline]
+        pub fn stream_chat_sequence(
+            &self,
+        ) -> Result<
+            support::EventStream<types::ChatChunk>,
+            support::Error<StreamChatSequenceError>,
+        > {
+            self.runtime.block_on(self.inner.stream_chat_sequence())
+        }
+        ///Response `204`: No Content
+        #[allow(deprecated)]
+        #[inline]
+        pub fn get_alternate_auth(
+            &self,
+        ) -> Result<support::ResponseValue<()>, support::Error<GetAlternateAuthError>> {
+            self.runtime.block_on(self.inner.get_alternate_auth())
         }
         ///Response `204`: No Content
         #[allow(deprecated)]

@@ -123,15 +123,10 @@ fn memoised_answer<T: Copy>(
 fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
     provenance
         .pointer
-        .as_str()
-        .rsplit('/')
-        .next()
+        .tokens()
+        .pop()
         .filter(|token| !token.is_empty())
-        .map_or_else(
-            || fallback.to_owned(),
-            // Order matters: `~1` first, then `~0`, or a literal `~01` would decode as `/`.
-            |token| token.replace("~1", "/").replace("~0", "~"),
-        )
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.

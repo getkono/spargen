@@ -30,8 +30,23 @@ paths:
     );
     assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
     assert!(code.contains("pub q: Option<types::Q>"), "{code}");
-    assert!(code.contains("serialize_form"), "{code}");
-    assert!(code.contains("build_url_with_query_string"), "{code}");
+    // The embedded runtime's `pub use` list names both helpers in every generated module, so a
+    // bare name proves nothing: assert the calls the operation body makes, whitespace-flattened.
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "query .extend( support::serialize_form( \"\", value, true, \
+             support::PercentEncoding::Form, )"
+        ),
+        "{code}"
+    );
+    assert!(
+        flat.contains(
+            "let url = support::build_url_with_query_string_on( &self.core, None, &path, \
+             &query, raw_query.as_deref(), )"
+        ),
+        "{code}"
+    );
 }
 
 #[test]

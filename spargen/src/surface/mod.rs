@@ -385,8 +385,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let method_name = names
             .operations
             .get(&operation.id)
-            .map(|ident| ident.as_str().to_owned())
-            .unwrap_or_else(|| operation.id.0.clone());
+            .expect("operation name allocated")
+            .as_str()
+            .to_owned();
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
@@ -422,10 +423,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     let mut aliases = BTreeSet::new();
     // An elided type has a name but no item, so it is no part of the surface.
     for (id, def) in api.types.emitted() {
-        let name = match names.types.get(&id) {
-            Some(ident) => ident.as_str().to_owned(),
-            None => continue,
-        };
+        let name = names
+            .types
+            .get(&id)
+            .expect("type name allocated")
+            .as_str()
+            .to_owned();
         let surface = match &def.kind {
             TypeKind::Struct(object) => {
                 let mut fields = BTreeMap::new();
@@ -433,8 +436,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     let field_name = names
                         .fields
                         .get(&(id, field.name.wire.clone()))
-                        .map(|ident| ident.as_str().to_owned())
-                        .unwrap_or_else(|| field.name.wire.clone());
+                        .expect("field name allocated")
+                        .as_str()
+                        .to_owned();
                     fields.insert(
                         field_name,
                         FieldSurface {
@@ -466,8 +470,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     let variant_name = names
                         .variants
                         .get(&(id, variant.name_hint.clone()))
-                        .map(|ident| ident.as_str().to_owned())
-                        .unwrap_or_else(|| variant.name_hint.clone());
+                        .expect("union variant name allocated")
+                        .as_str()
+                        .to_owned();
                     variants.insert(variant_name, canon_ty(variant.ty, api, names));
                 }
                 TypeSurface::Union(variants)
@@ -985,14 +990,15 @@ fn canon_container(kind: &TypeKind, api: &Api, names: &Names) -> String {
     }
 }
 
-/// The generated type name for a nominal reference, falling back to a structural placeholder if the
-/// id somehow lacks an allocated name (never expected post-allocation).
+/// The generated type name for a nominal reference: the name `name` allocated, which codegen's
+/// `ty_tokens` expects in the same way.
 fn nominal_name(ty: Ty, names: &Names) -> String {
     names
         .types
         .get(&ty.id)
-        .map(|ident| ident.as_str().to_owned())
-        .unwrap_or_else(|| "Unknown".to_owned())
+        .expect("type name allocated")
+        .as_str()
+        .to_owned()
 }
 
 /// Render an operation's success shape to a stable string.

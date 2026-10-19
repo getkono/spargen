@@ -54,16 +54,28 @@ pub(crate) fn build_script_manifest() -> Option<Utf8PathBuf> {
 /// - An empty value is taken as given: an empty `CARGO_MANIFEST_PATH` names the empty path, which
 ///   the audit then fails to read, and an empty `CARGO_MANIFEST_DIR` names `Cargo.toml` relative
 ///   to the working directory. The macro's locator treats an empty value as unset.
+///
+/// Both are decided by [`manifest_from`], which takes the two lookups as arguments so they can be
+/// exercised without mutating the process environment.
 fn manifest_from_env() -> Option<Utf8PathBuf> {
-    std::env::var("CARGO_MANIFEST_PATH")
-        .ok()
-        .map(Utf8PathBuf::from)
-        .or_else(|| {
-            std::env::var("CARGO_MANIFEST_DIR")
-                .ok()
-                .map(Utf8PathBuf::from)
-                .map(|directory| directory.join("Cargo.toml"))
-        })
+    manifest_from(
+        std::env::var("CARGO_MANIFEST_PATH"),
+        std::env::var("CARGO_MANIFEST_DIR"),
+    )
+}
+
+/// [`manifest_from_env`] over the results of looking up `CARGO_MANIFEST_PATH` (`path`) and
+/// `CARGO_MANIFEST_DIR` (`directory`).
+fn manifest_from(
+    path: Result<String, std::env::VarError>,
+    directory: Result<String, std::env::VarError>,
+) -> Option<Utf8PathBuf> {
+    path.ok().map(Utf8PathBuf::from).or_else(|| {
+        directory
+            .ok()
+            .map(Utf8PathBuf::from)
+            .map(|directory| directory.join("Cargo.toml"))
+    })
 }
 
 pub(crate) struct Audit {

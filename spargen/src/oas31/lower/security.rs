@@ -131,9 +131,14 @@ pub(super) fn lower_security_schemes(
             }
         };
         let lowered = match scheme.scheme_type.as_str() {
+            // OpenAPI makes the authentication scheme name case-insensitive, as RFC 9110 does.
             "http" => match scheme.scheme.as_deref() {
-                Some("bearer") => SecurityScheme::Http(HttpScheme::Bearer),
-                Some("basic") => SecurityScheme::Http(HttpScheme::Basic),
+                Some(value) if value.eq_ignore_ascii_case("bearer") => {
+                    SecurityScheme::Http(HttpScheme::Bearer)
+                }
+                Some(value) if value.eq_ignore_ascii_case("basic") => {
+                    SecurityScheme::Http(HttpScheme::Basic)
+                }
                 other => {
                     // `digest`, `negotiate`, and friends need a challenge/response exchange that a
                     // statically-attached credential cannot perform.
@@ -145,8 +150,8 @@ pub(super) fn lower_security_schemes(
                             other.unwrap_or("<missing>")
                         ))
                         .remedy(
-                            "use `bearer` or `basic`, or omit this API segment with \
-                             spargen::omit!",
+                            "use `bearer` or `basic` (in any letter case), or omit this API \
+                             segment with spargen::omit!",
                         )
                         .emit(diags);
                     continue;
