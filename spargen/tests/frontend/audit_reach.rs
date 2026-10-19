@@ -5,8 +5,8 @@
 
 use super::*;
 
-/// Every `(file, pointer)` a `code` diagnostic sits at, in emission order. The file is the
-/// diagnostic's span file name, so a position in a referenced file is told from a root one.
+/// The pointer of every `code` diagnostic in `report`, in emission order. A fixture with a second
+/// file gives its positions pointers no root position shares, so the pointer alone tells them apart.
 fn sites(report: &Report, code: Code) -> Vec<String> {
     report
         .diagnostics()
@@ -16,8 +16,8 @@ fn sites(report: &Report, code: Code) -> Vec<String> {
         .collect()
 }
 
-/// Run both entry points over `files` and assert each reaches `outcome`-ness and carries `code` at
-/// exactly the `expected` pointers, each once.
+/// Run both entry points over `files` and assert each is rejected exactly when `rejected` says,
+/// and carries `code` at exactly the `expected` pointers, each once.
 fn assert_sites(files: &[(&str, &str)], code: Code, rejected: bool, expected: &[&str]) {
     let (generated, checked, _) = generate_and_check_files(files);
     for (entry, report) in [("generate", generated), ("check", checked)] {
@@ -208,5 +208,59 @@ fn an_unreferenced_component_path_item_or_header_is_audited() {
             "/components/headers/Unused/schema",
             "/components/pathItems/Unused/get/responses/200/headers/X-Id/schema",
         ],
+    );
+}
+
+/// OpenAPI 3.2's positional `prefixEncoding` and `itemEncoding` hold headers too. Multipart
+/// rejects both (`E009`), and their header schemas are audited all the same, as every schema
+/// position of a rejected document is.
+#[test]
+fn a_positional_encoding_header_schema_is_audited() {
+    let spec = "openapi: 3.2.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                servers: [{ url: 'https://e.com' }]\n\
+                paths:\n  \
+                /upload:\n    \
+                post:\n      \
+                operationId: upload\n      \
+                requestBody:\n        \
+                content:\n          \
+                multipart/mixed:\n            \
+                schema: { type: array, items: { type: string } }\n            \
+                prefixEncoding:\n              \
+                - headers: { X-First: { schema: { type: string, const: a, maxLength: 1 } } }\n            \
+                itemEncoding:\n              \
+                headers: { X-Rest: { schema: { type: string, const: b, minLength: 1 } } }\n      \
+                responses:\n        \
+                '204': { description: done }\n";
+    let base = "/paths/~1upload/post/requestBody/content/multipart~1mixed";
+    assert_sites(
+        &[("openapi.yaml", spec)],
+        Code::ValidationKeywordIgnored,
+        true,
+        &[
+            &format!("{base}/prefixEncoding/0/headers/X-First/schema"),
+            &format!("{base}/itemEncoding/headers/X-Rest/schema"),
+        ],
+    );
+}
+
+/// A Path Item `$ref` chain that returns to itself is lowering's `E004`, which declines every
+/// chained Path Item reference; the audit's walk over it terminates and reaches no schema twice.
+#[test]
+fn a_path_item_reference_cycle_terminates_the_audit() {
+    let spec = format!(
+        "{HEAD}paths:\n  \
+         /a: {{ $ref: '#/components/pathItems/One' }}\n\
+         components:\n  \
+         pathItems:\n    \
+         One: {{ $ref: '#/components/pathItems/Two' }}\n    \
+         Two: {{ $ref: '#/components/pathItems/One' }}\n"
+    );
+    assert_sites(
+        &[("openapi.yaml", &spec)],
+        Code::UnresolvedRef,
+        true,
+        &["/paths/~1a"],
     );
 }
