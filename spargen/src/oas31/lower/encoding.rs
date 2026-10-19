@@ -542,9 +542,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// keyword, as [`Self::ref_target_body`] reads it, so `{ $ref: V }` pins what `V` pins.
     ///
     /// This is where the header schema's written reference is resolved, and a reference that
-    /// resolves to nothing is reported here (`E004`). That outcome, and a chain
-    /// [`Self::ref_target_body`] cannot read past it, is [`HeaderLiteral::Unreadable`]: the
-    /// defect is reported once, not again as "pins no value".
+    /// resolves to nothing is reported here (`E004`). That outcome, a chain
+    /// [`Self::ref_target_body`] cannot read past it, and a chain of sibling-bearing `$ref`s that
+    /// runs past `MAX_SCHEMA_DEPTH` are [`HeaderLiteral::Unreadable`]: the defect is reported
+    /// once, not again as "pins no value".
     fn literal_header_value(&mut self, schema: &RefOr<Schema>) -> HeaderLiteral {
         let (mut reference, mut at) = match schema {
             RefOr::Item(schema) => {
@@ -574,9 +575,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             reference.clone_from(next);
             at = target.provenance.clone();
         }
-        // A bare alias cycle ends in `ref_target_body`; a chain of `$ref`s with siblings that runs
-        // past the bound pins nothing within reach, and the bound only keeps this total.
-        HeaderLiteral::Unpinned
+        // A bare alias cycle ends in `ref_target_body`. A chain of `$ref`s with siblings that runs
+        // past the bound is a cycle through them, which component lowering rejects (`E013`), or a
+        // chain deeper than it reads (`E014`); either way the defect is reported there, not here.
+        HeaderLiteral::Unreadable
     }
 
     /// Report the encoding fields of a Media Type Object that cannot take effect in this position.
