@@ -200,7 +200,7 @@ pub async fn decode_success_text<T>(
 where
     T: DeserializeOwned,
 {
-    decode_success_with(core, response, decode_text_body::<T>).await
+    decode_success_with(core, response, |body| decode_text_body::<T>(body)).await
 }
 
 /// The body every structured success decoder shares: read the whole body, run `decode` over it, and
@@ -208,10 +208,14 @@ where
 /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
 /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
 /// capped.
-pub(crate) async fn decode_success_with<T>(
+///
+/// Generated code for a multi-status success enum calls it from the arm whose selector matched,
+/// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
+/// binary variant keeps it without a copy.
+pub async fn decode_success_with<T>(
     core: &ClientCore,
     response: Response,
-    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+    decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -262,19 +266,6 @@ where
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     serde_json::from_value(serde_json::Value::String(text.to_owned()))
         .map_err(|error| error.to_string())
-}
-
-/// Read a success response body whole, returning its status, headers, and raw bytes so generated
-/// code can select the matching per-status variant and decode it. Non-generic: the per-variant
-/// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
-/// which owns the status→variant table and its distinct body types.
-pub async fn read_success_body(
-    response: Response,
-) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes), Error<Infallible>> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    Ok((status, headers, body))
 }
 
 /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the

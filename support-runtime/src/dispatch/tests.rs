@@ -346,7 +346,7 @@ use std::convert::Infallible;
 
 use super::{
     classify_error_bytes, classify_error_text, decode_success_bytes, decode_success_text,
-    decode_text_body, read_error_body, read_success_body,
+    decode_success_with, decode_text_body, read_error_body, unexpected_status,
 };
 use crate::{Error, ResponseValue};
 
@@ -427,14 +427,6 @@ fn textual_error_codec_keeps_documented_status_semantics() {
         Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
         other => panic!("expected textual API error, got {other:?}"),
     }
-}
-
-#[test]
-fn read_success_body_returns_status_and_bytes() {
-    let response = json_response(201, r#"{"ok":true}"#);
-    let (status, _headers, body) = poll_ready(read_success_body(response)).unwrap();
-    assert_eq!(status, reqwest::StatusCode::CREATED);
-    assert_eq!(&body[..], br#"{"ok":true}"#);
 }
 
 /// Every runtime helper that raises `Decode` keeps the status and headers of the response it
@@ -563,60 +555,40 @@ enum SuccessEnum {
     Status202(Accepted),
 }
 
-/// A hand-written stand-in shaped like the generated per-status success dispatch: read once,
-/// select the variant whose selector matches (arm order = precedence), decode into it, else an
+/// A hand-written stand-in shaped like the generated per-status success dispatch: select the
+/// variant whose selector matches (arm order = precedence) and decode into it, else an
 /// undocumented-success error. Nothing ties it to the emitter's template: the tests over it pin
-/// the runtime primitives it calls (`read_success_body`, `StatusSpec::matches`) and nothing
-/// more. The emitted dispatch itself is driven over HTTP in `spargen/tests/e2e.rs`
-/// (`success_dispatch_takes_the_exact_arm_before_an_overlapping_range`,
-/// `a_bodyless_success_beside_one_body_is_its_own_variant`).
+/// the runtime primitives it calls (`decode_success_with`, `unexpected_status`,
+/// `StatusSpec::matches`) and nothing more. The emitted dispatch itself is driven over HTTP in
+/// `spargen/tests/e2e.rs` (`success_dispatch_takes_the_exact_arm_before_an_overlapping_range`,
+/// `a_bodyless_success_beside_one_body_is_its_own_variant`,
+/// `a_multi_success_operation_caps_the_body_it_keeps_in_an_error`).
+fn dispatch_success_with(
+    core: &ClientCore,
+    response: reqwest::Response,
+) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
+    let status = response.status();
+    if StatusSpec::Exact(200).matches(status) {
+        return poll_ready(decode_success_with(core, response, |body| {
+            serde_json::from_slice::<Created>(body)
+                .map(SuccessEnum::Status200)
+                .map_err(|error| error.to_string())
+        }));
+    }
+    if StatusSpec::Exact(202).matches(status) {
+        return poll_ready(decode_success_with(core, response, |body| {
+            serde_json::from_slice::<Accepted>(body)
+                .map(SuccessEnum::Status202)
+                .map_err(|error| error.to_string())
+        }));
+    }
+    Err(poll_ready(unexpected_status(core, response)))
+}
+
 fn dispatch_success(
     response: reqwest::Response,
 ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
-    let (status, headers, body) = poll_ready(read_success_body(response))?;
-    if StatusSpec::Exact(200).matches(status) {
-        let value = match serde_json::from_slice::<Created>(&body) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(Error::Decode {
-                    status,
-                    headers,
-                    path: error.to_string(),
-                    body,
-                    truncated: false,
-                })
-            }
-        };
-        return Ok(ResponseValue::new(
-            status,
-            headers,
-            SuccessEnum::Status200(value),
-        ));
-    }
-    if StatusSpec::Exact(202).matches(status) {
-        let value = match serde_json::from_slice::<Accepted>(&body) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(Error::Decode {
-                    status,
-                    headers,
-                    path: error.to_string(),
-                    body,
-                    truncated: false,
-                })
-            }
-        };
-        return Ok(ResponseValue::new(
-            status,
-            headers,
-            SuccessEnum::Status202(value),
-        ));
-    }
-    Err(Error::UnexpectedStatus {
-        status,
-        headers,
-        body,
-    })
+    dispatch_success_with(&core(), response)
 }
 
 #[test]
@@ -645,6 +617,27 @@ fn success_dispatch_parse_failure_is_decode() {
     let error = dispatch_success(json_response(202, "not json")).unwrap_err();
     assert!(matches!(error, Error::Decode { .. }));
     assert_eq!(error.status(), Some(reqwest::StatusCode::ACCEPTED));
+}
+
+/// Both error bodies the success dispatch keeps are capped at `max_error_body`: a parse failure's
+/// `Decode`, which says so through `truncated`, and an undocumented status's `UnexpectedStatus`.
+#[test]
+fn success_dispatch_caps_the_bodies_its_errors_keep() {
+    let mut core = core();
+    core.config_mut().max_error_body = 4;
+    match dispatch_success_with(&core, json_response(202, "not json")).unwrap_err() {
+        Error::Decode {
+            body, truncated, ..
+        } => {
+            assert_eq!(&body[..], b"not ");
+            assert!(truncated);
+        }
+        other => panic!("expected Decode, got {other:?}"),
+    }
+    match dispatch_success_with(&core, json_response(201, r#"{"id":1}"#)).unwrap_err() {
+        Error::UnexpectedStatus { body, .. } => assert_eq!(&body[..], b"{\"id"),
+        other => panic!("expected UnexpectedStatus, got {other:?}"),
+    }
 }
 
 // Stand-ins for a generated multi-status ERROR enum: an exact status plus a range that would
