@@ -170,33 +170,59 @@ fn a_cycle_closing_branch_of_a_typed_target_the_array_admits_generates() {
 /// is what the sibling spelling emitted before the array restricted anything. Each branch is its
 /// variant's payload, and no type of the union the array synthesizes (`…Constraint…`) or of a meet
 /// with it (`…Constrained…`) is emitted. The `milestone` row is GitHub 3.1's shape, a
-/// `[null, string, integer]` array beside `oneOf: [string, integer]` in a property.
+/// `[null, string, integer]` array beside `oneOf: [string, integer]` in a property. A branch that
+/// is itself a union is restated when the array admits every category it spans.
 #[test]
 fn a_type_array_restating_its_union_branches_keeps_their_types() {
+    // (the union, its schemas, whether its one `boolean` branch is excluded)
     let rows = [
         (
             "Pick",
             "    Pick: { type: [object, string], oneOf: [ { type: object, properties: { a: { type: \
              string } } }, { type: string } ] }\n",
+            false,
         ),
         (
             "Pick",
             "    Pick: { type: [object, string], oneOf: [ { type: object }, { type: string } ] }\n",
+            false,
         ),
         (
             "Pick",
             "    Pick: { type: [string, array], anyOf: [ { type: array, items: { type: object, \
              properties: { b: { type: integer } } } }, { type: string, enum: [x, y] } ] }\n",
+            false,
         ),
         (
             "Pick",
             "    Pick: { type: [string, integer], oneOf: [ { type: string, format: uuid }, { type: \
              integer, format: int32 }, { type: boolean } ] }\n",
+            true,
         ),
         (
             "Bodymilestone",
             "    Body: { type: object, properties: { milestone: { oneOf: [ { type: string }, { \
              type: integer } ], type: ['null', string, integer] } } }\n",
+            false,
+        ),
+        // A branch that is itself a union the array admits in every category it spans: a
+        // multi-category `type` array, and the same branch spelled as a nested `oneOf`.
+        (
+            "Pick",
+            "    Pick: { type: [string, integer, boolean], oneOf: [ { type: [string, integer] }, { \
+             type: boolean } ] }\n",
+            false,
+        ),
+        (
+            "Pick",
+            "    Pick: { type: [string, integer, boolean], anyOf: [ { oneOf: [ { type: string }, { \
+             type: integer } ] }, { type: boolean } ] }\n",
+            false,
+        ),
+        (
+            "Pick",
+            "    Pick: { type: [string, integer], oneOf: [ { type: [string, integer] } ] }\n",
+            false,
         ),
     ];
     // Every declaration and every variant payload of the types module.
@@ -213,7 +239,7 @@ fn a_type_array_restating_its_union_branches_keeps_their_types() {
             .map(str::to_owned)
             .collect()
     };
-    for (union, schemas) in rows {
+    for (union, schemas, excludes_boolean) in rows {
         let (report, code) = generate_with_code(&with_schemas("3.1.0", schemas));
         assert_ne!(
             report.outcome(),
@@ -225,6 +251,7 @@ fn a_type_array_restating_its_union_branches_keeps_their_types() {
             .replace("type: [object, string], ", "")
             .replace("type: [string, array], ", "")
             .replace("type: [string, integer], ", "")
+            .replace("type: [string, integer, boolean], ", "")
             .replace(", type: ['null', string, integer]", "");
         assert_ne!(without_array, schemas);
         let (_, bare) = generate_with_code(&with_schemas("3.1.0", &without_array));
@@ -232,7 +259,7 @@ fn a_type_array_restating_its_union_branches_keeps_their_types() {
         let actual = surface(&types);
         // The one branch the `[string, integer]` row's array omits is no variant, with `W011`; its
         // own type is lowered before the meet excludes it, as for any excluded branch.
-        if schemas.contains("type: boolean") {
+        if excludes_boolean {
             expected.retain(|line| !line.starts_with("PickVariant2("));
             assert_eq!(
                 messages_for(&report, Code::DeclarationHasNoEffect).len(),
