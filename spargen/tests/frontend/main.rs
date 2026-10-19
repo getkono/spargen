@@ -27,6 +27,7 @@ mod oracles;
 use oracles::types_module;
 
 mod all_of;
+mod audit_reach;
 mod bodies;
 mod defaults;
 mod diagnostics_meta;
