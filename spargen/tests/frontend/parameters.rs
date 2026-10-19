@@ -1107,3 +1107,51 @@ paths:
         }
     }
 }
+
+#[test]
+fn e010_a_content_parameter_whose_media_entry_has_no_schema() {
+    // Issue #699: a schema-less `content` entry lowered to nothing through a bare `?`, and the
+    // operation skips a parameter that lowers to nothing, so the argument vanished from the
+    // generated method with no diagnostic. Every location reports it, as the `querystring` arm
+    // already did, and a `text/*` entry as a JSON one.
+    for (location, name, path, media) in [
+        ("query", "q", "/x", "application/json"),
+        ("header", "X-Q", "/x", "application/json"),
+        ("cookie", "q", "/x", "text/plain"),
+        ("path", "q", "/x/{q}", "application/json"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  {path}:
+    get:
+      operationId: getX
+      parameters:
+        - name: {name}
+          in: {location}
+          required: true
+          content:
+            {media}: {{}}
+      responses:
+        "204": {{ description: No Content }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{location}: {report:#?}"
+            );
+            assert_eq!(
+                messages_for(&report, Code::UnsupportedParameterStyle),
+                [format!(
+                    "`content` parameter `{name}` has no schema for its `{media}` entry, so the \
+                     client has no type to serialize it from"
+                )],
+                "{location}: {report:#?}"
+            );
+        }
+    }
+}
