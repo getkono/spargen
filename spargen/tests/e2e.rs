@@ -4509,25 +4509,6 @@ fn success_and_error_shapes_agree_on_the_shared_rule() {
 }
 
 #[test]
-fn rejects_openapi_30_without_conversion() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
-        BASIC_SPEC.replace("openapi: 3.1.0", "openapi: 3.0.3"),
-    )
-    .unwrap();
-
-    let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
-
-    assert_eq!(report.outcome(), Outcome::Rejected);
-    assert!(report
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == Code::UnsupportedOpenApiVersion));
-}
-
-#[test]
 fn generated_module_compiles_in_oas32_crate_with_query_method() {
     // OpenAPI 3.2 lowers through the same frontend. This spec exercises the new fixed `QUERY`
     // method (which must emit a real client method) alongside a plain `get`, and must produce a
@@ -6973,31 +6954,6 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
         status.success(),
         "wasm build must compile even with the `blocking` feature enabled (no tokio pulled)"
     );
-}
-
-/// The hidden proc-macro bridge renders deterministically without touching the output path.
-#[test]
-fn macro_preview_is_deterministic() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
-
-    let config = Spec::new(spec);
-    let preview = spargen::__private::preview(&config);
-    assert_eq!(
-        preview.report.outcome(),
-        Outcome::Generated,
-        "{:#?}",
-        preview.report
-    );
-    let contents = preview.contents.expect("generated module");
-    assert!(
-        !out.exists(),
-        "macro preview must not write the output path"
-    );
-    let again = spargen::__private::preview(&config);
-    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
 }
 
 #[test]

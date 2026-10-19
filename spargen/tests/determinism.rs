@@ -1,7 +1,8 @@
 //! The headline invariant (CLAUDE.md): same spargen version + spec + config produces
 //! byte-identical output. Generating the same spec into two module paths must yield identical code,
 //! the same outcome, and the same diagnostics in the same order. It is held over an inline spec,
-//! every generating corpus case, the broad `e2e.rs` spec, and generated union/`allOf` documents.
+//! every generating corpus case, the broad `e2e.rs` spec (through `generate` and through the
+//! proc-macro preview), and generated union/`allOf` documents.
 
 use std::collections::BTreeSet;
 
@@ -136,6 +137,33 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs() {
     assert_eq!(
         assert_generates_identically(&spec_path, "e2e BASIC_SPEC"),
         Outcome::Generated
+    );
+}
+
+/// The hidden proc-macro bridge renders the broad spec deterministically and writes nothing: after
+/// two previews the spec's directory holds the spec alone.
+#[test]
+fn the_macro_preview_is_byte_identical_across_runs_and_writes_nothing() {
+    let (src, spec_path) = write_spec(e2e_basic_spec());
+    let config = Spec::new(spec_path);
+    let preview = spargen::__private::preview(&config);
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    let contents = preview.contents.expect("generated module");
+    let again = spargen::__private::preview(&config);
+    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
+    let written: Vec<_> = std::fs::read_dir(src.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        written,
+        ["openapi.yaml"],
+        "the macro preview must not write beside the spec"
     );
 }
 
