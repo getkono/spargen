@@ -770,25 +770,21 @@ paths:
         scratch.write("spargen.toml", "open_narrowing = true\n");
         scratch.write("api/spargen.toml", "carve = true\nbatch_cap = 3\n");
 
+        // `Spec` equality covers the config files applied, so this also pins which file was
+        // recorded: the one beside the spec, once.
+        let applied = Spec::new(scratch.path("api/openapi.yaml"))
+            .config_file(scratch.path("api/spargen.toml"))
+            .unwrap();
+        assert_eq!(applied, applied.clone().carve(true).batch_cap(3));
         let spec = spec_for(&args(r#""api/openapi.yaml""#), &scratch.consumer()).unwrap();
-        assert_eq!(
-            spec,
-            Spec::new(scratch.path("api/openapi.yaml"))
-                .carve(true)
-                .batch_cap(3)
-        );
+        assert_eq!(spec, applied);
 
         let spec = spec_for(
             &args(r#""api/openapi.yaml", batch_cap = 9"#),
             &scratch.consumer(),
         )
         .unwrap();
-        assert_eq!(
-            spec,
-            Spec::new(scratch.path("api/openapi.yaml"))
-                .carve(true)
-                .batch_cap(9)
-        );
+        assert_eq!(spec, applied.batch_cap(9));
     }
 
     #[test]
@@ -885,15 +881,15 @@ paths:
     }
 
     /// The files a successful expansion `include_bytes!`s, and so the files whose edit makes
-    /// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, and
-    /// a `spargen.lock` beside the spec. The `spargen.toml` beside the spec is not among them.
+    /// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, a
+    /// `spargen.lock` beside the spec, and the `spargen.toml` `spec_for` applied (#686).
     #[test]
-    fn tracking_includes_the_spec_its_refs_the_manifest_and_the_lock() {
+    fn tracking_includes_the_spec_its_refs_the_manifest_the_lock_and_the_config() {
         let scratch = Scratch::new("tracking");
         let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
         let schemas = scratch.write("schemas.yaml", SPLIT_SCHEMAS);
         let lock = scratch.write("spargen.lock", "version = 1\n");
-        scratch.write("spargen.toml", "carve = false\n");
+        let config = scratch.write("spargen.toml", "carve = false\n");
         let requirements = spargen::requirements(&Spec::new(spec.clone())).unwrap();
         // `[workspace]` makes the fixture its own workspace root, so the audit's walk upward for
         // one stops here instead of reading an ancestor manifest above the temporary directory.
@@ -906,9 +902,11 @@ paths:
             ),
         );
 
-        let preview = spargen::__private::preview_for_macro(&Spec::new(spec.clone()), &manifest);
+        let configured = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+        assert_eq!(configured.path().as_str(), spec);
+        let preview = spargen::__private::preview_for_macro(&configured, &manifest);
         assert_eq!(failure_message("openapi.yaml", &preview), None);
-        let mut expected = vec![manifest, spec, schemas, lock];
+        let mut expected = vec![manifest, spec, schemas, lock, config];
         expected.sort();
         assert_eq!(
             tracking(&preview).to_string(),

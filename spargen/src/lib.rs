@@ -762,6 +762,8 @@ pub mod __private {
         if lock.is_file() {
             source_files.push(lock);
         }
+        // The applied config files changed what was generated, so an edit to one re-expands.
+        source_files.extend(spec.config_files.iter().cloned());
         source_files.sort();
         source_files.dedup();
         if report.outcome != Outcome::Generated {
