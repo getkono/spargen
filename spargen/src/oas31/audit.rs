@@ -621,7 +621,31 @@ fn consumed_sse_content(
     for response in document.components.responses.values() {
         inspect_response(response);
     }
-    for item in document.paths.items.values() {
+    // Every Path Item the walk audits (#715): the root's, inline in `paths` or in
+    // `components.pathItems`, and the one each Path Item `$ref` among them names, followed one hop
+    // as lowering follows it. A target reached twice is inspected twice, which consumes nothing
+    // new.
+    let roots = document
+        .components
+        .path_items
+        .values()
+        .chain(document.paths.items.values());
+    let mut items: Vec<Cow<'_, PathItem>> = Vec::new();
+    for item in roots {
+        if let Some(reference) = &item.reference {
+            let mut discarded = Diagnostics::new(0);
+            if let Some(target) = resolver.resolve_path_item(
+                &reference.reference,
+                resolver.written_in(&reference.provenance),
+                &reference.provenance,
+                &mut discarded,
+            ) {
+                items.push(Cow::Owned(target));
+            }
+        }
+        items.push(Cow::Borrowed(item));
+    }
+    for item in &items {
         for operation in item.operations.values() {
             for response in operation.responses.by_status.values() {
                 inspect_response(response);
