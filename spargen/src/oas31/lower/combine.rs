@@ -880,7 +880,8 @@ pub(super) fn schema_has_union(schema: &Schema) -> bool {
 /// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is
 /// ([`LowerCtx::lower_all_of_with_union_member`]). A member that is a `$ref` is its target first,
 /// and an `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
-/// members, and beside object members they are `E013`.
+/// members, and beside object members they are `E013`
+/// ([`LowerCtx::reject_all_of_several_unions`]).
 pub(super) fn sole_union_member(schema: &Schema) -> Option<usize> {
     let mut unions = schema.all_of.iter().enumerate().filter(|(_, member)| {
         matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))

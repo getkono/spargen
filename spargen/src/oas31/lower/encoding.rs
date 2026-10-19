@@ -469,24 +469,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if header_name.eq_ignore_ascii_case("content-type") {
                 continue;
             }
-            // A `$ref` here is resolved rather than treated as pinning nothing: the target may
-            // well declare the `const` that gives the client something to send, and reporting
-            // "pins no value" without looking would name the wrong reason. An unresolvable
-            // reference is `E004` from `resolve_header`, not a warning.
-            let literal = match header {
-                RefOr::Item(header) => header
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.literal_header_value(schema)),
+            // A `$ref` here, to the Header Object or inside it to its schema, is resolved rather
+            // than treated as pinning nothing: the target may well declare the `const` that gives
+            // the client something to send, and reporting "pins no value" without looking would
+            // name the wrong reason. An unresolvable reference is `E004`, from `resolve_header`
+            // or `literal_header_value`, not a warning.
+            let schema = match header {
+                RefOr::Item(header) => header.schema.clone(),
                 RefOr::Ref(_) => match self.resolve_header(header) {
-                    Some(resolved) => resolved
-                        .schema
-                        .as_ref()
-                        .and_then(|schema| self.literal_header_value(schema)),
+                    Some(resolved) => resolved.schema,
                     // `resolve_header` already reported the unresolvable reference; adding
                     // "pins no value" would name a second, wrong reason for one defect.
                     None => continue,
                 },
+            };
+            let literal = match schema.map(|schema| self.literal_header_value(&schema)) {
+                Some(HeaderLiteral::Pinned(value)) => Some(value),
+                Some(HeaderLiteral::Unpinned) | None => None,
+                // Reported where the reference was resolved, for the same reason as above.
+                Some(HeaderLiteral::Unreadable) => continue,
             };
             match literal {
                 // The pair is sent verbatim as a part header, so a name or value the HTTP field
@@ -535,22 +536,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         (!refused).then_some(headers)
     }
 
-    /// The literal value a header schema pins, if any.
-    fn literal_header_value(&self, schema: &RefOr<Schema>) -> Option<String> {
-        let RefOr::Item(schema) = schema else {
-            return None;
+    /// The literal value a header schema pins: its own `const`, else its own `default`, and where
+    /// it states neither, those of the schema a `$ref` in it names (#701). The reference is read
+    /// through component aliases and through targets that are themselves a `$ref` beside a sibling
+    /// keyword, as [`Self::ref_target_body`] reads it, so `{ $ref: V }` pins what `V` pins.
+    ///
+    /// This is where the header schema's written reference is resolved, and a reference that
+    /// resolves to nothing is reported here (`E004`). That outcome, a chain
+    /// [`Self::ref_target_body`] cannot read past it, and a chain of sibling-bearing `$ref`s that
+    /// runs past `MAX_SCHEMA_DEPTH` are [`HeaderLiteral::Unreadable`]: the defect is reported
+    /// once, not again as "pins no value".
+    fn literal_header_value(&mut self, schema: &RefOr<Schema>) -> HeaderLiteral {
+        let (mut reference, mut at) = match schema {
+            RefOr::Item(schema) => {
+                if let Some(literal) = pinned_literal(schema) {
+                    return literal;
+                }
+                let Some(reference) = &schema.reference else {
+                    return HeaderLiteral::Unpinned;
+                };
+                (reference.clone(), schema.provenance.clone())
+            }
+            RefOr::Ref(reference) => (reference.reference.clone(), reference.provenance.clone()),
         };
-        let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
-        match &value.node {
-            crate::source::Node::String(text) => Some(text.clone()),
-            crate::source::Node::Bool(value) => Some(value.to_string()),
-            crate::source::Node::Number(number) => Some(match number {
-                crate::source::Number::Int(value) => value.to_string(),
-                crate::source::Number::UInt(value) => value.to_string(),
-                crate::source::Number::Float(value) => value.to_string(),
-            }),
-            _ => None,
+        if self.resolver.resolve(&reference, &at, self.diags).is_err() {
+            return HeaderLiteral::Unreadable;
         }
+        for _ in 0..super::MAX_SCHEMA_DEPTH {
+            let Some(target) = self.ref_target_body(&reference, &at) else {
+                return HeaderLiteral::Unreadable;
+            };
+            if let Some(literal) = pinned_literal(&target) {
+                return literal;
+            }
+            let Some(next) = &target.reference else {
+                return HeaderLiteral::Unpinned;
+            };
+            reference.clone_from(next);
+            at = target.provenance.clone();
+        }
+        // A bare alias cycle ends in `ref_target_body`. A chain of `$ref`s with siblings that runs
+        // past the bound is a cycle through them, which component lowering rejects (`E013`), or a
+        // chain deeper than it reads (`E014`); either way the defect is reported there, not here.
+        HeaderLiteral::Unreadable
     }
 
     /// Report the encoding fields of a Media Type Object that cannot take effect in this position.
@@ -591,4 +619,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// the document wrote one, else `at`, the body the property belongs to.
 fn encoding_site(declared: Option<&EncodingObject>, at: &Provenance) -> Provenance {
     declared.map_or_else(|| at.clone(), |encoding| encoding.provenance.clone())
+}
+
+/// What an encoding header's schema pins, as [`LowerCtx::literal_header_value`] reads it.
+enum HeaderLiteral {
+    /// The scalar literal sent as the part header's value.
+    Pinned(String),
+    /// No `const` or `default`, or one that is not a scalar: nothing to send (`W011`).
+    Unpinned,
+    /// A `$ref` the schema is read through could not be followed; its defect is reported where
+    /// the reference is resolved, so nothing more is said here.
+    Unreadable,
+}
+
+/// The literal `schema` itself pins, if it states a `const` or a `default`: `const` first, and a
+/// non-scalar value as [`HeaderLiteral::Unpinned`]. `None` where it states neither.
+fn pinned_literal(schema: &Schema) -> Option<HeaderLiteral> {
+    let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
+    Some(match &value.node {
+        crate::source::Node::String(text) => HeaderLiteral::Pinned(text.clone()),
+        crate::source::Node::Bool(value) => HeaderLiteral::Pinned(value.to_string()),
+        crate::source::Node::Number(number) => HeaderLiteral::Pinned(match number {
+            crate::source::Number::Int(value) => value.to_string(),
+            crate::source::Number::UInt(value) => value.to_string(),
+            crate::source::Number::Float(value) => value.to_string(),
+        }),
+        _ => HeaderLiteral::Unpinned,
+    })
 }
