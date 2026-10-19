@@ -20,18 +20,12 @@ pub(crate) enum IdentRole {
 /// keywords escaped as raw identifiers (`r#type`) where legal and via a trailing underscore
 /// otherwise, and leading digits / invalid starts repaired.
 pub(crate) fn escape(raw: &str, role: IdentRole) -> Ident {
+    // Each conversion yields a non-empty run of ASCII alphanumerics and underscores, falling back
+    // to `Generated` / `generated` itself when nothing survives segmentation.
     let mut ident = match role {
         IdentRole::Type | IdentRole::Variant => to_pascal_case(raw),
         IdentRole::Field | IdentRole::Method | IdentRole::Param => to_snake_case(raw),
     };
-
-    ident.retain(|ch| ch == '_' || ch.is_ascii_alphanumeric());
-    if ident.is_empty() {
-        ident = match role {
-            IdentRole::Type | IdentRole::Variant => "Generated".to_owned(),
-            _ => "generated".to_owned(),
-        };
-    }
 
     if ident.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
         ident = match role {

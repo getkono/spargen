@@ -638,13 +638,20 @@ enum YamlFailure {
         span: Span,
         name: String,
     },
+    /// The scalar at `span` denotes no JSON value (a non-finite float), for the reason `message`
+    /// gives. `path` is built exactly as [`YamlFailure::DuplicateKey`]'s is.
+    InvalidScalar {
+        path: Vec<Segment>,
+        span: Span,
+        message: String,
+    },
 }
 
 impl YamlFailure {
     /// The failure as seen from the container one level up, which holds the failing node under
     /// `segment`.
     fn within(mut self, segment: Segment) -> Self {
-        if let Self::DuplicateKey { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. } | Self::InvalidScalar { path, .. } = &mut self {
             path.push(segment);
         }
         self
@@ -653,7 +660,7 @@ impl YamlFailure {
     /// The failure as seen from a mapping whose key failed to build: a key has no pointer of its
     /// own, so a duplicate inside it is addressed by the mapping that holds the key.
     fn in_key(mut self) -> Self {
-        if let Self::DuplicateKey { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. } | Self::InvalidScalar { path, .. } = &mut self {
             path.clear();
         }
         self
@@ -684,6 +691,24 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
+            YamlFailure::InvalidScalar {
+                path,
+                span,
+                message,
+            } => {
+                // Worded as the JSON parser words its number errors, so one literal reads the
+                // same in either format.
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: {message} at line {} column {}",
+                    span.start.line, span.start.col
+                ))
+                .emit(diags);
+                Aborted
+            }
         })
     }
 
@@ -701,17 +726,21 @@ impl YamlBuilder<'_> {
         };
         let value = match event {
             Event::Scalar(value, style, _anchor, tag) => {
-                let node = scalar_to_node(value, *style, tag);
                 let end = scalar_end(positions, *style, value, marker.index());
+                let span = Span {
+                    file: self.file,
+                    start,
+                    end,
+                };
+                let node = scalar_to_node(value, *style, tag).map_err(|message| {
+                    YamlFailure::InvalidScalar {
+                        path: Vec::new(),
+                        span,
+                        message,
+                    }
+                })?;
                 self.idx += 1;
-                SpannedValue::new(
-                    node,
-                    Span {
-                        file: self.file,
-                        start,
-                        end,
-                    },
-                )
+                SpannedValue::new(node, span)
             }
             Event::SequenceStart(..) => {
                 self.idx += 1;
@@ -808,7 +837,8 @@ impl YamlBuilder<'_> {
 /// Interpret a YAML scalar exactly as `yaml_rust2`'s `YamlLoader` does (respecting quoting style
 /// and explicit `!!`-tags), then map it onto a [`Node`]. Reusing the crate's own scalar typing
 /// keeps parsed *values* identical to the previous `YamlLoader`-based path — only spans change.
-fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
+/// A float scalar with no finite value is an error, whose message [`yaml_float`] gives.
+fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Result<Node, String> {
     let yaml = if style != TScalarStyle::Plain {
         Yaml::String(value.to_owned())
     } else if let Some(Tag { handle, suffix }) = tag {
@@ -827,7 +857,7 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
                 // bypasses the integer classification `yaml_scalar_to_node` gives a `Real`.
                 "float" => {
                     if is_yaml_real(value) {
-                        return Node::Number(Number::Float(value.parse().unwrap_or(0.0)));
+                        return yaml_float(value).map(|float| Node::Number(Number::Float(float)));
                     }
                     Yaml::BadValue
                 }
@@ -849,39 +879,58 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
 /// Map a scalar [`Yaml`] onto a [`Node`] (`BadValue` falls through to `Null`), classifying an
 /// integer literal as the JSON parser does: `yaml_rust2` reads one that overflows `i64` as a
 /// `Real`, so a `Real` whose text parses as a `u64` (`18446744073709551615`, `+…`) is a `UInt`;
-/// any other `Real` (a fraction, an exponent, a literal beyond `u64`) is a `Float`.
-fn yaml_scalar_to_node(yaml: Yaml) -> Node {
-    match yaml {
+/// any other `Real` (a fraction, an exponent, a literal beyond `u64`) is a `Float`, or the error
+/// [`yaml_float`] gives when it has no finite value.
+fn yaml_scalar_to_node(yaml: Yaml) -> Result<Node, String> {
+    Ok(match yaml {
         Yaml::Null | Yaml::BadValue => Node::Null,
         Yaml::Boolean(value) => Node::Bool(value),
         Yaml::Integer(value) => Node::Number(Number::Int(value)),
         Yaml::Real(value) => match value.parse::<u64>() {
             Ok(unsigned) => Node::Number(Number::UInt(unsigned)),
-            Err(_) => Node::Number(Number::Float(value.parse().unwrap_or(0.0))),
+            Err(_) => Node::Number(Number::Float(yaml_float(&value)?)),
         },
         Yaml::String(value) => Node::String(value),
         // Scalars never carry these variants; treat defensively as null.
         Yaml::Array(_) | Yaml::Hash(_) | Yaml::Alias(_) => Node::Null,
+    })
+}
+
+/// YAML 1.2's spellings of an infinity, which `yaml_rust2` reads as a float.
+const YAML_INFINITIES: [&str; 9] = [
+    ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF",
+];
+
+/// YAML 1.2's spellings of NaN, which `yaml_rust2` reads as a float.
+const YAML_NANS: [&str; 3] = [".nan", ".NaN", ".NAN"];
+
+/// The finite `f64` a YAML float scalar denotes, or why it has none. OpenAPI's JSON data model has
+/// no infinities or NaN, so YAML's special floats are rejected by name, and a literal that
+/// overflows to a non-finite `f64` (`1e999`) is out of range, worded as the JSON parser's
+/// `parse_f64` words it.
+fn yaml_float(text: &str) -> Result<f64, String> {
+    if YAML_INFINITIES.contains(&text) {
+        return Err(format!(
+            "number `{text}` is infinite, which JSON cannot represent"
+        ));
+    }
+    if YAML_NANS.contains(&text) {
+        return Err(format!(
+            "number `{text}` is NaN, which JSON cannot represent"
+        ));
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => Ok(value),
+        Ok(_) => Err(format!("number `{text}` is out of range")),
+        Err(_) => Err(format!("invalid number literal `{text}`")),
     }
 }
 
 /// Mirror `yaml_rust2`'s (private) `parse_f64` acceptance test for the explicit `!!float` tag.
 fn is_yaml_real(value: &str) -> bool {
-    matches!(
-        value,
-        ".inf"
-            | ".Inf"
-            | ".INF"
-            | "+.inf"
-            | "+.Inf"
-            | "+.INF"
-            | "-.inf"
-            | "-.Inf"
-            | "-.INF"
-            | ".nan"
-            | ".NaN"
-            | ".NAN"
-    ) || (value.bytes().any(|byte| byte.is_ascii_digit()) && value.parse::<f64>().is_ok())
+    YAML_INFINITIES.contains(&value)
+        || YAML_NANS.contains(&value)
+        || (value.bytes().any(|byte| byte.is_ascii_digit()) && value.parse::<f64>().is_ok())
 }
 
 /// A best-effort end position for a scalar: for a single-line scalar it spans the scalar text
@@ -1267,6 +1316,43 @@ mod tests {
         let text = "a:\n  ? {k: 1, k: 2}\n  : v\n";
         assert!(parse_yaml(FileId(0), text, &mut diags).is_err());
         assert_eq!(duplicate_key_pointer(&diags).as_deref(), Some("/a"));
+    }
+
+    #[test]
+    fn a_non_finite_yaml_float_points_at_its_element_or_at_the_mapping_holding_its_key() {
+        // An array element is addressed by its index; a key has no pointer of its own, so a
+        // non-finite float used as a key is addressed by the mapping that holds it, and is
+        // refused for its value before the key's type is ever looked at.
+        for (text, pointer, message) in [
+            (
+                "a:\n  enum: [1, .inf]\n",
+                "/a/enum/1",
+                "malformed YAML: number `.inf` is infinite, which JSON cannot represent \
+                 at line 2 column 13",
+            ),
+            (
+                "a:\n  - 0\n  - -1e999\n",
+                "/a/1",
+                "malformed YAML: number `-1e999` is out of range at line 3 column 5",
+            ),
+            (
+                "a:\n  .nan: x\n",
+                "/a",
+                "malformed YAML: number `.nan` is NaN, which JSON cannot represent \
+                 at line 2 column 3",
+            ),
+            (
+                "1e999: x\n",
+                "",
+                "malformed YAML: number `1e999` is out of range at line 1 column 1",
+            ),
+        ] {
+            let mut diags = Diagnostics::default();
+            assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
+            let diag = the_invalid_input(&diags);
+            assert_eq!(diag.pointer.as_str(), pointer, "{text}: {diag:?}");
+            assert_eq!(diag.message, message, "{text}: {diag:?}");
+        }
     }
 
     #[test]

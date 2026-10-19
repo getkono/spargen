@@ -234,16 +234,8 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     for operation in &api.operations {
         let responses = operation
             .responses
-            .by_status
-            .iter()
-            .map(|(spec, response)| (status_label(*spec), response))
-            .chain(
-                operation
-                    .responses
-                    .default
-                    .as_ref()
-                    .map(|response| (status_label(crate::ir::StatusSpec::Default), response)),
-            );
+            .entries()
+            .map(|(spec, response)| (status_label(spec), response));
         for (label, response) in responses {
             if response.headers.is_empty() {
                 continue;

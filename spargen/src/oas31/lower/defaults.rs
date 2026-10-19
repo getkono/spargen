@@ -183,18 +183,13 @@ pub(super) fn retype_field_defaults(
 }
 
 /// Recover the JSON value a representable default was decided from, so it can be decided again
-/// against another type. An integral float is classified as the integer JSON Schema says it is: a
-/// `number` field's `3` is carried as `3.0`, and the `integer` it narrows to admits it.
+/// against another type. A float is classified by [`classify_float`]: a `number` field's `3` is
+/// carried as `3.0`, and the `integer` it narrows to admits it.
 pub(super) fn reclassify_default(value: &DefaultValue) -> RawDefault {
     match value {
         DefaultValue::Bool(value) => RawDefault::Bool(*value),
         DefaultValue::Int(value) => RawDefault::Int(*value),
-        DefaultValue::Float(value)
-            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 =>
-        {
-            RawDefault::Int(*value as i64)
-        }
-        DefaultValue::Float(value) => RawDefault::Float(*value),
+        DefaultValue::Float(value) => classify_float(*value),
         DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
             RawDefault::Str(value.clone())
         }
@@ -227,9 +222,26 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
         Node::Number(Number::UInt(value)) => {
             i64::try_from(*value).map_or(RawDefault::Float(*value as f64), RawDefault::Int)
         }
-        Node::Number(Number::Float(value)) => RawDefault::Float(*value),
+        Node::Number(Number::Float(value)) => classify_float(*value),
         Node::String(value) => RawDefault::Str(value.clone()),
         Node::Null | Node::Array(_) | Node::Object(_) => RawDefault::Other,
+    }
+}
+
+/// Classify a float as JSON Schema compares numbers, by value: an integral float of magnitude
+/// below 2^53 is that integer (`3.0` is `3`), so an `integer` field admits it under the same width
+/// check as an integer literal. Anything else — a fraction, or a magnitude of 2^53 or more — stays a
+/// float.
+fn classify_float(value: f64) -> RawDefault {
+    // At 2^53 and above, consecutive `f64` values are 2 or more apart, so every one of them is
+    // integral: `12345678901234567.5` parses to `12345678901234568.0`, and its fraction is gone
+    // before this sees it. Below 2^53 every integer is exact, so an integral float there names the
+    // integer its literal wrote, to the precision every float default is parsed at.
+    const EXACT_INTEGER_BOUND: f64 = 9_007_199_254_740_992.0; // 2^53
+    if value.fract() == 0.0 && value.abs() < EXACT_INTEGER_BOUND {
+        RawDefault::Int(value as i64)
+    } else {
+        RawDefault::Float(value)
     }
 }
 

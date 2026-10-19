@@ -362,7 +362,7 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
         let method = method
             .to_string()
             .parse::<spargen::OmitMethod>()
-            .map_err(|error| syn::Error::new(method.span(), format!("{error}")))?;
+            .map_err(|error| syn::Error::new(method.span(), error))?;
         let path: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Operation {
@@ -391,20 +391,12 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     braced!(body in input);
     while !body.is_empty() {
         let kind: Ident = body.parse()?;
-        // One shared parser, so `omit!`, the CLI, and `spargen.toml` accept the same spellings.
+        // One shared parser, so `omit!`, the CLI, and `spargen.toml` accept the same spellings
+        // and answer an unknown one with the same list.
         let kind = kind
             .to_string()
             .parse::<spargen::ComponentKind>()
-            .map_err(|error| {
-                syn::Error::new(
-                    kind.span(),
-                    format!(
-                        "{error}; expected one of \
-                         schemas/responses/parameters/request_bodies/headers/security_schemes/\
-                         path_items/media_types"
-                    ),
-                )
-            })?;
+            .map_err(|error| syn::Error::new(kind.span(), error))?;
         let names;
         braced!(names in body);
         while !names.is_empty() {
@@ -966,7 +958,8 @@ paths:
             ),
             (
                 r#""a.yaml", omit { operations { fetch "/a"; } }"#,
-                "unknown HTTP method: `fetch`",
+                "unknown HTTP method: `fetch`; \
+                 expected one of get/put/post/delete/options/head/patch/trace/query",
             ),
             (
                 r#""a.yaml", omit { operations { get "/a" } }"#,

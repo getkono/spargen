@@ -458,6 +458,91 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn the_accepted_lists_name_each_variant_exactly_once() {
+        // Each `match` names every variant's canonical spelling, so a new variant stops this test
+        // compiling until its spelling is written here. The assertions then hold `CANONICAL` to
+        // those spellings: entry `i` parses to the variant declared `i`th, whose spelling it is,
+        // and every variant listed below maps, in declaration order, onto `CANONICAL` exactly.
+        fn kind_spelling(kind: ComponentKind) -> &'static str {
+            match kind {
+                ComponentKind::Schemas => "schemas",
+                ComponentKind::Responses => "responses",
+                ComponentKind::Parameters => "parameters",
+                ComponentKind::RequestBodies => "request_bodies",
+                ComponentKind::Headers => "headers",
+                ComponentKind::SecuritySchemes => "security_schemes",
+                ComponentKind::PathItems => "path_items",
+                ComponentKind::MediaTypes => "media_types",
+            }
+        }
+        fn method_spelling(method: OmitMethod) -> &'static str {
+            match method {
+                OmitMethod::Get => "get",
+                OmitMethod::Put => "put",
+                OmitMethod::Post => "post",
+                OmitMethod::Delete => "delete",
+                OmitMethod::Options => "options",
+                OmitMethod::Head => "head",
+                OmitMethod::Patch => "patch",
+                OmitMethod::Trace => "trace",
+                OmitMethod::Query => "query",
+            }
+        }
+
+        for (index, token) in ComponentKind::CANONICAL.iter().enumerate() {
+            let kind: ComponentKind = token.parse().unwrap();
+            assert_eq!(
+                kind as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(kind_spelling(kind), *token);
+        }
+        let kinds = [
+            ComponentKind::Schemas,
+            ComponentKind::Responses,
+            ComponentKind::Parameters,
+            ComponentKind::RequestBodies,
+            ComponentKind::Headers,
+            ComponentKind::SecuritySchemes,
+            ComponentKind::PathItems,
+            ComponentKind::MediaTypes,
+        ];
+        assert_eq!(kinds.map(kind_spelling), ComponentKind::CANONICAL);
+
+        for (index, token) in OmitMethod::CANONICAL.iter().enumerate() {
+            let method: OmitMethod = token.parse().unwrap();
+            assert_eq!(
+                method as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(method_spelling(method), *token);
+        }
+        let methods = [
+            OmitMethod::Get,
+            OmitMethod::Put,
+            OmitMethod::Post,
+            OmitMethod::Delete,
+            OmitMethod::Options,
+            OmitMethod::Head,
+            OmitMethod::Patch,
+            OmitMethod::Trace,
+            OmitMethod::Query,
+        ];
+        assert_eq!(methods.map(method_spelling), OmitMethod::CANONICAL);
+
+        assert_eq!(
+            "nope".parse::<ComponentKind>().unwrap_err().to_string(),
+            "unknown component kind: `nope`; expected one of schemas/responses/parameters/\
+             request_bodies/headers/security_schemes/path_items/media_types"
+        );
+        assert_eq!(
+            "nope".parse::<OmitMethod>().unwrap_err().to_string(),
+            "unknown HTTP method: `nope`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+    }
+
+    #[test]
     fn glob_matcher_semantics() {
         // Exact literals.
         assert!(glob_match("/pets", "/pets"));
