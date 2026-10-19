@@ -360,6 +360,118 @@ paths:
     }
 }
 
+/// The Encoding Object form of #696: `spaceDelimited`/`pipeDelimited` are defined only for arrays
+/// and objects and `deepObject` only for objects, so a property whose schema admits a scalar
+/// under one of them has no defined serialization. On form-urlencoded the runtime refused such a
+/// value at request time (`ExpectedComposite`/`ExpectedObject`), failing every call that carried
+/// it; on multipart a delimited scalar was sent as if `style: form` had been declared. Both are
+/// `E009`, as every other undefined RFC 6570 combination in an Encoding Object is. A nullable
+/// array property stays supported: a `null` property is omitted from a form body, not serialized.
+#[test]
+fn e009_an_encoding_style_over_a_property_admitting_a_value_it_cannot_serialize() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          MEDIA:
+            schema:
+              type: object
+              properties:
+                p: SCHEMA
+            encoding:
+              p:
+                style: STYLE
+      responses:
+        "204": { description: No Content }
+"##;
+    let spec = |media: &str, style: &str, schema: &str| {
+        TEMPLATE
+            .replace("MEDIA", media)
+            .replace("STYLE", style)
+            .replace("SCHEMA", schema)
+    };
+    let form = "application/x-www-form-urlencoded";
+    let multipart = "multipart/form-data";
+    let rejected = [
+        (form, "spaceDelimited", "{ type: string }"),
+        (
+            form,
+            "pipeDelimited",
+            "{ oneOf: [{ type: array, items: { type: string } }, { type: integer }] }",
+        ),
+        (form, "deepObject", "{ type: integer }"),
+        (
+            form,
+            "deepObject",
+            "{ type: array, items: { type: string } }",
+        ),
+        (multipart, "spaceDelimited", "{ type: string }"),
+        (multipart, "pipeDelimited", "{ type: boolean }"),
+    ];
+    for (media, style, schema) in rejected {
+        let spec = spec(media, style, schema);
+        let shape = if style == "deepObject" {
+            "only objects"
+        } else {
+            "only arrays and objects"
+        };
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{media} {style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedMediaType);
+            assert_eq!(messages.len(), 1, "{media} {style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(&format!("`encoding.p.style: {style}` serializes {shape}")),
+                "{media} {style} {schema}: {messages:?}"
+            );
+        }
+    }
+    let accepted = [
+        (
+            form,
+            "spaceDelimited",
+            "{ type: array, items: { type: string } }",
+        ),
+        (
+            form,
+            "pipeDelimited",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            form,
+            "spaceDelimited",
+            "{ type: [array, 'null'], items: { type: string } }",
+        ),
+        (
+            form,
+            "deepObject",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            multipart,
+            "pipeDelimited",
+            "{ type: array, items: { type: string } }",
+        ),
+    ];
+    for (media, style, schema) in accepted {
+        let spec = spec(media, style, schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{media} {style} {schema}: {report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn multipart_rfc6570_array_encoding_generates() {
     // The shapes that *are* defined stay supported: an array property under a delimited or form

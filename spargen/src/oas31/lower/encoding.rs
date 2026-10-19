@@ -11,6 +11,7 @@ use crate::oas31::media::{
 };
 use crate::oas31::{EncodingObject, MediaTypeObject, RefOr, Schema};
 
+use super::parameter::StyleDomain;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -217,6 +218,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                              of `style`/`explode`/`allowReserved`, or omit this API segment with \
                              spargen::omit!",
                         )
+                        .emit(self.diags);
+                    return None;
+                }
+                // The delimited styles are defined only for arrays and objects and `deepObject`
+                // only for objects (#696); the parameter-side construct is `E010`. A `null`
+                // property is omitted from the body before any style sees it, at the root or as a
+                // union member's value alike.
+                if let Some(domain) = StyleDomain::of(&style)
+                    .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, false))
+                {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.style: {style_name}` serializes {}, but the schema \
+                             of property `{name}` admits another value, which the style has no \
+                             serialization for",
+                            domain.describe()
+                        ))
+                        .remedy(match domain {
+                            StyleDomain::ArrayOrObject => {
+                                "give the property an array or object schema, or use `style: form`"
+                            }
+                            StyleDomain::Object => {
+                                "give the property an object schema, or use `style: form`"
+                            }
+                        })
                         .emit(self.diags);
                     return None;
                 }

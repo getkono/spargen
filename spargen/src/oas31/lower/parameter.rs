@@ -323,6 +323,35 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .emit(self.diags);
             return None;
         }
+        // A `oneOf`/`anyOf` member's `null` is the value itself, so it is sent even on an
+        // optional parameter; only the root's `null` is the absent `None`.
+        if let Some(domain) = StyleDomain::of(&style)
+            .filter(|domain| !domain.admits_only(&self.graph, ty, parameter.required, true))
+        {
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(format!(
+                "`style: {style_name}` serializes {}, but the schema of parameter `{}` admits \
+                 another value (a scalar, or `null` on a required parameter), which the style \
+                 has no serialization for",
+                domain.describe(),
+                parameter.name
+            ))
+            .remedy(match domain {
+                StyleDomain::ArrayOrObject => {
+                    "give the parameter an array or object schema, nullable only if the parameter is \
+                     optional, or use `style: form`"
+                }
+                StyleDomain::Object => {
+                    "give the parameter an object schema, nullable only if the parameter is \
+                     optional, or use `style: form`"
+                }
+            })
+            .emit(self.diags);
+            return None;
+        }
         Some(self.lowered_parameter(
             parameter,
             location,
@@ -493,6 +522,104 @@ fn uninhabited_parameter_part_inner(
         // The parameter itself was classified above; a reservation has no parts to search.
         TypeKind::Reserved => None,
         _ => None,
+    }
+}
+
+/// The values a query style is defined for, beyond what [`parameter_shape_supported`] admits for
+/// every style: the specification's serialization table gives `spaceDelimited`/`pipeDelimited` a
+/// value only for an array or object, and `deepObject` only for an object (#696). The runtime's
+/// `serialize_delimited` and `serialize_deep_object` refuse any other value at request time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StyleDomain {
+    /// `spaceDelimited` / `pipeDelimited`.
+    ArrayOrObject,
+    /// `deepObject`.
+    Object,
+}
+
+impl StyleDomain {
+    /// The domain `style` is restricted to, or `None` for a style defined over scalars too.
+    pub(super) fn of(style: &ParamStyle) -> Option<Self> {
+        match style {
+            ParamStyle::Delimited(_) => Some(Self::ArrayOrObject),
+            ParamStyle::DeepObject => Some(Self::Object),
+            ParamStyle::Simple
+            | ParamStyle::Matrix
+            | ParamStyle::Label
+            | ParamStyle::Form
+            | ParamStyle::Cookie
+            | ParamStyle::Content(_) => None,
+        }
+    }
+
+    /// What the style serializes, as a diagnostic phrases it: "serializes {only ...}".
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "only arrays and objects",
+            Self::Object => "only objects",
+        }
+    }
+
+    /// Whether every value `ty` admits is one this domain holds. `null_sent` says whether a
+    /// `null` the root admits reaches the serializer: it does for a required parameter, while an
+    /// optional one's `None` is not sent and a form body omits a `null` property. A `null` a
+    /// `oneOf`/`anyOf` member admits is the value itself, so it is judged by the same flag only
+    /// where the call site drops a `null` value wholesale (`member_null_sent`).
+    pub(super) fn admits_only(
+        self,
+        graph: &TypeGraph,
+        ty: Ty,
+        null_sent: bool,
+        member_null_sent: bool,
+    ) -> bool {
+        self.admits_only_inner(graph, ty, null_sent, member_null_sent, &mut HashSet::new())
+    }
+
+    fn admits_only_inner(
+        self,
+        graph: &TypeGraph,
+        ty: Ty,
+        null_sent: bool,
+        member_null_sent: bool,
+        members: &mut HashSet<TypeId>,
+    ) -> bool {
+        if ty.nullable && null_sent {
+            return false;
+        }
+        let Some(definition) = graph.get(ty.id) else {
+            return false;
+        };
+        match &definition.kind {
+            TypeKind::Struct(_) => true,
+            TypeKind::Array(_) | TypeKind::Tuple(_) => self == Self::ArrayOrObject,
+            TypeKind::Null => !null_sent,
+            // A union admits exactly its members' values; one reached again through a member adds
+            // none, so it holds no counterexample (`members` stops the walk).
+            TypeKind::Union(union) => {
+                if !members.insert(ty.id) {
+                    return true;
+                }
+                let all = union.variants.iter().all(|variant| {
+                    self.admits_only_inner(
+                        graph,
+                        variant.ty,
+                        member_null_sent,
+                        member_null_sent,
+                        members,
+                    )
+                });
+                members.remove(&ty.id);
+                all
+            }
+            // A reservation's shape is unknown, so it cannot be proved to hold only composites;
+            // `parameter_shape_supported` refuses it first on the parameter side.
+            TypeKind::Reserved
+            | TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Never
+            | TypeKind::Any => false,
+        }
     }
 }
 
