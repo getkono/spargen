@@ -5,11 +5,12 @@ use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance
 use crate::source::SpannedValue;
 
 use super::{
-    Document, MediaTypeObject, ParameterObject, RefOr, Reference, RequestBodyObject, Resolver,
-    ResponseObject, Schema, SchemaOr, ValidationKeywords,
+    Document, EncodingObject, HeaderObject, MediaTypeObject, ParameterObject, PathItem, RefOr,
+    Reference, RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr, ValidationKeywords,
 };
 
-/// How a Parameter, Request Body or Response Object target is parsed, as lowering parses it.
+/// How a Parameter, Request Body, Response or Header Object target is parsed, as lowering parses
+/// it.
 type ObjectParser<T> = fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>;
 
 type AnnotationKey = (Option<FileId>, JsonPointer);
@@ -30,10 +31,10 @@ struct Audit<'a, 'doc> {
     /// Every schema node [`Audit::audit_schema`] has audited, so a target that several references
     /// reach, or that the walk reaches as well, is audited once and a reference cycle terminates.
     audited: HashSet<SchemaKey>,
-    /// Every Parameter, Request Body, Response and Media Type Object the walk has audited or
-    /// followed a reference through, by `(file, pointer)`, so an object that several references
-    /// reach, or that the walk reaches as a root component as well, is audited once and a
-    /// reference cycle terminates (#495).
+    /// Every Path Item, Parameter, Request Body, Response, Header and Media Type Object the walk
+    /// has audited or followed a reference through, by `(file, pointer)`, so an object that
+    /// several references reach, or that the walk reaches as a root component as well, is audited
+    /// once and a reference cycle terminates (#495, #715).
     objects: HashSet<SchemaKey>,
     /// The references met in audited positions, followed once the root walk is done
     /// ([`Audit::follow_references`]).
@@ -41,9 +42,12 @@ struct Audit<'a, 'doc> {
     diags: &'a mut Diagnostics,
 }
 
-/// The per-keyword audit: walks every reachable schema and emits the once-per-site warnings
-/// (validation-only keywords), and resolves the references in every subschema lowering never
-/// reads ([`Audit::resolve_unlowered`]). Other rejections fire during parsing and lowering.
+/// The per-keyword audit: walks every schema under the root document's components and paths, and
+/// every schema a reference met there reaches — through the Path Items, inline or referenced, and
+/// the Parameter, Request Body, Response, Header, Media Type and Encoding Objects that hold them —
+/// and emits the once-per-site warnings (validation-only keywords), and resolves the references
+/// in every subschema lowering never reads ([`Audit::resolve_unlowered`]). Other rejections fire
+/// during parsing and lowering.
 pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
     let consumed_content = consumed_sse_content(document, resolver, diags);
     let mut audit = Audit {
@@ -93,36 +97,79 @@ impl Audit<'_, '_> {
             self.audit_media(media, components_pointer.push("mediaTypes").push(name));
         }
 
+        for (name, header) in &document.components.headers {
+            self.audit_header_ref_or(header, components_pointer.push("headers").push(name));
+        }
+        let root = self.resolver.root_id();
+        for (name, item) in &document.components.path_items {
+            self.audit_path_item(
+                item,
+                (root, components_pointer.push("pathItems").push(name)),
+            );
+        }
+
         for (path, item) in &document.paths.items {
-            for (method, operation) in &item.operations {
-                let op_pointer = JsonPointer::root()
-                    .push("paths")
-                    .push(path)
-                    .push(method.as_str());
-                for (index, parameter) in item
-                    .parameters
-                    .iter()
-                    .chain(operation.parameters.iter())
-                    .enumerate()
-                {
-                    self.audit_parameter_ref_or(
-                        parameter,
-                        op_pointer.push("parameters").index(index),
-                    );
-                }
-                if let Some(body) = &operation.request_body {
-                    self.audit_request_body_ref_or(body, op_pointer.push("requestBody"));
-                }
-                for (status, response) in &operation.responses.by_status {
-                    self.audit_response_ref_or(response, op_pointer.push("responses").push(status));
-                }
-                if let Some(response) = &operation.responses.default {
-                    self.audit_response_ref_or(
-                        response,
-                        op_pointer.push("responses").push("default"),
-                    );
-                }
+            self.audit_path_item(item, (root, JsonPointer::root().push("paths").push(path)));
+        }
+    }
+
+    /// The Path Item at `key`: each operation's parameters, request body and responses are
+    /// audited, and a Path Item `$ref` is followed to the Path Item it names (#715), one hop, as
+    /// lowering follows it; a target that is itself a `$ref` is a chain lowering declines.
+    fn audit_path_item(&mut self, item: &PathItem, key: SchemaKey) {
+        if !self.objects.insert(key.clone()) {
+            return;
+        }
+        if let Some(reference) = &item.reference {
+            self.follow_path_item(reference);
+        }
+        let item_pointer = key.1;
+        for (method, operation) in &item.operations {
+            let op_pointer = item_pointer.push(method.as_str());
+            for (index, parameter) in item
+                .parameters
+                .iter()
+                .chain(operation.parameters.iter())
+                .enumerate()
+            {
+                self.audit_parameter_ref_or(parameter, op_pointer.push("parameters").index(index));
             }
+            if let Some(body) = &operation.request_body {
+                self.audit_request_body_ref_or(body, op_pointer.push("requestBody"));
+            }
+            for (status, response) in &operation.responses.by_status {
+                self.audit_response_ref_or(response, op_pointer.push("responses").push(status));
+            }
+            if let Some(response) = &operation.responses.default {
+                self.audit_response_ref_or(response, op_pointer.push("responses").push("default"));
+            }
+        }
+    }
+
+    /// Audit the Path Item a Path Item `$ref` names, through the input bundle as lowering resolves
+    /// it. A miss is lowering's to report in its own words, so the resolver's diagnostics are
+    /// discarded, as [`Self::follow_references`] discards them.
+    fn follow_path_item(&mut self, reference: &Reference) {
+        let Some(target) = self
+            .resolver
+            .reference_identity(&reference.reference, &reference.provenance)
+        else {
+            return;
+        };
+        if self.objects.contains(&target) {
+            return;
+        }
+        let mut discarded = Diagnostics::new(0);
+        let Some(resolved) = self.resolver.resolve_path_item(
+            &reference.reference,
+            self.resolver.written_in(&reference.provenance),
+            &reference.provenance,
+            &mut discarded,
+        ) else {
+            return;
+        };
+        if resolved.reference.is_none() {
+            self.audit_path_item(&resolved, target);
         }
     }
 
@@ -172,6 +219,32 @@ impl Audit<'_, '_> {
         }
     }
 
+    /// [`Self::audit_parameter_ref_or`] for a Header position: a Response or Encoding Object's
+    /// `headers` entry, or a `components.headers` one (#715).
+    fn audit_header_ref_or(&mut self, header: &RefOr<HeaderObject>, pointer: JsonPointer) {
+        match header {
+            RefOr::Item(header) => self.audit_header(header, pointer),
+            RefOr::Ref(reference) => {
+                if let Some(header) =
+                    self.follow_object(reference, super::deserialize::parse_header_object)
+                {
+                    let pointer = header.provenance.pointer.clone();
+                    self.audit_header(&header, pointer);
+                }
+            }
+        }
+    }
+
+    fn audit_headers(
+        &mut self,
+        headers: &indexmap::IndexMap<String, RefOr<HeaderObject>>,
+        pointer: JsonPointer,
+    ) {
+        for (name, header) in headers {
+            self.audit_header_ref_or(header, pointer.push(name));
+        }
+    }
+
     /// [`follow_object`], skipping a chain that reaches an object already audited.
     fn follow_object<T>(&self, reference: &Reference, parse: ObjectParser<T>) -> Option<T> {
         follow_object(self.resolver, reference, parse, &self.objects)
@@ -192,7 +265,23 @@ impl Audit<'_, '_> {
     fn audit_response(&mut self, response: &ResponseObject, pointer: JsonPointer) {
         if self.claim_object(&response.provenance) {
             self.audit_content(&response.content, pointer.push("content"));
+            self.audit_headers(&response.headers, pointer.push("headers"));
         }
+    }
+
+    fn audit_header(&mut self, header: &HeaderObject, pointer: JsonPointer) {
+        if !self.claim_object(&header.provenance) {
+            return;
+        }
+        if let Some(schema) = &header.schema {
+            self.audit_schema_ref_or(schema, pointer.push("schema"));
+        }
+        self.audit_content(&header.content, pointer.push("content"));
+    }
+
+    /// An Encoding Object, whose `headers` are the schema positions it holds.
+    fn audit_encoding(&mut self, encoding: &EncodingObject, pointer: JsonPointer) {
+        self.audit_headers(&encoding.headers, pointer.push("headers"));
     }
 
     fn audit_parameter(&mut self, parameter: &ParameterObject, pointer: JsonPointer) {
@@ -232,6 +321,15 @@ impl Audit<'_, '_> {
         }
         if let Some(schema) = &media.item_schema {
             self.audit_schema_ref_or(schema, pointer.push("itemSchema"));
+        }
+        for (name, encoding) in &media.encoding {
+            self.audit_encoding(encoding, pointer.push("encoding").push(name));
+        }
+        for (index, (encoding, _)) in media.prefix_encoding.iter().enumerate() {
+            self.audit_encoding(encoding, pointer.push("prefixEncoding").index(index));
+        }
+        if let Some((encoding, _)) = &media.item_encoding {
+            self.audit_encoding(encoding, pointer.push("itemEncoding"));
         }
     }
 
