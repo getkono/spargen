@@ -144,6 +144,60 @@ fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
 }
 
 #[test]
+fn e011_yaml_aliases_that_expand_past_the_node_budget_are_rejected_at_the_alias() {
+    // Issue #708: every alias expanded to a deep clone of its anchored node with no budget, so
+    // ten levels of anchors, each aliasing the level below ten times ("billion laughs"), grew a
+    // document of a few hundred bytes into 10^10 nodes and exhausted memory before any later
+    // stage ran. The expansion is now budgeted, and the alias that crosses it is `E011`.
+    let mut levels = String::from("  l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n");
+    for level in 1..10 {
+        let previous = level - 1;
+        let aliases = vec![format!("*l{previous}"); 10].join(", ");
+        levels.push_str(&format!("  l{level}: &l{level} [{aliases}]\n"));
+    }
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\nx-laughs:\n{levels}"
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 in {report:#?}"));
+        assert!(diag.message.contains("alias"), "{diag:#?}");
+        // Reported at the alias that crossed the budget: its pointer is an element of one of
+        // the levels, and its span starts on the `*` that spells it.
+        let pointer = diag.pointer.as_str();
+        let element = pointer
+            .strip_prefix("/x-laughs/l")
+            .and_then(|rest| rest.split_once('/'))
+            .and_then(|(level, index)| {
+                Some((level.parse::<u32>().ok()?, index.parse::<u32>().ok()?))
+            });
+        assert!(element.is_some(), "{diag:#?}");
+        let start = diag.span.expect("span").start;
+        let line = spec.lines().nth(start.line as usize - 1).expect("line");
+        assert_eq!(
+            line.chars().nth(start.col as usize - 1),
+            Some('*'),
+            "{line}: {diag:#?}"
+        );
+    }
+
+    // Aliases that repeat a subtree a bounded number of times still expand and generate.
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\nx-reused:\n  \
+         base: &base [x, x, x, x, x, x, x, x, x, x]\n  copies: [{}]\n",
+        vec!["*base"; 50].join(", ")
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
+#[test]
 fn oas32_document_with_compatible_constructs_generates() {
     // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
     // constructs lowers through the same frontend and generates — no `E001`, no warnings.
