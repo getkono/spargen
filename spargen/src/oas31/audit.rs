@@ -658,10 +658,11 @@ fn consumed_sse_content(
     consumed
 }
 
-/// Follow a Parameter, Request Body or Response Reference Object, hop by hop, to the object its
-/// chain ends at, as lowering does (#495): through the input bundle, so a reference into another
-/// file — a whole file, or a pointer into one — reaches the object written there, and a root
-/// `#/components/<kind>/<name>` reaches the root's declaration, which is the same node.
+/// Follow a Parameter, Request Body, Response or Header Reference Object, hop by hop, to the
+/// object its chain ends at, as lowering does (#495): through the input bundle, so a reference
+/// into another file — a whole file, or a pointer into one — reaches the object written there,
+/// and a root `#/components/<kind>/<name>` reaches the root's declaration, which is the same
+/// node.
 ///
 /// `None` when a hop targets an object in `done`, the chain cycles, or a hop misses. A miss is
 /// not reported here: lowering follows the same chain and reports it in its own words, so the
