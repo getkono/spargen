@@ -821,6 +821,49 @@ components:
     );
 }
 
+/// The scalar defaults decided by the less-travelled arms: an integer and a boolean `enum`, whose
+/// member is applied as the variant's wire value, and a literal above `i64::MAX`, which is a
+/// `number` field's float and no `integer` field's value (it is not wrapped into an `i64`).
+#[test]
+fn integer_and_boolean_enum_defaults_and_a_default_above_i64_max() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        level: { type: integer, enum: [1, 2], default: 2 }
+        flag: { type: boolean, enum: [true], default: true }
+        huge: { type: number, default: 18446744073709551615 }
+        wide: { type: integer, default: 18446744073709551615 }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let body = types_module(&code);
+    assert!(body.contains("Default: `2`."), "{body}");
+    assert!(body.contains("Default: `true`."), "{body}");
+    assert!(body.contains("Default: `18446744073709552000`."), "{body}");
+    assert!(
+        body.contains("Default (not applied): `18446744073709551615`."),
+        "{body}"
+    );
+    for report in [report, check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+                .map(|d| d.pointer.to_string())
+                .collect::<Vec<_>>(),
+            ["/components/schemas/Thing/properties/wide"],
+            "{report:#?}"
+        );
+    }
+}
+
 /// A component that is a bare `$ref` with a sibling `default` drops the default when the reference
 /// resolves; it must be acknowledged with W005 rather than lost silently, and still generate.
 #[test]

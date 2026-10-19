@@ -340,3 +340,89 @@ fn raw_display(value: &SpannedValue) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The arms of [`representable_default`] and [`classify_default`] pinned directly: a scalar
+    //! `enum` of integers or booleans, and an unsigned literal on either side of `i64::MAX`.
+
+    use super::{classify_default, representable_default, RawDefault};
+    use crate::diag::{Diagnostics, FileId};
+    use crate::ir::{DefaultValue, Openness, ScalarEnum, ScalarRepr, ScalarValue, TypeKind};
+    use crate::source::{Node, Number, SpannedValue};
+
+    fn scalar_enum(repr: ScalarRepr, variants: Vec<ScalarValue>) -> TypeKind {
+        TypeKind::Enum(ScalarEnum {
+            repr,
+            variants,
+            openness: Openness::Closed,
+        })
+    }
+
+    fn parsed(yaml: &str) -> SpannedValue {
+        let mut diags = Diagnostics::default();
+        crate::source::parse_yaml(FileId(0), yaml, &mut diags)
+            .unwrap_or_else(|_| panic!("probe does not parse: {yaml}"))
+    }
+
+    #[test]
+    fn an_integer_enum_takes_exactly_its_member_values() {
+        let kind = scalar_enum(
+            ScalarRepr::Int,
+            vec![ScalarValue::Int(1), ScalarValue::Int(2)],
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(2), Some(&kind)),
+            Some(DefaultValue::Int(2))
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(3), Some(&kind)),
+            None
+        );
+        // The integer arm is held to an integer set: a string set spelling the same digits is no
+        // home for an integer literal, and an integer set none for a boolean.
+        let digits = scalar_enum(
+            ScalarRepr::String,
+            vec![ScalarValue::String("2".to_owned())],
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(2), Some(&digits)),
+            None
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Bool(true), Some(&kind)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_boolean_enum_takes_exactly_its_member_values() {
+        let kind = scalar_enum(ScalarRepr::Bool, vec![ScalarValue::Bool(true)]);
+        assert_eq!(
+            representable_default(&RawDefault::Bool(true), Some(&kind)),
+            Some(DefaultValue::Bool(true))
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Bool(false), Some(&kind)),
+            None
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(1), Some(&kind)),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unsigned_literal_is_an_integer_only_within_i64() {
+        // The parser yields `UInt` only above `i64::MAX`; that value is no `i64`, so it is carried
+        // as the float JSON's number is, never wrapped into a negative integer.
+        let above = parsed("18446744073709551615");
+        assert_eq!(above.node, Node::Number(Number::UInt(u64::MAX)));
+        assert!(
+            matches!(classify_default(&above), RawDefault::Float(value) if value == u64::MAX as f64)
+        );
+        // An unsigned value that fits is the integer it is.
+        let within = SpannedValue::new(Node::Number(Number::UInt(5)), above.span);
+        assert!(matches!(classify_default(&within), RawDefault::Int(5)));
+    }
+}
