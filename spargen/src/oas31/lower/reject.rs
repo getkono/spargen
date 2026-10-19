@@ -74,6 +74,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
+    /// An `allOf` whose object members would meet two or more `oneOf`/`anyOf` unions
+    /// ([`Self::several_unions_beside_object`]): an object composition is met with one union branch
+    /// by branch, and a second would nest one union's branches under the other's, so the
+    /// conjunction is refused rather than generated as unions of unions whose branches the
+    /// generated types cannot tell apart.
+    pub(super) fn reject_all_of_several_unions<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: several-unions
+        self.reject_irreconcilable(
+            Code::AllOfIrreconcilable,
+            schema.provenance.clone(),
+            "an `allOf` has object members and more than one `oneOf`/`anyOf` union to meet them \
+             with, and object members are met with one union only",
+            "merge the unions into one `oneOf`/`anyOf` whose branches are their combinations, or \
+             omit this API segment with spargen::omit!",
+        )
+    }
+
     /// An all-scalar `allOf` whose members have no common value or no single representable type.
     pub(super) fn reject_all_of_scalars<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: scalar-members
