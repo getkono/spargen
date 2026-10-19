@@ -54,7 +54,7 @@ use security::{
     lower_security_requirement, lower_security_schemes, resolve_external_security_schemes,
 };
 use server::{lower_server, lower_server_override, parse_path_template};
-use xml::gate_xml_field_renames;
+use xml::{gate_xml_field_renames, RootXml, XmlSite};
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
 /// `allOf`/`oneOf`/`anyOf` member, and resolved `$ref` target descends one level through
@@ -242,6 +242,8 @@ fn lower_pass(
         narrowing_opens: false,
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
+        root_xml: HashMap::new(),
+        field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
         untyped_beside_null_member: None,
@@ -488,10 +490,18 @@ fn lower_pass(
     // declaring member gave it, so the applied defaults are checked again against the final graph.
     retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);
 
-    // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
-    // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
-    // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
-    gate_xml_field_renames(&mut ctx.graph, &operations, &ctx.meet_locations, ctx.diags);
+    // A field's `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only
+    // be applied to a schema used *exclusively* as an XML body — otherwise the rename would corrupt
+    // the JSON wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable
+    // type, apply each root `xml.name`, and disposition every hint the codec cannot honour.
+    gate_xml_field_renames(
+        &mut ctx.graph,
+        &operations,
+        &ctx.meet_locations,
+        &ctx.root_xml,
+        &ctx.field_xml_sites,
+        ctx.diags,
+    );
 
     let mut api_description = document.info.summary.clone();
     if let Some(description) = &document.info.description {
@@ -889,6 +899,13 @@ struct LowerCtx<'a, 'doc> {
     /// provenance, which ranks it after every declared schema when type names collide; this is
     /// where `W005` and `W006` raised against it point instead of that root (#454).
     meet_locations: HashMap<TypeId, Provenance>,
+    /// The `xml` object of every schema a definition was lowered from, read as that schema's root
+    /// ([`Self::record_root_xml`]), by the site it was written at. The definitions keep the site,
+    /// so [`gate_xml_field_renames`] finds each one from the types it produced once ids are final.
+    root_xml: HashMap<XmlSite, RootXml>,
+    /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
+    /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
+    field_xml_sites: HashSet<XmlSite>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the

@@ -200,7 +200,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
                 let reference = reference.to_owned();
                 let provenance = schema.provenance.clone();
-                return self.chain_component_alias(name, &reference, &provenance);
+                let alias = self.chain_component_alias(name, &reference, &provenance)?;
+                self.record_ref_xml(schema, alias.id);
+                return Some(alias);
             }
         }
         // A component whose whole body is `oneOf`/`anyOf` over one `$ref` and one or more `null`
