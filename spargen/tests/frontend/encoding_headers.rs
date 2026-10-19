@@ -153,8 +153,8 @@ fn w011_an_encoding_header_schema_ref_whose_target_pins_nothing_has_no_effect() 
     }
 }
 
-/// A header `schema` is never lowered, so a reference in it that resolves to nothing was reported
-/// only as pinning no value (`W011`), and the document generated around a dangling `$ref`. It is
+/// A reference in an encoding header's `schema` that resolves to nothing was reported only as
+/// pinning no value (`W011`), and the document generated around a dangling `$ref`. It is
 /// `E004`, as every other unresolvable reference is, and only `E004`: the broken link is reported
 /// once, whether it is the written reference or a component alias the chain passes through.
 #[test]

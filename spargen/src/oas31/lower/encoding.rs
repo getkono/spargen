@@ -541,8 +541,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// through component aliases and through targets that are themselves a `$ref` beside a sibling
     /// keyword, as [`Self::ref_target_body`] reads it, so `{ $ref: V }` pins what `V` pins.
     ///
-    /// A header schema is never lowered, so this is where its written reference is resolved, and
-    /// a reference that resolves to nothing is reported here (`E004`). That outcome, and a chain
+    /// This is where the header schema's written reference is resolved, and a reference that
+    /// resolves to nothing is reported here (`E004`). That outcome, and a chain
     /// [`Self::ref_target_body`] cannot read past it, is [`HeaderLiteral::Unreadable`]: the
     /// defect is reported once, not again as "pins no value".
     fn literal_header_value(&mut self, schema: &RefOr<Schema>) -> HeaderLiteral {
@@ -574,7 +574,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             reference.clone_from(next);
             at = target.provenance.clone();
         }
-        // Lowering the chain refuses an alias cycle; the bound only keeps this total.
+        // A bare alias cycle ends in `ref_target_body`; a chain of `$ref`s with siblings that runs
+        // past the bound pins nothing within reach, and the bound only keeps this total.
         HeaderLiteral::Unpinned
     }
 
