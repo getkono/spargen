@@ -317,6 +317,9 @@ pub(crate) fn vendor(
                             continue;
                         }
                     };
+                    // A redirect's `Location` may carry a fragment; a base URI carries none
+                    // (RFC 3986 §5.1), and the build drops one from a lock it reads.
+                    let retrieved = split_fragment(&retrieved).0.to_owned();
                     // The build registers a redirected copy under its retrieval URL as well, so a
                     // later reference to that URL reaches this document and reads no pin of its
                     // own: it is seen here too, or the lock would fetch and pin what the build
@@ -575,6 +578,58 @@ mod tests {
         assert!(vendor_dir
             .join(vendor_path_for_url("https://api.example.com/tag.yaml"))
             .exists());
+    }
+
+    /// A redirect whose end carries a fragment is pinned with the fragment dropped: the lock's
+    /// `retrieval_url` is a base URI, and the document's relative `$ref` resolves against the
+    /// fragment-free URL (`c.yaml` beside it), not into the fragment (`tag.yaml#/x/c.yaml`).
+    #[test]
+    fn a_redirect_ending_in_a_fragment_is_pinned_without_it() {
+        struct Redirecting;
+        impl RemoteFetch for Redirecting {
+            fn fetch(&self, url: &str) -> Result<Fetched, String> {
+                match url {
+                    "https://h.example/old/tag.yaml" => Ok(Fetched {
+                        bytes: b"$ref: c.yaml\n".to_vec(),
+                        url: "https://h.example/new/tag.yaml#/x/y".to_owned(),
+                    }),
+                    "https://h.example/new/c.yaml" => Ok(Fetched {
+                        bytes: b"type: string\n".to_vec(),
+                        url: url.to_owned(),
+                    }),
+                    _ => Err(format!("404 {url}")),
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             components:\n\
+             \x20 schemas:\n\
+             \x20   Tag:\n\
+             \x20     $ref: \"https://h.example/old/tag.yaml\"\n",
+        )
+        .unwrap();
+
+        let mut diags = Diagnostics::default();
+        let report = vendor(&spec, &Redirecting, &mut diags)
+            .unwrap_or_else(|_| panic!("{:?}", diags.items()));
+
+        let lock = std::fs::read_to_string(&report.lock_path).unwrap();
+        assert!(
+            lock.contains(
+                "url = \"https://h.example/old/tag.yaml\"\n\
+                 retrieval_url = \"https://h.example/new/tag.yaml\"\n"
+            ),
+            "{lock}"
+        );
+        assert!(
+            lock.contains("url = \"https://h.example/new/c.yaml\"\n"),
+            "{lock}"
+        );
     }
 
     /// A non-http(s) `$ref` the lock cannot vendor is `E003` at each `$ref` that names it, not at

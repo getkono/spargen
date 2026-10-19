@@ -737,6 +737,62 @@ mod tests {
         );
     }
 
+    /// A hand-edited `retrieval_url` holding a fragment is read without it: the pinned document
+    /// is keyed by, and resolves its relative `c.yaml` against, `https://h.example/new/b.yaml`,
+    /// so the reference reaches `https://h.example/new/c.yaml` rather than
+    /// `https://h.example/new/b.yaml#/x/c.yaml`, which no pin names.
+    #[test]
+    fn a_fragment_in_a_pinned_retrieval_url_is_not_part_of_the_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let redirecting = "https://h.example/old/b.yaml";
+        let sibling = "https://h.example/new/c.yaml";
+        let moved = "$ref: c.yaml\n";
+        let target = "type: string\n";
+        let vendor = dir.join(VENDOR_DIR);
+        std::fs::create_dir_all(vendor.join("h.example/old")).unwrap();
+        std::fs::create_dir_all(vendor.join("h.example/new")).unwrap();
+        std::fs::write(vendor.join("h.example/old/b.yaml"), moved).unwrap();
+        std::fs::write(vendor.join("h.example/new/c.yaml"), target).unwrap();
+        std::fs::write(
+            dir.join(LOCK_FILE_NAME),
+            format!(
+                "version = 1\n\n[[remote]]\nurl = \"{sibling}\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/new/c.yaml\"\n\n[[remote]]\nurl = \"{redirecting}\"\n\
+                 retrieval_url = \"https://h.example/new/b.yaml#/x/y\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/old/b.yaml\"\n",
+                sha256_hex(target.as_bytes()),
+                sha256_hex(moved.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+                 schemas:\n    B: {{ $ref: '{redirecting}' }}\n"
+            ),
+        )
+        .unwrap();
+
+        let bundle = load(&dir.join("openapi.yaml"));
+
+        let moved_id = bundle.remote_file(redirecting).expect("the pin is loaded");
+        assert_eq!(
+            bundle.remote_file("https://h.example/new/b.yaml"),
+            Some(moved_id)
+        );
+        let sibling_id = bundle.remote_file(sibling).expect("the sibling is loaded");
+        assert_eq!(
+            bundle.reference_target("c.yaml", moved_id),
+            Some((sibling_id, JsonPointer::root()))
+        );
+        assert_eq!(
+            bundle.remote_file("https://h.example/new/b.yaml#/x/c.yaml"),
+            None
+        );
+    }
+
     #[test]
     fn lexical_normalisation_removes_dot_segments_and_keeps_leading_parents() {
         for (path, normal) in [

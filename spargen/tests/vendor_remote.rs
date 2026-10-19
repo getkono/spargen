@@ -280,6 +280,34 @@ fn a_redirected_documents_relative_refs_resolve_against_the_url_it_was_retrieved
     assert_eq!(server.hits().len(), 3, "generation must not fetch");
 }
 
+/// A redirect whose `Location` carries a fragment is pinned with that fragment dropped from
+/// `retrieval_url`, whether or not the fetcher reports it, because a base URI carries none; the
+/// lock reads back as written (#710), so generation resolves the pin offline.
+#[test]
+fn a_redirect_to_a_location_with_a_fragment_reads_back_from_the_lock() {
+    let server = MockServer::start(&[
+        ("/moved.yaml", Reply::Redirect("/schemas/tag.yaml#moved")),
+        ("/schemas/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let requested = server.url("/moved.yaml");
+    let retrieved = server.url("/schemas/tag.yaml");
+    let (_temp, spec_path) = workspace(&requested);
+
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    let lock = std::fs::read_to_string(&report.lock_path).unwrap();
+    assert!(
+        lock.contains(&format!(
+            "url = \"{requested}\"\nretrieval_url = \"{retrieved}\"\n"
+        )),
+        "{lock}"
+    );
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert_eq!(server.hits().len(), 2, "generation must not fetch");
+}
+
 /// Generate `spec_path` offline into a sibling `client.rs`, require it not be rejected, and return
 /// the emitted source.
 fn generate_offline(spec_path: &Utf8PathBuf) -> String {
