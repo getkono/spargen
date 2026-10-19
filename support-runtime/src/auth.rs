@@ -147,20 +147,11 @@ impl std::fmt::Debug for Credential {
 mod tests {
     use std::sync::Arc;
 
-    use super::{AuthError, Credential, ExposeSecret, SecretString, TokenFuture};
+    use super::{AuthError, Credential, SecretString, TokenFuture};
 
-    #[test]
-    fn credential_debug_is_redacted() {
-        let secret = SecretString::from("s3cr3t");
-        assert_eq!(secret.expose_secret(), "s3cr3t");
-        let credential = Credential::Bearer(secret);
-        let rendered = format!("{credential:?}");
-        assert!(!rendered.contains("s3cr3t"), "{rendered}");
-    }
-
-    /// `Debug` is hand-written precisely so a credential cannot reach a log. Only the `Bearer` arm
-    /// was covered, and `Basic` is the one that holds a username in the clear alongside the secret
-    /// — so it is the arm where a naive derive would leak most.
+    /// `Debug` is hand-written so a credential cannot reach a log. Every arm is pinned, `Basic`
+    /// included: it holds a username in the clear alongside the secret, so it is the arm where a
+    /// naive derive would leak most.
     #[test]
     fn every_credential_kind_redacts_its_secret_and_names_its_kind() {
         let cases: Vec<(Credential, &str)> = vec![

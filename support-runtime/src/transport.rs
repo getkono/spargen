@@ -86,12 +86,11 @@ impl HttpBackend for ReqwestBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::sync::{Arc, Mutex};
-    use std::task::{Context, Poll, Waker};
 
     use reqwest::{Method, Request};
 
+    use crate::tests::poll_ready;
     use crate::{send, ClientCore, HttpBackend, ReqwestBackend};
 
     // Regression guard for the #21 conditional-Send refactor: on native, ClientCore and the seam
@@ -108,19 +107,6 @@ mod tests {
     };
 
     use super::ExecuteFuture;
-
-    /// The backend paths here never actually suspend on a socket (the canned response is ready
-    /// immediately), so a single poll with a noop waker is enough — no async runtime needed.
-    fn poll_ready<F: Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("future was not immediately ready"),
-        }
-    }
 
     /// A custom backend that records the request URL it was handed and returns a canned in-memory
     /// `reqwest::Response` synthesized without a socket — proving `send` routes the execute step
