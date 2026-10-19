@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use super::glob::escape_glob_meta;
 use super::{ComponentKind, OmitMethod, OmitRule};
-use crate::diag::{Diagnostic, FileId, JsonPointer, Severity};
+use crate::diag::{escape_token, Diagnostic, FileId, JsonPointer, Severity};
 use crate::source::{InputBundle, Node, SpannedValue};
 
 /// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
@@ -94,7 +94,7 @@ impl Carver<'_> {
         if !self.visited.insert((file, pointer.as_str().to_owned())) {
             return;
         }
-        let tokens = pointer_tokens(pointer);
+        let tokens = pointer.tokens();
         if let Some(rule) = file_scoped_enclosing(bundle, file, &tokens) {
             self.push(rule);
             return;
@@ -109,7 +109,7 @@ impl Carver<'_> {
                     site.file,
                     site.pointer.clone(),
                     site.target_tokens.len(),
-                    is_path_item_position(&pointer_tokens(&site.pointer)),
+                    is_path_item_position(&site.pointer.tokens()),
                 )
             })
             .collect();
@@ -180,7 +180,7 @@ fn collect_reference_sites(
                     file,
                     pointer: at.clone(),
                     target_file: target.0,
-                    target_tokens: pointer_tokens(&target.1),
+                    target_tokens: target.1.tokens(),
                 });
             }
             for (key, child) in object.iter() {
@@ -211,7 +211,7 @@ struct Enclosing {
 /// The smallest omittable construct enclosing a root-document `pointer`, as the rule that omits
 /// it, or `None` if none is (root / unmodelled).
 pub(super) fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
-    enclosing(&pointer_tokens(pointer)).map(|enclosing| enclosing.rule)
+    enclosing(&pointer.tokens()).map(|enclosing| enclosing.rule)
 }
 
 /// The same construct as [`omittable_enclosing`], found in the sub-file `file` and named by a
@@ -251,7 +251,7 @@ fn file_scoped_pointer(bundle: &InputBundle, file: FileId, tokens: &[String]) ->
     let path = bundle.root_relative_path(file)?;
     let pointer: String = tokens
         .iter()
-        .map(|token| format!("/{}", escape_glob_meta(&escape_pointer_token(token))))
+        .map(|token| format!("/{}", escape_glob_meta(&escape_token(token))))
         .collect();
     // The file is matched as a path, never as a glob, so it is carried verbatim; only the pointer
     // is glob-escaped.
@@ -284,8 +284,8 @@ fn enclosing(tokens: &[String]) -> Option<Enclosing> {
                         None,
                         format!(
                             "/paths/{}/additionalOperations/{}",
-                            escape_pointer_token(&path),
-                            escape_glob_meta(&escape_pointer_token(method))
+                            escape_token(&path),
+                            escape_glob_meta(&escape_token(method))
                         ),
                     ),
                 });
@@ -315,22 +315,4 @@ fn enclosing(tokens: &[String]) -> Option<Enclosing> {
         }
         _ => None,
     }
-}
-
-/// Escape one RFC 6901 reference token, the inverse of the unescaping in [`pointer_tokens`].
-fn escape_pointer_token(token: &str) -> String {
-    token.replace('~', "~0").replace('/', "~1")
-}
-
-/// Split a JSON Pointer into its unescaped reference tokens (`~1`→`/`, `~0`→`~`).
-fn pointer_tokens(pointer: &JsonPointer) -> Vec<String> {
-    let raw = pointer.as_str();
-    if raw.is_empty() {
-        return Vec::new();
-    }
-    raw.strip_prefix('/')
-        .unwrap_or(raw)
-        .split('/')
-        .map(|token| token.replace("~1", "/").replace("~0", "~"))
-        .collect()
 }
