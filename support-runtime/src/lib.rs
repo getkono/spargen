@@ -69,8 +69,8 @@ pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
     build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on,
     classify_error, classify_error_bytes, classify_error_text, decode_success,
-    decode_success_bytes, decode_success_text, decode_text_body, read_error_body,
-    read_success_body, send, unexpected_status, StatusSpec,
+    decode_success_bytes, decode_success_text, decode_success_with, decode_text_body,
+    read_error_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,

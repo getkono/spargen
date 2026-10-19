@@ -381,11 +381,8 @@ mod support {
             /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
             ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
             ///   silently.
-            /// - Two paths are **not** capped at all: the generated shim for an operation with more than
-            ///   one documented success status, which reads through
-            ///   [`read_success_body`](super::read_success_body) and reaches both `Decode` and
-            ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, which retains one frame drawn
-            ///   from a frame buffer that is itself unbounded.
+            /// - One path is **not** capped at all: `EventStream`'s per-frame decode, which retains one
+            ///   frame drawn from a frame buffer that is itself unbounded.
             pub max_error_body: usize,
         }
         impl Default for ClientConfig {
@@ -694,17 +691,21 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            decode_success_with(core, response, decode_text_body::<T>).await
+            decode_success_with(core, response, |body| decode_text_body::<T>(body)).await
         }
         /// The body every structured success decoder shares: read the whole body, run `decode` over it, and
         /// wrap the value with status and headers. A decode failure becomes [`Error::Decode`] carrying the
         /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
         /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
         /// capped.
-        pub(crate) async fn decode_success_with<T>(
+        ///
+        /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
+        /// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
+        /// binary variant keeps it without a copy.
+        pub async fn decode_success_with<T>(
             core: &ClientCore,
             response: Response,
-            decode: impl FnOnce(&[u8]) -> Result<T, String>,
+            decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let status = response.status();
             let headers = response.headers().clone();
@@ -753,21 +754,6 @@ mod support {
             let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
             serde_json::from_value(serde_json::Value::String(text.to_owned()))
                 .map_err(|error| error.to_string())
-        }
-        /// Read a success response body whole, returning its status, headers, and raw bytes so generated
-        /// code can select the matching per-status variant and decode it. Non-generic: the per-variant
-        /// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
-        /// which owns the status→variant table and its distinct body types.
-        pub async fn read_success_body(
-            response: Response,
-        ) -> Result<
-            (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes),
-            Error<Infallible>,
-        > {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            Ok((status, headers, body))
         }
         /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
         /// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
@@ -1061,13 +1047,11 @@ mod support {
                 headers: HeaderMap,
                 /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
                 /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
-                /// cap. The generated shim for an operation with more than one documented success status
-                /// reads through `read_success_body`, which does not take the cap, so on that path the
-                /// body is retained whole (see `Decode`'s `body`).
+                /// cap.
                 body: Bytes,
             },
             /// #8 — the response body failed to deserialize; retains the status and headers the response
-            /// carried, the serde error path, and the raw body, capped on every path but the two named on
+            /// carried, the serde error path, and the raw body, capped on every path but the one named on
             /// `body` below. A documented error status whose body does not match its schema (a problem
             /// `type` the description does not list, or an HTML page from a proxy in front of the server)
             /// arrives here with its status and headers intact, so the caller can still act on them —
@@ -1086,20 +1070,15 @@ mod support {
                 path: String,
                 /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
                 ///
-                /// Two paths do not reach the cap, for different reasons, and retain more than it:
-                ///
-                /// - The generated shim for an operation with more than one documented success status
-                ///   reads through `read_success_body`, which does not take the cap. Threading it through
-                ///   changes emitted output, so this is deferred rather than accepted. The same shim
-                ///   reaches `UnexpectedStatus` uncapped too.
-                /// - `EventStream`'s per-frame decode retains one frame, already detached by the framer.
-                ///   The cap does not apply because the bound there is the frame, not the response — but
-                ///   the frame buffer itself is unbounded, so this is a real gap, not a safe exemption.
+                /// One path does not reach the cap and retains more than it: `EventStream`'s per-frame
+                /// decode retains one frame, already detached by the framer. The cap does not apply
+                /// because the bound there is the frame, not the response — but the frame buffer itself
+                /// is unbounded, so this is a real gap, not a safe exemption.
                 body: Bytes,
                 /// Whether bytes were dropped from `body` to meet the cap.
                 ///
-                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the two
-                /// paths above nothing is dropped because nothing is capped.
+                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the path
+                /// above nothing is dropped because nothing is capped.
                 truncated: bool,
             },
             /// #9 — the connection dropped mid-stream on a streamed response.
@@ -4054,7 +4033,11 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            super::dispatch::decode_success_with(core, response, decode_xml_body::<T>)
+            super::dispatch::decode_success_with(
+                    core,
+                    response,
+                    |body| decode_xml_body::<T>(body),
+                )
                 .await
         }
         /// Classify a non-success XML response into the operation's typed error body `E`. A documented
@@ -4146,7 +4129,7 @@ mod support {
         build_url, build_url_on, build_url_with_query_string,
         build_url_with_query_string_on, classify_error, classify_error_bytes,
         classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-        decode_text_body, read_error_body, read_success_body, send, unexpected_status,
+        decode_success_with, decode_text_body, read_error_body, send, unexpected_status,
         StatusSpec,
     };
     pub use error::{
@@ -8138,71 +8121,43 @@ Response `409`: Conflict*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiResponse::Status201)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetMultiResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetMultiError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         } else {
             let (status, headers, body, truncated) = match support::read_error_body::<
                 GetMultiError,
@@ -8520,62 +8475,37 @@ Response `default`: Anything else*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiDefaultError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiDefaultResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiDefaultResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiDefaultError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiDefaultResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiDefaultResponse::Status201)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetMultiDefaultError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetMultiDefaultError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::classify_error::<
@@ -9645,61 +9575,39 @@ Response `409`: binary error*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match support::decode_text_body::<
-                    Box<types::ResponseBody4450a524>,
-                >(&body) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRawMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRawMultiResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            support::decode_text_body::<
+                                Box<types::ResponseBody4450a524>,
+                            >(body)
+                                .map(GetRawMultiResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match Ok::<
-                    Box<types::ResponseBody6bf58d24>,
-                    String,
-                >(Box::new(body.clone())) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRawMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRawMultiResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            Ok::<
+                                _,
+                                String,
+                            >(GetRawMultiResponse::Status201(Box::new(body.clone())))
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetRawMultiError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
         } else {
             let (status, headers, body, truncated) = match support::read_error_body::<
                 GetRawMultiError,
@@ -10356,46 +10264,33 @@ Response `204`: No Content*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMaybeEmptyError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMaybeEmptyResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMaybeEmptyResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetMaybeEmptyResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetMaybeEmptyError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetMaybeEmptyError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::unexpected_status::<GetMaybeEmptyError>(&self.core, response)
@@ -10423,46 +10318,32 @@ Response `204`: No Content*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match support::decode_xml_body::<
-                    Box<types::XmlReceipt>,
-                >(&body) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetXmlMaybeEmptyError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetXmlMaybeEmptyResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            support::decode_xml_body::<Box<types::XmlReceipt>>(body)
+                                .map(GetXmlMaybeEmptyResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetXmlMaybeEmptyResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetXmlMaybeEmptyError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetXmlMaybeEmptyError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::unexpected_status::<GetXmlMaybeEmptyError>(&self.core, response)
@@ -10490,62 +10371,34 @@ Response `200`: OK*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRangedError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRangedResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetRangedResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Range(2u8).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRangedError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRangedResponse::Status2xx(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetRangedResponse::Status2xx)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetRangedError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         } else {
             Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         }

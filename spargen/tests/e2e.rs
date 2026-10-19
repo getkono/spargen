@@ -3045,6 +3045,53 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     server.join().unwrap();
 }
 
+// Issue #689: a multi-success operation retains at most `max_error_body` bytes (64 KiB by
+// default) of a body it keeps in an error, as every single-success and error path does, and says
+// so through `truncated`. Before, it read through an uncapped helper and kept the whole body.
+static OVER_CAP: [u8; 64 * 1024 + 4096] = [b'x'; 64 * 1024 + 4096];
+
+#[test]
+fn a_multi_success_operation_caps_the_body_it_keeps_in_an_error() {
+    let cap = 64 * 1024;
+
+    // A matched arm whose body does not decode: read whole (decoding needs it), retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { status, body, truncated, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+            assert!(truncated, "a body cut at the cap must say so");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // An undocumented success status matches no arm: read capped, retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_maybe_empty().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+        }
+        other => panic!("expected an unexpected-status error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // A body under the cap is kept whole and reported untruncated.
+    let (base, server) = serve_once("text/plain", "202 Accepted", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { body, truncated, .. } => {
+            assert_eq!(&body[..], b"not json");
+            assert!(!truncated);
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
 // Issue #128: the error-side counterpart of the test above, driven through the emitted dispatch
 // rather than a hand-written stand-in. `getErrorRanged` documents an exact 409 and an overlapping
 // 4XX range, declared range first. A 409 matches both and must take the exact arm; a 404 matches
