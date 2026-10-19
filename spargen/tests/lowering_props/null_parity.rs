@@ -6,15 +6,14 @@
 
 use super::*;
 
-/// The `type` (and its own `enum` / `const`) one constraint set holds the union to.
-///
-/// A `type` array of two or more non-null categories is held out until #677 lands: beside a union
-/// with no other keyword the sibling spelling drops it for lowering and restricts no branch, so the
-/// spellings differ in which branches they keep, not in `null`. Its fixed rows (#675) still run.
-const NULL_CONJUNCTS: [&str; 8] = [
+/// The `type` (and its own `enum` / `const`) one constraint set holds the union to, a `type` array
+/// of two non-null categories included (#677).
+const NULL_CONJUNCTS: [&str; 10] = [
     "type: [string, 'null']",
     "type: [integer, 'null']",
     "type: string",
+    "type: [string, integer]",
+    "type: [string, integer, 'null']",
     "type: [string, 'null'], enum: [a]",
     "type: [string, 'null'], enum: [a, null]",
     "type: [string, 'null'], const: a",
@@ -101,6 +100,29 @@ impl NullCase {
             .filter(|branch| **branch != "{ type: 'null' }")
             .collect();
         matches!(real.as_slice(), [branch] if branch.starts_with("{ properties"))
+    }
+
+    /// A gap held exactly until #818 lands: beside a multi-category `type` array listing `null`,
+    /// an exact-null branch (`const: null`, `enum: [null]`, a `$ref` to `Z`) and another real
+    /// branch, the spellings that list the conjunct before the union hoist the branch's `null`
+    /// into an `Option` where the others carry it as the `()` arm. Those spellings are not
+    /// compared for it.
+    fn conjunct_first_hoists_the_null_arm(&self, spelling: NullSpelling) -> bool {
+        let exact_null = |branch: &&str| {
+            matches!(
+                *branch,
+                "{ const: null }" | "{ enum: [null] }" | "{ $ref: '#/components/schemas/Z' }"
+            )
+        };
+        matches!(
+            spelling,
+            NullSpelling::UnionSecond | NullSpelling::Nested | NullSpelling::RefMembers
+        ) && self.conjunct == "type: [string, integer, 'null']"
+            && self.branches.iter().any(exact_null)
+            && self
+                .branches
+                .iter()
+                .any(|branch| !exact_null(branch) && *branch != "{ type: 'null' }")
     }
 
     /// A gap held exactly until #678 lands: an `allOf`'s `oneOf` member, lowered on its own,
@@ -255,6 +277,9 @@ fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
         if spelling == NullSpelling::RefMembers && case.ref_member_is_gathered_as_an_object() {
             continue;
         }
+        if case.conjunct_first_hoists_the_null_arm(spelling) {
+            continue;
+        }
         let spec = case.spec(spelling);
         let (report, source) = generate_module(&spec);
         let checked = check(&spec);
@@ -332,7 +357,8 @@ proptest! {
 /// or one that states nothing and a single-category `type` array (#670, #668's stated-nothing
 /// counterpart), beside a `$ref` to a union `null` matches through an untyped branch, which is
 /// narrowed to `null` rather than excluded (#670), and two branches that state nothing (#673). A
-/// branch the conjunct excludes is reported (`W011`) in every spelling (#671).
+/// branch the conjunct excludes is reported (`W011`) in every spelling (#671), one of a category a
+/// multi-category `type` array omits included (#677).
 #[test]
 fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     let excluded_1 = vec![
@@ -377,7 +403,7 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             "#671",
             "type: [string, 'null']",
             vec!["{}", "{ type: integer }", "{ type: string, enum: [a] }"],
-            pick(true, excluded_1),
+            pick(true, excluded_1.clone()),
         ),
         // #673
         (
@@ -385,6 +411,13 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             "type: [string, 'null']",
             vec!["{}", "{}"],
             pick(false, Vec::new()),
+        ),
+        // #677, a branch of a category the multi-category conjunct omits.
+        (
+            "#677",
+            "type: [string, integer]",
+            vec!["{ type: integer }", "{ type: boolean }", "{ type: string }"],
+            pick(false, excluded_1),
         ),
         (
             "#673",
