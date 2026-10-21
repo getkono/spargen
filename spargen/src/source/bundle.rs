@@ -540,17 +540,33 @@ fn reject_drift(site: Provenance, message: String, diags: &mut Diagnostics) {
         .emit(diags);
 }
 
-/// Parse `text` into a value tree, choosing the format from `name`'s `.json`/`.yaml`/`.yml`
-/// extension (falling back to YAML-then-JSON).
+/// Parse `text` into a value tree, choosing the format from `name`'s extension
+/// ([`parse_by_extension`]).
 pub(super) fn parse_by_name(
     id: FileId,
     name: &str,
     text: &str,
     diags: &mut Diagnostics,
 ) -> Result<SpannedValue, Aborted> {
-    match Utf8Path::new(name).extension() {
-        Some("json") => parse_json(id, text, diags),
-        Some("yaml" | "yml") => parse_yaml(id, text, diags),
+    parse_by_extension(id, Utf8Path::new(name).extension(), text, diags)
+}
+
+/// Parse `text` in the format `extension` names, compared ASCII case-insensitively: `json` as
+/// JSON, `yaml` or `yml` as YAML, and any other extension, or none, as YAML then JSON. The build
+/// ([`parse_by_name`]) and `spargen lock` (`vendor::parse_scratch`) each read the extension from
+/// a document's name and both choose the format here, so an upper- or mixed-case extension
+/// such as `.JSON` names the same format to both (#915).
+pub(super) fn parse_by_extension(
+    id: FileId,
+    extension: Option<&str>,
+    text: &str,
+    diags: &mut Diagnostics,
+) -> Result<SpannedValue, Aborted> {
+    match extension {
+        Some(ext) if ext.eq_ignore_ascii_case("json") => parse_json(id, text, diags),
+        Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+            parse_yaml(id, text, diags)
+        }
         _ => parse_yaml_then_json(id, text, diags),
     }
 }
