@@ -1826,6 +1826,49 @@ components:
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
+/// The boolean schema `false` admits no value, so an `allOf` holding it admits none either. It is
+/// rejected as the empty composition it is, at a component root and inside a property alike, and
+/// located at the `false` entry itself: its pointer and the span of the `false` it names (#832).
+#[test]
+fn e013_an_all_of_member_that_is_false() {
+    for (place, schemas, pointer) in [
+        (
+            "component",
+            "    Probe:\n      allOf: [ { type: object, properties: { a: { type: string } } }, false \
+             ]\n",
+            "/components/schemas/Probe/allOf/1",
+        ),
+        (
+            "property",
+            "    Probe:\n      type: object\n      properties:\n        p: { allOf: [ { type: \
+             string }, false ] }\n",
+            "/components/schemas/Probe/properties/p/allOf/1",
+        ),
+    ] {
+        let spec = with_schemas("3.1.0", schemas);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{place}: {report:#?}");
+            assert_eq!(
+                messages_for(&report, Code::AllOfIrreconcilable),
+                ["an `allOf` member is `false`"],
+                "{place}: {report:#?}"
+            );
+            let diagnostic = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::AllOfIrreconcilable)
+                .expect("the E013 asserted above");
+            assert_eq!(diagnostic.pointer.as_str(), pointer, "{place}: {report:#?}");
+            let span = diagnostic.span.expect("the `false` entry has a span");
+            assert_eq!(
+                &spec[span.start.offset..span.end.offset],
+                "false",
+                "{place}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// Lay out a root document whose `Wrap` component is `allOf: [member]`, beside a `lib.yaml`
 /// sub-file, and run both entry points. Returns `(generate, check, generated source)`.
 fn all_of_member_layout(member: &str) -> (Report, Report, String) {
