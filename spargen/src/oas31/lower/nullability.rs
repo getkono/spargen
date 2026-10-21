@@ -512,8 +512,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Whether `member`, a union branch lowered to `ty`, is an object or array whose lowered
-    /// non-null struct, `Vec` or tuple decides nothing about `null`: no `type`, and nothing else
-    /// [`Self::all_of_decides_null`] reads as deciding, so `null` satisfies it wherever the
+    /// non-null struct, `Vec` or tuple decides nothing about `null`: the one decision leaves it
+    /// [`NullAdmission::Undecided`] ([`Self::null_admission`]), so `null` satisfies it wherever the
     /// conjuncts the union is met with admit it. Untyped `items` or `prefixItems` alone lower to an
     /// array (#614) as untyped object applicators lower to a struct (#613), and leave `null`
     /// undecided alike.
@@ -534,7 +534,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }),
             _ => false,
         };
-        !ty.nullable && undecided_kind && !self.all_of_decides_null(member, 0)
+        !ty.nullable && undecided_kind && self.null_admission(member) == NullAdmission::Undecided
     }
 
     /// Whether `member`, a union branch lowered to `ty` that hoisted no `null`, is a branch `null`
@@ -698,7 +698,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let SchemaOr::Schema(member) = member else {
             return false;
         };
-        !ty.nullable && self.is_reservation(ty.id) && !self.all_of_decides_null(member, 0)
+        !ty.nullable
+            && self.is_reservation(ty.id)
+            && self.null_admission(member) == NullAdmission::Undecided
     }
 
     /// Whether `schema` is a `oneOf`/`anyOf` whose other keywords decide nothing about `null` and

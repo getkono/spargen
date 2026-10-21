@@ -888,7 +888,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower a `$ref`'s shape-bearing `sibling` keywords (the reference stripped) to be met with
     /// its `referenced` target. An `allOf` there that no member decides `null` for — untyped
     /// object keywords alone, or `$ref`s to untyped object components
-    /// ([`Self::all_of_decides_null`]) — lowers on its own to the non-null struct
+    /// (`null` [`NullAdmission::Undecided`] by [`Self::null_admission`]) — lowers on its own to the non-null struct
     /// [`object_all_of_admits_null`] gives it, and that struct, met with a nullable object target,
     /// denied the target's `null`. Its members constrain only objects, so it admits `null` without
     /// deciding it, as the same keywords written beside the `$ref` and the same `allOf` nested in
@@ -915,7 +915,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && !schema_has_union(sibling)
             && is_struct(self, ty.id)
             && is_struct(self, referenced.id)
-            && !self.all_of_decides_null(sibling, 0)
+            && self.null_admission(sibling) == NullAdmission::Undecided
         {
             ty.nullable = true;
         }
