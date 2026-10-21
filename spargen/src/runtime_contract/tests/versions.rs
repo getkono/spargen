@@ -261,13 +261,16 @@ fn blocking_manifest(blocking: &str) -> String {
 
 #[test]
 fn blocking_may_enable_tokio_through_its_implicit_feature_or_dep_syntax() {
-    // Cargo accepts both spellings for enabling an optional dependency from a feature: the
-    // implicit feature named after it (`"tokio"`) and `"dep:tokio"`. Either wires the blocking
-    // client, alone or beside other entries.
+    // Cargo enables an optional dependency from a feature through three spellings: the implicit
+    // feature named after it (`"tokio"`), `"dep:tokio"`, and a non-weak dependency feature
+    // (`"tokio/rt"`, which enables tokio as well as its `rt`). Each wires the blocking client,
+    // alone or beside other entries.
     for blocking in [
         "[\"dep:tokio\"]",
         "[\"tokio\"]",
         "[\"serde_json/std\", \"tokio\"]",
+        "[\"tokio/rt\"]",
+        "[\"serde_json/std\", \"tokio/rt-multi-thread\"]",
     ] {
         let diagnostics =
             audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
@@ -278,9 +281,14 @@ fn blocking_may_enable_tokio_through_its_implicit_feature_or_dep_syntax() {
 #[test]
 fn blocking_that_enables_anything_but_tokio_is_not_wired() {
     // Neither a weak dependency feature (`tokio?/rt`, which enables `rt` only if something else
-    // already enables tokio) nor a near-miss name enables the optional dependency itself, so
-    // each is reported exactly as an empty entry is.
-    for blocking in ["[]", "[\"dep:tokio-util\"]", "[\"tokio?/rt\"]"] {
+    // already enables tokio) nor a near-miss name, as a dependency or as a dependency feature,
+    // enables the optional dependency itself, so each is reported exactly as an empty entry is.
+    for blocking in [
+        "[]",
+        "[\"dep:tokio-util\"]",
+        "[\"tokio-util/rt\"]",
+        "[\"tokio?/rt\"]",
+    ] {
         let diagnostics =
             audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
         assert_eq!(
