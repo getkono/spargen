@@ -341,11 +341,26 @@ fn poem_openapi_document_is_rejected_e001() {
 
 #[test]
 fn utoipa_untagged_overlap_generates_a_typed_union() {
-    let (report, text) = generate("utoipa-untagged-overlap.json", false);
-    assert_eq!(report.outcome(), Outcome::Generated);
-    assert!(
-        !has_code(&report, Code::NonDisjointUnion),
+    // "generate (clean)" in `corpus/recipes/README.md`: `check` finds nothing to report, and
+    // `generate` agrees with it.
+    let checked = check("utoipa-untagged-overlap.json");
+    assert_eq!(
+        checked.outcome(),
+        Outcome::Clean,
         "overlapping numeric branches are supported: {:?}",
+        checked.diagnostics()
+    );
+
+    let (report, text) = generate("utoipa-untagged-overlap.json", false);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Generated,
+        "{:?}",
+        report.diagnostics()
+    );
+    assert!(
+        report.diagnostics().is_empty(),
+        "a clean recipe generates without diagnostics: {:?}",
         report.diagnostics()
     );
 
@@ -355,9 +370,21 @@ fn utoipa_untagged_overlap_generates_a_typed_union() {
         text.contains("fn measure"),
         "the union operation is emitted"
     );
-    assert!(
-        text.contains("ResponseBodyVariant0(Box<ResponseBodyVariant0>)")
-            && text.contains("ResponseBodyVariant1(Box<ResponseBodyVariant1>)"),
-        "the overlapping response remains a typed, boxed enum: {text}"
+    assert_eq!(
+        enum_variants(&text, "ResponseBody"),
+        [
+            "ResponseBodyVariant0(Box<ResponseBodyVariant0>)",
+            "ResponseBodyVariant1(Box<ResponseBodyVariant1>)"
+        ],
+        "the overlapping response remains a typed, boxed enum"
+    );
+    // The payloads keep their declared formats: `int64` and `double`, not a widened number.
+    assert_eq!(
+        alias_target(&text, "ResponseBodyVariant0").as_deref(),
+        Some("i64")
+    );
+    assert_eq!(
+        alias_target(&text, "ResponseBodyVariant1").as_deref(),
+        Some("f64")
     );
 }
