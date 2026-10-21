@@ -158,6 +158,31 @@ impl Category {
             Category::Array => "        - { type: array, items: { type: string } }",
         }
     }
+
+    /// The [`shape`] of the Rust type the variant's schema lowers to.
+    fn shape(self) -> &'static str {
+        match self {
+            Category::String => "String",
+            Category::Integer => "i64",
+            Category::Number => "f64",
+            Category::Boolean => "bool",
+            Category::Array => "Vec<String>",
+        }
+    }
+}
+
+/// The [`shape`] of `U` when its `oneOf` lists the variant shapes `variants`: the one shape when
+/// they are all the same type, else an enum with one boxed variant per distinct shape.
+fn union_shape(variants: BTreeSet<String>) -> String {
+    if variants.len() == 1 {
+        return variants.into_iter().next().unwrap_or_default();
+    }
+    let mut payloads: Vec<String> = variants
+        .into_iter()
+        .map(|v| format!("(Box<{v}>)"))
+        .collect();
+    payloads.sort();
+    format!("enum {{ {} }}", payloads.join(", "))
 }
 
 fn category_union_spec(variants: &[Category]) -> String {
@@ -188,6 +213,15 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
         }
     }
     spec
+}
+
+/// The [`shape`] of the closed object whose required string keys are `keys`.
+fn closed_object_shape(keys: &BTreeSet<usize>) -> String {
+    let fields: Vec<String> = keys
+        .iter()
+        .map(|&key| format!("{}: String [] []", KEYS[key]))
+        .collect();
+    format!("struct {{ {} }}", fields.join("; "))
 }
 
 // The allOf merge reconciles member constraints exactly.
@@ -301,6 +335,14 @@ proptest! {
             variants,
             source
         );
+        // One variant per distinct category, each its category's type.
+        prop_assert_eq!(
+            shape::named(source, "U"),
+            union_shape(distinct.iter().map(|c| c.shape().to_owned()).collect()),
+            "union of {:?} lowers to the wrong variants:\n{}",
+            variants,
+            source
+        );
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
@@ -335,6 +377,14 @@ proptest! {
         if distinct.len() == 1 {
             prop_assert!(source.contains("pub struct U"), "union of one key set is not that struct:\n{source}");
         }
+        // One variant per distinct key set, each the closed object requiring exactly those keys.
+        prop_assert_eq!(
+            shape::named(source, "U"),
+            union_shape(distinct.iter().map(|keys| closed_object_shape(keys)).collect()),
+            "union of {:?} lowers to the wrong variants:\n{}",
+            variants,
+            source
+        );
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
@@ -1097,6 +1147,14 @@ mod shape {
         }
     }
 
+    /// The shape of the type the generated module `code` declares as `name`; `name` itself when it
+    /// declares nothing by that name.
+    pub fn named(code: &str, name: &str) -> String {
+        let ty = syn::parse_str::<syn::Type>(name)
+            .unwrap_or_else(|error| panic!("`{name}` is no type: {error}"));
+        Types::read(code).shape(&ty, 8)
+    }
+
     /// The shape of the field `wire` of `pub struct name` in the generated module `code`, `None`
     /// when no such field was emitted.
     pub fn field(code: &str, name: &str, wire: &str) -> Option<String> {
@@ -1296,15 +1354,33 @@ proptest! {
         let checked = check(&spec);
         prop_assert_eq!(rejected(&checked), rejected(&report), "{}", spec);
         if excluded && !nullable {
-            // Which code says so is the spelling's: `E013` beside an `allOf`, `E007` for the
-            // union's own siblings.
+            // Which code says so is the spelling's: `E013` beside an `allOf` and beside a `$ref`
+            // (the conjunction spellings), `E007` for the union's own siblings.
             prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
+            let code = if spelling == 2 { Code::NonDisjointUnion } else { Code::AllOfIrreconcilable };
+            prop_assert!(has_code(&report, code), "expected {:?}: {:#?}\n{}", code, report, spec);
             return Ok(());
         }
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}\n{}", report, spec);
         let shape = holder_p_shape(&source)?;
-        prop_assert_eq!(shape == "()", excluded, "`Holder.p` is `{}`:\n{}", shape, spec);
+        if excluded {
+            prop_assert_eq!(shape.as_str(), "()", "`Holder.p` is `{}`:\n{}", shape, spec);
+            return Ok(());
+        }
+        // A refiner every branch meets keeps the union it refines: `Holder.p` has the shape it has
+        // with no refiner at all, the `Cat`/`Dog` enum (beside `null` when the union admits it).
+        let unrefined = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    \
+             Cat:\n      type: object\n      required: [kind]\n      properties: {{ kind: {{ type: string }} }}\n    \
+             Dog:\n      type: object\n      required: [kind, bark]\n      properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }}\n    \
+             Pet:\n      oneOf: {union}\n    Holder:\n      type: object\n      required: [p]\n      properties:\n        p: {{ $ref: '#/components/schemas/Pet' }}\n"
+        );
+        let (control, control_source) = generate_module(&unrefined);
+        prop_assert_eq!(control.outcome(), Outcome::Generated, "{:#?}\n{}", control, unrefined);
+        let union = holder_p_shape(&control_source)?;
+        prop_assert!(non_null(&union).starts_with("enum { "), "the unrefined `Holder.p` is `{}`", union);
+        prop_assert_eq!(shape, union, "the refined union lost or changed a branch:\n{}", spec);
     }
 
     /// Every `default` a member writes on a property is accounted for by the meet, exactly as
