@@ -8,8 +8,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, P
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, CollectedRef,
-    RefTarget,
+    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
+    split_fragment, CollectedRef, RefTarget,
 };
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
@@ -421,9 +421,12 @@ impl InputBundle {
         parent.join(path)
     }
 
-    /// Register an OpenAPI 3.2 `$self` identity and make it the base for subsequent references.
-    /// Relative identities in local documents are resolved from the retrieval path; identities in
-    /// remote documents are resolved from the pinned retrieval URL.
+    /// Register an OpenAPI 3.2 `$self` identity, a name a reference reaches `file` by. An
+    /// `http`/`https` identity, or a relative one, also becomes the base its relative references
+    /// resolve against: a relative identity is resolved from the document's own path when it is
+    /// local, and from the URL it was retrieved from when it is remote. Any other identity with a
+    /// scheme (`urn:x:y`) is registered as written, in a remote document as in a local one, and
+    /// supplies no hierarchical base, so the document keeps the one it was reached at.
     fn register_self_identity(&mut self, file: FileId, retrieval_url: Option<&str>) {
         let Some(self_uri) = self
             .value_at(file)
@@ -437,7 +440,10 @@ impl InputBundle {
         if base.is_empty() {
             return;
         }
-        if let Some(retrieval_url) = retrieval_url {
+        if retrieval_url.is_some() && !is_http_url(base) && has_uri_scheme(base) {
+            // Absolute, so not resolved against the retrieval URL (#718); opaque, so no base.
+            self.url_to_file.insert(base.to_owned(), file);
+        } else if let Some(retrieval_url) = retrieval_url {
             let canonical = resolve_ref_url(retrieval_url, base);
             self.origins.insert(file, Origin::Remote(canonical.clone()));
             self.url_to_file.insert(canonical, file);

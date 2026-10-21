@@ -63,7 +63,7 @@ pub(crate) fn is_http_url(reference: &str) -> bool {
 /// followed by `:`. A one-letter scheme counts, so a Windows drive-letter path such as
 /// `C:/x.yaml` is an absolute URI with scheme `c`, as the `E003` explain text states; a relative
 /// path whose first segment holds a `:` is written `./a:b.yaml`, as RFC 3986 §4.2 requires.
-fn has_uri_scheme(reference: &str) -> bool {
+pub(crate) fn has_uri_scheme(reference: &str) -> bool {
     reference.split_once(':').is_some_and(|(scheme, _)| {
         let mut chars = scheme.chars();
         chars.next().is_some_and(|c| c.is_ascii_alphabetic())
