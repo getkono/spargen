@@ -29,16 +29,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<Ty> {
         // Taken here, so a later merge never reads what was recorded for this one.
         let value_variants = std::mem::take(&mut self.scalar_meet_value_variants);
-        let has_object = contributions
+        let mut has_object = contributions
             .iter()
             .any(|c| matches!(c, Contribution::Object { .. }));
-        let scalars: Vec<Ty> = contributions
+        let mut scalars: Vec<Ty> = contributions
             .iter()
             .filter_map(|c| match c {
                 Contribution::Scalar(ty) => Some(*ty),
                 Contribution::Object { .. } | Contribution::Refiner { .. } => None,
             })
             .collect();
+        // Every object member is a `$ref` to a union that lowered to its one object, beside scalar
+        // members: each is the union it is, met with them as the same union written inline is,
+        // in its place among them (#678). Beside another object member it stays an object.
+        if has_object
+            && !scalars.is_empty()
+            && contributions
+                .iter()
+                .all(|c| !matches!(c, Contribution::Object { union: None, .. }))
+        {
+            has_object = false;
+            scalars = contributions
+                .iter()
+                .filter_map(|c| match c {
+                    Contribution::Scalar(ty)
+                    | Contribution::Object {
+                        union: Some(ty), ..
+                    } => Some(*ty),
+                    Contribution::Object { .. } | Contribution::Refiner { .. } => None,
+                })
+                .collect();
+        }
         // Untyped array applicators constrain only arrays: beside object members they are
         // vacuous, and beside scalars they refine the scalars' meet below.
         let refiners: Vec<Refiner> = contributions
@@ -389,6 +410,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 additional: member_additional,
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
+                union: None,
             });
         }
         Some(())
@@ -742,6 +764,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|field| field.name.wire.clone())
                     .collect();
                 let additional = structure.additional.clone();
+                let union = self
+                    .ref_target_body(reference, provenance)
+                    .is_some_and(|target| schema_has_union(&target))
+                    .then_some(ty);
                 // A copied field keeps its `undeclared` mark, so one the component carries only
                 // for its own `required` still gives way to a later member's declaration.
                 out.push(Contribution::Object {
@@ -749,6 +775,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     additional,
                     required,
                     nullable: decides_null.then_some(ty.nullable),
+                    union,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -772,6 +799,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 additional,
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
+                union: None,
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -814,6 +842,12 @@ pub(super) enum Contribution {
         /// object keywords constrain only objects, so it admits `null` without deciding the
         /// merge's nullability, as an untyped `$ref` sibling leaves its target's alone.
         nullable: Option<bool>,
+        /// The type a `$ref` member's target lowered to, where that target is a `oneOf`/`anyOf`
+        /// that lowered to one object (its one real branch): beside scalar members alone it is
+        /// met with them as the union it is ([`LowerCtx::combine_all_of`]), as the same union
+        /// written inline is, rather than mixed with them as an object (#678). `None` for every
+        /// other object member.
+        union: Option<Ty>,
     },
     Scalar(Ty),
     /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the

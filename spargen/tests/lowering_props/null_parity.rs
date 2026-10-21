@@ -89,19 +89,6 @@ impl NullSpelling {
 }
 
 impl NullCase {
-    /// A gap held exactly until #678 lands: a `$ref` member naming a union of one untyped object
-    /// branch is gathered as the object it lowers to, so beside a scalar `type` it is `E013` where
-    /// the inline spellings generate. The `$ref`'d spelling is not compared for it.
-    fn ref_member_is_gathered_as_an_object(&self) -> bool {
-        // A `{type: 'null'}` member is no branch of its own: the union is the one beside it.
-        let real: Vec<&&str> = self
-            .branches
-            .iter()
-            .filter(|branch| **branch != "{ type: 'null' }")
-            .collect();
-        matches!(real.as_slice(), [branch] if branch.starts_with("{ properties"))
-    }
-
     /// A gap held exactly until #818 lands: beside a multi-category `type` array listing `null`,
     /// an exact-null branch (`const: null`, `enum: [null]`, a `$ref` to `Z`) and another real
     /// branch, the spellings that list the conjunct before the union hoist the branch's `null`
@@ -123,42 +110,6 @@ impl NullCase {
                 .branches
                 .iter()
                 .any(|branch| !exact_null(branch) && *branch != "{ type: 'null' }")
-    }
-
-    /// A gap held exactly until #678 lands: an `allOf`'s `oneOf` member, lowered on its own,
-    /// merges branches that lower to one generated type before the meet, so a branch of the set
-    /// the conjunct excludes is not reported (`W011`) in those spellings. The `W011`s of a `oneOf`
-    /// with two such branches are not compared. Each branch's key is the generated type it lowers
-    /// to on its own; the exact null type is no variant and merges with nothing.
-    fn merges_before_the_meet(&self) -> bool {
-        if !self.one_of {
-            return false;
-        }
-        let key = |branch: &'static str| match branch {
-            "{}"
-            | "true"
-            | "{ minLength: 1 }"
-            | "{ pattern: '^a' }"
-            | "{ minimum: 1 }"
-            | "{ not: { type: boolean } }" => Some("value"),
-            "{ type: string }" | "{ type: [string, 'null'] }" => Some("string"),
-            "{ type: integer }" | "{ type: [integer, 'null'] }" => Some("integer"),
-            "{ type: 'null' }"
-            | "{ const: null }"
-            | "{ enum: [null] }"
-            | "{ $ref: '#/components/schemas/Z' }" => None,
-            "{ $ref: '#/components/schemas/U' }"
-            | "{ oneOf: [ { items: { type: string } }, { type: boolean } ] }" => Some("union"),
-            other => Some(other),
-        };
-        let keys: Vec<&str> = self
-            .branches
-            .iter()
-            .filter_map(|branch| key(branch))
-            .collect();
-        keys.iter()
-            .enumerate()
-            .any(|(index, key)| keys[..index].contains(key))
     }
 
     fn union(&self) -> String {
@@ -274,9 +225,6 @@ fn null_answer(report: &Report, source: &str) -> NullAnswer {
 fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
     let mut seen: Option<(NullSpelling, NullAnswer, String)> = None;
     for spelling in NullSpelling::ALL {
-        if spelling == NullSpelling::RefMembers && case.ref_member_is_gathered_as_an_object() {
-            continue;
-        }
         if case.conjunct_first_hoists_the_null_arm(spelling) {
             continue;
         }
@@ -291,7 +239,7 @@ fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
             spec
         );
         prop_assert_eq!(codes(&checked), codes(&report), "{:?}: {}", spelling, spec);
-        let mut answer = null_answer(&report, &source);
+        let answer = null_answer(&report, &source);
         // `null` is carried once: a `()` arm, or the `Option` of the field naming `Pick`.
         prop_assert!(
             !(answer.optional && answer.unit_arms > 0),
@@ -300,9 +248,6 @@ fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
             spec,
             source
         );
-        if case.merges_before_the_meet() {
-            answer.excluded.clear();
-        }
         if let Some((at, first, first_spec)) = &seen {
             prop_assert_eq!(
                 &answer,
@@ -358,7 +303,9 @@ proptest! {
 /// counterpart), beside a `$ref` to a union `null` matches through an untyped branch, which is
 /// narrowed to `null` rather than excluded (#670), and two branches that state nothing (#673). A
 /// branch the conjunct excludes is reported (`W011`) in every spelling (#671), one of a category a
-/// multi-category `type` array omits included (#677).
+/// multi-category `type` array omits included (#677), and one of two branches that lower to one
+/// generated type (#678). A `$ref` to a union of one untyped object branch is met as that union
+/// beside a scalar conjunct, as the inline union is (#678).
 #[test]
 fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     let excluded_1 = vec![
@@ -404,6 +351,14 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             "type: [string, 'null']",
             vec!["{}", "{ type: integer }", "{ type: string, enum: [a] }"],
             pick(true, excluded_1.clone()),
+        ),
+        // #678, two branches that lower to one generated type, one of which the conjunct
+        // excludes: reported before the meet merges what it leaves.
+        (
+            "#678",
+            "type: [integer, 'null']",
+            vec!["{ type: [string, 'null'] }", "{ type: string }"],
+            pick(false, excluded_1.clone()),
         ),
         // #673
         (
@@ -460,7 +415,7 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     // An `anyOf` whose exact-null branch carries the `null` its conjunct admits, beside a `$ref` to
     // a union `null` also matches: `null` is carried once, by the `()` arm, so the field is no
     // `Option` in any spelling (Decision 3).
-    let any_of_rows: Vec<(&str, &str, Vec<&str>, NullAnswer)> = [
+    let mut any_of_rows: Vec<(&str, &str, Vec<&str>, NullAnswer)> = [
         "type: [string, 'null'], enum: [a, null]",
         "type: [string, 'null']",
     ]
@@ -481,6 +436,15 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
         )
     })
     .collect();
+    // #678, a union of one untyped object branch beside a scalar conjunct: the `$ref`'d union is
+    // met as the union it is, not mixed with the conjunct as the object it lowers to, so only
+    // `null` is left in every spelling.
+    any_of_rows.push((
+        "#678",
+        "type: [integer, 'null']",
+        vec!["{ properties: { a: { type: string } } }"],
+        pick(false, Vec::new()),
+    ));
     let mut mismatches = Vec::new();
     let rows = rows
         .into_iter()
@@ -557,7 +521,9 @@ fn a_type_array_null_an_enum_refuses_gives_a_standalone_enum_no_option() {
 /// whose own branches take `null` from one that states it, beside a `type` member that is a
 /// union itself or beside a second union member, and the exact-null two-union shape, give one
 /// field type in every order, nested in an inner `allOf` or not. `null` matches two branches of the
-/// null-stating union, so it fails the `oneOf` there and the field is `Pick`.
+/// null-stating union, so it fails the `oneOf` there and the field is `Pick`. A union member
+/// beside a `type` member that is a union itself also reports one set of `W001`s in every order
+/// (#678).
 #[test]
 fn the_member_order_of_an_all_of_decides_nothing_about_null() {
     let shapes: [(&str, Vec<&str>); 3] = [
@@ -611,6 +577,9 @@ fn the_member_order_of_an_all_of_decides_nothing_about_null() {
             members[1..].join(", ")
         ));
         let mut answers = Vec::new();
+        // The `W001`s each site reports, by message: a `type` member that is a union of its own
+        // beside one union member is met alike in every order, so it collapses alike (#678).
+        let mut collapses: Vec<(String, Vec<String>)> = Vec::new();
         for site in &sites {
             let spec = format!(
                 "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
@@ -630,6 +599,27 @@ fn the_member_order_of_an_all_of_decides_nothing_about_null() {
                 mismatches.push(format!("{issue} {site}: a `Value` alias:\n{source}"));
             }
             answers.push((site.clone(), null_answer(&report, &source)));
+            let mut collapsed: Vec<String> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Code::ValidationKeywordIgnored)
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect();
+            collapsed.sort();
+            collapses.push((site.clone(), collapsed));
+        }
+        // Two union members still nest by their own order, so only the one-union shape is held.
+        if members.len() == 2 {
+            if let Some((first_site, first)) = collapses.first() {
+                for (site, collapsed) in &collapses[1..] {
+                    if collapsed != first {
+                        mismatches.push(format!(
+                            "{issue} {site}: `W001`s {collapsed:?}, where {first_site} reports \
+                             {first:?}"
+                        ));
+                    }
+                }
+            }
         }
         for (site, answer) in &answers {
             if !answer.generated || answer.optional || answer.unit_arms + answer.option_arms > 0 {

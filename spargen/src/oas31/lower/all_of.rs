@@ -122,15 +122,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// collapse must count to deny `null`, as the sibling spelling does, and it stays. So it does
     /// beside a variant that accepts `null` itself, such as an exact-null branch's `()`
     /// (`[ {}, { const: null } ]`, or a `$ref` to such a component).
+    ///
+    /// The union members are met first, whatever order the `allOf` writes them in
+    /// ([`Self::union_members_first`]), so each union is met branch by branch with the rest, as
+    /// the sibling spelling meets it (#678).
     fn combine_scalar_union_members(
         &mut self,
         schema: &Schema,
         hint: &str,
-        mut contributions: Vec<Contribution>,
+        contributions: Vec<Contribution>,
         union_members: &[(usize, &Schema)],
         held: Vec<HeldUntypedWarning>,
         lowerings: Vec<(Provenance, Range<u32>)>,
     ) -> Option<Ty> {
+        let (mut contributions, union_members) =
+            self.union_members_first(contributions, union_members);
+        let union_members = union_members.as_slice();
         if self.several_unions_beside_object(union_members, &contributions, false) {
             self.report_held_untyped_warnings(held);
             return self.reject_all_of_several_unions(schema);
@@ -229,6 +236,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.report_held_untyped_warnings(held);
         met
+    }
+
+    /// `contributions` with the members `union_members` records as a union — an inline
+    /// `oneOf`/`anyOf`, or a `$ref` to one — moved ahead of the rest, each group in the order it
+    /// was gathered, and `union_members` with the slots moved alike. The scalar meet nests the
+    /// later member under each branch of the earlier one, so a union member written after a
+    /// `type` member that is a union of its own was met as each of that member's branches, and
+    /// collapsed with `W001`, where written before it, it was met branch by branch and was not
+    /// (#675, #678). Met first in every order, it is met as the sibling spelling meets it.
+    fn union_members_first<'s>(
+        &self,
+        contributions: Vec<Contribution>,
+        union_members: &[(usize, &'s Schema)],
+    ) -> (Vec<Contribution>, Vec<(usize, &'s Schema)>) {
+        let is_union = |member: &Schema| {
+            schema_has_union(member)
+                || member.reference.as_deref().is_some_and(|reference| {
+                    self.ref_target_body(reference, &member.provenance)
+                        .is_some_and(|target| schema_has_union(&target))
+                })
+        };
+        let unions: HashSet<usize> = union_members
+            .iter()
+            .filter(|(_, member)| is_union(member))
+            .map(|(slot, _)| *slot)
+            .collect();
+        let mut order: Vec<usize> = (0..contributions.len()).collect();
+        order.sort_by_key(|slot| !unions.contains(slot));
+        let moved: Vec<usize> = {
+            let mut moved = vec![0; order.len()];
+            for (to, &from) in order.iter().enumerate() {
+                moved[from] = to;
+            }
+            moved
+        };
+        let mut slots: Vec<Option<Contribution>> = contributions.into_iter().map(Some).collect();
+        let contributions = order
+            .iter()
+            .filter_map(|&from| slots[from].take())
+            .collect();
+        let union_members = union_members
+            .iter()
+            .map(|&(slot, member)| (moved.get(slot).copied().unwrap_or(slot), member))
+            .collect();
+        (contributions, union_members)
     }
 
     /// Whether an `allOf` merge whose gathered `contributions` hold an object member would meet
@@ -404,6 +456,74 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         (result, held.unwrap_or_default())
     }
 
+    /// Run `lower` with the union at `union` lowered as an input to an `allOf`'s scalar meet
+    /// ([`Self::scalar_meet_union`]): its indistinguishable branches stay apart until the meet
+    /// has made them what they are, and [`Self::collapse_met_one_ofs`] merges what it leaves
+    /// sharing one generated type (#678). Merged first, a branch the other members exclude was
+    /// folded into one they keep, so it was neither reported (`W011`) nor told apart from it,
+    /// where the sibling spelling of the same constraints reports it. The enclosing hold, if
+    /// any, is restored.
+    pub(super) fn lower_scalar_meet_union<T>(
+        &mut self,
+        union: &Provenance,
+        lower: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let enclosing = self.scalar_meet_union.replace(union.clone());
+        let lowered = lower(self);
+        self.scalar_meet_union = enclosing;
+        lowered
+    }
+
+    /// The `oneOf` target of `member`, a bare `$ref` to a root component that `contribution`
+    /// gathered as the one scalar it lowered to, lowered again under `hint` as an input to the
+    /// scalar meet ([`Self::lower_scalar_meet_union`]), where the component's own lowering left
+    /// fewer variants than it has branches, as a merge of two or more of them into one variant
+    /// leaves it: met as that merged type, the branches the
+    /// other members exclude were not told apart from the ones they keep, as they are in the
+    /// inline spelling (#678). The component keeps its own merged type, and its own `W001`s,
+    /// so the second lowering's are not raised again. `None` where nothing was merged, so the
+    /// component's type is met as it always was.
+    fn relower_merged_ref_union(
+        &mut self,
+        member: &Schema,
+        contribution: &Contribution,
+        hint: &str,
+    ) -> Option<Ty> {
+        let Contribution::Scalar(ty) = contribution else {
+            return None;
+        };
+        let reference = member.reference.as_deref()?;
+        reference.strip_prefix("#/components/schemas/")?;
+        let target = self
+            .ref_target_body(reference, &member.provenance)?
+            .into_owned();
+        let real_branches = target
+            .one_of
+            .iter()
+            .filter(|branch| !member_is_null_only(branch))
+            .count();
+        if real_branches < 2 || target.discriminator.is_some() {
+            return None;
+        }
+        let merged = match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Union(_)) => self
+                .union_variant_members
+                .get(&ty.id)
+                .is_some_and(|members| members.iter().any(|merged| merged.len() > 1)),
+            Some(TypeKind::Reserved) | None => false,
+            Some(_) => true,
+        };
+        if !merged {
+            return None;
+        }
+        let (relowered, _) = self.holding_untyped_warnings(|ctx| {
+            ctx.lower_scalar_meet_union(&target.provenance, |ctx| {
+                ctx.closed_narrowing(|ctx| ctx.lower_schema(&target, hint))
+            })
+        });
+        relowered
+    }
+
     /// Report, as raised, the `W001`s `held` back while an `allOf` gathered its members.
     fn report_held_untyped_warnings(&mut self, held: Vec<HeldUntypedWarning>) {
         for warning in held {
@@ -540,8 +660,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let slot = out.len();
         let from = self.graph_mark();
-        self.gather_member(member, hint, out)?;
+        match member {
+            // An inline union member is met with the other members before its indistinguishable
+            // branches merge, so the meet still tells apart a branch it excludes (#678).
+            SchemaOr::Schema(union) if union.reference.is_none() && schema_has_union(union) => {
+                self.lower_scalar_meet_union(&union.provenance, |ctx| {
+                    ctx.gather_member(member, hint, out)
+                })?;
+            }
+            _ => self.gather_member(member, hint, out)?,
+        }
         if let SchemaOr::Schema(member) = member {
+            if out.len() == slot + 1 {
+                let relowered_from = self.graph_mark();
+                if let Some(relowered) = self.relower_merged_ref_union(member, &out[slot], hint) {
+                    out[slot] = Contribution::Scalar(relowered);
+                    lowerings.push((member.provenance.clone(), relowered_from..self.graph_mark()));
+                }
+            }
             if (member.reference.is_some() || schema_has_union(member))
                 && out.len() == slot + 1
                 && matches!(out[slot], Contribution::Scalar(_))
@@ -610,13 +746,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut contributions = Vec::new();
         // Recorded only to count the composition's own unions beside the one written here.
         let mut union_members = Vec::new();
+        // The ids each of the composition's own union members was lowered into, held unmerged for
+        // the meet (#678), elided once the meet replaced them.
+        let mut lowerings = Vec::new();
         self.in_composition(|ctx| {
             ctx.gather_all_of_recording_unions(
                 &composition,
                 &composition_hint,
                 &mut contributions,
                 &mut union_members,
-                &mut Vec::new(),
+                &mut lowerings,
             )
         })?;
         if self.several_unions_beside_object(&union_members, &contributions, real_union(&union)) {
@@ -651,7 +790,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|(member, refiner)| (member.as_ref(), *refiner)),
         );
-        self.meet_union_with_all_of(
+        let met = self.meet_union_with_all_of(
             schema,
             hint,
             composed,
@@ -659,7 +798,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             &union,
             &format!("{hint}Union"),
             MetUnion::BesideAllOf,
-        )
+        );
+        // A composition union member's own lowering is an input to the meet, as it is in the
+        // `allOf` spelling ([`Self::combine_scalar_union_members`]): held unmerged, it was
+        // emitted as a public union of indistinguishable variants nothing referred to.
+        if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
+            for (_, lowered) in lowerings {
+                if !lowered.contains(&met.id.0) {
+                    self.elide_unused_union_lowering(lowered);
+                }
+            }
+        }
+        met
     }
 
     /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), on a
@@ -728,10 +878,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.report_held_untyped_warnings(held);
             return None;
         }
-        // With no object member, the union meets the other members as the scalar it is, in its
-        // place among them, exactly as an `allOf` of scalars always met one: the scalar meet
-        // already intersects a union branch by branch, and it keeps the narrowing `open_narrowing`
-        // gives each member where it is written. A refiner gathered from a nested `allOf` or a
+        // With no object member, the union meets the other members as the scalar it is, ahead of
+        // them as every union member of a scalar meet is ([`Self::union_members_first`], #678):
+        // the scalar meet already intersects a union branch by branch, and it keeps the narrowing
+        // `open_narrowing` gives each member as it is met. A refiner gathered from a nested `allOf` or a
         // sub-file target refines the union's branches below, as the same member written here does,
         // so a half that reaches none of them is reported (`W011`) rather than met silently. A
         // union whose branches leave `null` undecided takes it from the other members there, as
@@ -745,10 +895,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .any(|contribution| matches!(contribution, Contribution::Refiner { .. }));
         if !has_object && !has_refiner && scoped.is_empty() {
-            // Its `W001` is held with the members', for the meet to settle (#660).
+            // Its `W001` is held with the members', for the meet to settle (#660), and so is the
+            // merge of its indistinguishable branches, for the meet to collapse (#678).
             let from = self.graph_mark();
-            let (lowered, union_held) =
-                self.holding_untyped_warnings(|ctx| ctx.lower_schema(union, &union_hint));
+            let (lowered, union_held) = self.holding_untyped_warnings(|ctx| {
+                ctx.lower_scalar_meet_union(&union.provenance, |ctx| {
+                    ctx.lower_schema(union, &union_hint)
+                })
+            });
             lowerings.push((union.provenance.clone(), from..self.graph_mark()));
             let mut held = held;
             held.extend(union_held);

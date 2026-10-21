@@ -3725,3 +3725,78 @@ fn a_ref_all_of_member_to_untyped_array_applicators_refines_the_merge_s_arrays()
     );
     assert_eq!(enum_variants(&code, "Probe").len(), 2, "{code}");
 }
+
+/// A union member of the `allOf` written beside a `oneOf` is met before its indistinguishable
+/// branches merge, as the bare `allOf` spelling meets it (#678): the branch the outer union's
+/// `integer` excludes is reported (`W011`), the branches the meet leaves sharing one generated type
+/// collapse with one `W001` at the schema, and the member's own unmerged lowering, an input to the
+/// meet, is not emitted as a public union whose indistinguishable variants reject every value.
+/// Written inline, or as a `$ref` to a component that merged them, alike; the component keeps its
+/// own merged type.
+#[test]
+fn an_all_of_union_member_beside_a_union_is_met_before_its_branches_merge() {
+    let member = "{ oneOf: [ { type: string }, { type: string, maxLength: 3 } ] }";
+    for (spelling, written) in [
+        ("inline", member),
+        ("a $ref", "{ $ref: '#/components/schemas/M' }"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {{ oneOf: [ {{ type: string }}, {{ type: integer }} ], allOf: [ {{ type: \
+                 [string, 'null'] }}, {written} ] }}\n    M: {member}\n    Holder: {{ type: \
+                 object, properties: {{ pick: {{ $ref: '#/components/schemas/Pick' }} }}, \
+                 required: [pick] }}\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
+        );
+        let at = |code: Code, pointer: &str| {
+            report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == code && d.pointer.as_str() == pointer)
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            at(Code::DeclarationHasNoEffect, "/components/schemas/Pick")
+                .iter()
+                .any(|message| message.starts_with("union member 1 cannot satisfy")),
+            "{spelling}: the excluded `integer` branch is reported: {report:#?}"
+        );
+        assert!(
+            at(Code::ValidationKeywordIgnored, "/components/schemas/Pick")
+                .iter()
+                .any(|message| message.contains("intersect to a union whose branches differ only")),
+            "{spelling}: the meet's collapse is reported at the schema: {report:#?}"
+        );
+        assert!(
+            at(
+                Code::ValidationKeywordIgnored,
+                "/components/schemas/Pick/allOf/1"
+            )
+            .is_empty(),
+            "{spelling}: the member is not merged before the meet: {report:#?}"
+        );
+        assert_eq!(
+            alias_target(&code, "Pick").as_deref(),
+            Some("String"),
+            "{code}"
+        );
+        assert_eq!(
+            alias_target(&code, "M").as_deref(),
+            Some("String"),
+            "{code}"
+        );
+        let types = types_module(&code);
+        assert!(
+            !types.contains("PickCompositionMember1"),
+            "{spelling}: the member's unmerged lowering is emitted unused:\n{types}"
+        );
+    }
+}

@@ -896,13 +896,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the distinctions the generated type does not carry are reported, not dropped in silence.
         // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
         // decodes with any one match, so it does too. A `$ref`'s own `oneOf` sibling is collapsed
-        // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]).
+        // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]), and an `allOf`'s
+        // union member by the `allOf`'s scalar meet ([`Self::scalar_meet_union`], #678).
         // The members each kept variant stands for, its own first: a merge folds several into one.
         let mut merged_members: Vec<Vec<usize>> =
             variant_members.iter().map(|&member| vec![member]).collect();
+        let held_for_scalar_meet = self.scalar_meet_union.as_ref() == Some(&schema.provenance);
         if mode == UnionMode::OneOf
             && schema.discriminator.is_none()
             && self.unmerged_union.as_ref() != Some(&schema.provenance)
+            && !held_for_scalar_meet
         {
             merged_members = self.merge_indistinguishable_variants(
                 schema,
@@ -1062,6 +1065,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
         self.union_variant_members.insert(ty.id, merged_members);
+        if held_for_scalar_meet {
+            self.scalar_meet_unmerged.insert(ty.id);
+        }
         ty.nullable = nullable;
         Some(ty)
     }
