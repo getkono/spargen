@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
-use spargen::{CargoIntegration, Outcome, Spec};
+use spargen::{CargoIntegration, Code, Outcome, Spec};
 
 #[path = "shared/remote.rs"]
 mod remote;
@@ -38,11 +38,15 @@ enum Reply {
     Status(&'static str),
 }
 
-/// A minimal HTTP/1.1 server: one request per connection, answered from a fixed route table
-/// (unknown paths get `404`). Every requested path is recorded, so a test can assert what the
-/// fetcher actually asked for and how often.
+/// The route table a [`MockServer`] answers from, shared with its serving thread.
+type Routes = Arc<Mutex<BTreeMap<&'static str, Reply>>>;
+
+/// A minimal HTTP/1.1 server: one request per connection, answered from a route table (unknown
+/// paths get `404`) that a test may change between requests. Every requested path is recorded, so
+/// a test can assert what the fetcher actually asked for and how often.
 struct MockServer {
     base: String,
+    routes: Routes,
     hits: Arc<Mutex<Vec<String>>>,
 }
 
@@ -50,17 +54,23 @@ impl MockServer {
     fn start(routes: &[(&'static str, Reply)]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes: BTreeMap<&'static str, Reply> = routes.iter().cloned().collect();
+        let routes: Routes = Arc::new(Mutex::new(routes.iter().cloned().collect()));
+        let served = Arc::clone(&routes);
         let hits = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&hits);
         // The thread outlives the test only as long as the test binary; it is never joined.
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                answer(stream, &routes, &recorded);
+                answer(stream, &served, &recorded);
             }
         });
-        Self { base, hits }
+        Self { base, routes, hits }
+    }
+
+    /// Answer `path` with `reply` from the next request on.
+    fn route(&self, path: &'static str, reply: Reply) {
+        self.routes.lock().unwrap().insert(path, reply);
     }
 
     fn url(&self, path: &str) -> String {
@@ -79,7 +89,7 @@ impl MockServer {
 /// recorded after the write could be missing from that read.
 fn answer(
     mut stream: TcpStream,
-    routes: &BTreeMap<&'static str, Reply>,
+    routes: &Mutex<BTreeMap<&'static str, Reply>>,
     recorded: &Mutex<Vec<String>>,
 ) -> Option<()> {
     let mut head = Vec::new();
@@ -92,14 +102,15 @@ fn answer(
     }
     let head = String::from_utf8(head).ok()?;
     let path = head.split_whitespace().nth(1)?.to_owned();
-    let (status, headers, body) = match routes.get(path.as_str()) {
-        Some(Reply::Body(body)) => ("200 OK", String::new(), *body),
+    let reply = routes.lock().unwrap().get(path.as_str()).cloned();
+    let (status, headers, body) = match reply {
+        Some(Reply::Body(body)) => ("200 OK", String::new(), body),
         Some(Reply::Redirect(location)) => (
             "301 Moved Permanently",
             format!("Location: {location}\r\n"),
             "",
         ),
-        Some(Reply::Status(status)) => (*status, String::new(), ""),
+        Some(Reply::Status(status)) => (status, String::new(), ""),
         None => ("404 Not Found", String::new(), ""),
     };
     let response = format!(
@@ -516,6 +527,128 @@ fn a_refused_connection_is_e025_naming_the_url() {
     // The cause, not only reqwest's "error sending request": the refused connect's own I/O
     // error, whose std rendering always carries the OS error number.
     assert!(message.contains("(os error "), "{message}");
+}
+
+/// A failed fetch is located at the `$ref` that names the URL, as `E003` for an unsupported
+/// reference is: its pointer, and its span in the root document, so a description with several
+/// remote references says which one failed.
+#[test]
+fn a_failed_fetch_is_located_at_the_root_ref_that_names_it() {
+    let server = MockServer::start(&[("/pet.yaml", Reply::Body(PET_YAML))]);
+    let fetched = server.url("/pet.yaml");
+    let gone = server.url("/gone.yaml");
+    // The second operation's reference fails; the first one's succeeds, so a location at the
+    // root or at the first reference would both be wrong.
+    let (_temp, spec_path) = remote::workspace(&[&fetched, &gone]);
+
+    let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
+
+    let failed: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains(&gone))
+        .collect();
+    assert_eq!(failed.len(), 1, "{report:#?}");
+    let diagnostic = failed[0];
+    assert_eq!(diagnostic.code, Code::RemoteFetchFailed, "{report:#?}");
+    assert_eq!(
+        diagnostic.pointer.as_str(),
+        "/paths/~1pet~1again/get/responses/200/content/application~1json/schema/$ref",
+        "{report:#?}"
+    );
+    let span = diagnostic.span.expect("a root reference carries its span");
+    let text = std::fs::read_to_string(&spec_path).unwrap();
+    assert!(
+        text[span.start.offset..span.end.offset].contains(&gone),
+        "{span:?} in {text}"
+    );
+}
+
+/// A failed fetch of a reference inside a fetched document keeps that reference's pointer in
+/// the fetched document's terms, and no span: every scanned document parses as `FileId(0)`, so
+/// only the root's spans name the file they lie in.
+#[test]
+fn a_failed_fetch_of_a_fetched_documents_ref_is_located_at_its_pointer_without_a_span() {
+    // `pet.yaml`'s `tag.yaml` is unrouted, so the mock answers `404`.
+    let server = MockServer::start(&[("/schemas/pet.yaml", Reply::Body(PET_YAML))]);
+    let tag_url = server.url("/schemas/tag.yaml");
+    let (_temp, spec_path) = workspace(&server.url("/schemas/pet.yaml"));
+
+    let report = spargen::vendor(&Spec::new(spec_path)).unwrap_err();
+
+    let diagnostics = report.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{report:#?}");
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, Code::RemoteFetchFailed, "{report:#?}");
+    assert!(diagnostic.message.contains(&tag_url), "{report:#?}");
+    assert_eq!(
+        diagnostic.pointer.as_str(),
+        "/properties/tag/$ref",
+        "{report:#?}"
+    );
+    assert_eq!(diagnostic.span, None, "{report:#?}");
+}
+
+/// A `spargen lock` whose fetch of a document pinned by an earlier run fails still exits with
+/// `E025`, but leaves a lock the build can use (#714): the unreachable document keeps its earlier
+/// pin, and so does the document reachable only through it, beside their vendored copies; a
+/// document fetched again in the same run is re-pinned at its new content. Generation then
+/// resolves every reference offline.
+#[test]
+fn a_failed_fetch_keeps_the_earlier_pins_of_what_it_could_not_refetch() {
+    const OWNER_YAML: &str = "type: object\n\
+                              required: [name]\n\
+                              properties:\n  \
+                              name: { type: string }\n";
+    const OWNER_V2_YAML: &str = "type: object\n\
+                                 required: [name]\n\
+                                 properties:\n  \
+                                 name: { type: string }\n  \
+                                 nickname: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/schemas/pet.yaml", Reply::Body(PET_YAML)),
+        ("/schemas/tag.yaml", Reply::Body(TAG_YAML)),
+        ("/schemas/owner.yaml", Reply::Body(OWNER_YAML)),
+    ]);
+    let pet_url = server.url("/schemas/pet.yaml");
+    let tag_url = server.url("/schemas/tag.yaml");
+    let owner_url = server.url("/schemas/owner.yaml");
+    let (_temp, spec_path) = remote::workspace(&[&pet_url, &owner_url]);
+    let spec = Spec::new(spec_path.clone());
+    spargen::vendor(&spec).unwrap_or_else(|report| panic!("{report:#?}"));
+
+    server.route(
+        "/schemas/pet.yaml",
+        Reply::Status("503 Service Unavailable"),
+    );
+    server.route("/schemas/owner.yaml", Reply::Body(OWNER_V2_YAML));
+    let report = spargen::vendor(&spec).unwrap_err();
+
+    let diagnostics = report.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(diagnostics[0].code, Code::RemoteFetchFailed, "{report:#?}");
+    assert!(diagnostics[0].message.contains(&pet_url), "{report:#?}");
+
+    let lock = std::fs::read_to_string(spec_path.with_file_name("spargen.lock")).unwrap();
+    for (url, served) in [
+        (&owner_url, OWNER_V2_YAML),
+        (&pet_url, PET_YAML),
+        (&tag_url, TAG_YAML),
+    ] {
+        assert!(
+            lock.contains(&format!(
+                "url = \"{url}\"\nsha256 = \"{}\"\n",
+                sha256_hex(served.as_bytes())
+            )),
+            "{url} is pinned at what it last served: {lock}"
+        );
+    }
+
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert!(code.contains("pub nickname"), "{code}");
+    let checked = spargen::check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 /// The same fetch through the installed binary, so `spargen lock`'s own wiring is reached too.

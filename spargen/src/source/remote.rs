@@ -59,9 +59,15 @@ pub(crate) fn is_http_url(reference: &str) -> bool {
     reference.starts_with("http://") || reference.starts_with("https://")
 }
 
+/// Whether `reference` opens with an RFC 3986 scheme, `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`
+/// followed by `:`. A one-letter scheme counts, so a Windows drive-letter path such as
+/// `C:/x.yaml` is an absolute URI with scheme `c`, as the `E003` explain text states; a relative
+/// path whose first segment holds a `:` is written `./a:b.yaml`, as RFC 3986 §4.2 requires.
 fn has_uri_scheme(reference: &str) -> bool {
     reference.split_once(':').is_some_and(|(scheme, _)| {
-        !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic())
+        let mut chars = scheme.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     })
 }
 
@@ -388,6 +394,34 @@ mod tests {
             classify_ref("urn:foo:bar", None),
             RefTarget::UnsupportedRemote("urn:foo:bar".to_owned())
         );
+        // Any RFC 3986 scheme is absolute, a one-letter (drive-letter) one included (#720).
+        for uri in [
+            "git+https://h/x.yaml",
+            "coap+tcp://h",
+            "x-1.a:y",
+            "C:/s/x.yaml",
+        ] {
+            assert_eq!(
+                classify_ref(&format!("{uri}#/A"), None),
+                RefTarget::UnsupportedRemote(uri.to_owned())
+            );
+            assert!(is_absolute_ref(uri), "{uri}");
+        }
+        // A `:` outside a valid scheme leaves the ref a relative path.
+        for path in [
+            "./a:b.yaml",
+            "s/a:b.yaml",
+            "1a:b.yaml",
+            "+a:b",
+            "a_b:c",
+            ":x",
+        ] {
+            assert_eq!(
+                classify_ref(path, None),
+                RefTarget::LocalRelative(path.to_owned())
+            );
+            assert!(!is_absolute_ref(path), "{path}");
+        }
         // A relative ref inside a remote doc resolves against that doc's URL.
         assert_eq!(
             classify_ref("../s/y.yaml#/B", Some("https://h/a/x.yaml")),

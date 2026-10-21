@@ -20,7 +20,7 @@ cli = ["dep:clap", "remote-fetch"]
 # generator touches the network; `generate`/`check` never do. It is pulled in by `cli` so the
 # installed binary can vendor remote `$ref`s, and kept as a separate feature so a library-only
 # build (e.g. from `build.rs`) can opt in without the whole CLI.
-remote-fetch = ["dep:reqwest", "dep:rustls"]
+remote-fetch = ["dep:reqwest", "dep:rustls", "dep:rustls-webpki", "dep:webpki-roots"]
 
 [dependencies]
 # diag
@@ -63,6 +63,12 @@ reqwest = { workspace = true, features = [
 # the default-features graph `the_all_features_workspace_graph_carries_a_tls_stack` holds free
 # of one. Removing this floor means giving that test another way to name rustls.
 rustls = { version = "0.23.46", default-features = false, optional = true }
+# Advisory floors on the certificate verifier rustls links and the root store reqwest's
+# `rustls-tls` bundles, for the same reason as the rustls floor above: neither is named in code,
+# default features stay off so neither adds a feature, and each is mirrored by a `[bans] deny`
+# entry in `deny.toml` naming its advisory.
+rustls-webpki = { version = "0.103.16", default-features = false, optional = true }
+webpki-roots = { version = "1.0.10", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

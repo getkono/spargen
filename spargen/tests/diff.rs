@@ -422,7 +422,7 @@ fn a_mixed_report_summarizes_and_displays_every_change() {
 //
 // The nine kinds above were the ones with fixtures. The rest were classified by policy alone, with
 // nothing proving the classifier ever produces them; each of the tests below drives one out of a
-// real pair of specs. `spargen/src/surface/mod.rs` holds the guard that keeps this list complete.
+// real pair of specs. `spargen/src/surface/tests.rs` holds the guard that keeps this list complete.
 
 /// A spec assembled from a whole `paths:` body and a whole `components.schemas:` body, for the
 /// shapes the narrower `spec` helper above cannot express (request bodies, error responses, enums).
@@ -534,6 +534,44 @@ fn changing_a_request_body_type_is_major() {
     assert_eq!(
         kinds(&report),
         vec![ChangeKind::RequestBodyTypeChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn flipping_a_request_body_between_required_and_optional_is_major_both_ways() {
+    // A required body is a `&T` argument and an optional one `Option<&T>`, so either direction
+    // changes the method signature and breaks every caller.
+    let optional_body = REQUEST_BODY_PET.replace("required: true", "required: false");
+    let required = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let optional = full(&pets_get("listPets", &optional_body, PET_REF), PET_SCHEMA);
+
+    for (old, new) in [(&required, &optional), (&optional, &required)] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::RequestBodyRequirednessChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
+fn a_request_body_changing_type_and_requiredness_reports_both() {
+    let optional_string = REQUEST_BODY_STRING.replace("required: true", "required: false");
+    let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("listPets", &optional_string, PET_REF), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::RequestBodyRequirednessChanged,
+            ChangeKind::RequestBodyTypeChanged
+        ],
         "{:?}",
         report.changes
     );
