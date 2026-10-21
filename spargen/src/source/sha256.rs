@@ -115,13 +115,16 @@ mod tests {
         );
     }
 
-    /// Every corpus case in `corpus/manifest.toml` records the `sha256` of its pinned file, and
-    /// nothing verified it — so a corpus file could be edited, or an LFS fetch could return the
-    /// wrong revision, and every corpus expectation would silently be about a different document.
-    /// This lives here because `sha256_hex` is crate-private; it doubles as a check of the
-    /// hand-rolled hasher against multi-megabyte real-world inputs.
+    /// The hand-rolled hasher agrees with the `sha2` crate on every pinned corpus file: real-world
+    /// inputs up to several megabytes, whose lengths land on padding cases the NIST vectors above
+    /// do not reach. That each file still hashes to the `sha256` its manifest case pins is
+    /// `every_pinned_spec_matches_the_hash_the_manifest_declares` in
+    /// `spargen/tests/corpus_manifest.rs`; this test lives here only because `sha256_hex` is
+    /// crate-private.
     #[test]
-    fn the_pinned_corpus_files_still_hash_to_their_manifest_sha256() {
+    fn the_hasher_agrees_with_sha2_on_every_pinned_corpus_file() {
+        use sha2::{Digest, Sha256};
+
         // A packaged `.crate` ships no corpus, so the check is skipped there — gated on the
         // workspace marker, not on the file, so that inside the repository a missing or renamed
         // manifest fails instead of passing with a line on stderr nobody reads.
@@ -132,35 +135,27 @@ mod tests {
         let root = root.as_path();
         let manifest = read_repo_file(root, "corpus/manifest.toml");
 
-        // The manifest is a list of `[[case]]` tables; `path` and `sha256` are the two keys here.
-        fn value(line: &str) -> &str {
-            line.split_once('=')
-                .map(|(_, value)| value.trim().trim_matches('"'))
-                .expect("a key line carries a value")
-        }
-
+        // The manifest is a list of `[[case]]` tables; `path` is the one key read here.
         let mut checked = 0usize;
-        let mut path: Option<&str> = None;
         for line in manifest.lines() {
-            if line.starts_with("path = ") {
-                path = Some(value(line));
-            } else if line.starts_with("sha256 = ") {
-                let expected = value(line);
-                let relative = path.take().expect("`path` precedes `sha256` in each case");
-                let file = root.join("corpus").join(relative);
-                let bytes = std::fs::read(&file)
-                    .unwrap_or_else(|error| panic!("{} is missing: {error}", file.display()));
-                assert_eq!(
-                    sha256_hex(&bytes),
-                    expected,
-                    "`{relative}` no longer matches the sha256 pinned in corpus/manifest.toml"
-                );
-                checked += 1;
-            }
+            let Some(relative) = line.strip_prefix("path = ") else {
+                continue;
+            };
+            let relative = relative.trim().trim_matches('"');
+            let file = root.join("corpus").join(relative);
+            let bytes = std::fs::read(&file)
+                .unwrap_or_else(|error| panic!("{} is missing: {error}", file.display()));
+            assert_eq!(
+                sha256_hex(&bytes),
+                format!("{:x}", Sha256::digest(&bytes)),
+                "the hasher disagrees with `sha2` on `{relative}` ({} bytes)",
+                bytes.len()
+            );
+            checked += 1;
         }
         assert!(
             checked >= 9,
-            "expected every manifest case to carry a sha256; checked {checked}"
+            "expected every manifest case to name its pinned file; checked {checked}"
         );
     }
 
