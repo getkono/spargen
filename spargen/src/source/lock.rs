@@ -22,6 +22,7 @@
 //! carries `retrieval_url = "…"` after `url`: where the redirects ended, which is the base its
 //! relative `$ref`s resolve against.
 
+use std::collections::HashMap;
 #[cfg(feature = "remote-fetch")]
 use std::fmt::Write as _;
 
@@ -117,6 +118,8 @@ impl Lock {
         let mut lock = Lock::default();
         let mut version_seen = false;
         let mut current: Option<PartialEntry> = None;
+        // The line of each pinned URL's `url` key, so a second table for it can name the first.
+        let mut pinned: HashMap<String, usize> = HashMap::new();
 
         for (lineno, raw) in text.lines().enumerate() {
             let line = strip_comment(raw).trim();
@@ -125,7 +128,7 @@ impl Lock {
             }
             if line == "[[remote]]" {
                 if let Some(entry) = current.take() {
-                    lock.push_partial(entry, lineno)?;
+                    lock.push_partial(entry, lineno, &mut pinned)?;
                 }
                 current = Some(PartialEntry::default());
                 continue;
@@ -145,18 +148,30 @@ impl Lock {
                         lineno + 1
                     ))
                 })?;
-                match key {
-                    "url" => entry.url = Some(text),
-                    "retrieval_url" => entry.retrieval_url = Some(text),
-                    "sha256" => entry.sha256 = Some(text),
-                    "path" => entry.path = Some(text),
+                let slot = match key {
+                    "url" => {
+                        entry.url_line = lineno + 1;
+                        &mut entry.url
+                    }
+                    "retrieval_url" => &mut entry.retrieval_url,
+                    "sha256" => &mut entry.sha256,
+                    "path" => &mut entry.path,
                     other => {
                         return Err(LockError(format!(
                             "spargen.lock line {}: unknown key `{other}` in [[remote]]",
                             lineno + 1
                         )))
                     }
+                };
+                // A repeated key would otherwise let its later value silently replace the earlier
+                // one, pinning whichever of two conflicting values happens to come last.
+                if slot.is_some() {
+                    return Err(LockError(format!(
+                        "spargen.lock line {}: duplicate key `{key}` in [[remote]]",
+                        lineno + 1
+                    )));
                 }
+                *slot = Some(text);
             } else if key == "version" {
                 let version: u32 = value.parse().map_err(|_| {
                     LockError(format!("spargen.lock line {}: invalid version", lineno + 1))
@@ -175,7 +190,7 @@ impl Lock {
             }
         }
         if let Some(entry) = current.take() {
-            lock.push_partial(entry, text.lines().count())?;
+            lock.push_partial(entry, text.lines().count(), &mut pinned)?;
         }
         if !version_seen {
             return Err(LockError("spargen.lock is missing `version`".to_owned()));
@@ -184,13 +199,28 @@ impl Lock {
         Ok(lock)
     }
 
-    fn push_partial(&mut self, partial: PartialEntry, lineno: usize) -> Result<(), LockError> {
+    fn push_partial(
+        &mut self,
+        partial: PartialEntry,
+        lineno: usize,
+        pinned: &mut HashMap<String, usize>,
+    ) -> Result<(), LockError> {
+        let url_line = partial.url_line;
         let mut entry = partial.finish().ok_or_else(|| {
             LockError(format!(
                 "spargen.lock: [[remote]] before line {} is missing url/sha256/path",
                 lineno + 1
             ))
         })?;
+        // One URL pins one hash: `get` answers with a single entry, so a second table for the
+        // same URL would leave which of the two is verified against up to their order.
+        if let Some(first) = pinned.get(&entry.url) {
+            return Err(LockError(format!(
+                "spargen.lock line {url_line}: url `{}` is already pinned by the [[remote]] at line {first}",
+                entry.url
+            )));
+        }
+        pinned.insert(entry.url.clone(), url_line);
         // Security: `path` is later joined onto the vendor dir and read from disk. A hand-edited or
         // committed lock must never be able to point that read outside the vendor directory, so an
         // absolute path, a drive/root prefix, or any `..` component is rejected here — before any
@@ -251,6 +281,8 @@ struct PartialEntry {
     sha256: Option<String>,
     path: Option<String>,
     retrieval_url: Option<String>,
+    /// The 1-based line of the table's `url` key, once read.
+    url_line: usize,
 }
 
 impl PartialEntry {
@@ -467,6 +499,47 @@ mod tests {
         });
         let toml = lock.to_toml();
         assert_eq!(Lock::parse(&toml).unwrap(), lock, "{toml}");
+    }
+
+    /// A key given twice in one `[[remote]]` table is rejected at its second occurrence, naming
+    /// that line, rather than the later value silently replacing the earlier one (#719).
+    #[test]
+    fn rejects_a_key_repeated_in_one_remote_table() {
+        for (key, value) in [
+            ("url", "https://h/b.yaml"),
+            ("retrieval_url", "https://h/c.yaml"),
+            ("sha256", "b"),
+            ("path", "h/b.yaml"),
+        ] {
+            let text = format!(
+                "version = 1\n[[remote]]\nurl = \"https://h/a.yaml\"\n\
+                 retrieval_url = \"https://h/r.yaml\"\nsha256 = \"a\"\npath = \"h/a.yaml\"\n\
+                 {key} = \"{value}\"\n"
+            );
+            let err = Lock::parse(&text).unwrap_err();
+            assert!(
+                err.0.contains("line 7") && err.0.contains(&format!("duplicate key `{key}`")),
+                "{err}"
+            );
+        }
+    }
+
+    /// A second `[[remote]]` table for a URL an earlier table already pins is rejected, naming
+    /// the line of its `url` and of the earlier pin's, so a lock never holds two hashes for one
+    /// URL (#719). The check runs whatever the tables' order and whether their pins agree.
+    #[test]
+    fn rejects_a_second_remote_table_for_an_already_pinned_url() {
+        let text = "version = 1\n\
+                    [[remote]]\nurl = \"https://h/a.yaml\"\nsha256 = \"a\"\npath = \"h/a.yaml\"\n\
+                    [[remote]]\nurl = \"https://h/b.yaml\"\nsha256 = \"c\"\npath = \"h/b.yaml\"\n\
+                    [[remote]]\nsha256 = \"a\"\npath = \"h/a.yaml\"\nurl = \"https://h/a.yaml\"\n";
+        let err = Lock::parse(text).unwrap_err();
+        assert!(
+            err.0.contains("line 13")
+                && err.0.contains("`https://h/a.yaml`")
+                && err.0.contains("line 3"),
+            "{err}"
+        );
     }
 
     #[test]
