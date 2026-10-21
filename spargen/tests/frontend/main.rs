@@ -41,6 +41,7 @@ mod recursion;
 mod ref_siblings;
 mod refs;
 mod responses;
+mod schema_keywords;
 mod schemas;
 mod security;
 mod servers;
