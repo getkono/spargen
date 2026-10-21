@@ -188,6 +188,10 @@ fn audit_in(
                 continue;
             }
         }
+        let wiring = required
+            .conditional
+            .filter(|_| required.optional)
+            .map(|feature| (feature, required.dependency.name));
         check_dependency(
             &manifest,
             workspace,
@@ -203,25 +207,18 @@ fn audit_in(
             target,
             &mut diagnostics,
         );
-    }
-
-    if declares_feature(&manifest, "blocking") {
-        let wired = manifest
-            .get("features")
-            .and_then(|value| value.get("blocking"))
-            .and_then(toml::Value::as_array)
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .filter_map(toml::Value::as_str)
-                    .any(enables_tokio)
-            });
-        if !wired {
-            diagnostics.push(diagnostic(
-                audited,
-                "Cargo feature `blocking` must enable the native optional dependency with `blocking = [\"dep:tokio\"]`"
-                    .to_owned(),
-            ));
+        // An optional requirement is reachable only through the consumer feature that requires
+        // it, so that feature has to enable it.
+        if let Some((feature, dependency)) = wiring {
+            if !feature_enables(&manifest, feature, dependency) {
+                diagnostics.push(diagnostic(
+                    audited,
+                    format!(
+                        "Cargo feature `{feature}` must enable the native optional dependency \
+                         with `{feature} = [\"dep:{dependency}\"]`"
+                    ),
+                ));
+            }
         }
     }
 
@@ -233,15 +230,32 @@ fn audit_in(
     }
 }
 
-/// Whether one entry of a Cargo feature's list enables the optional `tokio` dependency:
-/// `"dep:tokio"`, the implicit feature `"tokio"`, or a dependency feature `"tokio/<feature>"`,
-/// which enables the dependency along with its feature. The weak form `"tokio?/<feature>"` enables
-/// a feature only of a tokio something else already enables, so it does not count.
-fn enables_tokio(item: &str) -> bool {
-    item == "dep:tokio"
-        || item == "tokio"
+/// Whether the consumer manifest's Cargo feature `feature` lists an entry that enables the
+/// optional dependency `dependency`.
+fn feature_enables(manifest: &toml::Value, feature: &str, dependency: &str) -> bool {
+    manifest
+        .get("features")
+        .and_then(|value| value.get(feature))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .any(|item| enables(item, dependency))
+        })
+}
+
+/// Whether one entry of a Cargo feature's list enables the optional dependency `dependency`:
+/// `"dep:<dependency>"`, the implicit feature `"<dependency>"`, or a dependency feature
+/// `"<dependency>/<feature>"`, which enables the dependency along with its feature. The weak form
+/// `"<dependency>?/<feature>"` enables a feature only of a dependency something else already
+/// enables, so it does not count.
+fn enables(item: &str, dependency: &str) -> bool {
+    item.strip_prefix("dep:") == Some(dependency)
+        || item == dependency
         || item
-            .strip_prefix("tokio/")
+            .strip_prefix(dependency)
+            .and_then(|rest| rest.strip_prefix('/'))
             .is_some_and(|feature| !feature.is_empty())
 }
 
