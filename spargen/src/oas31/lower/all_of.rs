@@ -746,13 +746,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut contributions = Vec::new();
         // Recorded only to count the composition's own unions beside the one written here.
         let mut union_members = Vec::new();
+        // The ids each of the composition's own union members was lowered into, held unmerged for
+        // the meet (#678), elided once the meet replaced them.
+        let mut lowerings = Vec::new();
         self.in_composition(|ctx| {
             ctx.gather_all_of_recording_unions(
                 &composition,
                 &composition_hint,
                 &mut contributions,
                 &mut union_members,
-                &mut Vec::new(),
+                &mut lowerings,
             )
         })?;
         if self.several_unions_beside_object(&union_members, &contributions, real_union(&union)) {
@@ -787,7 +790,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|(member, refiner)| (member.as_ref(), *refiner)),
         );
-        self.meet_union_with_all_of(
+        let met = self.meet_union_with_all_of(
             schema,
             hint,
             composed,
@@ -795,7 +798,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             &union,
             &format!("{hint}Union"),
             MetUnion::BesideAllOf,
-        )
+        );
+        // A composition union member's own lowering is an input to the meet, as it is in the
+        // `allOf` spelling ([`Self::combine_scalar_union_members`]): held unmerged, it was
+        // emitted as a public union of indistinguishable variants nothing referred to.
+        if let Some(met) = met.filter(|met| !self.is_reservation(met.id)) {
+            for (_, lowered) in lowerings {
+                if !lowered.contains(&met.id.0) {
+                    self.elide_unused_union_lowering(lowered);
+                }
+            }
+        }
+        met
     }
 
     /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), on a
