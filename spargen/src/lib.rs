@@ -837,9 +837,9 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `spec.path`,
 /// writing copies under `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec.
 ///
-/// This is the **only** spargen entry point that performs network I/O — `generate` and `check`
-/// resolve remote refs purely from the vendored, pinned copies this step produces, so builds stay
-/// hermetic. Backed by `reqwest` and gated behind the `remote-fetch` feature (implied by `cli`).
+/// This step fetches each remote document over HTTP(S) through `reqwest`; `generate` and `check`
+/// resolve remote refs purely from the vendored, pinned copies it produces, so builds stay
+/// hermetic. Gated behind the `remote-fetch` feature (implied by `cli`).
 #[cfg(feature = "remote-fetch")]
 pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
