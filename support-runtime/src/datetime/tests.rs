@@ -74,6 +74,26 @@ fn date_rejects_malformed_and_over_long_input() {
     assert!(serde_json::from_str::<Date>("\"2023-02-30\"").is_err());
 }
 
+/// Integer `FromStr` accepts a leading sign, so each field must be checked as ASCII digits:
+/// otherwise `-001-01-02` reads as year -1, which `Serialize` then refuses to write.
+#[test]
+fn date_rejects_a_sign_prefixed_field() {
+    for text in [
+        "2023-+1-+4",
+        "2023-+1-04",
+        "2023-01-+4",
+        "+023-01-04",
+        "-001-01-02",
+        "-023-11-14",
+    ] {
+        assert!(text.parse::<Date>().is_err(), "{text}");
+        assert!(
+            serde_json::from_str::<Date>(&format!("\"{text}\"")).is_err(),
+            "{text}"
+        );
+    }
+}
+
 /// `Display` must never fail: generated code renders a `multipart/form-data` text part and a
 /// `text/plain` body through `to_string()`, which panics on a `Display` error. A year outside
 /// RFC 3339's four-digit range is constructible (`time` holds -9999..=9999), so this is
@@ -147,17 +167,16 @@ fn is_full_date_shape(text: &str) -> bool {
         })
 }
 
-/// Strings of digits and dashes whose first byte is a digit, biased toward the `YYYY-MM-DD`
-/// shape so a good share of cases reach acceptance: well-formed calendar fields, then the
-/// ten-byte shape with either separator possibly a digit, then free strings of 8 to 12 bytes.
-///
-/// The first byte stays a digit because the parser still accepts a leading `-` on the year
-/// (`-023-11-14`, issue #690), which is not canonical; widen the alphabet once that lands.
+/// Strings of digits, dashes and plus signs, biased toward the `YYYY-MM-DD` shape so a good
+/// share of cases reach acceptance: well-formed calendar fields, then the ten-byte shape with
+/// either separator possibly a digit, then that shape with a sign possibly opening any field,
+/// then free strings of 8 to 12 bytes.
 fn digit_dash_string() -> impl proptest::strategy::Strategy<Value = String> {
     proptest::prop_oneof![
         2 => "[0-9]{4}-(0[0-9]|1[0-3])-([0-2][0-9]|3[0-2])",
         1 => "[0-9]{4}[0-9-][0-9]{2}[0-9-][0-9]{2}",
-        1 => "[0-9][0-9-]{7,11}",
+        1 => "[0-9+-][0-9]{3}-[0-9+-][0-9]-[0-9+-][0-9]",
+        1 => "[0-9+-]{8,12}",
     ]
 }
 
@@ -198,7 +217,7 @@ proptest::proptest! {
         proptest::prop_assert!(text.parse::<Date>().is_err(), "{}", text);
     }
 
-    /// Over strings of digits and dashes that open with a digit, whatever the parser accepts
+    /// Over strings of digits, dashes and plus signs, whatever the parser accepts
     /// is exactly the canonical `YYYY-MM-DD` rendering of what it read.
     #[test]
     fn an_accepted_digit_string_is_the_canonical_full_date(text in digit_dash_string()) {
