@@ -143,6 +143,35 @@ fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
     }
 }
 
+/// A file name with no `.json`/`.yaml`/`.yml` extension is parsed as YAML, then as JSON (#717).
+/// The YAML attempt's diagnostics are discarded when the JSON parse succeeds, so JSON spelling a
+/// character as a UTF-16 surrogate pair, which YAML refuses (its `\u` escape names one code
+/// point), generates cleanly under `spec.txt`.
+#[test]
+fn e011_an_extensionless_json_document_yaml_refuses_falls_back_to_json() {
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T😀", "version": "1.0.0"}, "paths": {}}"#;
+    // The premise: the same text under a YAML name is refused, so the fallback is what accepts it.
+    let (yaml_named, _, _) = generate_and_check_files(&[("openapi.yaml", json)]);
+    assert_eq!(yaml_named.outcome(), Outcome::Rejected, "{yaml_named:#?}");
+    let (generated, checked, _) = generate_and_check_files(&[("spec.txt", json)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
+/// An extensionless document neither parser accepts is reported once, with the YAML attempt's
+/// `E011`, rather than once per attempt (#717).
+#[test]
+fn e011_an_extensionless_document_neither_parser_accepts_reports_one_e011() {
+    let (generated, checked, _) =
+        generate_and_check_files(&[("spec.txt", "{\n\t\"openapi\": [\n")]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_with_code(report, Code::InvalidInput);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(messages[0].starts_with("malformed YAML"), "{report:#?}");
+    }
+}
+
 #[test]
 fn e011_yaml_aliases_that_expand_past_the_node_budget_are_rejected_in_the_levels() {
     // Issue #708: every alias expanded to a deep clone of its anchored node with no budget, so
