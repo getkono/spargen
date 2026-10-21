@@ -167,8 +167,9 @@ paths:
 #[test]
 fn e011_server_url_with_malformed_braces() {
     // Regression for #705: an unmatched `{`, as in `https://{host`, is rejected as `E011` at the
-    // server rather than generating a base URL that carries a literal `{host`. The template grammar admits a brace only as one side of a
-    // `{name}` reference with a non-empty name, so every other brace is rejected at the server.
+    // server rather than generating a base URL that carries a literal `{host`. The template
+    // grammar admits a brace only as one side of a `{name}` reference with a non-empty name, so
+    // every other brace is rejected at the server.
     for url in [
         "https://{host",
         "https://{host}.example.com/{base",
