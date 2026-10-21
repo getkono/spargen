@@ -295,6 +295,64 @@ fn e011_a_yaml_alias_key_past_the_node_budget_is_reported_at_its_mapping() {
     }
 }
 
+/// A document whose `x-deep` holds `depth` nested block sequences around the scalar `x`, written
+/// compactly on one line (`- - - x`), so the scalar sits at depth `depth + 1`.
+fn yaml_block_sequences(depth: usize) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\nx-deep:\n  {}x\n",
+        "- ".repeat(depth)
+    )
+}
+
+#[test]
+fn e011_yaml_nesting_past_the_depth_cap_is_rejected_at_the_node_that_crosses_it() {
+    // Issue #706: the JSON parser capped nesting at 256 levels, but the YAML builder recursed once
+    // per block sequence or mapping with no cap, and block-style nesting is not bounded by the
+    // event parser, so this million-level document overflowed even the frontend thread's 64 MiB
+    // stack and aborted the process. It is now `E011`, at the first node past the cap.
+    let spec = yaml_block_sequences(1_000_000);
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{:?}",
+            report.outcome()
+        );
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 among {} diagnostics", report.diagnostics().len()));
+        assert!(
+            diag.message.contains("YAML nesting is too deep"),
+            "{}",
+            diag.message
+        );
+        // `x-deep` is the first sequence, at depth 1, so the 257th, at depth 257, is the first
+        // node past the cap, and it is item 0 of each of the 256 sequences that hold it.
+        assert_eq!(
+            diag.pointer.as_str(),
+            format!("/x-deep{}", "/0".repeat(256)),
+            "{}",
+            diag.message
+        );
+        let start = diag.span.expect("span").start;
+        assert_eq!(
+            (start.line, start.col),
+            (5, 3 + 2 * 256),
+            "{}",
+            diag.message
+        );
+    }
+
+    // The deepest nesting the cap admits, a scalar at depth 256, still generates.
+    let spec = yaml_block_sequences(255);
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
 #[test]
 fn oas32_document_with_compatible_constructs_generates() {
     // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
