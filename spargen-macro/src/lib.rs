@@ -11,13 +11,13 @@ use syn::{braced, parenthesized, Ident, LitInt, LitStr, Token};
 pub fn generate_api(input: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(input as Args);
     match expand(&args) {
-        // Cross a string boundary and let the compiler re-tokenize the generated source on its own
-        // thread. The tokens from `expand` were built under proc-macro2's fallback (see there), so
-        // this reparse — on the real macro server thread — is what binds real spans to the output.
-        Ok(tokens) => match tokens.to_string().parse() {
+        // `expand` hands back source text, built off the compiler bridge (see `FallbackGuard`).
+        // Tokenizing it here, once, on the real macro server thread, is what binds real spans to
+        // the output.
+        Ok(source) => match source.parse() {
             Ok(stream) => stream,
             Err(error) => syn::Error::new(
-                proc_macro2::Span::call_site(),
+                args.spec.span(),
                 format!("spargen produced code that failed to tokenize: {error}"),
             )
             .to_compile_error()
@@ -145,7 +145,9 @@ impl Parse for Args {
     }
 }
 
-fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
+/// The source `generate_api!` expands to: the generated module followed by its `tracking` items,
+/// as text for `generate_api` to tokenize.
+fn expand(args: &Args) -> syn::Result<String> {
     let raw = args.spec.value();
     let consumer = Consumer::locate(
         std::env::var_os("CARGO_MANIFEST_PATH"),
@@ -154,7 +156,8 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     .map_err(|message| syn::Error::new(args.spec.span(), message))?;
     let config = spec_for(args, &consumer)?;
 
-    // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
+    // Keep spargen's codegen (and the `tracking` tokens below) off the compiler bridge; restored
+    // on drop.
     let _fallback = FallbackGuard::force();
     let preview = spargen::__private::preview_for_macro(&config, &consumer.manifest);
 
@@ -163,18 +166,8 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let source = preview.contents.as_ref().expect("checked above");
-    let generated: proc_macro2::TokenStream = source.parse().map_err(|error| {
-        syn::Error::new(
-            args.spec.span(),
-            format!("spargen produced code that failed to tokenize: {error}"),
-        )
-    })?;
-
-    let tracks = tracking(&preview);
-    Ok(quote! {
-        #generated
-        #tracks
-    })
+    // The newline ends a line comment the module may close on, so it cannot swallow the items.
+    Ok(format!("{source}\n{}", tracking(&preview)))
 }
 
 /// The `Spec` `expand` generates from: the spec path resolved against the consumer, the
