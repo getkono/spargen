@@ -11,7 +11,6 @@ use crate::ir::{
 use crate::name::{Names, OperationBindings};
 
 use super::responses::response_payload_ty_tokens;
-use super::runtime::to_pascal;
 use super::ty::ty_tokens;
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
@@ -69,7 +68,7 @@ pub(super) fn error_branch_tokens(
     operation: &Operation,
     api: &Api,
     names: &Names,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> TokenStream {
     let error_ty = quote! { #error_ident };
     let error_shape = operation.responses.error();
@@ -198,7 +197,7 @@ pub(super) fn success_decode_tokens(
     names: &Names,
     bindings: &OperationBindings,
     success_ty: &TokenStream,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> (TokenStream, Option<TokenStream>) {
     let request_binding = &bindings.request;
     let reconnect_request_binding = &bindings.reconnect_request;
@@ -234,11 +233,7 @@ pub(super) fn success_decode_tokens(
         // variant is an unexpected-status error — there is no untyped fallback. Every body an
         // error keeps goes through a runtime helper that caps it at `max_error_body`.
         SuccessShape::Enum(entries) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let enum_ident = success_enum_ident(method_ident);
+            let enum_ident = success_enum_ident(operation, names);
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
@@ -379,20 +374,34 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let ident = success_enum_ident(method_ident);
+            let ident = success_enum_ident(operation, names);
             quote! { #ident }
         }
     }
 }
 
-/// The type name of an operation's multi-status success response enum, derived from the method name
-/// (mirroring how the error enum is named `{Method}Error`).
-pub(super) fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
-    format_ident!("{}Response", to_pascal(method_ident.as_str()))
+/// The type name of an operation's multi-status success response enum, `{Method}Response` as
+/// [`Names::success_enums`] allocates it.
+pub(super) fn success_enum_ident<'a>(
+    operation: &Operation,
+    names: &'a Names,
+) -> &'a crate::name::Ident {
+    names
+        .success_enums
+        .get(&operation.id)
+        .expect("success enum name allocated for an enum-shaped success")
+}
+
+/// The type name of an operation's error type, `{Method}Error` or `{Method}OperationError` as
+/// [`Names::operation_errors`] allocates it.
+pub(super) fn error_type_ident<'a>(
+    operation: &Operation,
+    names: &'a Names,
+) -> &'a crate::name::Ident {
+    names
+        .operation_errors
+        .get(&operation.id)
+        .expect("error type name allocated")
 }
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact

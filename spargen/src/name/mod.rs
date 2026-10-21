@@ -33,6 +33,16 @@ pub(crate) struct Names {
     pub(crate) operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
+    /// Error type name per operation: `{Method}Error`, or `{Method}OperationError` where the first
+    /// form would shadow a root re-export. Allocated in the root scope with the `…Params` structs
+    /// and the success enums, so two operations whose methods PascalCase alike (`get_v2` and
+    /// `get_v_2`), or whose plain and widened forms meet (`request` and `requestOperation`), get
+    /// distinct types.
+    pub(crate) operation_errors: HashMap<OperationId, Ident>,
+    /// `{Method}Response` success-enum name per operation whose
+    /// [`Responses::success`](crate::ir::Responses::success) is an enum, allocated in the root
+    /// scope beside [`Names::operation_errors`].
+    pub(crate) success_enums: HashMap<OperationId, Ident>,
     /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
     /// parameters are allocated in the same scope first, so these identifiers can never shadow
     /// caller-provided values.
@@ -123,6 +133,75 @@ pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
 /// for a free-form variable; like the others it is reserved unconditionally, so a server's name
 /// does not change when such a variable is added.
 pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
+
+/// The names every generated module re-exports from the embedded runtime into its root, in the
+/// order `codegen` emits them.
+///
+/// The embedded `support` module is private, so this list and its two conditional siblings are the
+/// whole nameable runtime surface of a generated client, and so part of its semver surface. It has
+/// to cover every type that appears in a signature the output emits: `HeaderError` is the return
+/// type of each `…Headers::from_headers`, `RetryWait` is what a caller's `RetryPolicy` must return,
+/// `ClientCore` is what `Client::core` hands back, and the taxonomy's payload types are matched on.
+/// Anything short of that leaves a generated signature a caller can call but cannot write down.
+/// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
+/// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
+/// types gets none). `ApiErrorProblem` is the bound `Error::problem` needs, implemented by every
+/// error shape, and `ProblemDetails` is what that reader returns.
+///
+/// `codegen` emits the root `pub use` from these lists and the root scope [`allocate`] draws the
+/// operation types from reserves them, so the two read one source.
+/// `spargen/tests/reexport_lists.rs` holds each name to the embedded `support` module's own
+/// re-exports, and pins the emitted root surface as a golden file.
+pub(crate) const ROOT_REEXPORTS: &[&str] = &[
+    "ApiErrorBody",
+    "ApiErrorProblem",
+    "AuthError",
+    "ClientConfig",
+    "ClientCore",
+    "Credential",
+    "Error",
+    "ExecuteFuture",
+    "ExposeSecret",
+    "HeaderError",
+    "HeaderShape",
+    "HttpBackend",
+    "LinkPaginator",
+    "Middleware",
+    "MiddlewareBackend",
+    "Next",
+    "ProblemDetails",
+    "ProtocolError",
+    "RedirectError",
+    "RequestCause",
+    "RequestError",
+    "ReqwestBackend",
+    "ResponseValue",
+    "RetryBackend",
+    "RetryOutcome",
+    "RetryPolicy",
+    "RetryWait",
+    "SecretString",
+    "TimeoutKind",
+    "TokenFuture",
+    "TokenProvider",
+    "TransportError",
+    "exponential_backoff",
+    "next_link",
+];
+
+/// The root re-exports emitted only when the API has a sequential (streaming) response.
+pub(crate) const STREAM_ROOT_REEXPORTS: &[&str] = &[
+    "EventStream",
+    "ReconnectPolicy",
+    "ReconnectReason",
+    "ReconnectWait",
+    "StreamError",
+];
+
+/// The root re-exports emitted only when a date-typed primitive survives lowering with the `time`
+/// mapping on. `DateParseError` is the `FromStr` error of the other two, so `"…".parse::<Date>()`
+/// yields a `Result` whose error type a caller can write down.
+pub(crate) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateParseError", "DateTime"];
 
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
@@ -262,7 +341,22 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     for method in CLIENT_METHODS {
         operation_scope.reserve(method, IdentRole::Method);
     }
-    let mut params_scope = Scope::default();
+    // The `…Params` structs, the error types, and the success enums are all declared in the
+    // generated module's root beside the runtime re-exports, so they are drawn from one scope that
+    // holds those re-exports first. The names a type can take there are reserved; the function
+    // re-exports live in the value namespace and are not.
+    let mut root_scope = Scope::default();
+    for name in [
+        ROOT_REEXPORTS,
+        STREAM_ROOT_REEXPORTS,
+        DATETIME_ROOT_REEXPORTS,
+    ]
+    .concat()
+    .into_iter()
+    .filter(|name| name.starts_with(|ch: char| ch.is_ascii_uppercase()))
+    {
+        root_scope.reserve(name, IdentRole::Type);
+    }
     for operation in &api.operations {
         names.operations.insert(
             operation.id.clone(),
@@ -274,7 +368,7 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
         );
         names.params_structs.insert(
             operation.id.clone(),
-            params_scope.alloc(
+            root_scope.alloc(
                 &format!("{} params", operation.id.0),
                 IdentRole::Type,
                 &operation.provenance.pointer,
@@ -321,6 +415,7 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             },
         );
     }
+    allocate_operation_types(api, &mut names, &mut root_scope);
 
     for (id, def) in api.types.iter() {
         match &def.kind {
@@ -389,6 +484,101 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     }
 
     names
+}
+
+/// Allocate each operation's error type and, where its success is an enum, its success enum, in the
+/// root `scope`, after every operation's method name is allocated.
+///
+/// Each name is derived from the operation's method, which is unique, but two methods can
+/// PascalCase alike (`get_v2` and `get_v_2` both give `GetV2`), and the widened error form of one
+/// operation can be the plain form of another (`request` widens to `RequestOperationError`, the
+/// plain form of `requestOperation`). Each family is allocated as one ranked batch, so which of two
+/// contending operations keeps the bare spelling depends on the operations and not on the order
+/// the spec lists them in: a plain error form wins over a widened one, then the lexically smaller
+/// method. The loser takes a suffix seeded from its operation's pointer.
+///
+/// The widening reads the *union* of the root re-exports, the conditional ones included, so an
+/// operation's type name never changes because an unrelated part of the spec started or stopped
+/// using streams or dates.
+fn allocate_operation_types(api: &Api, names: &mut Names, scope: &mut Scope) {
+    let methods: Vec<(&crate::ir::Operation, &str)> = api
+        .operations
+        .iter()
+        .map(|operation| {
+            let method = names
+                .operations
+                .get(&operation.id)
+                .expect("every operation's method is allocated before its types");
+            (operation, method.as_str().trim_start_matches("r#"))
+        })
+        .collect();
+
+    let reexported = |name: &str| {
+        [
+            ROOT_REEXPORTS,
+            STREAM_ROOT_REEXPORTS,
+            DATETIME_ROOT_REEXPORTS,
+        ]
+        .iter()
+        .any(|names| names.contains(&name))
+    };
+    let error_hints: Vec<(String, bool)> = methods
+        .iter()
+        .map(|(_, method)| {
+            let plain = format!("{method} error");
+            if reexported(escape(&plain, IdentRole::Type).as_str()) {
+                (format!("{method} operation error"), true)
+            } else {
+                (plain, false)
+            }
+        })
+        .collect();
+    let requests: Vec<_> = methods
+        .iter()
+        .zip(&error_hints)
+        .map(|((operation, method), (hint, widened))| RankedRequest {
+            hint,
+            provenance: &operation.provenance.pointer,
+            rank: (*widened, *method),
+        })
+        .collect();
+    let allocated = scope.alloc_ranked(&requests, IdentRole::Type);
+    names.operation_errors.extend(
+        methods
+            .iter()
+            .map(|(operation, _)| operation.id.clone())
+            .zip(allocated),
+    );
+
+    let enums: Vec<(&crate::ir::Operation, &str)> = methods
+        .into_iter()
+        .filter(|(operation, _)| {
+            matches!(
+                operation.responses.success(),
+                crate::ir::SuccessShape::Enum(_)
+            )
+        })
+        .collect();
+    let hints: Vec<String> = enums
+        .iter()
+        .map(|(_, method)| format!("{method} response"))
+        .collect();
+    let requests: Vec<_> = enums
+        .iter()
+        .zip(&hints)
+        .map(|((operation, method), hint)| RankedRequest {
+            hint,
+            provenance: &operation.provenance.pointer,
+            rank: *method,
+        })
+        .collect();
+    let allocated = scope.alloc_ranked(&requests, IdentRole::Type);
+    names.success_enums.extend(
+        enums
+            .iter()
+            .map(|(operation, _)| operation.id.clone())
+            .zip(allocated),
+    );
 }
 
 /// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required
@@ -773,7 +963,7 @@ mod tests {
                 "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
                 "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
                 "body", "path", "query", "url", "request", "cookies", "additional", "other",
-                "Other", "1a", "-",
+                "Other", "1a", "-", "requestOperation", "getV2", "get_v_2",
             ])
             .prop_map(str::to_owned),
         ]
@@ -990,9 +1180,12 @@ mod tests {
                 .headers
                 .iter()
                 .map(|(status, headers)| {
+                    // An operation with a request body documents a body on each success status
+                    // too, so one documenting both `200` and `201` has an enum-shaped success.
+                    let bodied = synthetic.body && *status < 300;
                     let response = Response {
-                        body: None,
-                        media: None,
+                        body: bodied.then_some(text),
+                        media: bodied.then_some(MediaType::Json),
                         stream: None,
                         headers: headers
                             .iter()
@@ -1040,7 +1233,8 @@ mod tests {
         /// Every identifier `allocate` hands out, over a whole synthetic `Api` whose hints are
         /// biased to collide, is a legal identifier and distinct within the scope it is emitted
         /// in: the `types` module (definitions and response-header structs, beside the names
-        /// that module imports), the `…Params` structs, the client methods (beside the fixed
+        /// that module imports), the module root (the `…Params` structs, the error types, and the
+        /// success enums, beside the runtime re-exports), the client methods (beside the fixed
         /// ones), each struct's fields with its overflow map, each enum's and union's variants
         /// with an open enum's catch-all, each operation's method arguments with its generator
         /// bindings and its `…Params` fields, each header struct's fields, the `servers` module
@@ -1072,7 +1266,30 @@ mod tests {
             prop_assert_eq!(names.operations.len(), operations.len());
             assert_scope("client methods", names.operations.values(), super::CLIENT_METHODS)?;
             prop_assert_eq!(names.params_structs.len(), operations.len());
-            assert_scope("params structs", names.params_structs.values(), &[])?;
+            prop_assert_eq!(names.operation_errors.len(), operations.len());
+            let enum_successes = api
+                .operations
+                .iter()
+                .filter(|operation| {
+                    matches!(operation.responses.success(), crate::ir::SuccessShape::Enum(_))
+                })
+                .count();
+            prop_assert_eq!(names.success_enums.len(), enum_successes);
+            let reexported = [
+                super::ROOT_REEXPORTS,
+                super::STREAM_ROOT_REEXPORTS,
+                super::DATETIME_ROOT_REEXPORTS,
+            ]
+            .concat();
+            assert_scope(
+                "module root",
+                names
+                    .params_structs
+                    .values()
+                    .chain(names.operation_errors.values())
+                    .chain(names.success_enums.values()),
+                &reexported,
+            )?;
 
             for (id, def) in api.types.iter() {
                 match &def.kind {

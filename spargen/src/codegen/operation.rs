@@ -8,14 +8,13 @@ use crate::name::{Names, OperationBindings};
 
 use super::body::body_send_tokens;
 use super::dispatch::{
-    attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
+    attach_auth_tokens, error_branch_tokens, error_type_ident, success_decode_tokens, success_type,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::params::{
     cookie_param_tokens, json_querystring_tokens, param_value_tokens, query_param_tokens,
     querystring_param_tokens,
 };
-use super::runtime::error_type_ident;
 use super::ty::{reqwest_method, ty_tokens};
 
 /// Emit one `#[inline] pub async fn` operation method. Its body is written out per operation: it
@@ -36,7 +35,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = error_type_ident(method_ident.as_str());
+    let error_ident = error_type_ident(operation, names);
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names);
     let error_ty = quote! { #error_ident };
@@ -201,9 +200,9 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
     });
     let body_send = body_send_tokens(operation, api, names, bindings);
     let attach_auth = attach_auth_tokens(operation, api, request_binding);
-    let error_branch = error_branch_tokens(operation, api, names, &error_ident);
+    let error_branch = error_branch_tokens(operation, api, names, error_ident);
     let (success_decode, reconnect_request_init) =
-        success_decode_tokens(operation, api, names, bindings, &success_ty, &error_ident);
+        success_decode_tokens(operation, api, names, bindings, &success_ty, error_ident);
     // The return type is shared with the blocking shim so both surfaces stay identical.
     let (return_ok_ty, _) = operation_return_ty(operation, names);
 
@@ -386,11 +385,7 @@ pub(super) fn operation_return_ty(
     operation: &Operation,
     names: &Names,
 ) -> (TokenStream, TokenStream) {
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
-    let error_ident = error_type_ident(method_ident.as_str());
+    let error_ident = error_type_ident(operation, names);
     let success_ty = success_type(operation, names);
     let return_ok_ty = match operation.responses.stream_success() {
         Some(_) => quote! { support::EventStream<#success_ty> },
