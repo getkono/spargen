@@ -969,15 +969,10 @@ pub(crate) struct LowerOptions {
 }
 
 /// Append a note as a trailing rustdoc paragraph on a type's [`Docs`], used to surface a
-/// component-root `default` on the generated named type.
+/// component-root `default` on the generated named type. An empty description counts as absent,
+/// as in [`append_text`].
 fn append_doc_note(docs: &mut Docs, note: String) {
-    match &mut docs.description {
-        Some(description) => {
-            description.push_str("\n\n");
-            description.push_str(&note);
-        }
-        None => docs.description = Some(note),
-    }
+    append_text(&mut docs.description, note);
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
