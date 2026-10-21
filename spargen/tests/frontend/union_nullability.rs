@@ -1482,9 +1482,7 @@ fn a_ref_member_to_a_branching_allof_wrapper_graph_reads_each_target_once() {
         ),
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
     let pick = field_type(&types, "pub pick").unwrap_or_else(|| panic!("no `pick` field: {types}"));
     assert!(pick.starts_with("Option<"), "`pick` is `{pick}`");

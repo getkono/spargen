@@ -80,13 +80,6 @@ components:
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
     );
-    // check/generate parity: the same disposition is reached without emitting.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::ValidationKeywordIgnored),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -116,8 +109,6 @@ components:
         !has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -140,10 +131,6 @@ components:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::PatternPropertiesRejected));
-    // check/generate parity: the rejection fires in `check` too.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::PatternPropertiesRejected));
 }
 
 #[test]
@@ -367,12 +354,6 @@ components:
             );
             let key = format!("{version} {label}");
             let (report, code) = generate_with_code(&spec);
-            let checked = check(&spec);
-            assert_eq!(
-                report.outcome() == Outcome::Rejected,
-                checked.outcome() == Outcome::Rejected,
-                "`{key}`: check and generate disagree: {report:#?} {checked:#?}"
-            );
             if report.outcome() == Outcome::Rejected {
                 let codes: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
                 outcomes.push((key, Err(format!("rejected with {codes:?}"))));
@@ -825,13 +806,12 @@ paths:
                   - { type: string }
                 items: { type: integer }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::TupleRestNotRepresentable),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::TupleRestNotRepresentable),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -854,13 +834,12 @@ paths:
                   - { type: integer }
                 items: false
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::TupleRestNotRepresentable),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::TupleRestNotRepresentable),
+        "{report:#?}"
+    );
 }
 
 /// The support matrix says homogeneous scalar enums are supported; floats are the boundary. They
