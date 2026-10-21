@@ -118,8 +118,10 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///
     /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
     /// relative target against the fetched URL) to arm the following page, then decodes the body as
-    /// `T`. Three things terminate the paginator (subsequent calls return `None`):
+    /// `T`. Four things terminate the paginator (subsequent calls return `None`):
     ///
+    /// * a request for the `next` URL that cannot be built →
+    ///   `Some(Err(Error::RequestConstruction(..)))`;
     /// * a **transport failure** → `Some(Err(..))`;
     /// * a **non-success HTTP status** (anything outside `2xx`) → `Some(Err(Error::UnexpectedStatus))`
     ///   — the body is *never* decoded as `T`, so an error payload can't masquerade as a page. The
