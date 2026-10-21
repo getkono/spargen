@@ -353,6 +353,59 @@ fn e011_yaml_nesting_past_the_depth_cap_is_rejected_at_the_node_that_crosses_it(
     assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
 }
 
+/// A document whose extensions `x-a`, `x-b`, and `x-c` each hold flow lists nested 100, 100, and
+/// `c_depth` levels deep, around `x`, `*a`, and `*b`: each anchor holds the alias of the one
+/// before, so the copies stack, and `*b` reaches 200 levels below where it is written.
+fn yaml_stacked_aliases(c_depth: usize) -> String {
+    let nested = |n: usize, inner: &str| format!("{}{inner}{}", "[".repeat(n), "]".repeat(n));
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n\
+         x-a: &a {}\nx-b: &b {}\nx-c: {}\n",
+        nested(100, "x"),
+        nested(100, "*a"),
+        nested(c_depth, "*b"),
+    )
+}
+
+#[test]
+fn e011_a_yaml_alias_whose_copy_reaches_past_the_nesting_cap_is_rejected_at_the_alias() {
+    // Issue #706: no node of the source text sits deeper than 101, but `*b` written 101 levels
+    // down expands to a copy reaching 200 levels below it, past the 256-level cap, and later
+    // stages recurse over the expanded tree, so the alias is refused where it is written.
+    let spec = yaml_stacked_aliases(100);
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 in {report:#?}"));
+        assert!(
+            diag.message.contains("YAML nesting is too deep"),
+            "{diag:#?}"
+        );
+        assert_eq!(
+            diag.pointer.as_str(),
+            format!("/x-c{}", "/0".repeat(100)),
+            "{diag:#?}"
+        );
+        let start = diag.span.expect("span").start;
+        let line = spec.lines().nth(start.line as usize - 1).expect("line");
+        assert_eq!(
+            line.chars().nth(start.col as usize - 1),
+            Some('*'),
+            "{line}"
+        );
+    }
+
+    // The same alias written 50 levels down reaches depth 251, within the cap, and expands.
+    let spec = yaml_stacked_aliases(50);
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
 #[test]
 fn oas32_document_with_compatible_constructs_generates() {
     // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
