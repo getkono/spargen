@@ -246,7 +246,6 @@ fn lower_pass(
         field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        untyped_beside_null_member: None,
         stated_nothing_took_null: None,
         held_untyped_warnings: None,
         scalar_meet_value_variants: HashSet::new(),
@@ -920,12 +919,6 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
-    /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
-    /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
-    /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
-    /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
-    untyped_beside_null_member: Option<Provenance>,
     /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
     /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
     /// held back for (#592), where that `null` was settled before the meet: hoisted onto an

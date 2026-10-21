@@ -100,7 +100,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         additional: AdditionalProps::Allow,
                     }),
                 );
-                return Some(self.with_all_of_nullability(schema, ty));
+                return Some(ty);
             };
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
                 let merged = match self.intersect_types(
@@ -160,7 +160,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|def| def.kind.clone())?;
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
-            return Some(self.with_all_of_nullability(schema, ty));
+            return Some(ty);
         }
 
         // All object members: flatten into one struct. Property union preserves first-seen order.
@@ -388,7 +388,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
         // it satisfies every member.
         ty.nullable = object_all_of_admits_null(contributions);
-        Some(self.with_all_of_nullability(schema, ty))
+        Some(ty)
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object

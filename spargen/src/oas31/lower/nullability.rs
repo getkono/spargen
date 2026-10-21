@@ -1037,16 +1037,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .is_some_and(|target| self.ref_schema_denies_null(&target, depth + 1)))
     }
 
-    /// Apply the enclosing `allOf` schema's own nullability (a `"null"` in its type array) to the
-    /// merged type. Set after the final insert — a pure mutate that preserves the last-insert
-    /// invariant.
-    pub(super) fn with_all_of_nullability(&self, schema: &Schema, mut ty: Ty) -> Ty {
-        if schema.types.types.contains(&JsonType::Null) {
-            ty.nullable = true;
-        }
-        ty
-    }
-
     /// The null type for an object `allOf` whose object meet is empty, when `null` still satisfies
     /// it: every member admits `null` and one decides it ([`object_all_of_admits_null`]). The
     /// schema's own object keywords are one of those members ([`Self::gather_all_of`]), so its

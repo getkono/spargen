@@ -955,7 +955,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|(member, refiner)| (member.as_ref(), *refiner)),
         );
-        let mut ty = self.meet_union_with_all_of(
+        self.meet_union_with_all_of(
             schema,
             hint,
             composed,
@@ -963,10 +963,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             union,
             &union_hint,
             MetUnion::AllOfMember,
-        )?;
-        // As the other `allOf` arms apply it after their merge.
-        ty = self.with_all_of_nullability(schema, ty);
-        Some(ty)
+        )
     }
 
     /// Lower the `allOf` members of untyped object or array applicators alone, which refine a
@@ -1129,8 +1126,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
         self.unmerged_union_meets_null = enclosing_meets_null;
-        let untyped_beside_null_member =
-            self.untyped_beside_null_member.take() == Some(union.provenance.clone());
         let stated_nothing_took_null = self.take_stated_nothing_took_null(&union.provenance);
         let lowered = lowered?;
         let mark = self.graph_mark();
@@ -1205,9 +1200,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let kind = self.graph.get(meet.id)?.kind.clone();
         let mut ty = self.reemit_meet(schema, hint, mark, kind);
-        // The meets gave the untyped member `null` exactly where they kept the `null` member's, so
-        // `null` is in two branches or none.
-        ty.nullable = meet.nullable && !untyped_beside_null_member;
+        ty.nullable = meet.nullable;
         ty.boxed = meet.boxed;
         self.elide_unused_union_lowering(union_mark..mark);
         Some(ty)
