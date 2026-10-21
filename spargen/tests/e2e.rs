@@ -922,47 +922,127 @@ fn an_operation_named_after_a_client_method_still_compiles() {
 /// type is widened to `RequestOperationError` beside the runtime's `RequestError`, which is the
 /// plain form of `requestOperation`'s. `getV2` and `get_v_2` allocate the distinct methods `get_v2`
 /// and `get_v_2`, which both PascalCase to `GetV2`; each documents two success bodies and an error
-/// body, so each emits a `…Response` enum and a `…Error` type. The paths list the losers first, so
-/// the bare spellings are shown not to follow document order.
-const OPERATION_TYPE_COLLISION_SPEC: &str = r#"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
+/// body, so each emits a `…Response` enum and a `…Error` type. Each block is one path; the test
+/// generates them in this order, which lists each losing operation before its winner, and reversed.
+const OPERATION_TYPE_COLLISION_PATHS: [&str; 4] = [
+    r#"
   /request:
-    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }"#,
+    r#"
   /request-operation:
-    get: { operationId: requestOperation, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: integer } } } } } }
+    get: { operationId: requestOperation, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: integer } } } } } }"#,
+    r#"
   /get-v-2:
     get:
       operationId: get_v_2
       responses:
         "200": { description: ok, content: { application/json: { schema: { type: string } } } }
         "201": { description: created, content: { application/json: { schema: { type: integer } } } }
-        "404": { description: nf, content: { application/json: { schema: { type: string } } } }
+        "404": { description: nf, content: { application/json: { schema: { type: string } } } }"#,
+    r#"
   /get-v2:
     get:
       operationId: getV2
       responses:
         "200": { description: ok, content: { application/json: { schema: { type: boolean } } } }
         "201": { description: created, content: { application/json: { schema: { type: number } } } }
-        "404": { description: nf, content: { application/json: { schema: { type: integer } } } }
-"#;
+        "404": { description: nf, content: { application/json: { schema: { type: integer } } } }"#,
+];
+
+/// The collision spec with its [`OPERATION_TYPE_COLLISION_PATHS`] in the given order.
+fn operation_type_collision_spec<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    let mut spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:".to_owned();
+    spec.extend(paths);
+    spec.push('\n');
+    spec
+}
+
+/// The return type of the generated operation method `method`, whitespace removed.
+fn operation_return_type(generated: &str, method: &str) -> String {
+    let (_, rest) = generated
+        .split_once(&format!("pub async fn {method}("))
+        .unwrap_or_else(|| panic!("no operation method `{method}`:\n{generated}"));
+    let (_, rest) = rest.split_once("->").unwrap();
+    let (ret, _) = rest.split_once('{').unwrap();
+    ret.split_whitespace().collect()
+}
+
+/// Which operation keeps each contested spelling: `requestOperation` keeps `RequestOperationError`
+/// because a plain form beats `request`'s widened one, and `getV2` (method `get_v2`) keeps
+/// `GetV2Response` and `GetV2Error` because `get_v2` sorts before `get_v_2`. The loser of each
+/// takes a suffixed form of the name.
+fn assert_contested_names_won_by_rank(generated: &str) {
+    let request_operation = operation_return_type(generated, "request_operation");
+    assert!(
+        request_operation.contains("support::Error<RequestOperationError>"),
+        "`requestOperation` keeps the plain `RequestOperationError`: {request_operation}"
+    );
+    let request = operation_return_type(generated, "request");
+    assert!(
+        request.contains("support::Error<RequestOperationError")
+            && !request.contains("support::Error<RequestOperationError>"),
+        "`request` takes a suffixed `RequestOperationError…`: {request}"
+    );
+    let get_v2 = operation_return_type(generated, "get_v2");
+    assert!(
+        get_v2.contains("ResponseValue<GetV2Response>")
+            && get_v2.contains("support::Error<GetV2Error>"),
+        "`getV2` keeps `GetV2Response` and `GetV2Error`: {get_v2}"
+    );
+    let get_v_2 = operation_return_type(generated, "get_v_2");
+    assert!(
+        get_v_2.contains("ResponseValue<GetV2Response")
+            && !get_v_2.contains("ResponseValue<GetV2Response>")
+            && get_v_2.contains("support::Error<GetV2Error")
+            && !get_v_2.contains("support::Error<GetV2Error>"),
+        "`get_v_2` takes suffixed `GetV2Response…` and `GetV2Error…`: {get_v_2}"
+    );
+}
 
 /// Two operations whose error or success-enum type names derive alike still get distinct ones, so
 /// the module compiles and lints clean instead of defining one type twice (`E0428`). The plain
 /// form of a name wins it over a widened one, and of two plain forms the lexically smaller method
-/// keeps it.
+/// keeps it, whichever order `paths` lists them in.
 #[test]
 fn operations_whose_type_names_derive_alike_get_distinct_types() {
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, OPERATION_TYPE_COLLISION_SPEC).unwrap();
+    std::fs::write(
+        &spec,
+        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS),
+    )
+    .unwrap();
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "operation_types_collide");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert_contested_names_won_by_rank(&generated);
+
+    let reversed_spec = temp.path().join("reversed.yaml");
+    std::fs::write(
+        &reversed_spec,
+        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS.into_iter().rev()),
+    )
+    .unwrap();
+    let reversed_out = temp.path().join("reversed");
+    let report = generate_fixture_crate(
+        &reversed_spec,
+        &reversed_out,
+        "operation_types_collide_reversed",
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let reversed = std::fs::read_to_string(reversed_out.join("src/lib.rs")).unwrap();
+    assert_contested_names_won_by_rank(&reversed);
+    for method in ["request", "request_operation", "get_v2", "get_v_2"] {
+        assert_eq!(
+            operation_return_type(&generated, method),
+            operation_return_type(&reversed, method),
+            "`{method}`'s types do not depend on the order of `paths`"
+        );
+    }
+
     for (item, stem) in [
         ("struct", "RequestOperationError"),
         ("enum", "GetV2Response"),
