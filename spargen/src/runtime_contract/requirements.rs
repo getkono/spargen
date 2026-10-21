@@ -63,7 +63,6 @@ impl Dependency {
 /// The dependency capabilities referenced by one generated module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeRequirements {
-    pub(crate) reqwest_json: bool,
     pub(crate) reqwest_multipart: bool,
     pub(crate) bytes_serde: bool,
     pub(crate) streams: bool,
@@ -75,12 +74,6 @@ pub(crate) struct RuntimeRequirements {
 impl RuntimeRequirements {
     pub(crate) fn for_api(api: &Api, spec: &Spec) -> Self {
         Self {
-            reqwest_json: api.operations.iter().any(|operation| {
-                operation
-                    .request_body
-                    .as_ref()
-                    .is_some_and(|body| body.media == MediaType::Json)
-            }),
             reqwest_multipart: api.operations.iter().any(|operation| {
                 operation
                     .request_body
@@ -167,19 +160,11 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
     );
     push(
         REQWEST,
-        match (
-            requirements.reqwest_json,
-            requirements.reqwest_multipart,
-            requirements.streams,
-        ) {
-            (true, true, true) => &["json", "multipart", "stream"],
-            (true, true, false) => &["json", "multipart"],
-            (true, false, true) => &["json", "stream"],
-            (true, false, false) => &["json"],
-            (false, true, true) => &["multipart", "stream"],
-            (false, true, false) => &["multipart"],
-            (false, false, true) => &["stream"],
-            (false, false, false) => NONE,
+        match (requirements.reqwest_multipart, requirements.streams) {
+            (true, true) => &["multipart", "stream"],
+            (true, false) => &["multipart"],
+            (false, true) => &["stream"],
+            (false, false) => NONE,
         },
         true,
     );

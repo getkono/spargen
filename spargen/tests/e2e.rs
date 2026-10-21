@@ -7422,10 +7422,9 @@ components:
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `json` on `reqwest`"),
-        "{messages}"
-    );
+    // A JSON request body is serialized by `serde_json` and sent as bytes, so it needs no
+    // reqwest feature.
+    assert!(!messages.contains("`json`"), "{messages}");
     assert!(
         messages.contains("feature `serde` on `bytes`"),
         "{messages}"
@@ -7746,13 +7745,16 @@ fn workspace_inheritance_audit_agrees_with_cargo() {
         r##"openapi: 3.1.0
 info: { title: Inherited, version: 1.0.0 }
 paths:
-  /json:
+  /upload:
     post:
-      operationId: postJson
+      operationId: upload
       requestBody:
         content:
-          application/json:
-            schema: { type: string }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
       responses:
         "204": { description: ok }
 "##,
@@ -7769,7 +7771,7 @@ paths:
         .find(|dependency| dependency.name == "reqwest")
         .unwrap();
     assert!(
-        reqwest.no_default_features && reqwest.features.contains(&"json"),
+        reqwest.no_default_features && reqwest.features.contains(&"multipart"),
         "the cases below need a required feature and a required `default-features = false`: \
          {requirements:#?}"
     );
@@ -7868,7 +7870,7 @@ paths:
             member: &[
                 (
                     "reqwest",
-                    r#"reqwest = { workspace = true, features = ["json"] }"#,
+                    r#"reqwest = { workspace = true, features = ["multipart"] }"#,
                 ),
                 (
                     "serde",
@@ -7890,7 +7892,7 @@ paths:
                 "the member's default-features = false cannot turn off defaults the root leaves on",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -7902,7 +7904,7 @@ paths:
             name: "the same override, refused outright on edition 2024",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -8067,8 +8069,8 @@ paths:
     assert_eq!(kinds.len(), 5, "{raised:#?}");
 }
 
-/// A spec that turns on every capability the requirement table knows: a JSON body (`reqwest/json`),
-/// a multipart body (`reqwest/multipart`), a binary array inside JSON (`bytes/serde`), an XML body
+/// A spec that turns on every capability the requirement table knows: a multipart body
+/// (`reqwest/multipart`), a binary array inside a JSON body (`bytes/serde`), an XML body
 /// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
 /// `format: date-time` (`time`). The advice round trip below is only as strong as the set it
 /// round-trips, so it asserts this spec really derives all of them.
@@ -8228,7 +8230,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
             .features
             .clone()
     };
-    for feature in ["json", "multipart", "stream"] {
+    for feature in ["multipart", "stream"] {
         assert!(
             features_of("reqwest").contains(&feature),
             "{requirements:#?}"
