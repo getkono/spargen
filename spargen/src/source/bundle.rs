@@ -413,12 +413,20 @@ impl InputBundle {
     }
 
     fn resolve_path(&self, base: FileId, path: &str) -> Utf8PathBuf {
-        let base_path = match self.origins.get(&base) {
-            Some(Origin::Local(path)) => path,
-            _ => &self.file(base).expect("base file exists").path,
-        };
-        let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+        let parent = self
+            .base_path(base)
+            .parent()
+            .unwrap_or_else(|| Utf8Path::new(""));
         parent.join(path)
+    }
+
+    /// The local path `file`'s relative paths resolve against: its local `$self` identity, or the
+    /// path it was loaded from.
+    fn base_path(&self, file: FileId) -> &Utf8Path {
+        match self.origins.get(&file) {
+            Some(Origin::Local(path)) => path,
+            _ => &self.file(file).expect("base file exists").path,
+        }
     }
 
     /// Register an OpenAPI 3.2 `$self` identity, a name a reference reaches `file` by. An
@@ -436,29 +444,64 @@ impl InputBundle {
         else {
             return;
         };
-        let (base, _) = split_fragment(&self_uri);
-        if base.is_empty() {
-            return;
+        let identity = classify_self(&self_uri, retrieval_url, self.base_path(file));
+        match identity {
+            None => {}
+            Some(SelfRegistration::Remote(canonical)) => {
+                self.origins.insert(file, Origin::Remote(canonical.clone()));
+                self.url_to_file.insert(canonical, file);
+            }
+            Some(SelfRegistration::Local(canonical)) => {
+                self.origins.insert(file, Origin::Local(canonical));
+            }
+            Some(SelfRegistration::Opaque(uri)) => {
+                self.url_to_file.insert(uri, file);
+            }
         }
+    }
+}
+
+/// What the build registers a document's `$self` as: see [`InputBundle::register_self_identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SelfRegistration {
+    /// An `http`/`https` identity: the document's base and a URL a reference reaches it by.
+    Remote(String),
+    /// A local identity: the document's base and a path a reference reaches it by.
+    Local(Utf8PathBuf),
+    /// Any other identity with a scheme: a URI a reference naming it exactly reaches the document
+    /// by. It supplies no hierarchical base, so the document keeps the one it was reached at.
+    Opaque(String),
+}
+
+/// Classify the `$self` value `self_uri` of a document retrieved from `retrieval_url` (remote), or
+/// read with its relative paths resolving against `base_path` (local), or `None` where it is empty
+/// or fragment-only.
+pub(super) fn classify_self(
+    self_uri: &str,
+    retrieval_url: Option<&str>,
+    base_path: &Utf8Path,
+) -> Option<SelfRegistration> {
+    let (base, _) = split_fragment(self_uri);
+    if base.is_empty() {
+        return None;
+    }
+    Some(
         if retrieval_url.is_some() && !is_http_url(base) && has_uri_scheme(base) {
             // Absolute, so not resolved against the retrieval URL (#718); opaque, so no base.
-            self.url_to_file.insert(base.to_owned(), file);
+            SelfRegistration::Opaque(base.to_owned())
         } else if let Some(retrieval_url) = retrieval_url {
-            let canonical = resolve_ref_url(retrieval_url, base);
-            self.origins.insert(file, Origin::Remote(canonical.clone()));
-            self.url_to_file.insert(canonical, file);
+            SelfRegistration::Remote(resolve_ref_url(retrieval_url, base))
         } else if base.starts_with("http://") || base.starts_with("https://") {
-            self.origins.insert(file, Origin::Remote(base.to_owned()));
-            self.url_to_file.insert(base.to_owned(), file);
+            SelfRegistration::Remote(base.to_owned())
         } else if !base.contains(':') {
-            let canonical = self.resolve_path(file, base);
-            self.origins.insert(file, Origin::Local(canonical));
+            let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+            SelfRegistration::Local(parent.join(base))
         } else {
             // Opaque canonical identities can still resolve exact absolute references back to this
             // document. They cannot supply a hierarchical base for relative reference resolution.
-            self.url_to_file.insert(base.to_owned(), file);
-        }
-    }
+            SelfRegistration::Opaque(base.to_owned())
+        },
+    )
 }
 
 /// Where a diagnostic about `collected`'s target is raised: at the reference that names it, in
@@ -491,7 +534,7 @@ fn reject_drift(site: Provenance, message: String, diags: &mut Diagnostics) {
 
 /// Parse `text` into a value tree, choosing the format from `name`'s `.json`/`.yaml`/`.yml`
 /// extension (falling back to YAML-then-JSON).
-fn parse_by_name(
+pub(super) fn parse_by_name(
     id: FileId,
     name: &str,
     text: &str,
