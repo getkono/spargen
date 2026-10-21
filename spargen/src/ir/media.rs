@@ -23,10 +23,10 @@ pub(crate) enum MediaType {
     /// `text/event-stream` (Server-Sent Events, response bodies): a stream of items decoded from
     /// the event `data:` fields. Lowered to a streaming operation returning `EventStream<T>`.
     EventStream,
-    /// `application/x-ndjson` (newline-delimited JSON, response bodies): a stream of items, one per
-    /// line. Lowered to a streaming operation returning `EventStream<T>`.
+    /// JSON Lines (`application/x-ndjson`, `application/jsonl`; response bodies): a stream of
+    /// items, one per line. Lowered to a streaming operation returning `EventStream<T>`.
     Ndjson,
-    /// RFC 7464 JSON Text Sequences and `+json-seq` media.
+    /// RFC 7464 JSON Text Sequences (`application/json-seq`, `application/*+json-seq`).
     JsonSequence,
 }
 
@@ -67,9 +67,8 @@ pub(crate) struct RequestBody {
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
     pub(crate) content_type: String,
     /// The body's type, or `None` for a non-octet-stream body declared without a schema, or for
-    /// any body whose declared schema failed to lower. Not every such failure is reported today
-    /// (see #107 and #109). An octet-stream body without a schema lowers to `bytes::Bytes`; the
-    /// reference may still be nullable, which the emitter does not handle yet (#104).
+    /// a body whose declared schema failed to lower. An octet-stream body lowers to a non-nullable
+    /// `bytes::Bytes`, which [`check_invariants`](super::check_invariants) holds it to.
     pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.
@@ -179,7 +178,7 @@ pub(crate) struct Response {
     /// The chosen body media type, or `None` for a bodyless response. Codegen routes the decode by
     /// this (e.g. XML/text/binary bodies use their own codecs rather than serde_json).
     pub(crate) media: Option<MediaType>,
-    /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
+    /// For a streaming response (chosen media whose [`MediaType::stream_framing`] is `Some`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`. Lowering records it in every response position, and rejects
     /// a bodied stream anywhere but the operation's single bodied success (see
@@ -229,7 +228,8 @@ pub(crate) enum HeaderShape {
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
 #[derive(Debug, Clone)]
 pub(crate) struct Responses {
-    /// Per-status responses, most-specific first (exact before range).
+    /// Per-status responses, in document order. [`Self::success`] and [`Self::error`] sort them
+    /// into precedence order (exact before range).
     pub(crate) by_status: Vec<(StatusSpec, Response)>,
     /// The `default` response, if declared.
     pub(crate) default: Option<Response>,
@@ -440,7 +440,7 @@ impl Responses {
         has_two_bodied(&self.error_responses())
     }
 
-    /// Whether a bodied streaming response (`text/event-stream` / `application/x-ndjson`) sits
+    /// Whether a bodied streaming response (media whose [`MediaType::stream_framing`] is `Some`) sits
     /// anywhere but the operation's single bodied success — the one position whose framing
     /// [`Self::stream_success`] consumes. Every other position decodes a whole body: an error
     /// response (an explicit non-2xx status, or a `default`, which is offered to the error side
