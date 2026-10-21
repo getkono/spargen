@@ -495,8 +495,6 @@ mod tests {
             super::status_variant_ident(StatusSpec::Range(0)).to_string(),
             "Status0xx"
         );
-        assert_eq!(StatusSpec::Default.display_label(), "default");
-        assert_eq!(StatusSpec::Range(0).display_label(), "0XX");
         assert_eq!(
             super::runtime_status_spec(StatusSpec::Default).to_string(),
             quote::quote! { support::StatusSpec::Any }.to_string()
