@@ -134,7 +134,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // intersection. A null-only MEMBER supplies a branch that `null` validates against. A
         // `"null"` in the enclosing `type` array only *permits* null: `oneOf` still demands exactly
         // one matching member and `anyOf` at least one, so with no null member there is nothing for
-        // `null` to match and the schema admits nothing at all. Merging them made
+        // `null` to match and the schema admits nothing at all. Merging them would make
         // `{type: [integer,'null'], oneOf: [{type: string}]}` — which nothing satisfies —
         // indistinguishable from the same document with a `{type: 'null'}` member, which only
         // `null` satisfies. A `const: null` or an `enum` listing `null` permits it as the `type`
@@ -748,10 +748,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // them. That meet removes `null` from a typed branch only; an untyped branch it gives
         // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
         // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
-        // (#586): elsewhere it stays the variant `null` decodes to, as it always has. A branch that
-        // states nothing is counted where it took `null` from the conjunct (#592), and the meet's
-        // copy of that `null` is cleared where the count puts it in two branches, or where an
-        // `anyOf` hoisted it. An untyped object or array branch that hoisted nothing is counted
+        // (#586): elsewhere it stays the variant `null` decodes to. A branch that states nothing
+        // is counted where it took `null` from the conjunct (#592), and the meet's copy of that
+        // `null` is cleared where the count puts it in two branches, or where an `anyOf` hoisted
+        // it. An untyped object or array branch that hoisted nothing is counted
         // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
         // nothing and that `null` matches through its own branches (#628). A branch the sibling
         // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a

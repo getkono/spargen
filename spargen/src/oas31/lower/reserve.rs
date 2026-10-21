@@ -527,10 +527,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             id,
             // The target's *own* nullability is as much a fact about this alias as a `"null"`
             // member is. `ensure_component` computes it at reserve time so that every `$ref`
-            // consumer agrees on it without waiting for the body to finish, and reading only the
-            // members disagrees: an alias with no `"null"` member whose target is nullable emitted
-            // a non-`Option` field where the direct `{$ref: T}` spelling of that same target
-            // emitted an optional one.
+            // consumer agrees on it without waiting for the body to finish. Reading only the members
+            // would disagree with them: an alias with no `"null"` member whose target is nullable
+            // would emit a non-`Option` field where the direct `{$ref: T}` spelling of that same
+            // target emits an optional one.
             nullable: target_nullable || members.iter().any(member_is_null_only),
             // The target is mid-lowering, so this is a cycle-closing reference and needs the box
             // for the recursive type to have a finite size.
@@ -544,9 +544,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The three in-progress maps are each keyed by a different spelling of that identity, so this
     /// mirrors [`Self::lower_schema`]'s own `$ref` dispatch exactly: whichever `ensure_*` the
     /// reference would be lowered through is the map consulted for it. Keying on the literal
-    /// `#/components/schemas/` prefix instead made a target's identity depend on the reference
-    /// site's spelling, which is how one schema came to be both an alias and an unrepresentable
-    /// shape in the same document.
+    /// `#/components/schemas/` prefix would make a target's identity depend on the reference
+    /// site's spelling, and one schema could then be both an alias and an unrepresentable shape in
+    /// the same document.
     ///
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
     /// which the ordinary lowering path handles and reports for itself. It resolves no node and
