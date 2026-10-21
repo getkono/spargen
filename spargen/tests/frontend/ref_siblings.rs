@@ -2697,9 +2697,9 @@ fn a_union_sibling_without_a_type_does_not_decide_nullability() {
 /// ENCLOSING schema's `type`. The two differ in two ways, and each produces a wrong answer in the
 /// opposite direction.
 ///
-/// `lower_union_sibling` deletes the enclosing `type` array whenever it holds more than one non-null
-/// type, because no single lowered type represents it. That deletion also throws away the array's
-/// `"null"`, so the lowered sibling reads as null-rejecting even where the array admitted null —
+/// `lower_union_sibling` deleted the enclosing `type` array whenever it held more than one non-null
+/// type, because no single lowered type represents it. That deletion also threw away the array's
+/// `"null"`, so the lowered sibling read as null-rejecting even where the array admitted null —
 /// **an under-accept**, whose compiled client fails on a
 /// spec-legal `null` with `invalid type: null, expected struct …`. In the other direction, a sibling
 /// that speaks about null through `enum` or `const` rather than `type` was treated as silent, so the

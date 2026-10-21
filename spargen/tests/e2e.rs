@@ -3045,6 +3045,53 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     server.join().unwrap();
 }
 
+// Issue #689: a multi-success operation retains at most `max_error_body` bytes (64 KiB by
+// default) of a body it keeps in an error, as every single-success and error path does, and says
+// so through `truncated`. Before, it read through an uncapped helper and kept the whole body.
+static OVER_CAP: [u8; 64 * 1024 + 4096] = [b'x'; 64 * 1024 + 4096];
+
+#[test]
+fn a_multi_success_operation_caps_the_body_it_keeps_in_an_error() {
+    let cap = 64 * 1024;
+
+    // A matched arm whose body does not decode: read whole (decoding needs it), retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { status, body, truncated, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+            assert!(truncated, "a body cut at the cap must say so");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // An undocumented success status matches no arm: read capped, retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_maybe_empty().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+        }
+        other => panic!("expected an unexpected-status error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // A body under the cap is kept whole and reported untruncated.
+    let (base, server) = serve_once("text/plain", "202 Accepted", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { body, truncated, .. } => {
+            assert_eq!(&body[..], b"not json");
+            assert!(!truncated);
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
 // Issue #128: the error-side counterpart of the test above, driven through the emitted dispatch
 // rather than a hand-written stand-in. `getErrorRanged` documents an exact 409 and an overlapping
 // 4XX range, declared range first. A 409 matches both and must take the exact arm; a 404 matches
@@ -3658,6 +3705,9 @@ fn xml_body_types_carry_attribute_and_rename() {
     let xml = quick_xml::se::to_string(&order).unwrap();
     assert!(xml.contains("id=\"42\""), "{xml}");
     assert!(xml.contains("<sku>ABC</sku>"), "{xml}");
+    // The root `xml.name` names the body's root element, in place of the Rust type's name.
+    assert!(xml.starts_with("<order "), "{xml}");
+    assert!(xml.ends_with("</order>"), "{xml}");
 
     let receipt: basic_client::types::XmlReceipt =
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
@@ -3687,6 +3737,8 @@ fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     assert!(back.contains(r#""sku":"Z9""#), "{back}");
     assert!(!back.contains("@id"), "{back}");
     assert!(!back.contains("ProductSku"), "{back}");
+    // `JsonMeta`'s root `xml.name` is a container rename, which serde_json never reads.
+    assert_eq!(back, r#"{"id":5,"sku":"Z9"}"#);
 }
 
 #[test]
@@ -4506,25 +4558,6 @@ fn success_and_error_shapes_agree_on_the_shared_rule() {
             "both sides departed from the shared rule on {pattern:?} (bodied?)"
         );
     }
-}
-
-#[test]
-fn rejects_openapi_30_without_conversion() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
-        BASIC_SPEC.replace("openapi: 3.1.0", "openapi: 3.0.3"),
-    )
-    .unwrap();
-
-    let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
-
-    assert_eq!(report.outcome(), Outcome::Rejected);
-    assert!(report
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == Code::UnsupportedOpenApiVersion));
 }
 
 #[test]
@@ -6648,9 +6681,11 @@ components:
       properties:
         delta:
           type: string
-    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element.
+    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element, and the
+    # root `xml.name` names the element the body serializes as (a serde container rename).
     XmlOrder:
       type: object
+      xml: { name: order }
       required: [id, sku]
       properties:
         id:
@@ -6672,9 +6707,11 @@ components:
     # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
     # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
-    # hint genuinely has no effect, so it warns rather than rejecting.
+    # hint genuinely has no effect, so it warns rather than rejecting. Its root `xml.name` is
+    # applied all the same: a container rename reaches no JSON wire.
     JsonMeta:
       type: object
+      xml: { name: meta }
       required: [id, sku]
       properties:
         id:
@@ -6973,31 +7010,6 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
         status.success(),
         "wasm build must compile even with the `blocking` feature enabled (no tokio pulled)"
     );
-}
-
-/// The hidden proc-macro bridge renders deterministically without touching the output path.
-#[test]
-fn macro_preview_is_deterministic() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
-
-    let config = Spec::new(spec);
-    let preview = spargen::__private::preview(&config);
-    assert_eq!(
-        preview.report.outcome(),
-        Outcome::Generated,
-        "{:#?}",
-        preview.report
-    );
-    let contents = preview.contents.expect("generated module");
-    assert!(
-        !out.exists(),
-        "macro preview must not write the output path"
-    );
-    let again = spargen::__private::preview(&config);
-    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
 }
 
 #[test]

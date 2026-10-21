@@ -55,8 +55,9 @@ pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 /// What to generate: the spec to read plus every knob that can change the generated API.
 ///
 /// Two `Spec`s that compare equal produce byte-identical output for a given spargen version *and
-/// identical spec-file contents*. Equality covers the knobs below, including the spec's path; it
-/// cannot see the bytes at that path, which the build cache fingerprints separately.
+/// identical spec-file contents*. Equality covers the knobs below, including the spec's path and
+/// the paths of the config files applied to it; it cannot see the bytes at those paths, which the
+/// build cache fingerprints separately.
 ///
 /// ```no_run
 /// let spec = spargen::Spec::new("api/openapi.yaml").uuid(false);
@@ -72,6 +73,10 @@ pub struct Spec {
     pub(crate) batch_cap: usize,
     pub(crate) carve: bool,
     pub(crate) open_narrowing: bool,
+    /// Every config file applied through [`Spec::config_file`] (and so through
+    /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
+    /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
+    pub(crate) config_files: Vec<Utf8PathBuf>,
 }
 
 impl Spec {
@@ -87,6 +92,7 @@ impl Spec {
             batch_cap: DEFAULT_BATCH_CAP,
             carve: false,
             open_narrowing: false,
+            config_files: Vec::new(),
         }
     }
 
@@ -134,7 +140,7 @@ impl Spec {
     /// A *success* body that fails to decode is capped on retention only, on every target:
     /// deserialization needs the whole body, so it is always read whole. See
     /// `ClientConfig::max_error_body` in the emitted runtime for the full disposition, including
-    /// the two paths that are not capped at all.
+    /// the one path that is not capped at all.
     pub fn error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
@@ -187,16 +193,28 @@ impl Spec {
     ///
     /// Call this *before* any setter that must win over the file — `Spec` setters apply in
     /// chained order, so last write wins.
+    ///
+    /// The spec records `path`, so an edit to the file reruns the build:
+    /// [`generate`](crate::generate) names it as a `cargo:rerun-if-changed` path and fingerprints
+    /// its bytes, and `generate_api!` tracks it.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path.as_std_path()).map_err(|error| {
             ConfigError::new(format!("cannot read config file `{path}`: {error}"))
         })?;
-        self.apply_config(&text, path)
+        let mut spec = self.apply_config(&text, path)?;
+        spec.config_files.push(path.to_path_buf());
+        Ok(spec)
     }
 
     /// Apply `spargen.toml` from beside the spec, if one is there. A missing file is not an
     /// error — this is the discovery path every entry point uses by default.
+    ///
+    /// A file that is found is recorded as [`config_file`](Self::config_file) records it. A
+    /// missing one records nothing: creating `spargen.toml` later does not rerun a build on its
+    /// own, because Cargo reruns a build script on every build for a `rerun-if-changed` path
+    /// that does not exist, and `include_bytes!` of one does not compile. Touch the spec, or
+    /// `cargo clean -p` the crate, after adding the file.
     pub fn discover_config_file(self) -> Result<Self, ConfigError> {
         let discovered = self
             .path

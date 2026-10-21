@@ -24,13 +24,17 @@ use spargen::{
 #[path = "../oracles/mod.rs"]
 mod oracles;
 
+use oracles::types_module;
+
 mod all_of;
+mod audit_reach;
 mod bodies;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;
 mod document;
 mod encoding;
+mod encoding_headers;
 mod encoding_style;
 mod parameters;
 mod placement;
@@ -41,6 +45,7 @@ mod responses;
 mod schemas;
 mod security;
 mod servers;
+mod union_categories;
 mod union_nullability;
 mod unions;
 mod xml;
@@ -250,24 +255,6 @@ fn messages_for(report: &Report, code: Code) -> Vec<&str> {
         .filter(|d| d.code == code)
         .map(|d| d.message.as_str())
         .collect()
-}
-
-/// Everything from the generated `types` module to the end of the file, with the provenance header
-/// and the embedded runtime before it stripped.
-///
-/// It is **not** bounded at the module's closing brace: the returned text also carries the
-/// `Client` impl and the emitted scaffolding after `types`. A `.contains(…)` on it can therefore
-/// match client code rather than a lowered type; a fixture that must pin a lowered type should
-/// match a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
-///
-/// Two generations of the *same* spec already differ as whole files: the header carries the output
-/// path and a per-run `input-sha256`/`content-sha256`. So a whole-file comparison between two
-/// generated clients is unconditionally true and proves nothing. Comparing from `pub mod types {`
-/// onward compares what the two documents actually lowered to.
-fn types_module(code: &str) -> String {
-    code.find("pub mod types {")
-        .map(|start| code[start..].to_owned())
-        .unwrap_or_default()
 }
 
 /// Fail if anything from the generated `types` module onward uses `serde_json::Value` as a type:

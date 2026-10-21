@@ -144,6 +144,158 @@ fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
 }
 
 #[test]
+fn e011_yaml_aliases_that_expand_past_the_node_budget_are_rejected_in_the_levels() {
+    // Issue #708: every alias expanded to a deep clone of its anchored node with no budget, so
+    // ten levels of anchors, each aliasing the level below ten times ("billion laughs"), grew a
+    // document of a few hundred bytes into 10^10 nodes and exhausted memory before any later
+    // stage ran. The expansion is now budgeted, and the copy that crosses it is `E011`: here the
+    // copy of a level kept for the aliases of the next, reported at that level.
+    let mut levels = String::from("  l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n");
+    for level in 1..10 {
+        let previous = level - 1;
+        let aliases = vec![format!("*l{previous}"); 10].join(", ");
+        levels.push_str(&format!("  l{level}: &l{level} [{aliases}]\n"));
+    }
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\nx-laughs:\n{levels}"
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 in {report:#?}"));
+        assert!(
+            diag.message.contains("the copy kept for aliases"),
+            "{diag:#?}"
+        );
+        let level = diag.pointer.as_str().strip_prefix("/x-laughs/l");
+        assert!(
+            level.is_some_and(|level| level.parse::<u32>().is_ok()),
+            "{diag:#?}"
+        );
+    }
+
+    // Aliases that repeat a subtree a bounded number of times still expand and generate.
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\nx-reused:\n  \
+         base: &base [x, x, x, x, x, x, x, x, x, x]\n  copies: [{}]\n",
+        vec!["*base"; 50].join(", ")
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
+/// Four levels of anchors under `x-laughs`, each aliasing the level below ten times, so `*l3`
+/// expands to 11,111 nodes from about 50 parser events.
+fn yaml_laughs_to_level_3() -> String {
+    let mut levels = String::from("x-laughs:\n  l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n");
+    for level in 1..4 {
+        let aliases = vec![format!("*l{}", level - 1); 10].join(", ");
+        levels.push_str(&format!("  l{level}: &l{level} [{aliases}]\n"));
+    }
+    levels
+}
+
+/// 250 nested anchored lists `&n1 [&n2 [... &n250 [...]]]` under `x-nest`, the innermost holding
+/// 90 `*l3` aliases and 10,000 padding scalars: about a million nodes, inside the budget, each
+/// level of which kept a full copy of everything beneath it in the anchor table.
+fn yaml_nested_anchors(depth: usize) -> String {
+    let mut nest = String::from("x-nest: ");
+    for level in 1..=depth {
+        nest.push_str(&format!("&n{level} ["));
+    }
+    nest.push_str(&vec!["*l3"; 90].join(", "));
+    nest.push_str(", ");
+    nest.push_str(&vec!["x"; 10_000].join(", "));
+    nest.push_str(&"]".repeat(depth));
+    nest.push('\n');
+    nest
+}
+
+#[test]
+fn e011_nested_yaml_anchors_nothing_aliases_keep_no_copy_and_generate() {
+    // Issue #708 review: each completed anchored node was copied into the anchor table without
+    // being charged against the budget, so 250 nested anchors around a million-node core kept
+    // 250 copies of it (hundreds of millions of nodes) and ran out of memory, although the tree
+    // itself is within the budget. Nothing aliases `n1`..`n250`, so no copy is needed at all.
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n{}{}",
+        yaml_laughs_to_level_3(),
+        yaml_nested_anchors(250)
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+}
+
+#[test]
+fn e011_nested_yaml_anchors_whose_kept_copies_cross_the_node_budget_are_rejected() {
+    // The same document with every nested anchor aliased once afterwards: each anchor's copy is
+    // kept for its alias, and those copies are charged against the budget as they are taken, so
+    // the anchor whose copy crosses it is `E011` before the table outgrows the budget.
+    let refs: Vec<String> = (1..=250).map(|level| format!("*n{level}")).collect();
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n{}{}x-refs: [{}]\n",
+        yaml_laughs_to_level_3(),
+        yaml_nested_anchors(250),
+        refs.join(", ")
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 in {report:#?}"));
+        assert!(diag.message.contains("anchored node"), "{diag:#?}");
+        // The innermost anchor completes first and is the one whose copy crosses the budget.
+        assert_eq!(
+            diag.pointer.as_str(),
+            format!("/x-nest{}", "/0".repeat(249)),
+            "{diag:#?}"
+        );
+    }
+}
+
+#[test]
+fn e011_a_yaml_alias_key_past_the_node_budget_is_reported_at_its_mapping() {
+    // A mapping key has no pointer of its own, so the alias key whose copy crosses the budget is
+    // reported at the mapping that holds it, not at a member path.
+    let fill = ["*l2"; 4].join(", ");
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n\
+         x-laughs:\n  l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n  l1: &l1 [{}]\n  l2: &l2 [{}]\n\
+         x-fill: [{fill}]\nx-key: {{ *l2 : 1 }}\n",
+        ["*l0"; 10].join(", "),
+        ["*l1"; 10].join(", "),
+    );
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &spec)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::InvalidInput)
+            .unwrap_or_else(|| panic!("no E011 in {report:#?}"));
+        assert!(diag.message.contains("the alias at"), "{diag:#?}");
+        assert_eq!(diag.pointer.as_str(), "/x-key", "{diag:#?}");
+        // The span starts on the `*` that spells the alias.
+        let start = diag.span.expect("span").start;
+        let line = spec.lines().nth(start.line as usize - 1).expect("line");
+        assert_eq!(
+            line.chars().nth(start.col as usize - 1),
+            Some('*'),
+            "{line}: {diag:#?}"
+        );
+    }
+}
+
+#[test]
 fn oas32_document_with_compatible_constructs_generates() {
     // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
     // constructs lowers through the same frontend and generates — no `E001`, no warnings.
@@ -175,19 +327,22 @@ paths:
 #[test]
 fn oas30_document_still_rejected_e001() {
     // Widening to accept 3.2 must not accept 3.0: it uses different schema semantics and stays
-    // rejected with `E001`.
-    let report = generate(
-        r##"
-openapi: 3.0.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        has_code(&report, Code::UnsupportedOpenApiVersion),
-        "{report:#?}"
-    );
+    // rejected with `E001`, by `check` as by `generate`, on the first and on a later patch release.
+    for version in ["3.0.0", "3.0.3"] {
+        let spec =
+            format!("openapi: {version}\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n");
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{version} through {entry}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedOpenApiVersion),
+                "{version} through {entry}: {report:#?}"
+            );
+        }
+    }
 }
 
 #[test]

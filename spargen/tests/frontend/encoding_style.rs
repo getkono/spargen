@@ -8,7 +8,8 @@ use super::*;
 fn e009_multipart_deep_object_encoding_rejected() {
     // `deepObject` builds `name[key]=value` query fragments. A multipart part carries its name in
     // `Content-Disposition` and its value alone, so the style has no representation there — it used
-    // to generate parts holding only the values, with the keys dropped.
+    // to generate parts holding only the values, with the keys dropped. The property is a string,
+    // not an object, so the RFC 6570 object-property gate beside this one does not also refuse it.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -21,10 +22,7 @@ paths:
             schema:
               type: object
               properties:
-                filter:
-                  type: object
-                  properties:
-                    a: { type: string }
+                filter: { type: string }
             encoding:
               filter:
                 style: deepObject
@@ -33,7 +31,14 @@ paths:
 "##;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedMediaType),
+            [
+                "`encoding.filter.style: deepObject` is defined only for `in: query`; it has no \
+                 `multipart/form-data` part representation"
+            ],
+            "{report:#?}"
+        );
     }
 }
 

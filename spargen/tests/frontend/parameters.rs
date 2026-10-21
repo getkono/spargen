@@ -74,6 +74,43 @@ paths:
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
+/// The 3.2 metaschema refuses `querystring` beside `query` within one `parameters` list, so the
+/// spec above never reaches lowering's own rule. Split across the Path Item and the Operation, the
+/// metaschema admits the pair, and only the merged parameter set the operation lowers has both.
+#[test]
+fn oas32_querystring_and_named_query_are_rejected_across_path_item_and_operation() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    parameters:
+      - name: whole
+        in: querystring
+        content:
+          application/json:
+            schema: { type: object }
+    get:
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer }
+      responses:
+        '200': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::InvalidInput),
+            [
+                "an operation may declare at most one `in: querystring` parameter and may not \
+                 combine it with `in: query` parameters"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
 #[test]
 fn oas32_cookie_style_generates_cookie_header_serialization() {
     let spec = r##"
@@ -119,6 +156,57 @@ paths:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(code.matches("pub limit:").count(), 1, "{code}");
+    // The one field is the operation's `string`, not the path item's `integer`: a count alone holds
+    // whichever of the two wins.
+    assert_eq!(
+        field_type(&code, "pub limit:").as_deref(),
+        Some("Option<types::Limit>"),
+        "{code}"
+    );
+    assert_eq!(
+        alias_target(&code, "Limit").as_deref(),
+        Some("String"),
+        "{code}"
+    );
+}
+
+/// Each `parameters` list may name a `name`/`in` pair once. The two lists are checked apart,
+/// because a pair the operation repeats from its path item is an override, not a duplicate.
+#[test]
+fn e011_a_parameter_list_naming_one_pair_twice() {
+    for (level, message, path_item, operation) in [
+        (
+            "path item",
+            "path-item parameters contain a duplicate name/location pair",
+            "    parameters:\n      - { name: limit, in: query, schema: { type: integer } }\n      \
+             - { name: limit, in: query, schema: { type: string } }\n",
+            "",
+        ),
+        (
+            "operation",
+            "operation parameters contain a duplicate name/location pair",
+            "",
+            "      parameters:\n        - { name: limit, in: query, schema: { type: integer } }\n        \
+             - { name: limit, in: query, schema: { type: string } }\n",
+        ),
+    ] {
+        let spec = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n  \
+             /pets:\n{path_item}    \
+             get:\n{operation}      \
+             responses: {{ '204': {{ description: ok }} }}\n"
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{level}: {report:#?}");
+            assert_eq!(
+                messages_for(&report, Code::InvalidInput),
+                [message],
+                "{level}: {report:#?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1180,6 +1268,54 @@ paths:
                         && diagnostic.message == "media type `text/plain/extra` is not supported"
                 }),
                 "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e010_a_content_parameter_whose_media_entry_has_no_schema() {
+    // Issue #699: a schema-less `content` entry lowered to nothing through a bare `?`, and the
+    // operation skips a parameter that lowers to nothing, so the argument vanished from the
+    // generated method with no diagnostic. Every location reports it, as the `querystring` arm
+    // already did, and a `text/*` entry as a JSON one.
+    for (location, name, path, media) in [
+        ("query", "q", "/x", "application/json"),
+        ("header", "X-Q", "/x", "application/json"),
+        ("cookie", "q", "/x", "text/plain"),
+        ("path", "q", "/x/{q}", "application/json"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  {path}:
+    get:
+      operationId: getX
+      parameters:
+        - name: {name}
+          in: {location}
+          required: true
+          content:
+            {media}: {{}}
+      responses:
+        "204": {{ description: No Content }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{location}: {report:#?}"
+            );
+            assert_eq!(
+                messages_for(&report, Code::UnsupportedParameterStyle),
+                [format!(
+                    "`content` parameter `{name}` has no schema for its `{media}` entry, so the \
+                     client has no type to serialize it from"
+                )],
+                "{location}: {report:#?}"
             );
         }
     }

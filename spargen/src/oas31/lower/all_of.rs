@@ -52,7 +52,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   a member of untyped `items`/`prefixItems` alone then refines that intersection's arrays
     ///   (with no scalar member, it establishes the array), and beside object members it
     ///   constrains nothing (#607);
-    /// * an **object/scalar mix** → `E013`.
+    /// * an **object/scalar mix** → `E013`, and so are **object members beside two or more
+    ///   unions** ([`Self::several_unions_beside_object`]), each a union member written inline,
+    ///   nested in an inner `allOf`, or a `$ref` to one.
     ///
     /// Each `E013` returns `None`, as does a member that fails to lower for its own reason.
     ///
@@ -129,6 +131,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         held: Vec<HeldUntypedWarning>,
         lowerings: Vec<(Provenance, Range<u32>)>,
     ) -> Option<Ty> {
+        if self.several_unions_beside_object(union_members, &contributions, false) {
+            self.report_held_untyped_warnings(held);
+            return self.reject_all_of_several_unions(schema);
+        }
         let mut value_variants = HashSet::new();
         for (slot, _) in union_members {
             let Some(Contribution::Scalar(ty)) = contributions.get(*slot) else {
@@ -223,6 +229,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.report_held_untyped_warnings(held);
         met
+    }
+
+    /// Whether an `allOf` merge whose gathered `contributions` hold an object member would meet
+    /// that object with two or more unions ([`Self::reject_all_of_several_unions`]): the members
+    /// in `union_members` (recorded as [`Self::gather_all_of_recording_unions`] records them) that
+    /// are an inline `oneOf`/`anyOf` or a `$ref` to one and lowered to a union, plus one more
+    /// where `met_beside` says a union of two or more non-null branches is met with the merge
+    /// ([`real_union`]): the `allOf`'s own union member, or the union written beside the `allOf`.
+    /// A `oneOf`/`anyOf` of one real branch beside `null` lowers to that branch, no union, and is
+    /// not counted.
+    fn several_unions_beside_object(
+        &self,
+        union_members: &[(usize, &Schema)],
+        contributions: &[Contribution],
+        met_beside: bool,
+    ) -> bool {
+        let has_object = contributions
+            .iter()
+            .any(|contribution| matches!(contribution, Contribution::Object { .. }));
+        if !has_object {
+            return false;
+        }
+        let gathered = union_members
+            .iter()
+            .filter(|&&(slot, member)| {
+                let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
+                    return false;
+                };
+                let lowered_union = matches!(
+                    self.graph.get(ty.id).map(|def| &def.kind),
+                    Some(TypeKind::Union(_))
+                );
+                lowered_union
+                    && (schema_has_union(member)
+                        || member.reference.as_deref().is_some_and(|reference| {
+                            self.ref_target_body(reference, &member.provenance)
+                                .is_some_and(|target| schema_has_union(&target))
+                        }))
+            })
+            .count();
+        gathered + usize::from(met_beside) >= 2
     }
 
     /// The union members of an `allOf`'s scalar meet, for
@@ -539,7 +586,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf`-member spelling ([`Self::lower_all_of_with_union_member`]) takes it. Members that
     /// constrain nothing (`true`, `{}`, an annotation) take part in neither: with none of either
     /// kind left the union alone is the schema's type, under the schema's own hint, as it is with
-    /// no `allOf` at all.
+    /// no `allOf` at all. A composition that holds an object member and a union of its own would
+    /// meet the object with that union and this one, which is `E013`
+    /// ([`Self::reject_all_of_several_unions`]).
     pub(super) fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut composition = schema.clone();
         composition.one_of.clear();
@@ -559,9 +608,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let composition_hint = format!("{hint}Composition");
         let mut contributions = Vec::new();
+        // Recorded only to count the composition's own unions beside the one written here.
+        let mut union_members = Vec::new();
         self.in_composition(|ctx| {
-            ctx.gather_all_of(&composition, &composition_hint, &mut contributions)
+            ctx.gather_all_of_recording_unions(
+                &composition,
+                &composition_hint,
+                &mut contributions,
+                &mut union_members,
+                &mut Vec::new(),
+            )
         })?;
+        if self.several_unions_beside_object(&union_members, &contributions, real_union(&union)) {
+            return self.reject_all_of_several_unions(schema);
+        }
         let nested = take_refiners(&mut contributions);
         if contributions.is_empty() && scoped.is_empty() && nested.is_empty() {
             return self.lower_union(&union, hint);
@@ -616,7 +676,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// schema's own keywords, are gathered as [`Self::gather_all_of`] gathers them, under the hints
     /// it gives them; members of untyped object or array applicators alone refine the union's
     /// branches of their own category, as beside the `allOf`. Where no member is an object and
-    /// none refines one, the union is combined as the scalar member it always was.
+    /// none refines one, the union is combined as the scalar member it always was. Where an
+    /// object member is gathered beside a further union — a `$ref` member to one, or one nested in
+    /// an inner `allOf` — the object would meet two unions, which is `E013`
+    /// ([`Self::reject_all_of_several_unions`]).
     pub(super) fn lower_all_of_with_union_member(
         &mut self,
         schema: &Schema,
@@ -713,6 +776,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The union is met below with its merge held back, so its own report waits for that meet
         // ([`Self::warn_untyped_met_variants`]); the members' stand as raised.
         self.report_held_untyped_warnings(held);
+        // A `$ref` to a union, or a union nested in an inner `allOf`, beside this one.
+        if self.several_unions_beside_object(&union_members, &contributions, real_union(union)) {
+            return self.reject_all_of_several_unions(schema);
+        }
         let nested = take_refiners(&mut contributions);
         let composed = if contributions.is_empty() {
             None
@@ -991,4 +1058,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.elide_unused_union_lowering(union_mark..mark);
         Some(ty)
     }
+}
+
+/// Whether `union`'s `oneOf`/`anyOf` has two or more branches that are not the bare null type, so
+/// it lowers to a union rather than to its one real branch
+/// ([`LowerCtx::several_unions_beside_object`]).
+fn real_union(union: &Schema) -> bool {
+    union
+        .one_of
+        .iter()
+        .chain(&union.any_of)
+        .filter(|branch| !member_is_null_only(branch))
+        .nth(1)
+        .is_some()
 }

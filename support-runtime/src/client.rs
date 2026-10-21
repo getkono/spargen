@@ -22,11 +22,8 @@ pub struct ClientConfig {
     /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
     ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
     ///   silently.
-    /// - Two paths are **not** capped at all: the generated shim for an operation with more than
-    ///   one documented success status, which reads through
-    ///   [`read_success_body`](crate::read_success_body) and reaches both `Decode` and
-    ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, which retains one frame drawn
-    ///   from a frame buffer that is itself unbounded.
+    /// - One path is **not** capped at all: `EventStream`'s per-frame decode, which retains one
+    ///   frame drawn from a frame buffer that is itself unbounded.
     pub max_error_body: usize,
 }
 

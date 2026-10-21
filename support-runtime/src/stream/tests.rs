@@ -378,6 +378,101 @@ fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
     );
 }
 
+/// An SSE `id` holding a control character other than NUL is accepted by the framer but cannot be
+/// sent as a `Last-Event-ID` header value. The reconnect still happens, without the header, so
+/// neither that id nor a `Last-Event-ID` the caller set on the original request reaches the
+/// server; `last_event_id` keeps reporting the id the server sent.
+#[test]
+fn an_unsendable_sse_id_reconnects_without_last_event_id() {
+    let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":2}\n\n")]));
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .header("last-event-id", "evt-0")
+        .header(reqwest::header::COOKIE, "session=secret")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response("id: a\u{1}b\ndata: {\"seq\":1}\n\n"),
+        Framing::SseJsonData,
+        core,
+        Some(request),
+    );
+    let mut stream = match stream.with_reconnect(policy.clone()) {
+        Ok(stream) => stream,
+        Err(error) => panic!("reconnect should be available: {error}"),
+    };
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(stream.last_event_id(), Some("a\u{1}b"));
+    match poll_ready(stream.next()) {
+        Some(Ok(item)) => assert_eq!(item, serde_json::json!({"seq": 2})),
+        other => panic!("expected the reconnected item, got {other:?}"),
+    }
+    assert_eq!(
+        backend.headers.lock().unwrap().as_slice(),
+        &[(None, Some("session=secret".to_owned()))]
+    );
+    assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
+}
+
+/// An empty `id:` resets replay state, so the reconnect sends no `Last-Event-ID`: neither an
+/// empty header, nor the server's earlier id, nor the one the original request carried.
+#[test]
+fn an_empty_sse_id_reconnects_without_last_event_id() {
+    let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":3}\n\n")]));
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .header("last-event-id", "evt-0")
+        .header(reqwest::header::COOKIE, "session=secret")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response("id: evt-1\ndata: {\"seq\":1}\n\nid:\ndata: {\"seq\":2}\n\n"),
+        Framing::SseJsonData,
+        core,
+        Some(request),
+    );
+    let mut stream = match stream.with_reconnect(policy.clone()) {
+        Ok(stream) => stream,
+        Err(error) => panic!("reconnect should be available: {error}"),
+    };
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(stream.last_event_id(), Some("evt-1"));
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    assert_eq!(stream.last_event_id(), Some(""));
+    match poll_ready(stream.next()) {
+        Some(Ok(item)) => assert_eq!(item, serde_json::json!({"seq": 3})),
+        other => panic!("expected the reconnected item, got {other:?}"),
+    }
+    assert_eq!(
+        backend.headers.lock().unwrap().as_slice(),
+        &[(None, Some("session=secret".to_owned()))]
+    );
+    assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
+}
+
 #[test]
 fn declined_reconnect_failure_preserves_the_original_error_variant() {
     let backend = Arc::new(SequenceBackend::new([(503, "unavailable")]));

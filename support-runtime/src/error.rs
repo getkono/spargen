@@ -70,13 +70,11 @@ pub enum Error<E> {
         headers: HeaderMap,
         /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
         /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
-        /// cap. The generated shim for an operation with more than one documented success status
-        /// reads through `read_success_body`, which does not take the cap, so on that path the
-        /// body is retained whole (see `Decode`'s `body`).
+        /// cap.
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the status and headers the response
-    /// carried, the serde error path, and the raw body, capped on every path but the two named on
+    /// carried, the serde error path, and the raw body, capped on every path but the one named on
     /// `body` below. A documented error status whose body does not match its schema (a problem
     /// `type` the description does not list, or an HTML page from a proxy in front of the server)
     /// arrives here with its status and headers intact, so the caller can still act on them —
@@ -95,20 +93,15 @@ pub enum Error<E> {
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
-        /// Two paths do not reach the cap, for different reasons, and retain more than it:
-        ///
-        /// - The generated shim for an operation with more than one documented success status
-        ///   reads through `read_success_body`, which does not take the cap. Threading it through
-        ///   changes emitted output, so this is deferred rather than accepted. The same shim
-        ///   reaches `UnexpectedStatus` uncapped too.
-        /// - `EventStream`'s per-frame decode retains one frame, already detached by the framer.
-        ///   The cap does not apply because the bound there is the frame, not the response — but
-        ///   the frame buffer itself is unbounded, so this is a real gap, not a safe exemption.
+        /// One path does not reach the cap and retains more than it: `EventStream`'s per-frame
+        /// decode retains one frame, already detached by the framer. The cap does not apply
+        /// because the bound there is the frame, not the response — but the frame buffer itself
+        /// is unbounded, so this is a real gap, not a safe exemption.
         body: Bytes,
         /// Whether bytes were dropped from `body` to meet the cap.
         ///
-        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the two
-        /// paths above nothing is dropped because nothing is capped.
+        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the path
+        /// above nothing is dropped because nothing is capped.
         truncated: bool,
     },
     /// #9 — the connection dropped mid-stream on a streamed response.

@@ -24,22 +24,10 @@ use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
 use spargen::{Outcome, Severity, Spec};
 
-#[derive(serde::Deserialize)]
-struct Manifest {
-    #[serde(rename = "case")]
-    cases: Vec<Case>,
-}
+#[path = "shared/corpus.rs"]
+mod corpus;
 
-#[derive(serde::Deserialize)]
-struct Case {
-    id: String,
-    path: String,
-    /// The pinned content hash of `path`. Not optional: a case that omits it would vendor a spec
-    /// nothing pins, which is the drift this field exists to prevent.
-    sha256: String,
-    /// `generate` or `reject:E###`.
-    expect: String,
-}
+use corpus::{manifest, Case};
 
 fn workspace_root() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,25 +40,6 @@ fn read(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{path} must be readable: {error}"))
-}
-
-/// The parsed manifest. Every test that loops over its cases reads it here, so an empty case list
-/// fails each of them instead of letting every loop pass by checking nothing.
-fn manifest() -> Manifest {
-    let manifest: Manifest =
-        toml::from_str(&read("corpus/manifest.toml")).expect("corpus/manifest.toml must parse");
-    assert!(
-        !manifest.cases.is_empty(),
-        "corpus/manifest.toml declares no `[[case]]`, so every corpus check would pass vacuously"
-    );
-    manifest
-}
-
-impl Case {
-    /// The diagnostic code a `reject:E###` expectation names, or `None` for `generate`.
-    fn rejection_code(&self) -> Option<&str> {
-        self.expect.strip_prefix("reject:")
-    }
 }
 
 #[test]
@@ -1533,9 +1502,12 @@ const GATE_WORKFLOWS: [GateWorkflow; 4] = [
         concurrency: Some("group: deny-${{ github.ref }}\ncancel-in-progress: true"),
         permissions: None,
     },
+    // On demand only as far as GitHub's triggers go: the release run is a dispatch from
+    // `release-plz.yml` (`benchmarks_are_recorded_once_for_each_spargen_release`), because a tag
+    // release-plz pushes with `GITHUB_TOKEN` starts no workflow (#685).
     GateWorkflow {
         file: "benchmarks.yml",
-        on: "push:\n  tags: [\"v*\"]\nworkflow_dispatch:",
+        on: "workflow_dispatch:",
         concurrency: None,
         permissions: None,
     },
@@ -2622,6 +2594,91 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
              image's), whose version nothing holds to the pin, or the tool is local-only and \
              belongs in LOCAL_ONLY_TOOLS with why"
         );
+    }
+}
+
+#[test]
+fn benchmarks_are_recorded_once_for_each_spargen_release() {
+    // `benchmarks.yml` once filtered on `push: tags: ["v*"]`, which matched none of release-plz's
+    // `spargen-v*` / `spargen-macro-v*` tags, so it never ran on a release (#685). Fixing the glob
+    // would not have been enough: release-plz pushes its tags with `GITHUB_TOKEN`, and GitHub
+    // starts no workflow for an event that token causes, `workflow_dispatch` aside. So the release
+    // job hands its `releases` output to a job that dispatches the benchmarks on the `spargen`
+    // package's tag, whatever release-plz names it.
+    let release = workflow("release-plz.yml");
+    let jobs = &release["jobs"];
+    let release_job = &jobs["release-plz-release"];
+    assert_eq!(
+        release_job["outputs"],
+        yaml_document(
+            "releases_created: ${{ steps.release-plz.outputs.releases_created }}\n\
+             releases: ${{ steps.release-plz.outputs.releases }}",
+            "the release job's pinned `outputs:`",
+        ),
+        "`release-plz.yml`'s release job must expose release-plz's `releases_created` and \
+         `releases` outputs, which the benchmark dispatch reads"
+    );
+    let release_steps: Vec<_> = release_job["steps"]
+        .as_vec()
+        .expect("the release job carries steps")
+        .iter()
+        .filter(|step| step["id"].as_str() == Some("release-plz"))
+        .collect();
+    assert!(
+        matches!(release_steps.as_slice(), [step] if step["with"]["command"].as_str() == Some("release")),
+        "exactly one step of the release job, the one running `release-plz release`, must carry \
+         `id: release-plz`, the step the job's outputs read"
+    );
+    assert_eq!(
+        jobs["benchmarks"],
+        yaml_document(
+            "name: Dispatch release benchmarks\n\
+             needs: release-plz-release\n\
+             if: needs.release-plz-release.outputs.releases_created == 'true'\n\
+             runs-on: ubuntu-latest\n\
+             permissions:\n  actions: write\n\
+             steps:\n\
+             \x20 - name: Dispatch the benchmarks on the spargen release tag\n\
+             \x20   env:\n\
+             \x20     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n\
+             \x20     RELEASES: ${{ needs.release-plz-release.outputs.releases }}\n\
+             \x20   run: |\n\
+             \x20     tag=$(jq -r '.[]? | select(.package_name == \"spargen\") | .tag' <<< \"${RELEASES:-[]}\")\n\
+             \x20     if [ -n \"$tag\" ]; then\n\
+             \x20       gh workflow run benchmarks.yml --repo \"$GITHUB_REPOSITORY\" --ref \"$tag\"\n\
+             \x20     fi\n",
+            "the pinned benchmark dispatch job",
+        ),
+        "`release-plz.yml`'s `benchmarks` job is the only thing that runs the benchmarks on a \
+         release: it must dispatch `benchmarks.yml` on the `spargen` tag of each release"
+    );
+    // The dispatch is what `benchmarks.yml` must accept; its `on:` is pinned by its GATE_WORKFLOWS
+    // row, and this holds that row to the dispatch rather than to a filter that can never fire.
+    let benchmarks = workflow("benchmarks.yml");
+    assert!(
+        benchmarks["on"]["workflow_dispatch"] != yaml_rust2::Yaml::BadValue,
+        "`benchmarks.yml` must accept the `workflow_dispatch` `release-plz.yml` sends"
+    );
+    // Every tag in this repository is release-plz's, pushed with `GITHUB_TOKEN`, so a tag or
+    // release trigger on any workflow is one that never fires.
+    for file in workflow_files() {
+        let on = &workflow(&file)["on"];
+        for (event, filter) in [("push", "tags"), ("push", "tags-ignore")] {
+            assert!(
+                on[event][filter] == yaml_rust2::Yaml::BadValue,
+                "`{file}` triggers on `{event}: {filter}:`; release-plz pushes every tag here with \
+                 `GITHUB_TOKEN`, which starts no workflow, so dispatch the run from \
+                 `release-plz.yml` as its `benchmarks` job does"
+            );
+        }
+        for event in ["create", "release"] {
+            assert!(
+                on[event] == yaml_rust2::Yaml::BadValue,
+                "`{file}` triggers on `{event}:`; release-plz creates every tag and release here \
+                 with `GITHUB_TOKEN`, which starts no workflow, so dispatch the run from \
+                 `release-plz.yml` as its `benchmarks` job does"
+            );
+        }
     }
 }
 

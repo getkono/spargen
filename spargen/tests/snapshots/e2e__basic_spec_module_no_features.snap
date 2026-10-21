@@ -27,9 +27,13 @@ pub use support::{
 #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
 mod support {
     mod auth {
+        use std::convert::Infallible;
         use std::future::Future;
         use std::pin::Pin;
         use std::sync::Arc;
+        use reqwest::header::HeaderValue;
+        use reqwest::RequestBuilder;
+        use super::{ClientCore, Error, RequestError};
         pub use secrecy::{ExposeSecret, SecretString};
         /// A failure from an async token provider.
         #[derive(Debug)]
@@ -147,310 +151,22 @@ mod support {
             /// The wire carrier.
             pub kind: AuthKind,
         }
-        impl std::fmt::Debug for Credential {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let kind = match self {
+        impl Credential {
+            /// The variant's name, as `Debug` renders it and as
+            /// [`super::RequestError::CredentialMismatch`] reports it in `registered`.
+            fn kind_name(&self) -> &'static str {
+                match self {
                     Credential::Bearer(_) => "Bearer",
                     Credential::Basic { .. } => "Basic",
                     Credential::ApiKey(_) => "ApiKey",
                     Credential::Provider(_) => "Provider",
-                };
-                write!(f, "Credential::{kind}(***)")
-            }
-        }
-    }
-    mod client {
-        use std::collections::HashMap;
-        use std::convert::Infallible;
-        use std::sync::Arc;
-        use reqwest::Url;
-        use super::{Credential, Error, HttpBackend, ReqwestBackend};
-        /// Client-wide configuration.
-        #[derive(Debug, Clone)]
-        pub struct ClientConfig {
-            /// Maximum bytes of a response body retained on error variants; the rest is dropped
-            /// (default 64 KiB).
-            ///
-            /// Where it applies, and what says so:
-            ///
-            /// - Bodies read as errors are capped, and on native targets the cap bounds *reading* too —
-            ///   an over-cap body is abandoned partway, which forgoes reuse of that connection. On
-            ///   `wasm32` the `fetch` backend has no incremental read, so there only retention is bounded.
-            /// - A success body that fails to decode is capped on retention only. Deserialization needs
-            ///   the whole body, so it is always read whole.
-            /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
-            ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
-            ///   silently.
-            /// - Two paths are **not** capped at all: the generated shim for an operation with more than
-            ///   one documented success status, which reads through
-            ///   [`read_success_body`](super::read_success_body) and reaches both `Decode` and
-            ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, which retains one frame drawn
-            ///   from a frame buffer that is itself unbounded.
-            pub max_error_body: usize,
-        }
-        impl Default for ClientConfig {
-            fn default() -> Self {
-                Self { max_error_body: 64 * 1024 }
-            }
-        }
-        /// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
-        /// (the BYO-client injection point for TLS choice, proxies, timeouts), the swappable transport
-        /// [`HttpBackend`] that EXECUTES them, the base URL, configuration, and per-scheme credentials.
-        ///
-        /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
-        /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
-        /// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
-        ///
-        /// The generated `Client` exposes `Client::new(base_url)`,
-        /// `Client::with_client(reqwest::Client, base_url)`, and
-        /// `Client::with_backend(Arc<dyn HttpBackend>, base_url)`, plus one `#[inline]` method per operation
-        /// that delegates to the non-generic dispatch routines.
-        #[derive(Debug, Clone)]
-        pub struct ClientCore {
-            http: reqwest::Client,
-            backend: Arc<dyn HttpBackend>,
-            base_url: Url,
-            config: ClientConfig,
-            credentials: HashMap<String, Credential>,
-        }
-        impl ClientCore {
-            /// Build a core with a default `reqwest::Client` and the given base URL. Returns a
-            /// request-construction error if the base URL is invalid.
-            pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
-                Self::with_client(reqwest::Client::new(), base_url)
-            }
-            /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
-            /// proxies, and timeouts. The client both builds requests and, wrapped in the default
-            /// [`ReqwestBackend`], executes them.
-            pub fn with_client(
-                client: reqwest::Client,
-                base_url: &str,
-            ) -> Result<Self, Error<Infallible>> {
-                let backend = Arc::new(ReqwestBackend::new(client.clone()));
-                Self::assemble(client, backend, base_url)
-            }
-            /// Build a core with a caller-supplied transport [`HttpBackend`] — the injection point for
-            /// retry, middleware, or an entirely non-reqwest transport. Requests are still BUILT on a
-            /// default `reqwest::Client`; only the execute step goes through `backend`.
-            pub fn with_backend(
-                backend: Arc<dyn HttpBackend>,
-                base_url: &str,
-            ) -> Result<Self, Error<Infallible>> {
-                Self::assemble(reqwest::Client::new(), backend, base_url)
-            }
-            fn assemble(
-                http: reqwest::Client,
-                backend: Arc<dyn HttpBackend>,
-                base_url: &str,
-            ) -> Result<Self, Error<Infallible>> {
-                let base_url = Url::parse(base_url)
-                    .map_err(Error::request_construction)?;
-                Ok(Self {
-                    http,
-                    backend,
-                    base_url,
-                    config: ClientConfig::default(),
-                    credentials: HashMap::new(),
-                })
-            }
-            /// The retention/config settings.
-            pub fn config(&self) -> &ClientConfig {
-                &self.config
-            }
-            /// Mutably borrow the retention/config settings.
-            pub fn config_mut(&mut self) -> &mut ClientConfig {
-                &mut self.config
-            }
-            /// The base URL.
-            pub fn base_url(&self) -> &Url {
-                &self.base_url
-            }
-            /// The injected HTTP client used to BUILD requests.
-            pub fn http(&self) -> &reqwest::Client {
-                &self.http
-            }
-            /// The transport backend that EXECUTES requests. [`super::send`] dispatches through this;
-            /// retry/middleware layers can clone the `Arc` to wrap it.
-            pub fn backend(&self) -> &Arc<dyn HttpBackend> {
-                &self.backend
-            }
-            /// Register a credential for a named security scheme, replacing any already registered for it.
-            pub fn set_credential(&mut self, scheme: &str, credential: Credential) {
-                self.credentials.insert(scheme.to_owned(), credential);
-            }
-            /// Unregister the credential for a named security scheme, returning it if one was registered.
-            ///
-            /// This is how a caller reaches a later security alternative: selection picks the first
-            /// alternative whose schemes are all registered and never falls through past it (see
-            /// [`super::attach_auth`]), so an alternative stops being chosen only once one of its schemes
-            /// is unregistered. Removing a scheme that was never registered is a no-op returning `None`.
-            pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
-                self.credentials.remove(scheme)
-            }
-            /// Retrieve a registered credential by scheme name.
-            pub fn credential(&self, scheme: &str) -> Option<&Credential> {
-                self.credentials.get(scheme)
-            }
-        }
-    }
-    mod dispatch {
-        //! The small set of dispatch routines shared within a generated client: build URL →
-        //! attach auth → send → classify status → decode. Sharing happens *within* a generated client
-        //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
-        //!
-        //! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
-        //! distinct body type — the one place monomorphization is unavoidable.
-        use std::convert::Infallible;
-        use bytes::Bytes;
-        use reqwest::header::HeaderValue;
-        use reqwest::{Request, RequestBuilder, Response, Url};
-        use secrecy::{ExposeSecret, SecretString};
-        use serde::de::DeserializeOwned;
-        use super::{
-            AuthKind, AuthScheme, ClientCore, Credential, Error, RequestError,
-            ResponseValue,
-        };
-        /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-        /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
-        ///
-        /// `query` holds complete `name=value` fragments that the parameter helpers have already
-        /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
-        /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
-        /// a `,` inside one of them.
-        pub fn build_url(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_on(core, None, path, query)
-        }
-        /// As [`build_url`], but against an optional per-operation server override. An absolute override
-        /// replaces the client's base URL; a relative one is joined onto it.
-        pub fn build_url_on(
-            core: &ClientCore,
-            server: Option<&str>,
-            path: &str,
-            query: &[String],
-        ) -> Result<Url, Error<Infallible>> {
-            let mut url = base_for(core, server)?;
-            let base_path = url.path().trim_end_matches('/');
-            let request_path = path.trim_start_matches('/');
-            let joined = if base_path.is_empty() {
-                format!("/{request_path}")
-            } else if request_path.is_empty() {
-                base_path.to_owned()
-            } else {
-                format!("{base_path}/{request_path}")
-            };
-            if let Some(segment) = request_path
-                .split(['/', '\\'])
-                .find(|s| is_dot_segment(s))
-            {
-                return Err(
-                    Error::request_message(
-                        format!(
-                            "request path contains the dot segment {segment:?}, which URL normalization would \
-             remove and so send the request to a different resource"
-                        ),
-                    ),
-                );
-            }
-            url.set_path(&joined);
-            append_query(&mut url, query);
-            Ok(url)
-        }
-        /// Whether `segment` is a `.` or `..` path segment under the URL Standard: `.` or `%2E`, or
-        /// `..`, `.%2E`, `%2E.` or `%2E%2E`, each `%2E` matched ASCII case-insensitively. The URL parser
-        /// deletes every ASCII tab, LF and CR before it reads a segment, so `.\t.` is `..` to it; they are
-        /// deleted here first too.
-        fn is_dot_segment(segment: &str) -> bool {
-            let stripped: String;
-            let segment = if segment.contains(['\t', '\n', '\r']) {
-                stripped = segment
-                    .chars()
-                    .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-                    .collect();
-                stripped.as_str()
-            } else {
-                segment
-            };
-            let rest = segment.strip_prefix('.').or_else(|| strip_encoded_dot(segment));
-            match rest {
-                Some("") => true,
-                Some(rest) => rest == "." || strip_encoded_dot(rest) == Some(""),
-                None => false,
-            }
-        }
-        /// `segment` without a leading `%2E` (either case), if it starts with one.
-        fn strip_encoded_dot(segment: &str) -> Option<&str> {
-            segment
-                .get(..3)
-                .filter(|prefix| prefix.eq_ignore_ascii_case("%2e"))
-                .map(|_| &segment[3..])
-        }
-        /// Resolve the base URL for one request: the client's own, or a per-operation server override.
-        fn base_for(
-            core: &ClientCore,
-            server: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            match server {
-                None => Ok(core.base_url().clone()),
-                Some(server) => {
-                    match Url::parse(server) {
-                        Ok(absolute) => Ok(absolute),
-                        Err(_) => {
-                            core.base_url()
-                                .join(server)
-                                .map_err(Error::request_construction)
-                        }
-                    }
                 }
             }
         }
-        /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
-        fn append_query(url: &mut Url, query: &[String]) {
-            if query.is_empty() {
-                return;
+        impl std::fmt::Debug for Credential {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Credential::{}(***)", self.kind_name())
             }
-            let joined = match url.query() {
-                Some(existing) if !existing.is_empty() => {
-                    format!("{existing}&{}", query.join("&"))
-                }
-                _ => query.join("&"),
-            };
-            url.set_query(Some(&joined));
-        }
-        /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-        /// Both forms replace any query embedded in the selected server URL.
-        pub fn build_url_with_query_string(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-            query_string: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_with_query_string_on(core, None, path, query, query_string)
-        }
-        /// As [`build_url_with_query_string`], but against an optional per-operation server override.
-        pub fn build_url_with_query_string_on(
-            core: &ClientCore,
-            server: Option<&str>,
-            path: &str,
-            query: &[String],
-            query_string: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            let mut url = build_url_on(core, server, path, &[])?;
-            url.set_query(None);
-            append_query(&mut url, query);
-            if let Some(query_string) = query_string {
-                let joined = match url.query() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{existing}&{query_string}")
-                    }
-                    _ => query_string.to_owned(),
-                };
-                url.set_query(Some(&joined));
-            }
-            Ok(url)
         }
         /// Attach credentials for an operation's security requirement. `requirements` is an OR
         /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
@@ -636,17 +352,297 @@ mod support {
             required: &'static str,
             credential: &Credential,
         ) -> Error<Infallible> {
-            let registered = match credential {
-                Credential::Bearer(_) => "Bearer",
-                Credential::Basic { .. } => "Basic",
-                Credential::ApiKey(_) => "ApiKey",
-                Credential::Provider(_) => "Provider",
-            };
             Error::RequestConstruction(RequestError::CredentialMismatch {
                 scheme,
                 required,
-                registered,
+                registered: credential.kind_name(),
             })
+        }
+    }
+    mod client {
+        use std::collections::HashMap;
+        use std::convert::Infallible;
+        use std::sync::Arc;
+        use reqwest::Url;
+        use super::{Credential, Error, HttpBackend, ReqwestBackend};
+        /// Client-wide configuration.
+        #[derive(Debug, Clone)]
+        pub struct ClientConfig {
+            /// Maximum bytes of a response body retained on error variants; the rest is dropped
+            /// (default 64 KiB).
+            ///
+            /// Where it applies, and what says so:
+            ///
+            /// - Bodies read as errors are capped, and on native targets the cap bounds *reading* too —
+            ///   an over-cap body is abandoned partway, which forgoes reuse of that connection. On
+            ///   `wasm32` the `fetch` backend has no incremental read, so there only retention is bounded.
+            /// - A success body that fails to decode is capped on retention only. Deserialization needs
+            ///   the whole body, so it is always read whole.
+            /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
+            ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
+            ///   silently.
+            /// - One path is **not** capped at all: `EventStream`'s per-frame decode, which retains one
+            ///   frame drawn from a frame buffer that is itself unbounded.
+            pub max_error_body: usize,
+        }
+        impl Default for ClientConfig {
+            fn default() -> Self {
+                Self { max_error_body: 64 * 1024 }
+            }
+        }
+        /// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
+        /// (the BYO-client injection point for TLS choice, proxies, timeouts), the swappable transport
+        /// [`HttpBackend`] that EXECUTES them, the base URL, configuration, and per-scheme credentials.
+        ///
+        /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
+        /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
+        /// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
+        ///
+        /// The generated `Client` exposes `Client::new(base_url)`,
+        /// `Client::with_client(reqwest::Client, base_url)`, and
+        /// `Client::with_backend(Arc<dyn HttpBackend>, base_url)`, plus one `#[inline]` method per operation
+        /// that delegates to the non-generic dispatch routines.
+        #[derive(Debug, Clone)]
+        pub struct ClientCore {
+            http: reqwest::Client,
+            backend: Arc<dyn HttpBackend>,
+            base_url: Url,
+            config: ClientConfig,
+            credentials: HashMap<String, Credential>,
+        }
+        impl ClientCore {
+            /// Build a core with a default `reqwest::Client` and the given base URL. Returns a
+            /// request-construction error if the base URL is invalid.
+            pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
+                Self::with_client(reqwest::Client::new(), base_url)
+            }
+            /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
+            /// proxies, and timeouts. The client both builds requests and, wrapped in the default
+            /// [`ReqwestBackend`], executes them.
+            pub fn with_client(
+                client: reqwest::Client,
+                base_url: &str,
+            ) -> Result<Self, Error<Infallible>> {
+                let backend = Arc::new(ReqwestBackend::new(client.clone()));
+                Self::assemble(client, backend, base_url)
+            }
+            /// Build a core with a caller-supplied transport [`HttpBackend`] — the injection point for
+            /// retry, middleware, or an entirely non-reqwest transport. Requests are still BUILT on a
+            /// default `reqwest::Client`; only the execute step goes through `backend`.
+            pub fn with_backend(
+                backend: Arc<dyn HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, Error<Infallible>> {
+                Self::assemble(reqwest::Client::new(), backend, base_url)
+            }
+            fn assemble(
+                http: reqwest::Client,
+                backend: Arc<dyn HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, Error<Infallible>> {
+                let base_url = Url::parse(base_url)
+                    .map_err(Error::request_construction)?;
+                Ok(Self {
+                    http,
+                    backend,
+                    base_url,
+                    config: ClientConfig::default(),
+                    credentials: HashMap::new(),
+                })
+            }
+            /// The retention/config settings.
+            pub fn config(&self) -> &ClientConfig {
+                &self.config
+            }
+            /// Mutably borrow the retention/config settings.
+            pub fn config_mut(&mut self) -> &mut ClientConfig {
+                &mut self.config
+            }
+            /// The base URL.
+            pub fn base_url(&self) -> &Url {
+                &self.base_url
+            }
+            /// The injected HTTP client used to BUILD requests.
+            pub fn http(&self) -> &reqwest::Client {
+                &self.http
+            }
+            /// The transport backend that EXECUTES requests. [`super::send`] dispatches through this;
+            /// retry/middleware layers can clone the `Arc` to wrap it.
+            pub fn backend(&self) -> &Arc<dyn HttpBackend> {
+                &self.backend
+            }
+            /// Register a credential for a named security scheme, replacing any already registered for it.
+            pub fn set_credential(&mut self, scheme: &str, credential: Credential) {
+                self.credentials.insert(scheme.to_owned(), credential);
+            }
+            /// Unregister the credential for a named security scheme, returning it if one was registered.
+            ///
+            /// This is how a caller reaches a later security alternative: selection picks the first
+            /// alternative whose schemes are all registered and never falls through past it (see
+            /// [`super::attach_auth`]), so an alternative stops being chosen only once one of its schemes
+            /// is unregistered. Removing a scheme that was never registered is a no-op returning `None`.
+            pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
+                self.credentials.remove(scheme)
+            }
+            /// Retrieve a registered credential by scheme name.
+            pub fn credential(&self, scheme: &str) -> Option<&Credential> {
+                self.credentials.get(scheme)
+            }
+        }
+    }
+    mod dispatch {
+        //! The small set of dispatch routines shared within a generated client: build URL →
+        //! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
+        //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
+        //!
+        //! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
+        //! distinct body type — the one place monomorphization is unavoidable.
+        use std::convert::Infallible;
+        use bytes::Bytes;
+        use reqwest::{Request, Response, Url};
+        use serde::de::DeserializeOwned;
+        use super::{ClientCore, Error, ResponseValue};
+        /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
+        /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+        ///
+        /// `query` holds complete `name=value` fragments that the parameter helpers have already
+        /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
+        /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
+        /// a `,` inside one of them.
+        pub fn build_url(
+            core: &ClientCore,
+            path: &str,
+            query: &[String],
+        ) -> Result<Url, Error<Infallible>> {
+            build_url_on(core, None, path, query)
+        }
+        /// As [`build_url`], but against an optional per-operation server override. An absolute override
+        /// replaces the client's base URL; a relative one is joined onto it.
+        pub fn build_url_on(
+            core: &ClientCore,
+            server: Option<&str>,
+            path: &str,
+            query: &[String],
+        ) -> Result<Url, Error<Infallible>> {
+            let mut url = base_for(core, server)?;
+            let base_path = url.path().trim_end_matches('/');
+            let request_path = path.trim_start_matches('/');
+            let joined = if base_path.is_empty() {
+                format!("/{request_path}")
+            } else if request_path.is_empty() {
+                base_path.to_owned()
+            } else {
+                format!("{base_path}/{request_path}")
+            };
+            if let Some(segment) = request_path
+                .split(['/', '\\'])
+                .find(|s| is_dot_segment(s))
+            {
+                return Err(
+                    Error::request_message(
+                        format!(
+                            "request path contains the dot segment {segment:?}, which URL normalization would \
+             remove and so send the request to a different resource"
+                        ),
+                    ),
+                );
+            }
+            url.set_path(&joined);
+            append_query(&mut url, query);
+            Ok(url)
+        }
+        /// Whether `segment` is a `.` or `..` path segment under the URL Standard: `.` or `%2E`, or
+        /// `..`, `.%2E`, `%2E.` or `%2E%2E`, each `%2E` matched ASCII case-insensitively. The URL parser
+        /// deletes every ASCII tab, LF and CR before it reads a segment, so `.\t.` is `..` to it; they are
+        /// deleted here first too.
+        fn is_dot_segment(segment: &str) -> bool {
+            let stripped: String;
+            let segment = if segment.contains(['\t', '\n', '\r']) {
+                stripped = segment
+                    .chars()
+                    .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                    .collect();
+                stripped.as_str()
+            } else {
+                segment
+            };
+            let rest = segment.strip_prefix('.').or_else(|| strip_encoded_dot(segment));
+            match rest {
+                Some("") => true,
+                Some(rest) => rest == "." || strip_encoded_dot(rest) == Some(""),
+                None => false,
+            }
+        }
+        /// `segment` without a leading `%2E` (either case), if it starts with one.
+        fn strip_encoded_dot(segment: &str) -> Option<&str> {
+            segment
+                .get(..3)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("%2e"))
+                .map(|_| &segment[3..])
+        }
+        /// Resolve the base URL for one request: the client's own, or a per-operation server override.
+        fn base_for(
+            core: &ClientCore,
+            server: Option<&str>,
+        ) -> Result<Url, Error<Infallible>> {
+            match server {
+                None => Ok(core.base_url().clone()),
+                Some(server) => {
+                    match Url::parse(server) {
+                        Ok(absolute) => Ok(absolute),
+                        Err(_) => {
+                            core.base_url()
+                                .join(server)
+                                .map_err(Error::request_construction)
+                        }
+                    }
+                }
+            }
+        }
+        /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
+        fn append_query(url: &mut Url, query: &[String]) {
+            if query.is_empty() {
+                return;
+            }
+            let joined = match url.query() {
+                Some(existing) if !existing.is_empty() => {
+                    format!("{existing}&{}", query.join("&"))
+                }
+                _ => query.join("&"),
+            };
+            url.set_query(Some(&joined));
+        }
+        /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
+        /// Both forms replace any query embedded in the selected server URL.
+        pub fn build_url_with_query_string(
+            core: &ClientCore,
+            path: &str,
+            query: &[String],
+            query_string: Option<&str>,
+        ) -> Result<Url, Error<Infallible>> {
+            build_url_with_query_string_on(core, None, path, query, query_string)
+        }
+        /// As [`build_url_with_query_string`], but against an optional per-operation server override.
+        pub fn build_url_with_query_string_on(
+            core: &ClientCore,
+            server: Option<&str>,
+            path: &str,
+            query: &[String],
+            query_string: Option<&str>,
+        ) -> Result<Url, Error<Infallible>> {
+            let mut url = build_url_on(core, server, path, &[])?;
+            url.set_query(None);
+            append_query(&mut url, query);
+            if let Some(query_string) = query_string {
+                let joined = match url.query() {
+                    Some(existing) if !existing.is_empty() => {
+                        format!("{existing}&{query_string}")
+                    }
+                    _ => query_string.to_owned(),
+                };
+                url.set_query(Some(&joined));
+            }
+            Ok(url)
         }
         /// Send a prepared request through the core's transport [`super::HttpBackend`], mapping
         /// transport/timeout/protocol/redirect failures into the taxonomy. The backend reports failures as
@@ -695,17 +691,21 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            decode_success_with(core, response, decode_text_body::<T>).await
+            decode_success_with(core, response, |body| decode_text_body::<T>(body)).await
         }
         /// The body every structured success decoder shares: read the whole body, run `decode` over it, and
         /// wrap the value with status and headers. A decode failure becomes [`Error::Decode`] carrying the
         /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
         /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
         /// capped.
-        pub(crate) async fn decode_success_with<T>(
+        ///
+        /// Generated code for a multi-status success enum calls it from the arm whose selector matched,
+        /// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
+        /// binary variant keeps it without a copy.
+        pub async fn decode_success_with<T>(
             core: &ClientCore,
             response: Response,
-            decode: impl FnOnce(&[u8]) -> Result<T, String>,
+            decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let status = response.status();
             let headers = response.headers().clone();
@@ -754,21 +754,6 @@ mod support {
             let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
             serde_json::from_value(serde_json::Value::String(text.to_owned()))
                 .map_err(|error| error.to_string())
-        }
-        /// Read a success response body whole, returning its status, headers, and raw bytes so generated
-        /// code can select the matching per-status variant and decode it. Non-generic: the per-variant
-        /// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
-        /// which owns the status→variant table and its distinct body types.
-        pub async fn read_success_body(
-            response: Response,
-        ) -> Result<
-            (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes),
-            Error<Infallible>,
-        > {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            Ok((status, headers, body))
         }
         /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
         /// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
@@ -1062,13 +1047,11 @@ mod support {
                 headers: HeaderMap,
                 /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
                 /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
-                /// cap. The generated shim for an operation with more than one documented success status
-                /// reads through `read_success_body`, which does not take the cap, so on that path the
-                /// body is retained whole (see `Decode`'s `body`).
+                /// cap.
                 body: Bytes,
             },
             /// #8 — the response body failed to deserialize; retains the status and headers the response
-            /// carried, the serde error path, and the raw body, capped on every path but the two named on
+            /// carried, the serde error path, and the raw body, capped on every path but the one named on
             /// `body` below. A documented error status whose body does not match its schema (a problem
             /// `type` the description does not list, or an HTML page from a proxy in front of the server)
             /// arrives here with its status and headers intact, so the caller can still act on them —
@@ -1087,20 +1070,15 @@ mod support {
                 path: String,
                 /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
                 ///
-                /// Two paths do not reach the cap, for different reasons, and retain more than it:
-                ///
-                /// - The generated shim for an operation with more than one documented success status
-                ///   reads through `read_success_body`, which does not take the cap. Threading it through
-                ///   changes emitted output, so this is deferred rather than accepted. The same shim
-                ///   reaches `UnexpectedStatus` uncapped too.
-                /// - `EventStream`'s per-frame decode retains one frame, already detached by the framer.
-                ///   The cap does not apply because the bound there is the frame, not the response — but
-                ///   the frame buffer itself is unbounded, so this is a real gap, not a safe exemption.
+                /// One path does not reach the cap and retains more than it: `EventStream`'s per-frame
+                /// decode retains one frame, already detached by the framer. The cap does not apply
+                /// because the bound there is the frame, not the response — but the frame buffer itself
+                /// is unbounded, so this is a real gap, not a safe exemption.
                 body: Bytes,
                 /// Whether bytes were dropped from `body` to meet the cap.
                 ///
-                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the two
-                /// paths above nothing is dropped because nothing is capped.
+                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the path
+                /// above nothing is dropped because nothing is capped.
                 truncated: bool,
             },
             /// #9 — the connection dropped mid-stream on a streamed response.
@@ -3539,7 +3517,9 @@ mod support {
                 reconnect.policy = Some(policy);
                 Ok(self)
             }
-            /// The latest SSE event ID, including an empty ID that resets replay state.
+            /// The latest SSE event ID, including an empty ID that resets replay state. An automatic
+            /// reconnect sends it as `Last-Event-ID` when it is a valid header value; an empty ID, or one
+            /// holding a control character a header value refuses, reconnects without that header.
             pub fn last_event_id(&self) -> Option<&str> {
                 self.last_event_id.as_deref()
             }
@@ -3728,15 +3708,15 @@ mod support {
                 let reconnect = self.reconnect.as_ref()?;
                 let core = reconnect.core.clone();
                 let mut request = reconnect.request.try_clone()?;
-                match self.last_event_id.as_deref() {
-                    Some("") => {
-                        request.headers_mut().remove("last-event-id");
+                if let Some(id) = self.last_event_id.as_deref() {
+                    match reqwest::header::HeaderValue::from_str(id) {
+                        Ok(value) if !id.is_empty() => {
+                            request.headers_mut().insert("last-event-id", value);
+                        }
+                        _ => {
+                            request.headers_mut().remove("last-event-id");
+                        }
                     }
-                    Some(id) => {
-                        let value = reqwest::header::HeaderValue::from_str(id).ok()?;
-                        request.headers_mut().insert("last-event-id", value);
-                    }
-                    None => {}
                 }
                 Some(
                     Box::pin(async move {
@@ -4059,7 +4039,11 @@ mod support {
         where
             T: DeserializeOwned,
         {
-            super::dispatch::decode_success_with(core, response, decode_xml_body::<T>)
+            super::dispatch::decode_success_with(
+                    core,
+                    response,
+                    |body| decode_xml_body::<T>(body),
+                )
                 .await
         }
         /// Classify a non-success XML response into the operation's typed error body `E`. A documented
@@ -4143,15 +4127,15 @@ mod support {
         }
     }
     pub use auth::{
-        AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString,
-        TokenFuture, TokenProvider,
+        attach_auth, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret,
+        SecretString, TokenFuture, TokenProvider,
     };
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
-        attach_auth, build_url, build_url_on, build_url_with_query_string,
+        build_url, build_url_on, build_url_with_query_string,
         build_url_with_query_string_on, classify_error, classify_error_bytes,
         classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-        decode_text_body, read_error_body, read_success_body, send, unexpected_status,
+        decode_success_with, decode_text_body, read_error_body, send, unexpected_status,
         StatusSpec,
     };
     pub use error::{
@@ -6237,6 +6221,7 @@ pub mod types {
     }
     pub type ChatChunkdelta = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "order")]
     pub struct XmlOrder {
         #[serde(rename = "@id")]
         pub id: XmlOrderid,
@@ -6260,6 +6245,7 @@ pub mod types {
     pub type XmlReceiptcode = String;
     pub type XmlReceiptnote = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "meta")]
     pub struct JsonMeta {
         #[serde(rename = "id")]
         pub id: JsonMetaid,
@@ -8143,71 +8129,43 @@ Response `409`: Conflict*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiResponse::Status201)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetMultiResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetMultiError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         } else {
             let (status, headers, body, truncated) = match support::read_error_body::<
                 GetMultiError,
@@ -8525,62 +8483,37 @@ Response `default`: Anything else*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiDefaultError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiDefaultResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiDefaultResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMultiDefaultError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMultiDefaultResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMultiDefaultResponse::Status201)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetMultiDefaultError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetMultiDefaultError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::classify_error::<
@@ -9650,61 +9583,39 @@ Response `409`: binary error*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match support::decode_text_body::<
-                    Box<types::ResponseBody4450a524>,
-                >(&body) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRawMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRawMultiResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            support::decode_text_body::<
+                                Box<types::ResponseBody4450a524>,
+                            >(body)
+                                .map(GetRawMultiResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(201u16).matches(status) {
-                let value = match Ok::<
-                    Box<types::ResponseBody6bf58d24>,
-                    String,
-                >(Box::new(body.clone())) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRawMultiError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRawMultiResponse::Status201(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            Ok::<
+                                _,
+                                String,
+                            >(GetRawMultiResponse::Status201(Box::new(body.clone())))
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetRawMultiError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
         } else {
             let (status, headers, body, truncated) = match support::read_error_body::<
                 GetRawMultiError,
@@ -10361,46 +10272,33 @@ Response `204`: No Content*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetMaybeEmptyError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetMaybeEmptyResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetMaybeEmptyResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetMaybeEmptyResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetMaybeEmptyError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetMaybeEmptyError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::unexpected_status::<GetMaybeEmptyError>(&self.core, response)
@@ -10428,46 +10326,32 @@ Response `204`: No Content*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match support::decode_xml_body::<
-                    Box<types::XmlReceipt>,
-                >(&body) {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetXmlMaybeEmptyError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetXmlMaybeEmptyResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            support::decode_xml_body::<Box<types::XmlReceipt>>(body)
+                                .map(GetXmlMaybeEmptyResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Exact(204u16).matches(status) {
                 return Ok(
                     support::ResponseValue::new(
                         status,
-                        headers,
+                        response.headers().clone(),
                         GetXmlMaybeEmptyResponse::Status204,
                     ),
                 );
             }
-            Err(support::Error::<GetXmlMaybeEmptyError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetXmlMaybeEmptyError>(&self.core, response)
+                    .await,
+            )
         } else {
             Err(
                 support::unexpected_status::<GetXmlMaybeEmptyError>(&self.core, response)
@@ -10495,62 +10379,34 @@ Response `200`: OK*/
             .await
             .map_err(support::Error::widen)?;
         if response.status().is_success() {
-            let (status, headers, body) = support::read_success_body(response)
-                .await
-                .map_err(support::Error::widen)?;
+            let status = response.status();
             if support::StatusSpec::Exact(200u16).matches(status) {
-                let value = match serde_json::from_slice::<Box<types::MultiOk>>(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRangedError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRangedResponse::Status200(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiOk>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetRangedResponse::Status200)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
             if support::StatusSpec::Range(2u8).matches(status) {
-                let value = match serde_json::from_slice::<
-                    Box<types::MultiCreated>,
-                >(&body)
-                    .map_err(|error| error.to_string())
-                {
-                    Ok(value) => value,
-                    Err(path) => {
-                        return Err(support::Error::<GetRangedError>::Decode {
-                            status,
-                            headers,
-                            path,
-                            body,
-                            truncated: false,
-                        });
-                    }
-                };
-                return Ok(
-                    support::ResponseValue::new(
-                        status,
-                        headers,
-                        GetRangedResponse::Status2xx(value),
-                    ),
-                );
+                return support::decode_success_with(
+                        &self.core,
+                        response,
+                        |body| {
+                            serde_json::from_slice::<Box<types::MultiCreated>>(body)
+                                .map_err(|error| error.to_string())
+                                .map(GetRangedResponse::Status2xx)
+                        },
+                    )
+                    .await
+                    .map_err(support::Error::widen);
             }
-            Err(support::Error::<GetRangedError>::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         } else {
             Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         }

@@ -34,7 +34,7 @@ pub async fn decode_success_xml<T>(
 where
     T: DeserializeOwned,
 {
-    crate::dispatch::decode_success_with(core, response, decode_xml_body::<T>).await
+    crate::dispatch::decode_success_with(core, response, |body| decode_xml_body::<T>(body)).await
 }
 
 /// Classify a non-success XML response into the operation's typed error body `E`. A documented

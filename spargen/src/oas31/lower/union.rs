@@ -12,9 +12,11 @@ use super::discriminator::member_component_name;
 use super::meet::NoMeet;
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
-use super::refiner::{unreached_halves, unreached_message};
+use super::refiner::{
+    multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
+};
 use super::shape::schema_has_shape_constraint;
-use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull};
+use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower a `oneOf`/`anyOf` union, with `open_narrowing` out of effect.
@@ -46,7 +48,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// and is no variant, and with every member so narrowed the union is the null type. A `oneOf`
     /// in which `null` matches more than one branch admits no `null`. The union is rejected
     /// (`None`) with `E007` where one node declares both `oneOf` and `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
-    /// be met with a member that closes a reference cycle, with a member that states no category
+    /// be met with a member that closes a reference cycle (but for one of a category a sibling that
+    /// is a multi-category `type` array alone admits, which is kept unmet,
+    /// [`Self::cycle_branch_within`]), with a member that states no category
     /// for untyped sibling keywords to establish, or with a member it shares values with that no
     /// single Rust type represents, or where it meets every one of several `oneOf` members, or one
     /// beside a `null` member, in `null` alone, which then matches them all.
@@ -76,7 +80,38 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
                 (true, true) => unreachable!("lower_union is called only for a union schema"),
             };
+        let sibling_from = self.graph_mark();
         let sibling = self.lower_union_sibling(schema, hint)?;
+        let sibling_lowered = sibling_from..self.graph_mark();
+        let union = self.lower_union_with_sibling(schema, hint, members, mode, sibling);
+        // A multi-category `type` array lowers to the union it synthesizes only to be met with each
+        // branch, so that union and its branches are emitted only where a meet kept one of them as
+        // it is (#677).
+        if multi_category_types(schema).is_some()
+            && union.is_some_and(|union| !sibling_lowered.contains(&union.id.0))
+        {
+            self.elide_unused_union_lowering(sibling_lowered);
+        }
+        union
+    }
+
+    /// [`Self::lower_union_closed`] past the lowering of its `sibling`, which it meets with every
+    /// member of the `oneOf`/`anyOf` `members`.
+    fn lower_union_with_sibling(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        members: Vec<&SchemaOr>,
+        mode: UnionMode,
+        sibling: Option<UnionSibling>,
+    ) -> Option<Ty> {
+        // A sibling that is a multi-category `type` array alone constrains a branch's category and
+        // nothing else, so a cycle-closing branch of a category it admits meets it in itself, and
+        // is kept unmet rather than refused below ([`Self::cycle_branch_within`]).
+        let categories_alone = union_sibling_is_categories_alone(schema);
+        let kept_unmet = |ctx: &Self, member: &SchemaOr| {
+            categories_alone.is_some_and(|allowed| ctx.cycle_branch_within(member, allowed))
+        };
 
         // Two DIFFERENT facts, tracked apart because only one of them can rescue an empty
         // intersection. A null-only MEMBER supplies a branch that `null` validates against. A
@@ -144,6 +179,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // siblings are present, so one shape would get two codes.
                 if self.member_closes_a_cycle(member, &schema.provenance)
                     && !self.member_is_this_union(member, &schema.provenance)
+                    && !kept_unmet(self, member)
                 {
                     return self.reject_union_member_cycle(schema);
                 }
@@ -203,7 +239,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // reference reaches here still pointing at a placeholder, and the intersection below
             // cannot compose with one. Reported with the same wording the other two spellings use,
             // because it is the same fact about the same document.
-            if sibling.is_some() && self.is_in_progress_root(inner.id) {
+            if sibling.is_some()
+                && self.is_in_progress_root(inner.id)
+                && !kept_unmet(self, real_members[0])
+            {
                 return self.reject_union_member_cycle(schema);
             }
             // The member is some *other* type's still-open reservation — the cycle-closing
@@ -234,8 +273,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          own and cannot be given a generated type",
                     );
                 }
-                // A sibling meet is refused above, so here the `type` array was dropped for
-                // lowering, and a target whose keywords decide nothing takes its `null` (#574).
+                // A sibling meet is refused above, so here there is no sibling, or one that is a
+                // multi-category `type` array alone admitting the target's category, and a target
+                // whose keywords decide nothing takes the array's `null` (#574).
                 let takes_null = inner.nullable || (null_from_type_array && member_untyped);
                 // A `null` member beside a member that accepts `null`, or whose untyped target
                 // leaves it undecided, puts `null` in two branches, as the collapse below counts
@@ -248,9 +288,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // An untyped member accepts the `null` the `type` array permits (#574), as the
             // multi-member path's untyped variants do, before the sibling meet so the other
-            // sibling keywords can still take it away. Without a sibling to meet (a multi-type
-            // array dropped for lowering) it is then a branch `null` matches; with one, the meet
-            // below recounts it.
+            // sibling keywords can still take it away. Without a sibling to meet it is then a
+            // branch `null` matches; with one, the meet below recounts it.
             if null_from_type_array && member_untyped {
                 inner.nullable = true;
                 member_takes_null = true;
@@ -273,8 +312,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     |ctx, reach| {
                         // A member uninhabited on its own leaves the union so whatever the
                         // sibling is (#615), rather than an empty meet that rejects it below.
-                        let met =
-                            ctx.meet_refiner(inner, sibling.refiner, reach, &constrained_hint);
+                        let met = ctx.meet_union_sibling(
+                            schema,
+                            inner,
+                            sibling.refiner,
+                            reach,
+                            &constrained_hint,
+                        );
                         ctx.uninhabited_union_meet(inner, met)
                     },
                     |ctx| {
@@ -460,6 +504,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // that its own keywords decide nothing. A nested union `null` matches through its own
             // branches is such a branch too (#628).
             let leaves_null_undecided = self.branch_matches_null_undecided(member, ty);
+            // A cycle-closing branch a multi-category `type` array alone admits meets that sibling
+            // in itself: it is the variant it is without one.
+            let sibling =
+                if sibling.is_some() && self.is_in_progress_root(ty.id) && kept_unmet(self, member)
+                {
+                    None
+                } else {
+                    sibling
+                };
             // The reservation half of the cycle test again, on a multi-variant union. Same fact,
             // same wording, same place in the order: before anything tries to intersect against the
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
@@ -502,8 +555,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
             // sibling meet so the other sibling keywords can still take it away, and is then
-            // counted as a branch `null` matches. Without a sibling to meet (a multi-type array
-            // dropped for lowering) nothing else would give it the array's `null`.
+            // counted as a branch `null` matches. Without a sibling to meet (a cycle-closing branch
+            // a multi-category `type` array alone admits) nothing else would give it the array's
+            // `null`.
             if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
                 ty.nullable = true;
             }
@@ -524,7 +578,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
                 let null_before = self.is_exact_null(ty);
-                let met = self.meet_refiner(
+                let met = self.meet_union_sibling(
+                    schema,
                     ty,
                     sibling.refiner,
                     &mut reach,
