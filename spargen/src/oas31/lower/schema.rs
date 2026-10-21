@@ -217,7 +217,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
             // Beside a union sibling and no `type`, the untyped target leaves `null` to the
             // union, as the same target written as an `allOf` member beside it does
-            // ([`undecided_admits_null`], #586): where a branch admits `null` itself
+            // ([`Self::composition_takes_union_null`], #586): where a branch admits `null` itself
             // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
             // union's answer.
             let referenced = if has_union_sibling

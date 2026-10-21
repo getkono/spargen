@@ -9,9 +9,7 @@ use crate::ir::{Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
 
 use super::combine::{schema_has_union, take_refiners, Contribution};
-use super::nullability::{
-    member_is_null_only, undecided_admits_null, union_branch_admits_null, NullAdmission,
-};
+use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
 use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
 
@@ -691,14 +689,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let has_object = contributions
                 .iter()
                 .any(|contribution| matches!(contribution, Contribution::Object { .. }));
-            Some(undecided_admits_null(
-                composed,
-                has_object,
-                &contributions,
-                &union,
-                |branch| self.branch_decides_null(branch),
-                |branch| self.branch_denies_null(branch),
-            ))
+            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
         };
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
         refiners.extend(
@@ -856,14 +847,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             let composed =
                 self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?;
-            Some(undecided_admits_null(
-                composed,
-                has_object,
-                &contributions,
-                union,
-                |branch| self.branch_decides_null(branch),
-                |branch| self.branch_denies_null(branch),
-            ))
+            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
         };
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
         refiners.extend(
@@ -1028,9 +1012,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
         let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
         // With no composition, only untyped refiners meet the union: they leave `null` to it, as
-        // an untyped composition does ([`undecided_admits_null`]), so they admit it where a branch
-        // admits it itself ([`union_branch_admits_null`]), and its untyped branches take it there
-        // (#586).
+        // an untyped composition does ([`Self::composition_takes_union_null`]), so they admit it
+        // where a branch admits it itself ([`union_branch_admits_null`]), and its untyped branches
+        // take it there (#586).
         let enclosing_meets_null = std::mem::replace(
             &mut self.unmerged_union_meets_null,
             composed.map_or_else(
