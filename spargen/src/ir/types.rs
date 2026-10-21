@@ -168,6 +168,13 @@ impl TypeGraph {
         })
     }
 
+    /// Whether `id`'s alias walk reaches a reservation — `id` itself, or an array or tuple item
+    /// along the way — so [`same_generated_type`](Self::same_generated_type) answers `false` for
+    /// it only because the reservation is not filled yet, and may answer `true` once it is.
+    pub(crate) fn reaches_reservation(&self, id: TypeId) -> bool {
+        self.alias_cycle(id).is_none()
+    }
+
     /// [`closes_alias_cycle`](Self::closes_alias_cycle), or `None` where the walk reaches a
     /// reservation — `id` itself, or an array or tuple item along the way — whose body is unknown,
     /// so whether it closes the cycle is unknown too.
