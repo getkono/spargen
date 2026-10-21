@@ -9,9 +9,10 @@ use crate::name::Names;
 use super::ty::ty_tokens;
 
 /// Emit the enum for union definition `id`, one boxed payload variant per union variant, with the
-/// `Deserialize` / `Serialize` impls of its strategy: by discriminator tag, by a statically
-/// disjoint feature, or by trying each variant's schema. `docs` and `deprecated` are the
-/// definition's own attributes.
+/// `Deserialize` / `Serialize` impls of its strategy: by discriminator (a unique JSON category for
+/// a non-object variant, then the tag, then a trial of the variants no tag selects, then the
+/// `defaultMapping` variant), by a statically disjoint feature, or by trying each variant's
+/// schema. `docs` and `deprecated` are the definition's own attributes.
 pub(super) fn emit_union(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
@@ -25,9 +26,10 @@ pub(super) fn emit_union(
         // `serde_json::Value`. NOT serde `#[serde(tag = ...)]`: internal tagging consumes the tag
         // field out of the buffer, so a variant struct that declares the discriminator as a
         // (usually required) property would fail with "missing field". Instead the WHOLE value is
-        // handed to the selected variant (it keeps its own tag field), and on serialize the tag is
-        // re-inserted only when the variant did not already write it. No `untagged`, no `Value`
-        // degrade.
+        // handed to the selected variant (it keeps its own tag field), and on serialize a tagged
+        // variant's first tag is inserted only when the variant did not already write it; a
+        // variant selected by category or trial is written with no tag. No serde `untagged`, no
+        // `Value` degrade.
         UnionStrategy::Discriminated {
             tag_field,
             tags,

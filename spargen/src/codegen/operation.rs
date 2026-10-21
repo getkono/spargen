@@ -278,8 +278,10 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
 
 /// Whether a required parameter is emitted as `impl Into<String>` rather than its concrete type.
 ///
-/// Exactly a non-nullable, unboxed `String`. `Option<String>` and `Box<String>` positions stay
-/// concrete: `Into` would make `None` ambiguous at the call site for no gain.
+/// Exactly a non-nullable, unboxed [`Prim::String`](crate::ir::Prim::String). `Option<String>`
+/// and `Box<String>` positions stay concrete: `Into` would make `None` ambiguous at the call site
+/// for no gain. A `uuid`, `date` or `date-time` primitive stays concrete too, including where its
+/// feature is off and it renders as `String`.
 fn takes_into_string(api: &Api, ty: Ty) -> bool {
     !ty.nullable
         && !ty.boxed
@@ -289,8 +291,10 @@ fn takes_into_string(api: &Api, ty: Ty) -> bool {
         )
 }
 
-/// Convert every `impl Into<..>` argument to its concrete type once, at the top of the method body,
-/// so the rest of the emitted body is written against concrete types exactly as before.
+/// Convert every `impl Into<..>` argument to its concrete type once, at the top of the method body:
+/// each required parameter [`takes_into_string`] admits, and the optional-parameters bundle from
+/// `impl Into<Option<…Params>>` to `Option<…Params>`. The rest of the emitted body is written
+/// against concrete types.
 fn operation_arg_normalizations(
     operation: &Operation,
     api: &Api,
