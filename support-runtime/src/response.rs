@@ -59,9 +59,14 @@ mod tests {
 
     #[test]
     fn maps_body_without_losing_metadata() {
-        let value = ResponseValue::new(StatusCode::CREATED, HeaderMap::new(), 41);
+        // A present header, so "preserving headers" is observed rather than vacuous on an empty map.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-trace", "abc".parse().unwrap());
+        let value = ResponseValue::new(StatusCode::CREATED, headers, 41);
         let mapped = value.map(|value| value + 1);
         assert_eq!(mapped.status(), StatusCode::CREATED);
+        assert_eq!(mapped.headers().len(), 1);
+        assert_eq!(mapped.headers()["x-trace"], "abc");
         assert_eq!(*mapped.inner(), 42);
     }
 
