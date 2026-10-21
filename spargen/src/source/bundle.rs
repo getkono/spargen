@@ -499,7 +499,8 @@ fn parse_by_name(
 /// Parse a document whose name carries no recognised extension: as YAML, then as JSON (#717).
 /// Each attempt collects into scratch diagnostics, and only the kept attempt's are replayed into
 /// `diags`: the parse that succeeded, or YAML's when both fail. A failed YAML attempt therefore
-/// does not abort a document JSON accepts, and a document neither accepts reports one `E011`.
+/// does not abort a document JSON accepts, and a document neither accepts reports only the YAML
+/// attempt's diagnostic rather than one per attempt.
 /// The build ([`parse_by_name`]) and `spargen lock` both take this fallback.
 pub(super) fn parse_yaml_then_json(
     id: FileId,
