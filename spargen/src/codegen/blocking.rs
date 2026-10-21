@@ -11,11 +11,11 @@ use super::operation::{operation_args, operation_return_ty, param_default_docs_t
 
 /// Emit the `BlockingClient`: a synchronous facade that owns the async `Client` plus a
 /// current-thread tokio runtime and drives each async operation to completion with `block_on`. It
-/// is compiled only under the generated crate's `blocking` feature on a non-`wasm32` target
+/// is compiled only under the consumer crate's `blocking` feature on a non-`wasm32` target
 /// (`cfg(all(feature = "blocking", not(target_arch = "wasm32")))`): tokio's blocking runtime cannot
 /// run on the single-threaded browser, so a wasm build never has one, feature or not. It reuses the
-/// whole async dispatch — every method is a thin shim — so there is zero logic duplication.
-/// Constructors mirror the async client's.
+/// whole async dispatch — every method is a thin shim — so there is zero logic duplication. Its
+/// constructors are the async client's `new`, `with_client` and `with_backend`.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the
@@ -26,7 +26,8 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
         .iter()
         .map(|operation| emit_blocking_operation(operation, api, names));
     let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
-        and `block_on`s each operation. Enable the crate's `blocking` feature to use it.\n\n\
+        and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it \
+        compiles only on a non-wasm32 target.\n\n\
         Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";

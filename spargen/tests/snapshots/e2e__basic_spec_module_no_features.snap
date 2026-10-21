@@ -21,8 +21,8 @@ pub use support::{
 pub use support::{
     EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
-/// The freestanding runtime embedded verbatim into this output; no spargen crate exists
-/// at runtime.
+/// The freestanding runtime embedded into this output; no spargen crate is a runtime
+/// dependency.
 #[forbid(unsafe_code)]
 #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
 mod support {
@@ -2696,10 +2696,8 @@ mod support {
         //! }
         //! ```
         //!
-        //! No generic closure/future combinator is provided for this: Rust closures returning futures are
-        //! awkward to type, and the plain loop over the already-public [`super::send`] /
-        //! [`super::decode_success`] primitives (which the generated methods use) is clearer and fully
-        //! typed. The loop pattern above is the supported shape.
+        //! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
+        //! type, and a plain loop over the generated operation method is clearer and fully typed.
         use std::convert::Infallible;
         use std::marker::PhantomData;
         use reqwest::header::HeaderMap;
@@ -4119,9 +4117,9 @@ mod support {
         //! and drives the generated async operation futures to completion on it — the blocking client is a
         //! thin shim that reuses every line of the async dispatch, adding no logic of its own.
         //!
-        //! This module is compiled only under the `blocking` feature, which pulls in `tokio` with just the
-        //! `rt` feature. A client built without the feature carries no tokio dependency and no blocking
-        //! client at all.
+        //! This module is compiled only under the `blocking` feature on a non-wasm32 target, and pulls in
+        //! `tokio` with just the `rt` feature. A client built without the feature, or for wasm32, carries
+        //! no tokio dependency and no blocking client at all.
         //!
         //! # Nested-runtime caveat
         //!
@@ -7632,13 +7630,13 @@ impl Client {
     ///
     /// Registration checks nothing; each operation matches its `security` requirement
     /// against the registered credentials when it is called, and fails before anything is
-    /// sent, as `support::Error::RequestConstruction`, when no alternative has every scheme
+    /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
     /// registered (`RequestError::MissingCredential`), when the selected alternative has a
     /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
     /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
     /// `Credential::Basic`), or when its token provider fails
-    /// (`RequestError::CredentialProvider`). `support::Credential`'s documentation lists
-    /// which variant each kind of scheme accepts.
+    /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+    /// variant each kind of scheme accepts.
     ///
     ///# Declared schemes
     ///
@@ -10538,7 +10536,7 @@ Response `409`: Conflict*/
 mod __spargen_blocking {
     use super::*;
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-    /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it.
+    /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it compiles only on a non-wasm32 target.
 
 Must NOT be constructed or called from inside another async runtime — tokio's `block_on` panics when nested. Build one on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`).*/
     #[derive(Debug)]

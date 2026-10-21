@@ -134,9 +134,9 @@ the version it emits, and the idioms spargen handles.
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
-  support. Each is opt-in and adds no dependency; spargen ships no retry *policy* and no async
-  timer — the caller supplies both. See the
-  [runtime reference](docs/book/src/runtime.md).
+  support. Each is opt-in; streams add `futures-core` and the blocking client a native-only
+  `tokio`, and the [runtime reference](docs/book/src/runtime.md) lists what each capability adds.
+  Spargen ships no retry *policy* and no async timer — the caller supplies both.
 - Each schema becomes a model in the generated `types` module. A model whose name would spell one
   of the ten names that module itself uses (`Date`, `DateTime`, `Serialize`, `Deserialize`,
   `BTreeMap`, `String`, `Option`, `Vec`, `Box`, `Result`) takes a disambiguated name instead.
@@ -147,13 +147,11 @@ the version it emits, and the idioms spargen handles.
 ### Design guarantees
 
 - **Freestanding output.** The runtime support code is embedded into the generated module; no
-  spargen crate ever appears in a consumer's runtime dependency tree. Runtime dependencies are
-  exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus only
-  the capabilities the compiled API uses: `futures-core` and reqwest's `stream` feature for
-  sequential responses, `quick-xml` for XML bodies, `time` for date formats, `uuid` for UUIDs, and
-  an opt-in `tokio` only when the consumer declares its own `blocking` feature. Generation audits
-  the consumer manifest against the
-  tested floors and feature set before Cargo/rustc compile the emitted client; see the
+  spargen crate ever appears in a consumer's runtime dependency tree. The runtime dependency set,
+  and what each capability adds to it only when the compiled API uses it, is stated in the
+  [runtime reference](docs/book/src/runtime.md), and `spargen deps <spec>` prints it for one spec.
+  Generation audits the consumer manifest against the tested floors and feature set before
+  Cargo/rustc compile the emitted client; see the
   [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
   test. Item order follows the document's order; nothing depends on hash-map iteration.

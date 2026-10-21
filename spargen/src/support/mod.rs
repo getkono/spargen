@@ -7,7 +7,7 @@
 //! (`include_str!`) for codegen to embed into a private `support` module of the generated code:
 //! [`runtime_files`] for the files every client embeds as they are, and one accessor for each file
 //! embedded on its own terms: streams, XML, and the RFC 3339 date types only for an API that uses
-//! them, and the blocking client behind its `blocking` feature.
+//! them, and the blocking client behind its `blocking` feature on a non-wasm32 target.
 //!
 //! The embed is not verbatim: `codegen::runtime::emit_support` keeps each file only up to its
 //! `#[cfg(test)]` marker, rewrites every `crate::` to `super::` so the paths resolve from the
@@ -114,11 +114,12 @@ pub(crate) fn datetime_runtime_file() -> SupportFile {
     }
 }
 
-/// The blocking-facade runtime source (`BlockingRuntime`), embedded into every crate output but
-/// gated behind the `blocking` feature at the module level, so the tokio-dependent code is compiled
-/// only when a consumer opts in. Kept out of [`runtime_files`] (which is embedded unconditionally
-/// with no cfg) because it must carry the `#[cfg(feature = "blocking")]` gate; its bytes ship inside
-/// the published crate through the `runtime/blocking.rs` symlink.
+/// The blocking-facade runtime source (`BlockingRuntime`), embedded into every generated module but
+/// gated at the module level on the `blocking` feature on a non-wasm32 target, so the
+/// tokio-dependent code is compiled only when a consumer opts in on a native target. Kept out of
+/// [`runtime_files`] (which is embedded with no cfg) because it must carry the
+/// `#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]` gate; its bytes ship inside the
+/// published crate through the `runtime/blocking.rs` symlink.
 pub(crate) fn blocking_runtime_file() -> SupportFile {
     SupportFile {
         name: "blocking.rs",

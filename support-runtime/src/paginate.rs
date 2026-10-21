@@ -53,10 +53,8 @@
 //! }
 //! ```
 //!
-//! No generic closure/future combinator is provided for this: Rust closures returning futures are
-//! awkward to type, and the plain loop over the already-public [`crate::send`] /
-//! [`crate::decode_success`] primitives (which the generated methods use) is clearer and fully
-//! typed. The loop pattern above is the supported shape.
+//! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
+//! type, and a plain loop over the generated operation method is clearer and fully typed.
 
 use std::convert::Infallible;
 use std::marker::PhantomData;

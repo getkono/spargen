@@ -135,13 +135,13 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             ///
             /// Registration checks nothing; each operation matches its `security` requirement
             /// against the registered credentials when it is called, and fails before anything is
-            /// sent, as `support::Error::RequestConstruction`, when no alternative has every scheme
+            /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
             /// registered (`RequestError::MissingCredential`), when the selected alternative has a
             /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
             /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
             /// `Credential::Basic`), or when its token provider fails
-            /// (`RequestError::CredentialProvider`). `support::Credential`'s documentation lists
-            /// which variant each kind of scheme accepts.
+            /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+            /// variant each kind of scheme accepts.
             #(#scheme_docs)*
             #[must_use]
             pub fn with_credential(

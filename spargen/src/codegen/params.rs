@@ -99,7 +99,8 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
 
 /// Emit serialization of one query parameter into the operation's fragment vector.
 ///
-/// Fragments arrive at `build_url` already percent-encoded, so the style's delimiters stay
+/// Fragments arrive at `support::build_url_on` (or `build_url_with_query_string_on`, beside a
+/// whole-query value) already percent-encoded, so the style's delimiters stay
 /// literal and remain distinguishable from the same character inside a value.
 pub(super) fn query_param_tokens(
     param: &crate::ir::Parameter,
