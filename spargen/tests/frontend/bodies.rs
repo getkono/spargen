@@ -984,6 +984,41 @@ paths:
 }
 
 #[test]
+fn binary_format_in_content_parameters_emits_no_bytes_alias() {
+    // The `content:` parameter call site of the same elision (#927): a JSON and a `text/*`
+    // `content` parameter whose schema lowers to `bytes::Bytes` take its `String` copy, so the
+    // bytes alias the schema lowered to is named by nothing and is not emitted.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/json:
+              schema: { type: string, format: binary }
+        - name: tag
+          in: header
+          content:
+            text/plain:
+              schema: { type: string, format: binary }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for alias in ["Filter", "Tag"] {
+        assert_eq!(alias_target(&code, alias), None, "{code}");
+    }
+    assert!(!code.contains("= bytes::Bytes;"), "{code}");
+    let checked = check(spec);
+    assert_check_agrees(&report, &checked);
+}
+
+#[test]
 fn a_binary_parameter_keeps_the_component_it_refs_emitted() {
     // Eliding the bytes type a binary parameter's `String` copy replaces (#927) must not reach a
     // `$ref`'d component: the parameter lowers it first, and its memo hands the same type to the
