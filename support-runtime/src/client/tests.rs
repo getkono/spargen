@@ -1,7 +1,8 @@
 use secrecy::SecretString;
 
 use super::{ClientConfig, ClientCore};
-use crate::Credential;
+use crate::tests::poll_ready;
+use crate::{send, Credential, Error};
 
 #[test]
 fn an_invalid_base_url_is_a_request_construction_error() {
@@ -88,17 +89,24 @@ fn a_removed_credential_is_returned_and_no_longer_registered() {
     assert!(core.credential("token").is_some());
 }
 
+/// The supplied client is the one requests run on: an `https_only` client refuses a plain `http`
+/// request at execute, which a default client would instead try to send. reqwest refuses it
+/// without touching the network, so the future is ready on the first poll, and the refusal is a
+/// builder-kind error that the taxonomy classifies as `RequestConstruction`.
 #[test]
-fn with_client_installs_the_supplied_client_for_building_requests() {
-    let client = reqwest::Client::new();
-    let core = ClientCore::with_client(client, "https://example.com").unwrap();
-    // The injected client is the one requests are built on; the default backend wraps a clone
-    // of it for execution.
-    assert!(core
-        .http()
-        .request(reqwest::Method::GET, "https://example.com/x")
+fn with_client_runs_requests_on_the_supplied_client() {
+    let client = reqwest::Client::builder()
+        .https_only(true)
         .build()
-        .is_ok());
+        .expect("build an https-only client");
+    let core = ClientCore::with_client(client, "http://example.com").unwrap();
+    let request = core
+        .http()
+        .request(reqwest::Method::GET, "http://example.com/x")
+        .build()
+        .expect("reqwest builds the request; it refuses it only at execute");
+    let error = poll_ready(send(&core, request)).expect_err("the https-only client refuses http");
+    assert!(matches!(error, Error::RequestConstruction(_)), "{error:?}");
 }
 
 /// `http` hands back the caller's client, not a default one: its configuration is what the
