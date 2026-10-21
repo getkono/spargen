@@ -57,7 +57,8 @@ other direction stands whatever the command line says:
 - `open_narrowing = true` in the file cannot be turned off; `--open-narrowing` only turns it on.
 
 To undo one of those, edit the file or point `--config` at another. `diff` resolves each of its two
-specs this way on its own, so each side discovers the `spargen.toml` beside it.
+specs this way on its own: absent `--config`, each side discovers the `spargen.toml` beside it,
+while `--config` applies its one file to both sides.
 
 ### Exit status
 
