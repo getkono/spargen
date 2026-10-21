@@ -331,11 +331,11 @@ fn explains_union(diagnostic: &Diagnostic) -> bool {
 /// The [`indistinguishable_variants`] of `code` a `Generated` run must not have emitted: every one
 /// except those of a union a `W001` of `report` explains at the union's own pointer.
 ///
-/// The generated module records no pointer, so a union is tied to a pointer through its name: a
-/// `W001` that [explains a union](explains_union) at a pointer under the component schema `C`
-/// excuses one union whose name begins with `C`'s, as every type lowered under `C` is named (`U`'s
-/// property `p` is `Up`). Each such warning excuses one union, so two unions cannot shelter behind
-/// one warning, and a warning anywhere else, or of any other kind, excuses none.
+/// A union is tied to a pointer only through its name: a `W001` that [explains a
+/// union](explains_union) at a pointer under the component schema `C` excuses one union whose name
+/// begins with `C`'s, as every type lowered under `C` is named (`U`'s property `p` is `Up`). Each
+/// such warning excuses one union, so two unions cannot shelter behind one warning, and a warning
+/// anywhere else, or of any other kind, excuses none.
 pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
     let violations = union_violations(code);
     let mut explanations: Vec<String> = report
