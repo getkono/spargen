@@ -301,6 +301,45 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
     assert!(rejection.new_spec().is_some());
 }
 
+/// A path item whose response is a dynamic reference (`E006`): it rejects the whole spec unless
+/// carve omits it.
+const DYNAMIC_REF_OP: &str = "  /bad:
+    get:
+      operationId: getBad
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $dynamicRef: '#meta' }
+";
+
+/// With `carve` set on each side, `diff` carves each spec the way `check` and generation do and
+/// compares the carved surfaces; without it, the same pair is a rejection on both sides.
+#[test]
+fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
+    let old = spec("", "id", PET_PROPS, DYNAMIC_REF_OP);
+    let new = spec("", "id", PET_PROPS, &format!("{DYNAMIC_REF_OP}{EXTRA_OP}"));
+
+    let uncarved = rejection(&old, &new);
+    assert!(
+        uncarved.old_spec().is_some() && uncarved.new_spec().is_some(),
+        "{uncarved}"
+    );
+
+    let report = diff_configured(&old, &new, |spec| spec.carve(true), |spec| spec.carve(true));
+    assert_eq!(kinds(&report), [ChangeKind::OperationAdded], "{report:?}");
+    assert!(
+        report
+            .changes
+            .iter()
+            .all(|change| !change.location.contains("getBad")
+                && !change.location.contains("get_bad")),
+        "the carved operation is on neither surface: {report:?}"
+    );
+    assert_eq!(report.bump, Impact::Minor);
+}
+
 /// A document that never lowers, for the rejection fixtures.
 const UNLOWERABLE: &str = "not: a valid openapi document\n";
 
