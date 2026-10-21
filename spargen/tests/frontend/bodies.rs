@@ -967,15 +967,58 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
+    // The `bytes::Bytes` aliases the two parameters lowered to are replaced by their `String`
+    // copies, so nothing names them and they are not emitted (#927).
+    for alias in ["Token", "Cursor"] {
+        assert_eq!(alias_target(&code, alias), None, "{code}");
+    }
 
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn a_binary_parameter_keeps_the_component_it_refs_emitted() {
+    // Eliding the bytes type a binary parameter's `String` copy replaces (#927) must not reach a
+    // `$ref`'d component: the parameter lowers it first, and its memo hands the same type to the
+    // body that names it afterwards.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob/{token}:
+    post:
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Blob" }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { $ref: "#/components/schemas/Blob" }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Blob: { type: string, format: binary }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        alias_target(&code, "Blob").as_deref(),
+        Some("bytes::Bytes"),
+        "{code}"
+    );
+    let checked = check(spec);
+    assert_check_agrees(&report, &checked);
 }
 
 #[test]
