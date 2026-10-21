@@ -4250,13 +4250,22 @@ mod support {
             type Err = DateParseError;
             /// Parses exactly `YYYY-MM-DD`. The length and separator positions are checked first so that a
             /// longer string (an accidental full `date-time`, say) is rejected rather than silently
-            /// truncated to its date part.
+            /// truncated to its date part. Every other byte must be an ASCII digit, because integer
+            /// `FromStr` would otherwise accept a sign (`2023-+1-+4`, or year -1 from `-001-01-02`).
             fn from_str(text: &str) -> Result<Self, Self::Err> {
                 let invalid = || DateParseError {
                     expected: "full-date (YYYY-MM-DD)",
                 };
                 let bytes = text.as_bytes();
-                if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+                if bytes.len() != 10
+                    || !bytes
+                        .iter()
+                        .enumerate()
+                        .all(|(index, byte)| match index {
+                            4 | 7 => *byte == b'-',
+                            _ => byte.is_ascii_digit(),
+                        })
+                {
                     return Err(invalid());
                 }
                 let year: i32 = text[0..4].parse().map_err(|_| invalid())?;
