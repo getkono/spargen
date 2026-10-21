@@ -1862,6 +1862,63 @@ fn a_server_variable_gaining_or_losing_its_enum_is_major_both_ways() {
     }
 }
 
+/// The `/pets` spec whose `Pet` carries `additional` (an `additionalProperties:` line at 6-space
+/// indent, or `""` for none).
+fn with_additional(additional: &str) -> String {
+    full(
+        &pets_get("listPets", "", PET_REF),
+        &format!("{PET_SCHEMA}{additional}"),
+    )
+}
+
+const ADDITIONAL_STRING: &str = "      additionalProperties: { type: string }\n";
+
+const ADDITIONAL_INTEGER: &str = "      additionalProperties: { type: integer }\n";
+
+#[test]
+fn changing_a_typed_additional_properties_map_is_major() {
+    // The map is a public `BTreeMap<String, T>` field, so its value type is surface (#726).
+    let report = diff(
+        &with_additional(ADDITIONAL_STRING),
+        &with_additional(ADDITIONAL_INTEGER),
+    );
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::AdditionalPropertiesTypeChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn adding_a_typed_additional_properties_map_is_minor_and_removing_one_is_major() {
+    let added = diff(&with_additional(""), &with_additional(ADDITIONAL_STRING));
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::AdditionalPropertiesAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_additional(ADDITIONAL_STRING), &with_additional(""));
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::AdditionalPropertiesRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+
+    // `false` changes what a decode accepts and declares no field, so it is no surface change.
+    let denied = diff(
+        &with_additional(""),
+        &with_additional("      additionalProperties: false\n"),
+    );
+    assert_eq!(kinds(&denied), vec![], "{:?}", denied.changes);
+}
+
 #[test]
 fn the_json_report_names_kinds_by_code_and_impacts_in_lowercase() {
     let report = diff(&base(), &spec("", "id", PET_PROPS, EXTRA_OP));

@@ -4,9 +4,11 @@
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
 //! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
 //! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
-//! client sees — the client methods (operations) and the public model types — then classifies every
-//! difference between an old and a new surface as a semver bump. It never emits code and has no
-//! effect on generation or the runtime; it backs `spargen diff`.
+//! client sees — the client methods (operations) with their typed response-header structs, the
+//! public model types with their typed `additionalProperties` maps, and the server builders with
+//! their variable enums — then classifies every difference between an old and a new surface as a
+//! semver bump. It never emits code and has no effect on generation or the runtime; it backs
+//! `spargen diff`.
 //!
 //! Per the product contract, "the semver surface is the public API of generated output".
 //!
@@ -36,13 +38,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
-    TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec,
+    SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
-/// The full consumer-visible surface of one generated client: its operations (client methods) and
-/// its public model types, each keyed by a stable identity so two surfaces can be diffed.
+/// The full consumer-visible surface of one generated client: its operations (client methods), its
+/// public model types, and its server builders, each keyed by a stable identity so two surfaces
+/// can be diffed.
 pub(crate) struct Surface {
     /// Operations keyed by `"METHOD /path"` — the stable endpoint identity (independent of a
     /// possibly-synthesised `operationId`).
@@ -59,8 +62,8 @@ pub(crate) struct Surface {
 }
 
 /// One server builder's surface: a setter per server variable, keyed by the generated setter name.
-/// Its fields are private, so the setters are all a consumer reaches of it beyond `new`, `url`, and
-/// `Default`, which every builder has.
+/// Its fields are private; a consumer reaches it through `new`, `url`, `Default`, which every
+/// builder has, and these setters.
 struct ServerSurface {
     variables: BTreeMap<String, ServerVariableSurface>,
 }
@@ -145,8 +148,9 @@ struct ParamSurface {
 /// consumer already sees at every use site, so they are compared structurally there rather than as
 /// standalone entries.
 enum TypeSurface {
-    /// A `struct`: fields keyed by generated field name.
-    Struct(BTreeMap<String, FieldSurface>),
+    /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
+    /// when it has one.
+    Struct(BTreeMap<String, FieldSurface>, Option<OverflowSurface>),
     /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
     /// the generated name of the variant holding any other string.
     Enum(BTreeSet<String>, Option<String>),
@@ -164,7 +168,7 @@ impl TypeSurface {
     /// A short label for the generation kind, used to report a kind change (`struct` → `enum`, …).
     fn kind_label(&self) -> &'static str {
         match self {
-            TypeSurface::Struct(_) => "struct",
+            TypeSurface::Struct(..) => "struct",
             TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
             TypeSurface::Newtype(_) => "newtype",
@@ -179,6 +183,15 @@ impl TypeSurface {
 struct FieldSurface {
     ty: String,
     required: bool,
+}
+
+/// A struct's typed `additionalProperties` map, emitted as a public `#[serde(flatten)]` field of
+/// type `BTreeMap<String, T>`.
+struct OverflowSurface {
+    /// The generated field name.
+    field: String,
+    /// The canonical value type `T`.
+    ty: String,
 }
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
@@ -302,6 +315,13 @@ pub enum ChangeKind {
     /// A server variable's setter now takes another type: a free-form variable gained or lost its
     /// `enum`, or its variable enum was renamed. **Major**.
     ServerVariableTypeChanged,
+    /// A struct gained a typed `additionalProperties` map. **Minor** — a new public map field, the
+    /// optional-field rule.
+    AdditionalPropertiesAdded,
+    /// A struct lost its typed `additionalProperties` map. **Major** — reads of the field break.
+    AdditionalPropertiesRemoved,
+    /// The value type of a struct's typed `additionalProperties` map changed. **Major**.
+    AdditionalPropertiesTypeChanged,
 }
 
 impl ChangeKind {
@@ -317,7 +337,8 @@ impl ChangeKind {
             | ChangeKind::ResponseHeadersAdded
             | ChangeKind::ResponseHeaderAdded
             | ChangeKind::ServerAdded
-            | ChangeKind::ServerVariableAdded => Impact::Minor,
+            | ChangeKind::ServerVariableAdded
+            | ChangeKind::AdditionalPropertiesAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::RequestBodyAdded
@@ -347,7 +368,9 @@ impl ChangeKind {
             | ChangeKind::ResponseHeaderRequirednessChanged
             | ChangeKind::ServerRemoved
             | ChangeKind::ServerVariableRemoved
-            | ChangeKind::ServerVariableTypeChanged => Impact::Major,
+            | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesRemoved
+            | ChangeKind::AdditionalPropertiesTypeChanged => Impact::Major,
         }
     }
 
@@ -394,6 +417,9 @@ impl ChangeKind {
             ChangeKind::ServerVariableAdded => "server-variable-added",
             ChangeKind::ServerVariableRemoved => "server-variable-removed",
             ChangeKind::ServerVariableTypeChanged => "server-variable-type-changed",
+            ChangeKind::AdditionalPropertiesAdded => "additional-properties-added",
+            ChangeKind::AdditionalPropertiesRemoved => "additional-properties-removed",
+            ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
         }
     }
 }
@@ -561,7 +587,20 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         },
                     );
                 }
-                TypeSurface::Struct(fields)
+                // `Deny` and `Allow` only change what a decode accepts; neither declares a field.
+                let overflow = match &object.additional {
+                    AdditionalProps::Typed(ty) => Some(OverflowSurface {
+                        field: names
+                            .struct_overflow
+                            .get(&id)
+                            .expect("overflow field name allocated")
+                            .as_str()
+                            .to_owned(),
+                        ty: canon_ty(**ty, api, names),
+                    }),
+                    AdditionalProps::Allow | AdditionalProps::Deny => None,
+                };
+                TypeSurface::Struct(fields, overflow)
             }
             // Only string enums generate a real `pub enum` whose variants are surface. Integer /
             // boolean enums lower to a scalar alias and carry no variant surface — skip them here;
@@ -1143,8 +1182,12 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
 
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
-        (TypeSurface::Struct(old_fields), TypeSurface::Struct(new_fields)) => {
+        (
+            TypeSurface::Struct(old_fields, old_overflow),
+            TypeSurface::Struct(new_fields, new_overflow),
+        ) => {
             diff_struct(name, old_fields, new_fields, changes);
+            diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
         }
         (TypeSurface::Enum(old_variants, old_open), TypeSurface::Enum(new_variants, new_open)) => {
             diff_variant_set(name, old_variants, new_variants, changes);
@@ -1178,6 +1221,52 @@ fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>)
         name,
         format!("type kind `{old}` -> `{new}`"),
     ));
+}
+
+/// The changes to a struct's typed `additionalProperties` map. A map that moves to another field
+/// name (a declared property taking its spelling) is the old field removed and a new one added.
+fn diff_overflow(
+    name: &str,
+    old: Option<&OverflowSurface>,
+    new: Option<&OverflowSurface>,
+    changes: &mut Vec<Change>,
+) {
+    match (old, new) {
+        (Some(old_map), Some(new_map)) if old_map.field == new_map.field => {
+            if old_map.ty != new_map.ty {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesTypeChanged,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties type `BTreeMap<String, {}>` -> `BTreeMap<String, {}>`",
+                        old_map.ty, new_map.ty
+                    ),
+                ));
+            }
+        }
+        _ => {
+            if let Some(old_map) = old {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesRemoved,
+                    format!("{name}.{}", old_map.field),
+                    format!(
+                        "additional properties map removed (was `BTreeMap<String, {}>`)",
+                        old_map.ty
+                    ),
+                ));
+            }
+            if let Some(new_map) = new {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesAdded,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties map added: `BTreeMap<String, {}>`",
+                        new_map.ty
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn diff_struct(

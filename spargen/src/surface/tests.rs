@@ -48,6 +48,9 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::ServerVariableAdded,
         ChangeKind::ServerVariableRemoved,
         ChangeKind::ServerVariableTypeChanged,
+        ChangeKind::AdditionalPropertiesAdded,
+        ChangeKind::AdditionalPropertiesRemoved,
+        ChangeKind::AdditionalPropertiesTypeChanged,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -92,7 +95,10 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::ServerRemoved
             | ChangeKind::ServerVariableAdded
             | ChangeKind::ServerVariableRemoved
-            | ChangeKind::ServerVariableTypeChanged => {}
+            | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesAdded
+            | ChangeKind::AdditionalPropertiesRemoved
+            | ChangeKind::AdditionalPropertiesTypeChanged => {}
         }
     }
     every.to_vec()
@@ -141,6 +147,9 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::ServerVariableAdded => "ServerVariableAdded",
         ChangeKind::ServerVariableRemoved => "ServerVariableRemoved",
         ChangeKind::ServerVariableTypeChanged => "ServerVariableTypeChanged",
+        ChangeKind::AdditionalPropertiesAdded => "AdditionalPropertiesAdded",
+        ChangeKind::AdditionalPropertiesRemoved => "AdditionalPropertiesRemoved",
+        ChangeKind::AdditionalPropertiesTypeChanged => "AdditionalPropertiesTypeChanged",
     }
 }
 
@@ -148,7 +157,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        40,
+        43,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -211,6 +220,7 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::ResponseHeaderAdded,
         ChangeKind::ServerAdded,
         ChangeKind::ServerVariableAdded,
+        ChangeKind::AdditionalPropertiesAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
