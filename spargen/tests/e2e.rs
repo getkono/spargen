@@ -391,7 +391,7 @@ blocking = ["dep:tokio"]
 bytes = {{ version = "{bytes}", features = ["serde"] }}
 futures-core = "{futures_core}"
 quick-xml = {{ version = "{quick_xml}", features = ["serialize"] }}
-reqwest = {{ version = "{reqwest}", default-features = false, features = ["json", "multipart", "stream"] }}
+reqwest = {{ version = "{reqwest}", default-features = false, features = ["multipart", "stream"] }}
 secrecy = "{secrecy}"
 serde = {{ version = "{serde}", features = ["derive"] }}
 serde_json = "{serde_json}"
@@ -9100,7 +9100,7 @@ uuid = ["dep:uuid"]
 
 [dependencies]
 bytes = "1.12.1"
-reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+reqwest = { version = "0.12.28", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
