@@ -210,9 +210,6 @@ fn build_format(name: &str, remote: bool) -> Format {
 fn the_lock_and_the_build_parse_every_document_alike() {
     use Expect::{Both, Disagree};
     use Format::{Either, Json, Yaml};
-    // The lock folds the name's case before reading its suffix; the build reads the extension as
-    // written.
-    const CASE_BUG: u32 = 915;
     // The lock cuts a local path at its first `?`; the build reads the extension through it.
     const QUERY_BUG: u32 = 916;
     // The lock matches the suffix of a dot-file name; the build reads it as having no extension.
@@ -229,30 +226,9 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("specs/./lib/../api.json", Both(Json)),
         ("specs.json/api", Both(Either)),
         // Extension case.
-        (
-            "specs/api.JSON",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "specs/api.Yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "specs/api.YML",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
+        ("specs/api.JSON", Both(Json)),
+        ("specs/api.Yaml", Both(Yaml)),
+        ("specs/api.YML", Both(Yaml)),
         // A query string, which a relative `$ref` carries into the local path it names.
         (
             "specs/api.json?v=1",
@@ -306,22 +282,8 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("https://h.example/api.json;v=1", Both(Either)),
         ("https://h.example/api%2Ejson", Both(Either)),
         // Extension case.
-        (
-            "https://h.example/api.JSON",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "https://h.example/api.Yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
+        ("https://h.example/api.JSON", Both(Json)),
+        ("https://h.example/api.Yaml", Both(Yaml)),
         // A trailing slash.
         (
             "https://h.example/api.json/",

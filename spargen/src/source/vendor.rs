@@ -11,14 +11,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
-use super::bundle::{local_identity, parse_yaml_then_json, working_dir};
+use super::bundle::{local_identity, parse_by_extension, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
     classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
     split_fragment, RefTarget,
 };
 use super::sha256::sha256_hex;
-use super::{parse_json, parse_yaml, SpannedValue};
+use super::SpannedValue;
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
@@ -449,21 +449,18 @@ pub(crate) fn vendor(
 }
 
 /// Parse text into a value tree for ref-scanning only, discarding parse diagnostics. Chooses the
-/// format by the `.json`/`.yaml`/`.yml` suffix of `name` (a path or URL), else tries YAML then JSON.
+/// format the way the build does ([`parse_by_extension`]), from the text after the last `.` of
+/// `name` (a path or URL) with any `?` query or `#` fragment cut off first.
 pub(super) fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
-    let id = crate::diag::FileId(0);
-    let lowered = name
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(name)
-        .to_ascii_lowercase();
-    if lowered.ends_with(".json") {
-        parse_json(id, text, &mut Diagnostics::default()).ok()
-    } else if lowered.ends_with(".yaml") || lowered.ends_with(".yml") {
-        parse_yaml(id, text, &mut Diagnostics::default()).ok()
-    } else {
-        parse_yaml_then_json(id, text, &mut Diagnostics::default()).ok()
-    }
+    let stem = name.split(['?', '#']).next().unwrap_or(name);
+    let extension = stem.rsplit_once('.').map(|(_, extension)| extension);
+    parse_by_extension(
+        crate::diag::FileId(0),
+        extension,
+        text,
+        &mut Diagnostics::default(),
+    )
+    .ok()
 }
 
 fn input_error(diags: &mut Diagnostics, message: String) {
