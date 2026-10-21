@@ -66,6 +66,69 @@ paths:
 }
 
 #[test]
+fn encoding_on_a_form_or_multipart_key_in_another_letter_case_takes_effect() {
+    // A media key's type and subtype are case-insensitive, so `Multipart/Form-Data` is the
+    // multipart body `multipart/form-data` is: its `encoding` is applied, not a `W011`.
+    let spec = |media: &str, encoding: &str| {
+        format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                sdp: {{ type: string }}
+                tags: {{ type: array, items: {{ type: string }} }}
+            encoding:
+              {encoding}
+      responses:
+        '204': {{ description: ok }}
+"##
+        )
+    };
+    for (lower, media, encoding) in [
+        (
+            "multipart/form-data",
+            "Multipart/Form-Data",
+            "sdp: { contentType: application/sdp }",
+        ),
+        (
+            "application/x-www-form-urlencoded",
+            "Application/X-WWW-Form-Urlencoded",
+            "tags: { style: form, explode: true }",
+        ),
+    ] {
+        let (lower_report, lower_code) = generate_with_code(&spec(lower, encoding));
+        assert_ne!(
+            lower_report.outcome(),
+            Outcome::Rejected,
+            "{lower_report:#?}"
+        );
+        let spec = spec(media, encoding);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            module_body(&code.replace(media, lower)),
+            module_body(&lower_code),
+            "{media} must generate what {lower} does"
+        );
+        let checked = check(&spec);
+        assert_check_agrees(&report, &checked);
+    }
+}
+
+#[test]
 fn w011_encoding_on_a_json_body_has_no_effect() {
     // `encoding` applies only to form and multipart content; elsewhere the specification says it
     // SHALL be ignored, so it is acknowledged rather than rejected.

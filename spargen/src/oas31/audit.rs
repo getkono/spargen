@@ -593,7 +593,10 @@ fn consumed_sse_content(
     let mut consumed = HashSet::new();
     let mut inspect = |content: &indexmap::IndexMap<String, MediaTypeObject>| {
         for (media_name, media) in content {
-            if super::media::media_essence(media_name).eq_ignore_ascii_case("text/event-stream") {
+            // The classification lowering selects a body by, so a key it consumes here is one
+            // lowering reads as a stream, in whatever letter case it is spelled (#709).
+            let classified = super::media::classify_media(super::media::media_essence(media_name));
+            if classified.is_some_and(|(media, _)| media == crate::ir::MediaType::EventStream) {
                 let media = follow_media(resolver, media, &HashSet::new());
                 if let Some(item) = media.as_ref().and_then(|media| media.item_schema.as_ref()) {
                     if let Some(json) = super::sse::json_data_schema(item, resolver, diags) {

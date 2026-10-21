@@ -4,7 +4,8 @@
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
-use crate::oas31::media::media_essence;
+use crate::ir::MediaType;
+use crate::oas31::media::{classify_media, media_essence};
 use crate::oas31::resolve::reject_undeclared_component;
 use crate::oas31::{
     ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
@@ -384,10 +385,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Encoding is scoped to form and multipart content. The specification says it is simply
         // ignored elsewhere, so rejecting would refuse valid documents — but ignoring it silently
         // would be the fourth behavior this generator does not have. Acknowledge it instead. The
-        // form/multipart case carries on to `lower_body_encoding`, which knows the schema.
+        // form/multipart case carries on to `lower_body_encoding`, which knows the schema. Which
+        // case a key is in is `classify_media`'s answer, the one lowering selects a body by, so a
+        // `Multipart/Form-Data` key is the form/multipart case too.
         if !matches!(
-            media_essence(media_name),
-            "multipart/form-data" | "application/x-www-form-urlencoded"
+            classify_media(media_essence(media_name)),
+            Some((MediaType::Multipart | MediaType::FormUrlEncoded, _))
         ) {
             self.note_inert_encoding(&current, media_name);
         }
