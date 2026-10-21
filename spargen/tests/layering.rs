@@ -1585,12 +1585,9 @@ const OVER_LENGTH_BASELINE: &[&str] = &[
     "spargen/tests/corpus_manifest.rs",
     "spargen/tests/diff.rs",
     "spargen/tests/e2e.rs",
-    "spargen/tests/frontend/all_of.rs",
     "spargen/tests/frontend/bodies.rs",
     "spargen/tests/frontend/recursion.rs",
-    "spargen/tests/frontend/ref_siblings.rs",
     "spargen/tests/frontend/refs.rs",
-    "spargen/tests/frontend/unions.rs",
 ];
 
 /// Directories of vendored text, copied verbatim from upstream rather than written here.

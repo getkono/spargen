@@ -12,9 +12,9 @@
 //! The last two oracles live in `oracles/`, shared with `fuzz_frontend.rs` and
 //! `lowering_props.rs`.
 //!
-//! This file holds that shared harness; the fixtures sit in one module per construct family
-//! beside it (`unions`, `ref_siblings`, `bodies`, ...), each reaching the harness through
-//! `use super::*`.
+//! This file holds that shared harness; the fixtures sit in one module per construct family or
+//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies`, ...), each reaching the
+//! harness through `use super::*`.
 
 use camino::Utf8PathBuf;
 use spargen::{
@@ -26,7 +26,11 @@ mod oracles;
 
 use oracles::types_module;
 
-mod all_of;
+mod all_of_arrays;
+mod all_of_meet_conflicts;
+mod all_of_merge;
+mod all_of_nullability;
+mod all_of_union_meet;
 mod audit_reach;
 mod bodies;
 mod defaults;
@@ -39,7 +43,9 @@ mod parameters;
 mod pattern_properties;
 mod placement;
 mod recursion;
-mod ref_siblings;
+mod ref_sibling_categories;
+mod ref_sibling_rejections;
+mod ref_sibling_unions;
 mod refs;
 mod requirements;
 mod responses;
@@ -49,7 +55,10 @@ mod security;
 mod servers;
 mod union_categories;
 mod union_nullability;
-mod unions;
+mod unions_collapse;
+mod unions_dispatch;
+mod unions_null_branches;
+mod unions_siblings;
 mod untyped_branch_nullability;
 mod xml;
 
