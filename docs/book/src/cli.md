@@ -51,7 +51,10 @@ Audit a vendored spec with the same frontend used during generation, without emi
 spargen check <SPEC> [OPTIONS]
 ```
 
-It accepts `--format <human|json>` plus the shared spec options above. Run from a build script it
+It accepts `--format <human|json>` plus the shared spec options above. A diagnostic whose location
+is known renders as `--> <file>:<line>:<col>` in human output, naming the file it lies in, a
+`$ref`'d file included, by the path the spec's references resolved to; under `--format json` the
+same path is the diagnostic's `file`, beside its `span`. Run from a build script it
 also audits the consuming package's `Cargo.toml` (`E023`); elsewhere there is no consuming package,
 and `spargen deps` covers that ground instead.
 

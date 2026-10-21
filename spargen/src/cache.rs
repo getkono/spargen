@@ -10,7 +10,7 @@ use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, Spec};
 
-const CACHE_FORMAT: u32 = 4;
+const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -252,6 +252,7 @@ fn cache_diagnostic(message: String) -> Diagnostic {
         severity: Code::InvalidInput.severity(),
         pointer: JsonPointer::root(),
         span: None,
+        file: None,
         message,
         remedy: None,
         interpretation: None,
@@ -275,6 +276,7 @@ struct CachedDiagnostic {
     code: String,
     pointer: String,
     span: Option<CachedSpan>,
+    file: Option<String>,
     message: String,
     remedy: Option<String>,
     interpretation: Option<u16>,
@@ -289,6 +291,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             code: value.code.as_str().to_owned(),
             pointer: value.pointer.as_str().to_owned(),
             span: value.span.map(CachedSpan::from),
+            file: value.file.clone(),
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
@@ -305,6 +308,7 @@ impl CachedDiagnostic {
             severity: code.severity(),
             pointer: JsonPointer::from(self.pointer),
             span: self.span.map(CachedSpan::into_span),
+            file: self.file,
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),

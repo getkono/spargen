@@ -301,6 +301,7 @@ impl InputBundle {
             Aborted
         })?;
         let id = FileId(self.files.len() as u32);
+        diags.register_file(id, path.clone());
         let parsed = parse_by_name(id, path.as_str(), &text, diags)?;
         self.files.insert(
             id,
@@ -365,6 +366,7 @@ impl InputBundle {
             }
         };
         let id = FileId(self.files.len() as u32);
+        diags.register_file(id, vendored.clone());
         let parsed = parse_by_name(id, &entry.path, &text, diags)?;
         self.files.insert(
             id,

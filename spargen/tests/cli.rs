@@ -552,8 +552,10 @@ fn check_names_the_referenced_file_a_diagnostic_lies_in() {
         .lines()
         .find_map(|line| line.trim_start().strip_prefix("--> "))
         .unwrap_or_else(|| panic!("the diagnostic carries a location: {stderr}"));
+    // The path as the bundle loaded it: the `$ref` resolved against the directory of the spec
+    // path given on the command line.
     assert_eq!(
-        location, "schemas.yaml:7:11",
+        location, "./schemas.yaml:7:11",
         "the location names the referenced file: {stderr}"
     );
 
@@ -569,7 +571,7 @@ fn check_names_the_referenced_file_a_diagnostic_lies_in() {
     let diagnostic = &report["diagnostics"][0];
     assert_eq!(
         diagnostic["file"].as_str(),
-        Some("schemas.yaml"),
+        Some("./schemas.yaml"),
         "the JSON diagnostic names the referenced file: {stdout}"
     );
     assert_eq!(diagnostic["span"]["start"]["line"], 7, "{stdout}");

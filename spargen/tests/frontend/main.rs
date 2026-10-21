@@ -312,6 +312,7 @@ fn located(
                 offset: end,
             },
         }),
+        file: None,
         message: message.to_owned(),
         remedy: None,
         interpretation: None,
