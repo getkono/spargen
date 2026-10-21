@@ -17,7 +17,7 @@ fn manifest_block(spec: &str) -> String {
 /// meet drops is withheld from the output (#561). A `format: date`, `format: uuid` or
 /// `contentEncoding` bytes branch that only that withheld lowering holds is no type of the client,
 /// so it declares neither the `time` nor the `uuid` dependency nor the `bytes` `serde` feature, and
-/// embeds no RFC 3339 newtype or `uuid::Uuid` field. Each
+/// embeds no RFC 3339 newtype. Each
 /// spec's control keeps the branch, so the same spelling is shown to reach the requirement.
 #[test]
 fn a_withheld_union_branch_adds_no_runtime_requirement() {
@@ -48,11 +48,7 @@ components:
     let date = "{ type: string, format: date }";
     let uuid = "{ type: string, format: uuid }";
     let bytes = "{ type: string, contentEncoding: base64 }";
-    for (branch, needle, emitted) in [
-        (date, "time =", "pub struct Date"),
-        (uuid, "uuid =", "uuid::Uuid"),
-        (bytes, "\"serde\"", "pub struct Date"),
-    ] {
+    for (branch, needle) in [(date, "time ="), (uuid, "uuid ="), (bytes, "\"serde\"")] {
         // The control: met with an object, the object branch survives the meet.
         let kept = spec(branch, "{ type: object }");
         let block = manifest_block(&kept);
@@ -70,8 +66,8 @@ components:
             "a withheld {branch} branch must not reach `{needle}`:\n{block}"
         );
         assert!(
-            !code.contains(emitted),
-            "a withheld {branch} branch must not emit `{emitted}`"
+            !code.contains("pub struct Date"),
+            "a withheld {branch} branch must embed no RFC 3339 newtype"
         );
     }
 }

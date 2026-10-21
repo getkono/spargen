@@ -91,7 +91,7 @@ impl RuntimeRequirements {
             streams: api.uses_streams(),
             xml: api.uses_xml(),
             uuid: spec.uuid
-                && api.types.iter().any(|(_, definition)| {
+                && api.types.emitted().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
             time: spec.time && api.uses_time(),
