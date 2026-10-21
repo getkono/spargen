@@ -30,7 +30,7 @@
 //! JSON is a subset of YAML). The run is deterministic and bounded: a fixed-seed RNG and capped
 //! case counts / input sizes keep `mise run test` fast and non-flaky. A panic anywhere inside
 //! `check` fails the test with the (shrunk) offending input, and a stack overflow aborts the test
-//! process. The runner sets no per-case timeout, so a hang shows up as a test that never finishes.
+//! process. A hang shows up as a test that never finishes.
 
 use std::cell::Cell;
 
