@@ -260,10 +260,9 @@ pub(crate) struct DiscriminatorTarget {
 }
 
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime
-/// (W-class). Present so the disposition audit can warn once per site; kept as a
-/// representative surface (raw applicator keywords such as `if`/`then`/`else`, `not`,
-/// `unevaluated*`, `propertyNames`, and `dependentSchemas`/`dependentRequired` are retained during
-/// implementation).
+/// (W-class). Present so the disposition audit can warn once per site. The applicator keywords
+/// whose value is a subschema are parsed into [`Schema::validation_children`] as well; the
+/// deserializer's `SUBSCHEMA_KEYWORDS` is the one list of them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ValidationKeywords {
     pub(crate) pattern: Option<String>,
@@ -279,8 +278,9 @@ pub(crate) struct ValidationKeywords {
     pub(crate) unique_items: bool,
     pub(crate) min_properties: Option<u64>,
     pub(crate) max_properties: Option<u64>,
-    /// Another JSON Schema validation/applicator keyword is present (`not`, `if`/`then`/`else`,
-    /// `contains`, `dependent*`, `unevaluated*`, `propertyNames`, or content validation).
+    /// Another JSON Schema validation/applicator keyword is present: one of the deserializer's
+    /// `SUBSCHEMA_KEYWORDS` (`not`, `if`/`then`/`else`, `contains`, `propertyNames`,
+    /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, or `maxContains`.
     pub(crate) other: bool,
 }
 

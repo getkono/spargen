@@ -8,7 +8,7 @@ use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer};
 use crate::source::{Node, Number, SpannedMap, SpannedValue};
 
 use super::super::{JsonType, TypeSet, ValidationKeywords};
-use super::{expect_array, expect_string, provenance, string};
+use super::{expect_array, expect_string, provenance};
 
 /// A Schema Object's `required`: an array of property names, or `E011` at the keyword when it is
 /// not an array and at the element when one is not a string. Either used to be dropped, leaving
@@ -88,6 +88,21 @@ fn parse_json_type(value: &str) -> Option<JsonType> {
     })
 }
 
+/// The JSON Schema applicator keywords whose value is a single subschema, which spargen parses
+/// into `Schema::validation_children` and does not enforce.
+pub(super) const SUBSCHEMA_KEYWORDS: [&str; 8] = [
+    "not",
+    "if",
+    "then",
+    "else",
+    "contains",
+    "propertyNames",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+];
+
+/// A Schema Object's [`ValidationKeywords`]. `other` is set by any of [`SUBSCHEMA_KEYWORDS`],
+/// `dependentSchemas`, `dependentRequired`, `minContains`, or `maxContains`.
 pub(super) fn parse_validation(
     map: &SpannedMap,
     pointer: &JsonPointer,
@@ -95,7 +110,10 @@ pub(super) fn parse_validation(
 ) -> ValidationKeywords {
     let mut bound = |keyword: &str| count(map, keyword, pointer, diags);
     ValidationKeywords {
-        pattern: map.get("pattern").and_then(string).map(str::to_owned),
+        pattern: map
+            .get("pattern")
+            .and_then(SpannedValue::as_str)
+            .map(str::to_owned),
         minimum: map.get("minimum").and_then(number_f64),
         maximum: map.get("maximum").and_then(number_f64),
         exclusive_minimum: map.get("exclusiveMinimum").and_then(number_f64),
@@ -111,22 +129,15 @@ pub(super) fn parse_validation(
             .unwrap_or(false),
         min_properties: bound("minProperties"),
         max_properties: bound("maxProperties"),
-        other: [
-            "not",
-            "if",
-            "then",
-            "else",
-            "contains",
-            "minContains",
-            "maxContains",
-            "dependentSchemas",
-            "dependentRequired",
-            "propertyNames",
-            "unevaluatedProperties",
-            "unevaluatedItems",
-        ]
-        .iter()
-        .any(|keyword| map.get(keyword).is_some()),
+        other: SUBSCHEMA_KEYWORDS
+            .iter()
+            .chain(&[
+                "minContains",
+                "maxContains",
+                "dependentSchemas",
+                "dependentRequired",
+            ])
+            .any(|keyword| map.get(keyword).is_some()),
     }
 }
 
