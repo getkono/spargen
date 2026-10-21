@@ -805,3 +805,115 @@ fn json_sequence_discards_junk_and_skips_empty_records() {
     );
     assert!(buf.is_empty());
 }
+
+/// A stream whose `ClientCore` bounds an unterminated item at `max_stream_frame` bytes and
+/// retains 4 bytes of an error body, holding a replayable request and the given policy.
+fn bounded_stream(
+    body: &str,
+    framing: Framing,
+    max_stream_frame: usize,
+    policy: Arc<ImmediateReconnect>,
+) -> EventStream<serde_json::Value> {
+    let backend = Arc::new(SequenceBackend::new([(200, "{\"a\":2}\n")]));
+    let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
+    core.config_mut().max_stream_frame = max_stream_frame;
+    core.config_mut().max_error_body = 4;
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .build()
+        .unwrap();
+    match EventStream::new_reconnectable(response(body), framing, core, Some(request))
+        .with_reconnect(policy)
+    {
+        Ok(stream) => stream,
+        Err(error) => panic!("reconnect should be available: {error}"),
+    }
+}
+
+/// Once more than `max_stream_frame` bytes of an item whose terminator has not arrived are
+/// buffered, the stream yields a `Decode` error retaining `max_error_body` bytes of them and
+/// ends: the reconnect policy is not consulted, and the over-limit item is never yielded, though
+/// it is valid JSON the end of the body would otherwise have flushed. The complete item ahead of
+/// it in the same chunk is yielded first.
+#[test]
+fn an_unterminated_item_past_max_stream_frame_is_a_decode_error_that_ends_the_stream() {
+    for (framing, body, retained) in [
+        (
+            Framing::Ndjson,
+            "{\"a\":1}\n{\"b\":\"0123456789\"}",
+            &b"{\"b\""[..],
+        ),
+        (
+            Framing::SseJsonData,
+            "data: {\"a\":1}\n\ndata: {\"b\":\"0123\"}",
+            &b"data"[..],
+        ),
+    ] {
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 5,
+            ..ImmediateReconnect::default()
+        });
+        let mut stream = bounded_stream(body, framing, 16, policy.clone());
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"a": 1}),
+            "{framing:?}"
+        );
+        match poll_ready(stream.next()) {
+            Some(Err(Error::Decode {
+                status,
+                headers,
+                path,
+                body,
+                truncated,
+            })) => {
+                assert_eq!(status.as_u16(), 200);
+                assert_eq!(headers.get("x-response").unwrap(), "initial");
+                assert_eq!(
+                    path,
+                    "stream item exceeds max_stream_frame (16 bytes) before its terminator"
+                );
+                assert_eq!(&body[..], retained, "{framing:?}");
+                assert!(truncated);
+            }
+            other => panic!("{framing:?}: expected a Decode error, got {other:?}"),
+        }
+        assert!(poll_ready(stream.next()).is_none(), "{framing:?}");
+        assert!(policy.seen.lock().unwrap().is_empty(), "{framing:?}");
+    }
+}
+
+/// An unterminated item of exactly `max_stream_frame` bytes stays buffered, and the end of the
+/// body flushes it as an ordinary item.
+#[test]
+fn an_unterminated_item_at_max_stream_frame_is_still_framed() {
+    let policy = Arc::new(ImmediateReconnect::default());
+    let mut stream = bounded_stream(
+        "{\"a\":1}\n{\"b\":\"01234567\"}",
+        Framing::Ndjson,
+        16,
+        policy,
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"a": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"b": "01234567"})
+    );
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// The default bound is the documented 16 MiB, and a stream built without a `ClientCore` takes
+/// it.
+#[test]
+fn max_stream_frame_defaults_to_sixteen_mebibytes() {
+    assert_eq!(
+        crate::ClientConfig::default().max_stream_frame,
+        16 * 1024 * 1024
+    );
+    let stream: EventStream<serde_json::Value> = EventStream::new(response(""), Framing::Ndjson);
+    assert_eq!(stream.max_frame, 16 * 1024 * 1024);
+}
