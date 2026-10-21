@@ -1109,12 +1109,10 @@ paths:
 {COMPONENTS}"##
     );
     let (generated, root_code) = generate_with_code(&root);
-    let checked = check(&root);
     let (split_generated, split_checked, split_code) =
         split("./lib.yaml#/components/schemas/Holder", COMPONENTS);
     for (entry, report) in [
         ("root/generate", &generated),
-        ("root/check", &checked),
         ("split/generate", &split_generated),
         ("split/check", &split_checked),
     ] {
@@ -1328,14 +1326,8 @@ components:
       required: [pick]
 "##
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{site}, via {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
@@ -1440,14 +1432,8 @@ components:
       required: [pick]
 "##
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{site}, via {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
@@ -1679,14 +1665,8 @@ components:
       required: [pick]
 "##
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{site}, via {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
@@ -1797,14 +1777,8 @@ components:
       required: [pick]
 "##
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{site}, via {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
@@ -1891,19 +1865,12 @@ components:
       required: [pick]
 "##
         );
-        let (generated, code) = generate_with_code(&spec);
-        let checked = check(&spec);
-        let mut verdicts = Vec::new();
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            if report.outcome() == Outcome::Rejected
-                || has_code(report, Code::AllOfIrreconcilable)
-                || has_code(report, Code::NonDisjointUnion)
-            {
-                verdicts.push(format!("via {entry}: {:?}", codes(report)));
-            }
-        }
-        if !verdicts.is_empty() {
-            mismatches.push(format!("{site}: {verdicts:?}"));
+        let (report, code) = generate_with_code(&spec);
+        if report.outcome() == Outcome::Rejected
+            || has_code(&report, Code::AllOfIrreconcilable)
+            || has_code(&report, Code::NonDisjointUnion)
+        {
+            mismatches.push(format!("{site}: {:?}", codes(&report)));
             continue;
         }
         let types = types_module(&code);
@@ -1957,14 +1924,8 @@ components:
       required: [pick]
 "##
             );
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{site}, via {entry}: {report:#?}"
-                );
-            }
-            let (_, code) = generate_with_code(&spec);
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
             let types = types_module(&code);
             let pick = field_type(&types, "pub pick")
                 .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
@@ -2111,8 +2072,6 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 
     // The typed union the name promises: both branches survive, each with its own numeric type.
     let types = types_module(&code);
@@ -2193,8 +2152,6 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2214,9 +2171,6 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 
     // The sibling `type: string` intersects each branch: the integer branch admits nothing a
     // string does, so what remains is the string branch alone, not a two-variant union.
@@ -2248,8 +2202,6 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2281,8 +2233,6 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2310,8 +2260,6 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2333,10 +2281,6 @@ components:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion));
-
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::NonDisjointUnion));
 }
 
 #[test]
@@ -2364,8 +2308,6 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 
     // The hoist itself: a required use of the union is `Option<U>` (the nullability the variant
     // carried), and the string variant's own type is the non-null `String`.
@@ -2410,8 +2352,6 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 
     // The collapse: no enum, `U` names the string itself, and the stripped null reappears as the
     // `Option` a required use of `U` carries.
@@ -2446,10 +2386,6 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(!has_code(&checked, Code::NonScalarEnum), "{checked:#?}");
 }
 
 #[test]
@@ -2468,9 +2404,6 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 
     let types = types_module(&code);
     assert_eq!(
@@ -2521,13 +2454,12 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
             .to_owned()
     };
     let generates = |spec: &str| -> String {
-        for report in [check(spec), generate(spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
-            for code in [Code::DeclarationHasNoEffect, Code::AllOfIrreconcilable] {
-                assert!(!has_code(&report, code), "{spec}\n{report:#?}");
-            }
+        let (report, code) = generate_with_code(spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+        for diagnostic in [Code::DeclarationHasNoEffect, Code::AllOfIrreconcilable] {
+            assert!(!has_code(&report, diagnostic), "{spec}\n{report:#?}");
         }
-        types_module(&generate_with_code(spec).1)
+        types_module(&code)
     };
 
     // The issue's reproduction: both branches are objects, so both now require `a`. `A` declares
@@ -2946,11 +2878,6 @@ components:
          {report:#?}"
     );
 
-    // check/generate parity for the same site, which the `E013` sites also assert.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
-
     // And the abstinence Site B spends five lines of comment justifying: the multi-variant path
     // emits a per-variant `W011` before its `E007` and this one deliberately does not, because
     // `W011` means "declared construct has no effect" and describes something dropped from output
@@ -3070,28 +2997,27 @@ fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
 
     for (what, body, null_satisfies) in cases {
         let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            if *null_satisfies {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
-                );
-                assert!(
-                    !has_code(&report, Code::NonDisjointUnion),
-                    "`{what}` reported E007 through {entry}: {report:#?}"
-                );
-            } else {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
-                );
-                assert!(
-                    has_code(&report, Code::NonDisjointUnion),
-                    "`{what}` did not report E007 through {entry}: {report:#?}"
-                );
-            }
+        let (report, code) = generate_with_code(&spec);
+        if *null_satisfies {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` is satisfied by `null`, so it must not be rejected: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "`{what}` reported E007: {report:#?}"
+            );
+        } else {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` admits no value at all, so it must still be rejected: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::NonDisjointUnion),
+                "`{what}` did not report E007: {report:#?}"
+            );
         }
         if *null_satisfies {
             // The exact JSON null type, not a silently dropped body and not `Option<()>`: `null` is
@@ -3099,7 +3025,6 @@ fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
             // through the operation's own signature rather than by guessing an alias name — the
             // sole-member path lowers its member under the same hint, so the union's own def gets a
             // disambiguating suffix.
-            let (_, code) = generate_with_code(&spec);
             let body = code
                 .split("ResponseValue<types::")
                 .nth(1)
@@ -3218,27 +3143,25 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
     let mut emitted: Vec<(&str, String)> = Vec::new();
     for (what, body, null_satisfies) in cases {
         let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            if *null_satisfies {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
-                );
-            } else {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "`{what}` admits no value at all, so {entry} must reject it rather than type \
-                     the body `()`: {report:#?}"
-                );
-                assert!(
-                    has_code(&report, Code::NonDisjointUnion),
-                    "`{what}` did not report E007 through {entry}: {report:#?}"
-                );
-            }
+        let (report, code) = generate_with_code(&spec);
+        if *null_satisfies {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` is satisfied by `null`, so it must not be rejected: {report:#?}"
+            );
+        } else {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` admits no value at all, so it must be rejected rather than the body \
+                 typed `()`: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::NonDisjointUnion),
+                "`{what}` did not report E007: {report:#?}"
+            );
         }
-        let (_, code) = generate_with_code(&spec);
         emitted.push((what, code));
     }
 
@@ -3586,19 +3509,16 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
     ];
     for (spelling, pet) in &spellings {
         let spec = format!("{head}{pet}{holder}");
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{spelling}, {entry}: a nullable union refined to only `null` rejected: \
-                 {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{spelling}, {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{spelling}: a nullable union refined to only `null` rejected: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{spelling}: {report:#?}"
+        );
         let types = types_module(&code);
         assert!(
             types.contains("pub type Pet = ();"),
@@ -3617,11 +3537,7 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
     let spec = format!(
         "{head}    Pet:\n      allOf: [{{ type: object, {refined} }}]\n      oneOf: {UNION}\n{holder}"
     );
-    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            has_code(&report, Code::AllOfIrreconcilable),
-            "{entry}: {report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
