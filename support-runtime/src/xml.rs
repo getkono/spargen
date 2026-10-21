@@ -49,7 +49,10 @@ pub async fn classify_error_xml<E>(
 where
     E: DeserializeOwned,
 {
-    crate::dispatch::classify_with(core, response, documented, decode_xml_body::<E>).await
+    crate::dispatch::classify_with(core, response, documented, |body| {
+        decode_xml_body::<E>(body)
+    })
+    .await
 }
 
 /// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
