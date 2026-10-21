@@ -189,6 +189,44 @@ mod tests {
     }
 
     #[test]
+    fn the_stable_suffix_is_the_low_half_of_the_pointers_fnv_1a_hash() {
+        // The suffix is part of every disambiguated public name, so its function is pinned, not
+        // only its determinism: `a` and `foobar` are FNV-1a 64 reference vectors
+        // (`0xaf63dc4c8601ec8c`, `0x85944171f73967e8`), and the empty input is the offset basis.
+        assert_eq!(super::stable_suffix(""), "84222325");
+        assert_eq!(super::stable_suffix("a"), "8601ec8c");
+        assert_eq!(super::stable_suffix("foobar"), "f73967e8");
+        assert_eq!(super::stable_suffix("/components/schemas/Pet"), "58d74607");
+    }
+
+    #[test]
+    fn the_counter_after_a_repeated_suffix_counts_up_from_two() {
+        // The counter's sequence is spelled into public names, so it is pinned exactly: injectivity
+        // alone would also hold for a counter that skipped or reordered its values.
+        let pointer = JsonPointer::from("/components/schemas/Pet");
+        let mut scope = Scope::default();
+        let allocated: Vec<String> = (0..5)
+            .map(|_| {
+                scope
+                    .alloc("id", IdentRole::Field, &pointer)
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
+
+        assert_eq!(
+            allocated,
+            [
+                "id",
+                "id_58d74607",
+                "id_58d74607_2",
+                "id_58d74607_3",
+                "id_58d74607_4",
+            ]
+        );
+    }
+
+    #[test]
     fn a_ranked_contest_goes_to_the_lowest_rank_whatever_the_request_order() {
         let low = JsonPointer::from("/components/schemas/Shape");
         let high = JsonPointer::from("/paths/~1a/get");
