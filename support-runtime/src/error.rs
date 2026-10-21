@@ -429,18 +429,24 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 // enum variant, say) verbatim; its control characters are escaped so a value
                 // holding a LF, CR or tab cannot break or forge the message's line.
                 write!(f, "response decode failed ({status}) at ")?;
-                for c in path.chars() {
-                    if c.is_control() {
-                        write!(f, "{}", c.escape_debug())?;
-                    } else {
-                        write!(f, "{c}")?;
-                    }
-                }
-                Ok(())
+                write_escaped(f, path)
             }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
         }
     }
+}
+
+/// Write `text` with each control character replaced by its `escape_debug` form, so text quoted
+/// from a server (a LF, CR or tab included) cannot break or forge the line it is written into.
+pub(crate) fn write_escaped(f: &mut std::fmt::Formatter<'_>, text: &str) -> std::fmt::Result {
+    for c in text.chars() {
+        if c.is_control() {
+            write!(f, "{}", c.escape_debug())?;
+        } else {
+            write!(f, "{c}")?;
+        }
+    }
+    Ok(())
 }
 
 impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
