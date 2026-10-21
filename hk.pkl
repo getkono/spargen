@@ -44,7 +44,7 @@ hooks {
     }
   }
   ["pre-push"] {
-    // Deliberately unglobbed, as before: this is the last gate before code leaves the machine, and
+    // Deliberately unglobbed: this is the last gate before code leaves the machine, and
     // the suite pins docs/errors.md and the corpus fixtures, so a change touching no Rust at all
     // can still break it. A rust-toolchain.toml bump likewise changes what clippy reports.
     steps {

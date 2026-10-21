@@ -42,7 +42,8 @@ vendored into the source tree before compilation. There are exactly two supporte
 
 Both modes run as part of Rust compilation. Spargen is host/build-time only and **never enters your
 runtime dependency tree**. The CLI is tooling for `lock`, `check`, `deps`, `diff`, and
-`explain`; it cannot generate code, stream generated source, watch files, or scaffold a crate.
+`explain`; it has no `generate` subcommand. The [CLI reference](docs/book/src/cli.md) covers each
+subcommand, its options, and its exit statuses.
 
 `spargen lock` (the `remote-fetch` feature) is the generator's only networked step. It fetches
 over reqwest's rustls stack with rustls's defaults and the bundled Mozilla roots, and spargen
@@ -71,8 +72,14 @@ mod api {
 ```
 
 See [`examples/petstore`](examples/petstore) (build.rs) and
-[`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops that drive
-every generated feature against a local mock server. Point the `build.rs` output at `src/api.rs`
+[`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops against
+a local mock server. `petstore` drives path, query, header and `deepObject` parameters, JSON and
+multipart request bodies, a multi-status response enum, typed servers and response headers, bearer
+auth with a static token and an async token provider, typed and undocumented error statuses,
+RFC 9457 problems with `open_narrowing`, and the retry adapter; `petstore-macro` drives a compact
+subset of that through the macro path. Streams, XML, pagination, the blocking client, and apiKey
+and basic auth are compile-checked and exercised by spargen's own test suite, not by the examples.
+Point the `build.rs` output at `src/api.rs`
 instead when the generated client should be reviewed and committed.
 
 Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
@@ -149,7 +156,7 @@ the version it emits, and the idioms spargen handles.
   tested floors and feature set before Cargo/rustc compile the emitted client; see the
   [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
-  test. Item ordering never depends on input map ordering.
+  test. Item order follows the document's order; nothing depends on hash-map iteration.
 - **Edition-independent output.** The generated module is `include!`d into the consumer's crate and
   compiles under *that* crate's edition, so identifiers are escaped against the union of Rust's
   reserved words across editions 2015-2024: a spec that names a field `type` or `gen` emits
@@ -160,7 +167,8 @@ the version it emits, and the idioms spargen handles.
 - **Every construct has a disposition.** Supported, warned, or rejected — never a fourth, silent
   behavior; a typed schema is never silently degraded to `serde_json::Value`. The
   [support matrix](docs/support-matrix.md) and [diagnostic index](docs/errors.md) are the
-  operational contract; `spargen explain E013` prints the same text the docs carry.
+  operational contract; the index gives each code's severity and title, and
+  `spargen explain E013` prints its full explanation.
 - **No `serde(untagged)`.** First-match-wins deserialization can silently misparse; undiscriminated
   unions are rejected instead.
 - **`#![forbid(unsafe_code)]`-equivalent attributes on all generated items**, `Debug`-redacted
@@ -183,9 +191,10 @@ metadata. See the concise
 [OpenAPI 3.2 scope](docs/openapi-3.2.md) for the exact delta from 3.1.
 
 Anything outside the documented surface is rejected or warned loudly, never silent; see the
-[support matrix](docs/support-matrix.md) for the exact boundary. Every diagnostic carries a JSON
-Pointer, and where its construct's location is known, the file it lies in (a `$ref`'d file
-included) with its line and column. The pinned GitHub OpenAPI 3.1 description generates and its
+[support matrix](docs/support-matrix.md) for the exact boundary. Every diagnostic carries the
+JSON Pointer of the construct it names, and where that location is known, the file it lies in (a
+`$ref`'d file included) with its line and column. The pinned GitHub OpenAPI 3.1 description
+generates and its
 full emitted crate is compile-checked in CI; the remaining [corpus](corpus/README.md) pins both
 generating and intentionally rejecting real-world cases.
 
@@ -241,10 +250,8 @@ that alter generated signatures, type shapes, or variant sets are major; output 
 to that API are minor; generator-internal fixes are patch.
 
 Publishing runs strictly in CI via crates.io [Trusted Publishing](https://crates.io/docs/trusted-publishing)
-(OIDC) — no `CARGO_REGISTRY_TOKEN` secret. Each crate was bootstrapped once: `spargen 0.1.0` and
-`spargen-macro 0.2.0` were published manually to create their crates.io entries. Both now trust
-`getkono/spargen`'s `release-plz.yml` workflow, which publishes `spargen` before its dependent
-`spargen-macro`.
+(OIDC) — no `CARGO_REGISTRY_TOKEN` secret; `release-plz.yml` publishes `spargen` before its
+dependent `spargen-macro`. The maintainer bootstrap history is in [`AGENTS.md`](AGENTS.md#releases).
 
 ## License
 

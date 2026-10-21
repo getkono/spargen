@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|response-header-requiredness-changed|GET /pets 200 header `x_rate_limit`|response header now optional
+bump=major

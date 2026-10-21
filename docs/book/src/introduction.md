@@ -17,9 +17,7 @@ The [OpenAPI 3.2 scope](./openapi-3.2.md) summarizes the 3.2 delta; the 3.0.x re
 Generated code compiles, or generation fails with a diagnostic that names the construct, its JSON
 Pointer, and a remedy. Every construct is supported, warned about, or rejected; the
 [feature support matrix](./support-matrix.md) and the [diagnostic index](./errors.md) are that
-operational contract. The rest of the design guarantees (freestanding output, determinism,
-edition-independent output, `include!`-friendly output, no `serde(untagged)`, and a cap on retained error bodies) are listed
-once, in the README's
+operational contract. The rest of the design guarantees are listed once, in the README's
 [Design guarantees](https://github.com/getkono/spargen#design-guarantees).
 
 ## Where to next

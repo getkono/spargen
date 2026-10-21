@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|server-variable-added|servers::Server0::version|server variable added: `impl Into<String>`
+bump=minor

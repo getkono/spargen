@@ -130,6 +130,137 @@ components:
     );
 }
 
+/// Media types are case-insensitive (RFC 9110 § 8.3.1), so an SSE key spelled in another letter
+/// case is the same stream: it is lowered, its `contentSchema` types the payload, and a validation
+/// keyword inside that schema warns exactly as it does under the lowercase key (#709).
+#[test]
+fn an_sse_key_in_another_letter_case_is_the_same_stream() {
+    let spec = |media: &str| {
+        format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        '200':
+          description: ok
+          content:
+            {media}:
+              itemSchema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: string
+                    contentMediaType: application/json
+                    contentSchema: {{ type: string, maxLength: 5 }}
+"##
+        )
+    };
+    let (lower_report, lower_code) = generate_with_code(&spec("text/event-stream"));
+    assert_ne!(
+        lower_report.outcome(),
+        Outcome::Rejected,
+        "{lower_report:#?}"
+    );
+    for media in ["TEXT/EVENT-STREAM", "Text/Event-Stream"] {
+        let spec = spec(media);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            code.contains("EventStream"),
+            "{media} must lower as a stream: {code}"
+        );
+        assert_eq!(
+            has_code(&report, Code::ValidationKeywordIgnored),
+            has_code(&lower_report, Code::ValidationKeywordIgnored),
+            "{media} must warn as `text/event-stream` does: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::ValidationKeywordIgnored),
+            messages_for(&lower_report, Code::ValidationKeywordIgnored),
+            "{media}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            code.matches("EventStream<").count(),
+            lower_code.matches("EventStream<").count(),
+            "{media}"
+        );
+        let checked = check(&spec);
+        assert_check_agrees(&report, &checked);
+    }
+}
+
+#[test]
+fn a_body_key_in_another_letter_case_classifies_as_its_lowercase_spelling() {
+    // One case rule for every media key, not only the stream: `Application/JSON` is the JSON body
+    // `application/json` is, on a request and on a response: the same client, up to any place the
+    // document's spelling of the key is quoted.
+    let spec = |media: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          {media}:
+            schema: {{ $ref: '#/components/schemas/Pet' }}
+      responses:
+        '200':
+          description: ok
+          content:
+            {media}:
+              schema: {{ $ref: '#/components/schemas/Pet' }}
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name: {{ type: string }}
+"##
+        )
+    };
+    let (lower_report, lower_code) = generate_with_code(&spec("application/json"));
+    assert_ne!(
+        lower_report.outcome(),
+        Outcome::Rejected,
+        "{lower_report:#?}"
+    );
+    for media in ["Application/JSON", "APPLICATION/JSON"] {
+        let spec = spec(media);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            module_body(&code.replace(media, "application/json")),
+            module_body(&lower_code),
+            "{media} must generate what `application/json` does"
+        );
+        let checked = check(&spec);
+        assert_check_agrees(&report, &checked);
+    }
+}
+
 #[test]
 fn content_schema_outside_sse_remains_an_explicit_warning() {
     let spec = r##"

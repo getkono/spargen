@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|server-variable-type-changed|servers::Server0::region|server variable type `servers::Server0Region` -> `impl Into<String>`
+bump=major
