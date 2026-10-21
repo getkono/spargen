@@ -50,7 +50,11 @@ impl Diagnostics {
         self.files[index] = Some(path.into());
     }
 
-    /// Record a diagnostic. Ignored once the cap is reached, but sets the cap-reached flag.
+    /// Record a diagnostic.
+    ///
+    /// A diagnostic identical to one already recorded (same code, pointer, span, message, and
+    /// remedy) is ignored. Past the cap, a diagnostic is dropped and sets the cap-reached flag,
+    /// but an error still counts toward [`Self::has_errors`].
     ///
     /// A diagnostic with a span and no file is given the path [`Self::register_file`] recorded
     /// for the span's file, when one was.

@@ -4,10 +4,11 @@
 //! Diagnostic codes and severities, each code's title and `spargen explain` text, the JSON
 //! Pointer + span model, and the [`InterpId`] (`INT-###`) a code may name for the interpretation
 //! its behavior depends on.
-//! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
+//! `diag` is the lowest layer, which every pipeline stage may reach, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
-//! construct, a [`Span`] (`file:line:column`) when the construct's location is known, a one-line
+//! construct, a [`Span`] (line and column within the file its [`FileId`] names) when the
+//! construct's location is known, a one-line
 //! message, an optional remedy, and the [`OutcomeClaim`] its message makes.
 //! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
 //! at the first error; presentation belongs to the optional binary.
@@ -45,7 +46,10 @@ pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
     })
 }
 
-/// A single diagnostic emitted during parsing, validation, or codegen.
+/// A single diagnostic emitted during a pipeline run.
+///
+/// Every field is public, so a caller reads each one directly. spargen builds its own diagnostics
+/// through the crate-internal `Diagnostic::error` and `Diagnostic::warning` builders.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {
     /// The stable, documented code (`E###`/`W###`).

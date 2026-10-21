@@ -4,7 +4,7 @@
 //! everything structural is decided at generation time; nothing is interpreted at runtime.
 //!
 //! This crate is the library half of the `spargen` tool. Its public surface is the `build.rs`
-//! API — see the [facade](crate) items ([`Spec`], [`Build`], [`generate`], [`check`], [`explain`]).
+//! API: the [crate-root](crate) items, starting from [`Build`] and [`generate`].
 //!
 //! ## Subsystem layering
 //!
@@ -20,7 +20,7 @@
 //! | `ir`      | `diag`        |
 //! | `oas31`   | `source`, `ir`, `name`, `diag` |
 //! | `name`    | `ir`, `diag`  |
-//! | `support` | — (compiles standalone against reqwest/serde) |
+//! | `support` | — (an `include_str!` handle to `support-runtime`'s sources, which compile standalone) |
 //! | `codegen` | `ir`, `name`, `support`, `diag` |
 //! | `emit`    | `codegen`     |
 //! | `compat`  | `source`, `diag` |
@@ -29,8 +29,9 @@
 //! | facade (`lib.rs`) | all of the above |
 //!
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
-//! only vocabulary shared across stages. `compat` preprocesses the bundle before `oas31` sees it;
-//! `surface` reads the lowered API for `diff` and never feeds generation.
+//! lowest layer, which every stage may reach and which depends on nothing, and `ir` as the
+//! lowered model `oas31` produces and `name`, `codegen` and `surface` read. `compat` preprocesses
+//! the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and never feeds generation.
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
 //! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
@@ -69,13 +70,15 @@ pub use surface::{Change, ChangeKind, DiffReport, Impact};
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Outcome {
-    /// The generated module was freshly rendered and written.
+    /// The generated module was rendered by this run rather than replayed from the build cache.
+    /// The output file is rewritten only when its bytes change.
     Generated,
     /// The generated module was already up to date and was verified from the build cache.
     Cached,
     /// The support audit completed without a rejection.
     Clean,
-    /// The spec used an R-class construct; generation failed loudly.
+    /// An error-severity diagnostic was emitted, so the run did not get as far as it was asked
+    /// to.
     Rejected,
 }
 
@@ -95,7 +98,8 @@ impl Outcome {
         !matches!(self, Outcome::Rejected)
     }
 
-    /// Whether this run actually rewrote the output file. A cache hit did not.
+    /// Whether this run rendered the output rather than replaying it from the build cache. A
+    /// rendered output is written only when its bytes differ from the file already on disk.
     pub fn wrote_output(self) -> bool {
         matches!(self, Outcome::Generated)
     }
@@ -123,8 +127,9 @@ impl std::fmt::Display for Outcome {
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
-/// Fields are private and read through accessors, matching [`Spec`], [`Build`], [`Diagnostic`],
-/// and [`DiffRejection`], so the shape can grow without a breaking change.
+/// Fields are private and read through accessors, matching [`Spec`], [`Build`], and
+/// [`DiffRejection`], so the shape can grow without a breaking change. [`Diagnostic`] is the
+/// exception: its fields are public.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
@@ -602,12 +607,12 @@ where
     })
 }
 
-/// The result of a [`diff`] run: the semver-impact report when both specs lowered, plus each
-/// spec's rejection [`Report`] when it failed to lower.
+/// The `Err` of a [`diff`] run: at least one spec failed to lower, so the two surfaces are not
+/// comparable and no [`DiffReport`] is produced.
 ///
-/// `report` is `Some` iff **both** specs lowered successfully. When a spec rejects (used an R-class
-/// construct, failed validation, …), its diagnostics are surfaced in `old_rejection` / `new_rejection`
-/// and no diff is produced — the surfaces are simply not comparable. `diff` never panics on a bad spec.
+/// Each side that failed to lower carries its rejection [`Report`], read through
+/// [`old_spec`](Self::old_spec), [`new_spec`](Self::new_spec), or [`rejections`](Self::rejections)
+/// for every failed side in turn. `diff` never panics on a bad spec.
 #[derive(Debug, Clone)]
 pub struct DiffRejection {
     old: Option<Report>,
@@ -740,7 +745,8 @@ fn source_files(spec: &Spec) -> Vec<Utf8PathBuf> {
     }
 }
 
-/// Private cross-crate bridge used exclusively by `spargen-macro`.
+/// Private cross-crate bridge for `spargen-macro`; `preview` is also called by this crate's
+/// integration tests.
 #[doc(hidden)]
 pub mod __private {
     use camino::{Utf8Path, Utf8PathBuf};
