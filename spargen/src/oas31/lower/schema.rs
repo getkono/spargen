@@ -217,7 +217,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
             // Beside a union sibling and no `type`, the untyped target leaves `null` to the
             // union, as the same target written as an `allOf` member beside it does
-            // ([`undecided_admits_null`], #586): where a branch admits `null` itself
+            // ([`Self::composition_takes_union_null`], #586): where a branch admits `null` itself
             // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
             // union's answer.
             let referenced = if has_union_sibling
@@ -255,8 +255,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             self.unmerged_union_meets_null = enclosing_meets_null;
-            let untyped_beside_null_member =
-                self.untyped_beside_null_member.take() == Some(schema.provenance.clone());
             let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
             let sibling = sibling?;
             let mark = self.graph_mark();
@@ -313,12 +311,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Nothing meets the union after the collapse here.
                 if untyped_check {
                     self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
-                }
-                // The meet gave the untyped member `null` exactly where it kept the `null`
-                // member's, so `null` is in two branches or none.
-                let mut collapsed = collapsed;
-                if untyped_beside_null_member {
-                    collapsed.nullable = false;
                 }
                 collapsed
             } else {

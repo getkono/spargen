@@ -408,16 +408,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if null_twice && sibling.is_some() && self.is_exact_null(inner) {
                 return self.reject_one_of_null_in_every_branch(schema);
             }
-            // Held back for a meet with no sibling here, an untyped member's `null` is not settled
-            // yet: the caller counts it after the meet.
-            if mode == UnionMode::OneOf
-                && null_members > 0
-                && member_untyped
-                && sibling.is_none()
-                && self.unmerged_union.as_ref() == Some(&schema.provenance)
-            {
-                self.untyped_beside_null_member = Some(schema.provenance.clone());
-            }
             ty.nullable = (inner.nullable || nullable) && !null_twice;
             ty.boxed = inner.boxed;
             return Some(ty);

@@ -246,10 +246,8 @@ fn lower_pass(
         field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        untyped_beside_null_member: None,
         stated_nothing_took_null: None,
         held_untyped_warnings: None,
-        scalar_meet_value_variants: HashSet::new(),
         scalar_meet_union: None,
         scalar_meet_unmerged: HashSet::new(),
         union_variant_members: HashMap::new(),
@@ -925,12 +923,6 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
-    /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
-    /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
-    /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
-    /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
-    untyped_beside_null_member: Option<Provenance>,
     /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
     /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
     /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
@@ -947,14 +939,6 @@ struct LowerCtx<'a, 'doc> {
     /// (`{}`, `true`) is `Value`; the meet then gives it the other members' type, so the warning
     /// is raised for the variants the meet leaves `Value` alone (#660).
     held_untyped_warnings: Option<Vec<HeldUntypedWarning>>,
-    /// The variant hints of the `Value` variants of the union members an `allOf`'s scalar meet
-    /// meets, whose `null` the `allOf` decided by the union's own count
-    /// ([`Self::union_members_take_scalar_null`]) rather than by a branch that states `null`
-    /// (beside which the copy is a second branch `null` matches, and stays). `Value` is the
-    /// identity of the meet, so the meet hands each the other members' `null` a second time;
-    /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
-    /// is counted once (#660).
-    scalar_meet_value_variants: HashSet<String>,
     /// The union member of an `allOf` being lowered as an input to the `allOf`'s scalar meet
     /// ([`LowerCtx::lower_scalar_meet_union`]). [`Self::lower_union_closed`] leaves its
     /// indistinguishable variants unmerged, as it leaves [`Self::unmerged_union`]'s, so the meet
