@@ -1076,7 +1076,8 @@ components:
 /// name and never reads the struct's container rename there, so the root name has to become the
 /// field's: without it each element went on the wire as `<pets>` while `check` printed `clean`.
 /// A name written beside the `$ref` on the items still wins, and an owner that also travels as
-/// JSON keeps its field name under the shared-type `W006`, like every other field rename.
+/// JSON keeps its field name under the shared-type `W006`, like every other field rename. An owner
+/// no XML body reaches derives no rename at all, so the root name alone raises no `W006` there.
 #[test]
 fn a_component_root_name_names_each_element_of_an_array_property_of_it() {
     let pet = "Pet: { type: object, xml: { name: pet }, properties: { id: { type: integer } } }";
@@ -1106,8 +1107,13 @@ fn a_component_root_name_names_each_element_of_an_array_property_of_it() {
             "critter",
         ),
     ] {
-        for shared in [false, true] {
-            let json_use = if shared {
+        for reach in ["xml", "shared", "json"] {
+            let body_media = if reach == "json" {
+                "application/json"
+            } else {
+                "application/xml"
+            };
+            let json_use = if reach == "shared" {
                 "
         '200':
           description: ok
@@ -1125,7 +1131,7 @@ paths:
     post:
       requestBody:
         content:
-          application/xml: {{ schema: {{ $ref: '#/components/schemas/Owner' }} }}
+          {body_media}: {{ schema: {{ $ref: '#/components/schemas/Owner' }} }}
       responses:
         '204': {{ description: ok }}{json_use}
 components:
@@ -1138,24 +1144,39 @@ components:
     {list}
 "##
             );
-            let case = format!("{version} {pets} shared={shared}");
+            let case = format!("{version} {pets} reach={reach}");
             let (report, code) = generate_with_code(&spec);
             assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
             let field_rename = format!(r#"rename = "{element}","#);
-            if shared {
-                assert!(
-                    messages_for(&report, Code::XmlHintIgnored)
-                        .iter()
-                        .any(|m| m.contains("shared between an XML body")),
-                    "{case}: {report:#?}"
-                );
-                assert!(!code.contains(&field_rename), "{case}: {code}");
-            } else {
-                assert!(
-                    !has_code(&report, Code::XmlHintIgnored),
-                    "{case}: {report:#?}"
-                );
-                assert!(code.contains(&field_rename), "{case}: {code}");
+            match reach {
+                "shared" => {
+                    assert!(
+                        messages_for(&report, Code::XmlHintIgnored)
+                            .iter()
+                            .any(|m| m.contains("shared between an XML body")),
+                        "{case}: {report:#?}"
+                    );
+                    assert!(!code.contains(&field_rename), "{case}: {code}");
+                }
+                "json" => {
+                    // The root name alone derives no rename on an owner no XML body reaches, so it
+                    // has nothing to warn about; a name written on the items is a hint like any
+                    // other and keeps its `W006`.
+                    let written = pets.contains("critter");
+                    assert_eq!(
+                        has_code(&report, Code::XmlHintIgnored),
+                        written,
+                        "{case}: {report:#?}"
+                    );
+                    assert!(!code.contains(&field_rename), "{case}: {code}");
+                }
+                _ => {
+                    assert!(
+                        !has_code(&report, Code::XmlHintIgnored),
+                        "{case}: {report:#?}"
+                    );
+                    assert!(code.contains(&field_rename), "{case}: {code}");
+                }
             }
             assert!(
                 struct_attributes(&code, "Pet").contains(&r#"#[serde(rename = "pet")]"#.to_owned()),

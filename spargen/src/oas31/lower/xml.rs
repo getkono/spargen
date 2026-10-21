@@ -379,11 +379,13 @@ pub(super) fn gate_xml_field_renames(
     // of that list: OpenAPI 3.2 has a `$ref` item (node type `none`) produce the referenced
     // schema's own element. quick-xml writes a nested struct under the field's name and never
     // reads its container rename there, so the root name becomes the field's, unless the items
-    // already gave one. It is then a field rename like any other, suppressed below (`W006`) on an
-    // owner that is not exclusively XML.
+    // already gave one. Only an owner some XML body reaches takes it: on any other, the rename is
+    // derived rather than written and moves no wire, so it is not set at all. On an owner a non-XML
+    // body also reaches, it is a field rename like any other, suppressed below (`W006`).
     let view: &TypeGraph = graph;
     let item_names: Vec<(TypeId, usize, String)> = view
         .emitted()
+        .filter(|(id, _)| xml_reachable.contains(id))
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
                 return None;
