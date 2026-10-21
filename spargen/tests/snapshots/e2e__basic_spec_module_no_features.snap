@@ -6384,12 +6384,9 @@ pub mod types {
         )]
         pub tags: Option<RequestBodytags0d6778a5>,
     }
-    pub type Token = bytes::Bytes;
     pub type Token84222325 = String;
-    pub type Cursor = bytes::Bytes;
     pub type Cursor84222325 = String;
     pub type RequestBody43755b84 = bytes::Bytes;
-    pub type Cursor394a9248 = bytes::Bytes;
     pub type Cursor842223252 = String;
     pub type RequestBodydigest = bytes::Bytes;
     pub type RequestBodypreviousC67f70f9 = bytes::Bytes;
