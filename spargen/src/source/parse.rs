@@ -756,9 +756,8 @@ impl YamlBuilder<'_> {
         self.build_node(0, diags).map_err(|failure| match failure {
             YamlFailure::Reported(aborted) => aborted,
             YamlFailure::DuplicateKey { path, span, name } => {
-                // `YamlLoader` rejected duplicate mapping keys; keep rejecting them (now with a
-                // precise span at the second occurrence) rather than silently retaining a
-                // duplicate.
+                // A duplicate mapping key is rejected, at the span of its second occurrence,
+                // rather than silently retained.
                 Diagnostic::error(
                     Code::DuplicateObjectKey,
                     Provenance::new(pointer_of(&path), Some(span)),
