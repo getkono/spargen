@@ -471,11 +471,9 @@ fn input_error(diags: &mut Diagnostics, message: String) {
 }
 
 /// The real, reqwest-backed fetcher used by `spargen lock`. Present only under the `remote-fetch`
-/// feature so a library-only build carries no HTTP stack.
-#[cfg(feature = "remote-fetch")]
+/// feature, which gates this whole module, so a library-only build carries no HTTP stack.
 pub(crate) struct ReqwestFetcher;
 
-#[cfg(feature = "remote-fetch")]
 impl RemoteFetch for ReqwestFetcher {
     fn fetch(&self, url: &str) -> Result<Fetched, String> {
         // What `reqwest::blocking::get` does: a default client per fetch.
@@ -487,7 +485,6 @@ impl RemoteFetch for ReqwestFetcher {
 /// builder. The builder is the trust seam — the TLS test in this module adds its self-signed root
 /// to it and otherwise runs exactly the path `spargen lock` runs, so the handshake, the root
 /// store, and ALPN under the linked reqwest/rustls stack are reached by a test.
-#[cfg(feature = "remote-fetch")]
 fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fetched, String> {
     let response = builder
         .build()
@@ -517,7 +514,6 @@ fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fe
 /// A reqwest transport error displays only "error sending request for url (…)"; what actually
 /// failed — the refused connection, the DNS lookup, the TLS alert and its reason — is carried by
 /// its sources, and E025 promises to report it.
-#[cfg(feature = "remote-fetch")]
 fn with_causes(error: &dyn std::error::Error) -> String {
     let mut rendered = error.to_string();
     let mut source = error.source();
@@ -1244,7 +1240,6 @@ mod tests {
     /// plain HTTP only, because the fetcher trusts only the bundled `webpki-roots` and a local
     /// server's certificate is self-signed; here the certificate's root is added to the client
     /// builder through `fetch_with`, and nothing else differs from `ReqwestFetcher`.
-    #[cfg(feature = "remote-fetch")]
     mod tls {
         use std::io::{Read, Write};
         use std::net::TcpListener;
