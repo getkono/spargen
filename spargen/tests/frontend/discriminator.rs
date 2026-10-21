@@ -21,10 +21,22 @@ components:
     Cat: { type: object, properties: { kind: { const: cat } } }
     Dog: { type: object, properties: { kind: { type: string } } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    assert_eq!(
+        enum_variants(&code, "Pet"),
+        ["Cat(Box<Cat>)", "Dog(Box<Dog>)"],
+        "{code}"
+    );
+    // The fallback branch: `Dog` decodes under its own tag, an absent tag and an unknown one, so
+    // neither of the two errors a union without a fallback raises is emitted; `Cat` under its tag
+    // only.
+    let pet = deserialize_impl(&code, "Pet");
+    assert_eq!(pet.matches("map(Pet::Dog)").count(), 3, "{pet}");
+    assert_eq!(pet.matches("map(Pet::Cat)").count(), 1, "{pet}");
+    assert!(!pet.contains("missing discriminator field"), "{pet}");
+    assert!(!pet.contains("unknown discriminator value"), "{pet}");
 }
 
 #[test]
@@ -50,7 +62,19 @@ components:
 "##;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+        // At the `defaultMapping` itself: the same discriminator's `mapping` entries are a sibling
+        // `E007` site (`a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry`).
+        let e007: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            e007,
+            ["/components/schemas/Pet/discriminator/defaultMapping"],
+            "{report:#?}"
+        );
     }
 }
 
@@ -1254,7 +1278,9 @@ MAPPING
 #[test]
 fn discriminated_union_with_mapping_generates() {
     // A `discriminator` with an explicit mapping over object `$ref` variants → an internally-tagged
-    // enum. Generates without E007. check/generate parity.
+    // enum: each mapping key (and the member's component name, which no key claims) selects its
+    // member, and serialization writes the key. Generates without E007, in `check` as in
+    // `generate`.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1279,9 +1305,31 @@ components:
           cat: "#/components/schemas/Cat"
           dog: "#/components/schemas/Dog"
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    assert_eq!(
+        enum_variants(&code, "Pet"),
+        ["Cat(Box<Cat>)", "Dog(Box<Dog>)"],
+        "{code}"
+    );
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![
+            ("Cat".to_owned(), vec!["cat".to_owned(), "Cat".to_owned()]),
+            ("Dog".to_owned(), vec!["dog".to_owned(), "Dog".to_owned()]),
+        ],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("cat".to_owned())),
+            ("Dog".to_owned(), Some("dog".to_owned())),
+        ],
+        "{code}"
+    );
     let checked = check(spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
@@ -1289,7 +1337,7 @@ components:
 #[test]
 fn discriminated_union_with_unique_non_object_category_generates() {
     // A non-object variant dispatches by JSON category while object variants dispatch by tag.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1310,6 +1358,41 @@ components:
     );
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    assert_eq!(
+        enum_variants(&code, "Pet"),
+        ["Cat(Box<Cat>)", "PetVariant1(Box<PetVariant1>)"],
+        "{code}"
+    );
+    assert_eq!(
+        alias_target(&code, "PetVariant1").as_deref(),
+        Some("String"),
+        "{code}"
+    );
+    // The string is taken by its category before any tag is read; the object by its tag alone,
+    // and it is the only member serialization writes a tag for.
+    let pet = deserialize_impl(&code, "Pet");
+    let flat = pet.split_whitespace().collect::<Vec<_>>().join(" ");
+    let category = flat
+        .find("if value.is_string() { return serde_json::from_value(value) .map(Pet::PetVariant1)")
+        .unwrap_or_else(|| panic!("no category dispatch to `PetVariant1`: {pet}"));
+    let tag = flat
+        .find(".get(\"petType\")")
+        .unwrap_or_else(|| panic!("no tag read: {pet}"));
+    assert!(category < tag, "{pet}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![("Cat".to_owned(), vec!["Cat".to_owned()])],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("Cat".to_owned())),
+            ("PetVariant1".to_owned(), None),
+        ],
+        "{code}"
+    );
 }
 
 /// A 3.2 `Pet` over three members, each requiring its own `kind`, falling back to `fallback`; and

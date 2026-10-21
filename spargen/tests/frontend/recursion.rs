@@ -2771,15 +2771,17 @@ components:
     );
 }
 
-/// Mutually-recursive components (`A -> B -> A`, including recursion through an array) must also
-/// generate: exactly one back-edge in the cycle is boxed.
+/// Mutually-recursive components (`A -> B -> A`) must also generate, directly and through an
+/// array. Directly, exactly one back-edge in the cycle is boxed; through an array, the array's
+/// `Vec` already puts the cycle behind a pointer, so neither edge is.
 #[test]
 fn mutually_recursive_refs_generate() {
-    let report = generate(
-        r##"
+    let spec = |back_edge: &str| {
+        format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
+info: {{ title: T, version: 1.0.0 }}
+paths: {{}}
 components:
   schemas:
     A:
@@ -2790,20 +2792,60 @@ components:
     B:
       type: object
       properties:
-        children:
-          type: array
-          items:
-            $ref: "#/components/schemas/A"
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .all(|d| d.severity != spargen::Severity::Error),
-        "mutually-recursive schemas must not raise an error: {report:#?}"
-    );
+{back_edge}"##
+        )
+    };
+    // Each struct declares one field, so the field types below are every edge of the cycle: in
+    // the direct case `A.b` is unboxed and `B.a` boxed, and through the array neither is.
+    let cases = [
+        (
+            "direct",
+            spec("        a:\n          $ref: \"#/components/schemas/A\"\n"),
+            ("pub a:", "Option<Box<A>>"),
+            None,
+        ),
+        (
+            "through an array",
+            spec(
+                "        children:\n          type: array\n          items:\n            \
+                 $ref: \"#/components/schemas/A\"\n",
+            ),
+            ("pub children:", "Option<Bchildren>"),
+            Some(("Bchildren", "Vec<A>")),
+        ),
+    ];
+    for (case, spec, (back_edge, back_edge_type), alias) in cases {
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{case}: mutually-recursive schemas must not raise an error: {report:#?}"
+        );
+        // Read from the `types` module on, past the embedded runtime's own declarations.
+        let types = types_module(&code);
+        assert_eq!(declared_fields(&types, "A"), ["b"], "{case}: {types}");
+        assert_eq!(
+            field_type(&types, "pub b:").as_deref(),
+            Some("Option<B>"),
+            "{case}: {types}"
+        );
+        assert_eq!(declared_fields(&types, "B").len(), 1, "{case}: {types}");
+        assert_eq!(
+            field_type(&types, back_edge).as_deref(),
+            Some(back_edge_type),
+            "{case}: {types}"
+        );
+        if let Some((name, target)) = alias {
+            assert_eq!(
+                alias_target(&types, name).as_deref(),
+                Some(target),
+                "{case}: {types}"
+            );
+        }
+    }
 }
 
 /// A `$ref` that closes a cycle resolves to a *reserved* id whose def is still the
