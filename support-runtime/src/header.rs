@@ -23,7 +23,9 @@ pub enum HeaderShape {
     Scalar,
     /// A comma-separated list.
     Array,
-    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set.
+    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
+    /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
+    /// without an error.
     Object,
     /// A `content`-typed header carrying JSON.
     Json,
@@ -87,7 +89,11 @@ impl std::error::Error for HeaderError {}
 /// Parse one documented response header, or `Ok(None)` when it is absent.
 ///
 /// Repeated occurrences are joined with `,` first, which is the RFC 9110 field-list rule and the
-/// same shape a non-exploded array is written in.
+/// same shape a non-exploded array is written in. [`HeaderShape::SetCookie`] is the exception:
+/// each occurrence is decoded as one list item and none are joined.
+///
+/// An occurrence that is not valid UTF-8 is [`HeaderError::NotUtf8`], and a value that does not
+/// deserialize into `T` is [`HeaderError::Parse`].
 pub fn parse_header<T: DeserializeOwned>(
     headers: &HeaderMap,
     name: &'static str,
@@ -166,9 +172,10 @@ pub fn require_header<T: DeserializeOwned>(
 /// Rebuild a JSON value from `simple`-style header text.
 fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
     match shape {
+        HeaderShape::Scalar => scalar(raw, scalars),
         // `SetCookie` is handled before any joining happens, and `Json` before any reconstruction,
         // both in `parse_header`.
-        HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
+        HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
         HeaderShape::Array => {
             Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
         }

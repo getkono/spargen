@@ -155,8 +155,7 @@ impl MiddlewareBackend {
     }
 }
 
-// `Middleware: Debug`, so the chain is `Debug`; a manual impl keeps the field names tidy and matches
-// `RetryBackend`'s non-exhaustive style.
+// `Middleware: Debug`, so the chain is `Debug`; a manual impl keeps the field names tidy.
 impl std::fmt::Debug for MiddlewareBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MiddlewareBackend")

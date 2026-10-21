@@ -1,5 +1,6 @@
-//! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`) or
-//! newline-delimited JSON (`application/x-ndjson`). A streaming operation returns an
+//! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`),
+//! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
+//! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
 //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
 //! `next().await` convenience method. Reqwest's body stream keeps delivery incremental on native
 //! and browser targets; dropping `EventStream` drops that body stream and cancels the transfer.
@@ -89,7 +90,8 @@ pub enum Framing {
     JsonSequence,
 }
 
-/// A typed async stream of items decoded from a streaming response body (SSE or ndjson).
+/// A typed async stream of items decoded from a streaming response body (SSE, ndjson, or a JSON
+/// Text Sequence).
 ///
 /// Yielded by generated operation methods whose success response is a streaming media type, in
 /// place of the usual `ResponseValue<T>`. Drive it manually:
@@ -203,6 +205,9 @@ impl<T> EventStream<T> {
     }
 
     /// Enable automatic reconnects using a caller-owned policy and timer.
+    ///
+    /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
+    /// because the operation's request could not be cloned (a streaming request body, for example).
     pub fn with_reconnect(mut self, policy: Arc<dyn ReconnectPolicy>) -> Result<Self, StreamError> {
         let Some(reconnect) = self.reconnect.as_mut() else {
             return Err(Error::request_message(
