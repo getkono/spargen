@@ -1,6 +1,8 @@
-//! Schema Object keywords whose value is held to a JSON shape: `type`, `required`, and the
-//! validation keywords. A count keyword, `type`, or `required` of the wrong shape is `E011` at the
-//! keyword (or the array element) that holds it; dropping it would silently widen the schema.
+//! Schema Object keywords whose value is held to a JSON shape: `type`, `required`, and the six
+//! count keywords (`minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
+//! `maxProperties`). One of the wrong shape is `E011` at the keyword (or the array element) that
+//! holds it; dropping it would silently widen the schema. `parse_validation` also reads `pattern`,
+//! the numeric bounds, and `uniqueItems`, keeping each only when its value has the expected shape.
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer};
 use crate::source::{Node, Number, SpannedMap, SpannedValue};
