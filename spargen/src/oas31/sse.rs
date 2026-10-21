@@ -33,8 +33,8 @@ pub(super) fn json_data_schema(
         }
         // The item's own reference is resolved outside `visiting`, unlike every nested one
         // (`collect_reference`): an envelope whose `allOf` cycles back to it is walked a second
-        // time, its `data` counts twice, and no candidate is unambiguous — the answer lowering
-        // and the audit's consumed-`contentSchema` check both rely on.
+        // time, its `data` counts twice, and the result is `None`. Lowering and the audit's
+        // consumed-`contentSchema` check both read that result.
         RefOr::Ref(reference) => {
             if let Ok(resolved) =
                 resolver.resolve(&reference.reference, &reference.provenance, diags)

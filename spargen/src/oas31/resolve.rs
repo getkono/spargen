@@ -330,7 +330,7 @@ impl<'doc> Resolver<'doc> {
 }
 
 /// `E004` for a `$ref` the bundle could not follow, worded by how `miss` failed; `kind` names the
-/// reference in the message (`$ref`, ``Path Item `$ref` ``). Shared by [`Resolver::resolve`] and
+/// reference in the message (`$ref`, ``Path Item `$ref` ``). Shared by [`Resolver::resolve_bundle`] and
 /// [`Resolver::resolve_path_item`], so both word a miss alike. An unparsable target was reported
 /// by its parser, at the target, so it adds nothing here.
 fn report_bundle_miss(
