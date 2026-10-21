@@ -1,5 +1,5 @@
-use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser as YamlParser, Tag};
-use yaml_rust2::scanner::{Marker, TScalarStyle};
+use yaml_rust2::parser::{Event, Parser as YamlParser, Tag};
+use yaml_rust2::scanner::{Marker, ScanError, TScalarStyle};
 use yaml_rust2::Yaml;
 
 use crate::diag::{
@@ -51,33 +51,33 @@ pub(crate) fn parse_json(
 ///
 /// YAML is restricted to the JSON-compatible subset OAS 3.1 prescribes: aliases expand to clones
 /// of their anchored nodes, within [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] nodes per parse event,
-/// and constructs outside that subset (non-string keys, multiple
-/// documents) are diagnosed. The low-level event API
-/// (`yaml_rust2::parser::Parser` + a [`MarkedEventReceiver`]) is used instead of `YamlLoader` so
-/// that each event's source [`Marker`] can be turned into a per-node span. Errors are reported
-/// through `diags`.
+/// nesting is capped at [`MAX_NESTING_DEPTH`] as in JSON, copies of aliases included, and
+/// constructs outside that subset (non-string keys, multiple documents) are diagnosed. The
+/// low-level event API (`yaml_rust2::parser::Parser`, read by [`yaml_events`]) is used instead of
+/// `YamlLoader` so that each event's source [`Marker`] can be turned into a per-node span. Errors
+/// are reported through `diags`.
 pub(crate) fn parse_yaml(
     file: FileId,
     text: &str,
     diags: &mut Diagnostics,
 ) -> Result<SpannedValue, Aborted> {
     let positions = Positions::new(text);
-    let mut sink = EventSink::default();
-    let mut parser = YamlParser::new_from_str(text);
-    if let Err(error) = parser.load(&mut sink, true) {
-        let loc = positions.loc(error.marker().index());
-        Diagnostic::error(
-            Code::InvalidInput,
-            Provenance::new(JsonPointer::root(), Some(Span::point(file, loc))),
-        )
-        .message(format!("malformed YAML: {error}"))
-        .remedy("fix the YAML syntax before running spargen")
-        .emit(diags);
-        return Err(Aborted);
-    }
+    let events = match yaml_events(text) {
+        Ok(events) => events,
+        Err(error) => {
+            let loc = positions.loc(error.marker().index());
+            Diagnostic::error(
+                Code::InvalidInput,
+                Provenance::new(JsonPointer::root(), Some(Span::point(file, loc))),
+            )
+            .message(format!("malformed YAML: {error}"))
+            .remedy("fix the YAML syntax before running spargen")
+            .emit(diags);
+            return Err(Aborted);
+        }
+    };
 
-    let doc_count = sink
-        .events
+    let doc_count = events
         .iter()
         .filter(|(event, _)| matches!(event, Event::DocumentStart))
         .count();
@@ -93,12 +93,11 @@ pub(crate) fn parse_yaml(
 
     let mut builder = YamlBuilder {
         file,
-        events: &sink.events,
+        events: &events,
         positions: &positions,
         idx: 0,
         anchors: std::collections::HashMap::new(),
-        aliased: sink
-            .events
+        aliased: events
             .iter()
             .filter_map(|(event, _)| match event {
                 Event::Alias(id) => Some(*id),
@@ -107,10 +106,10 @@ pub(crate) fn parse_yaml(
             .collect(),
         nodes: 0,
         kept: 0,
-        node_budget: sink
-            .events
+        node_budget: events
             .len()
             .saturating_mul(ALIAS_EXPANSION_BUDGET_PER_EVENT),
+        deepest: 0,
     };
     builder.build(diags)
 }
@@ -144,8 +143,10 @@ const DUPLICATE_KEY_REMEDY: &str =
 
 // JSON: hand-rolled span-tracking recursive-descent parser
 
-/// Guard against unbounded recursion on pathological input (deeply nested `[[[…]]]`).
-const MAX_JSON_DEPTH: u32 = 256;
+/// The deepest a value may sit in a parsed document, the root at depth 0, in either parser. Both
+/// recurse once per level of nesting, so the cap bounds their stack on pathological input
+/// (`[[[…]]]`, or block-style `- - - …`), and a value past it is `E011`.
+const MAX_NESTING_DEPTH: u32 = 256;
 
 /// A JSON parse failure, carrying the precise source span it occurred at, the stable diagnostic
 /// code to raise, and the message/remedy to render. Most failures are syntax errors (`E011`
@@ -284,7 +285,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_value(&mut self, depth: u32) -> Result<SpannedValue, JsonError> {
-        if depth > MAX_JSON_DEPTH {
+        if depth > MAX_NESTING_DEPTH {
             return Err(self.error("JSON nesting is too deep"));
         }
         self.skip_ws();
@@ -615,16 +616,21 @@ impl<'a> JsonParser<'a> {
 
 // YAML: event-based span-tracking builder over the JSON-compatible subset
 
-/// Collects `(event, marker)` pairs from `yaml_rust2`'s push parser so the tree can be built in a
-/// second pass with lookahead to container-end markers.
-#[derive(Default)]
-struct EventSink {
-    events: Vec<(Event, Marker)>,
-}
-
-impl MarkedEventReceiver for EventSink {
-    fn on_event(&mut self, event: Event, marker: Marker) {
-        self.events.push((event, marker));
+/// Every `(event, marker)` pair `yaml_rust2`'s parser produces for `text`, through `StreamEnd`, so
+/// the tree can be built in a second pass with lookahead to container-end markers. The events are
+/// pulled one at a time rather than pushed by `Parser::load`, which recurses once per level of
+/// nesting and so would overflow the stack on a deep block-style document before
+/// [`YamlBuilder::build_node`] could refuse it.
+fn yaml_events(text: &str) -> Result<Vec<(Event, Marker)>, ScanError> {
+    let mut parser = YamlParser::new_from_str(text);
+    let mut events = Vec::new();
+    loop {
+        let (event, marker) = parser.next_token()?;
+        let end = event == Event::StreamEnd;
+        events.push((event, marker));
+        if end {
+            return Ok(events);
+        }
     }
 }
 
@@ -636,10 +642,11 @@ struct YamlBuilder<'a> {
     events: &'a [(Event, Marker)],
     positions: &'a Positions,
     idx: usize,
-    /// Anchor id → the node it labels and that node's expanded node count, so aliases can be
-    /// expanded exactly as `YamlLoader` does and charged for what they copy. Populated post-order
-    /// as each anchored node in [`YamlBuilder::aliased`] completes.
-    anchors: std::collections::HashMap<usize, (SpannedValue, usize)>,
+    /// Anchor id → the node it labels, that node's expanded node count, and its height (how many
+    /// levels its deepest descendant sits below it), so aliases can be expanded exactly as
+    /// `YamlLoader` does and charged for what they copy, and for how deep the copy reaches.
+    /// Populated post-order as each anchored node in [`YamlBuilder::aliased`] completes.
+    anchors: std::collections::HashMap<usize, (SpannedValue, usize, u32)>,
     /// The anchor ids some alias in the document names: only these anchored nodes are copied
     /// into [`YamlBuilder::anchors`].
     aliased: std::collections::HashSet<usize>,
@@ -650,6 +657,10 @@ struct YamlBuilder<'a> {
     /// The most nodes the built tree and the kept copies may hold together:
     /// [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] per event.
     node_budget: usize,
+    /// The depth of the deepest node built so far inside the node being built, an alias counted
+    /// as reaching as deep as its copy does; [`YamlBuilder::build_node`] reads an anchored node's
+    /// height from it.
+    deepest: u32,
 }
 
 /// The nodes the built YAML tree may hold per event the parser produced. Without aliases a tree
@@ -686,6 +697,9 @@ enum YamlFailure {
         site: BudgetSite,
         budget: usize,
     },
+    /// The node at `span` sits deeper than [`MAX_NESTING_DEPTH`], itself or through the copy an
+    /// alias expands to. `path` is built exactly as [`YamlFailure::DuplicateKey`]'s is.
+    TooDeep { path: Vec<Segment>, span: Span },
 }
 
 /// The copy that crossed the alias expansion budget.
@@ -703,7 +717,8 @@ impl YamlFailure {
     fn within(mut self, segment: Segment) -> Self {
         if let Self::DuplicateKey { path, .. }
         | Self::InvalidScalar { path, .. }
-        | Self::ExpansionBudget { path, .. } = &mut self
+        | Self::ExpansionBudget { path, .. }
+        | Self::TooDeep { path, .. } = &mut self
         {
             path.push(segment);
         }
@@ -715,7 +730,8 @@ impl YamlFailure {
     fn in_key(mut self) -> Self {
         if let Self::DuplicateKey { path, .. }
         | Self::InvalidScalar { path, .. }
-        | Self::ExpansionBudget { path, .. } = &mut self
+        | Self::ExpansionBudget { path, .. }
+        | Self::TooDeep { path, .. } = &mut self
         {
             path.clear();
         }
@@ -737,7 +753,7 @@ impl YamlBuilder<'_> {
             self.idx += 1;
         }
         self.idx += 1; // step past DocumentStart onto the root node
-        self.build_node(diags).map_err(|failure| match failure {
+        self.build_node(0, diags).map_err(|failure| match failure {
             YamlFailure::Reported(aborted) => aborted,
             YamlFailure::DuplicateKey { path, span, name } => {
                 // `YamlLoader` rejected duplicate mapping keys; keep rejecting them (now with a
@@ -796,15 +812,47 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
+            YamlFailure::TooDeep { path, span } => {
+                // Worded after the JSON parser's message for its own cap, so one document reads
+                // alike in either format.
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: YAML nesting is too deep at line {} column {} (more than \
+                     {MAX_NESTING_DEPTH} levels)",
+                    span.start.line, span.start.col
+                ))
+                .remedy("flatten the nesting, or share the repeated structure with a `$ref`")
+                .emit(diags);
+                Aborted
+            }
         })
     }
 
-    fn build_node(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, YamlFailure> {
+    /// Build the node the cursor is on, which sits at `depth` (the root at 0). The builder recurses
+    /// once per level, so a node deeper than [`MAX_NESTING_DEPTH`] is refused before it is
+    /// descended into, and so is an alias whose copy would reach past it.
+    fn build_node(
+        &mut self,
+        depth: u32,
+        diags: &mut Diagnostics,
+    ) -> Result<SpannedValue, YamlFailure> {
         let events = self.events;
         let positions = self.positions;
         let (event, marker) = &events[self.idx];
         let start = positions.loc(marker.index());
+        if depth > MAX_NESTING_DEPTH {
+            return Err(YamlFailure::TooDeep {
+                path: Vec::new(),
+                span: Span::point(self.file, start),
+            });
+        }
         let nodes_before = self.nodes;
+        // The deepest node outside this one, restored once this one is built, so `deepest` then
+        // spans this node's subtree alone and gives its height.
+        let deepest_outside = std::mem::replace(&mut self.deepest, depth);
         // The anchor id (0 = none) labelling this node, captured before it is built so the
         // completed node can be registered for later alias expansion.
         let anchor_id = match event {
@@ -837,7 +885,7 @@ impl YamlBuilder<'_> {
                 let mut items = Vec::new();
                 while !matches!(events[self.idx].0, Event::SequenceEnd) {
                     let item = self
-                        .build_node(diags)
+                        .build_node(depth + 1, diags)
                         .map_err(|failure| failure.within(Segment::Index(items.len())))?;
                     items.push(item);
                 }
@@ -857,7 +905,9 @@ impl YamlBuilder<'_> {
                 self.nodes += 1;
                 let mut map = SpannedMap::default();
                 while !matches!(events[self.idx].0, Event::MappingEnd) {
-                    let key = self.build_node(diags).map_err(YamlFailure::in_key)?;
+                    let key = self
+                        .build_node(depth + 1, diags)
+                        .map_err(YamlFailure::in_key)?;
                     let Node::String(name) = key.node else {
                         Diagnostic::error(
                             Code::InvalidInput,
@@ -875,7 +925,7 @@ impl YamlBuilder<'_> {
                         });
                     }
                     let value = self
-                        .build_node(diags)
+                        .build_node(depth + 1, diags)
                         .map_err(|failure| failure.within(Segment::Key(name.clone())))?;
                     map.push(
                         SpannedKey {
@@ -903,10 +953,20 @@ impl YamlBuilder<'_> {
                 // copy is charged at its expanded size before it is made, so a document whose
                 // aliases compound is rejected at the alias that crosses the budget.
                 let id = *id;
-                let (anchored, size) = self
+                let (anchored, size, height) = self
                     .anchors
                     .get(&id)
-                    .map_or((None, 1), |(value, size)| (Some(value), *size));
+                    .map_or((None, 1, 0), |(value, size, height)| {
+                        (Some(value), *size, *height)
+                    });
+                // A copy placed here reaches `height` levels below the alias; nested anchors that
+                // each alias the one before would otherwise stack copies past the cap.
+                if depth.saturating_add(height) > MAX_NESTING_DEPTH {
+                    return Err(YamlFailure::TooDeep {
+                        path: Vec::new(),
+                        span: Span::point(self.file, start),
+                    });
+                }
                 if size > self.headroom() {
                     return Err(YamlFailure::ExpansionBudget {
                         path: Vec::new(),
@@ -920,6 +980,7 @@ impl YamlBuilder<'_> {
                 });
                 self.idx += 1;
                 self.nodes += size;
+                self.deepest = deepest_outside.max(depth + height);
                 return Ok(value);
             }
             // The remaining events (stream/document delimiters, container ends) are consumed by
@@ -934,6 +995,8 @@ impl YamlBuilder<'_> {
                 return Err(YamlFailure::Reported(Aborted));
             }
         };
+        let height = self.deepest - depth;
+        self.deepest = self.deepest.max(deepest_outside);
         // Keep a copy only for an anchor some alias names, and charge it like any other copy: a
         // stack of nested anchors would otherwise each keep everything beneath it.
         if anchor_id > 0 && self.aliased.contains(&anchor_id) {
@@ -947,7 +1010,8 @@ impl YamlBuilder<'_> {
                 });
             }
             self.kept += size;
-            self.anchors.insert(anchor_id, (value.clone(), size));
+            self.anchors
+                .insert(anchor_id, (value.clone(), size, height));
         }
         Ok(value)
     }
@@ -1319,7 +1383,7 @@ mod tests {
         // `n` nested arrays put the innermost one at depth `n - 1`, so the deepest accepted
         // nesting is one past the cap and the next is refused, at the array that crosses it.
         let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
-        let deepest = MAX_JSON_DEPTH as usize + 1;
+        let deepest = MAX_NESTING_DEPTH as usize + 1;
         parse_json_ok(&nested(deepest));
 
         let mut diags = Diagnostics::default();
@@ -1526,6 +1590,13 @@ mod tests {
     fn the_e011_explain_text_states_the_alias_expansion_budget() {
         // `spargen explain E011` restates the budget as a literal, so it follows the constant.
         let stated = format!("{ALIAS_EXPANSION_BUDGET_PER_EVENT} nodes per parse event");
+        assert!(Code::InvalidInput.explain().contains(&stated), "{stated}");
+    }
+
+    #[test]
+    fn the_e011_explain_text_states_the_nesting_cap() {
+        // `spargen explain E011` restates the cap as a literal, so it follows the constant.
+        let stated = format!("nested more than {MAX_NESTING_DEPTH} levels deep");
         assert!(Code::InvalidInput.explain().contains(&stated), "{stated}");
     }
 

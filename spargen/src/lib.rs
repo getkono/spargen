@@ -306,7 +306,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                     return Report {
                         diagnostics: cargo_diagnostics,
                         outcome: Outcome::Rejected,
-                        truncated: false,
+                        truncated: cached.truncated,
                     };
                 }
                 // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
@@ -314,7 +314,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
-                    truncated: false,
+                    truncated: cached.truncated,
                 };
             }
         }
@@ -383,6 +383,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 &snapshot.digest,
                 &content_digest,
                 &preview.report.diagnostics,
+                preview.report.truncated,
                 requirements,
             ) {
                 return pipeline_error_report(message);
@@ -553,19 +554,22 @@ fn preview_inner(spec: &Spec) -> PipelinePreview {
 
 /// The stack size for the dedicated frontend worker thread. Parsing, deserialization, meta-schema
 /// validation, and lowering are all recursive over the (possibly deeply nested) document. Lowering
-/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`) and the parser bounds nesting
-/// too, so the peak stack is bounded — but only *this* thread guarantees it has room for that bound,
-/// no matter how small the caller's own stack is. A build.rs, a CLI, a proptest worker, or a
-/// libFuzzer target all inherit the same guarantee: no spec — however deep or adversarial — can
-/// overflow the stack, because the recursive work always runs here.
+/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`), and the JSON and YAML
+/// parsers both refuse a document nested past a fixed depth before recursing past it, an alias's
+/// copy counted at the depth it reaches, so the peak stack is bounded — but only *this* thread
+/// guarantees it has room for that bound, no matter how small the caller's own stack is. A
+/// build.rs, a CLI, a proptest worker, or a libFuzzer target all inherit the same guarantee: no
+/// spec — however deep or adversarial — can overflow the stack, because the recursive work always
+/// runs here.
 const FRONTEND_STACK: usize = 64 * 1024 * 1024;
 
 /// Run `f` (the whole recursive frontend/pipeline) on a dedicated thread with a large, fixed stack,
 /// decoupling spargen's recursion budget from the caller's stack size. This is the mechanism behind
-/// the no-overflow invariant: combined with the lowering depth cap, it makes stack exhaustion on any
-/// input impossible for every entry point. A panic inside the worker is propagated to the caller
-/// unchanged (so genuine bugs still surface). Thread creation is not input-driven; the only way it
-/// fails is OS resource exhaustion, which is outside the "no input crashes the generator" contract.
+/// the no-overflow invariant: combined with the parsers' and lowering's depth caps, it makes stack
+/// exhaustion on any input impossible for every entry point. A panic inside the worker is
+/// propagated to the caller unchanged (so genuine bugs still surface). Thread creation is not
+/// input-driven; the only way it fails is OS resource exhaustion, which is outside the "no input
+/// crashes the generator" contract.
 fn run_on_frontend_stack<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send,
