@@ -750,7 +750,7 @@ paths:
     /// The `compile_error!` text: the spec as the macro was given it, then each error-severity
     /// diagnostic in `Diagnostic`'s own `Display`: code and message, span, pointer, and remedy.
     #[test]
-    fn a_rejected_spec_renders_each_error_with_its_code_and_pointer() {
+    fn a_rejected_spec_renders_each_error_with_its_code_span_and_remedy() {
         let scratch = Scratch::new("rejected");
         let spec = scratch.write(
             "openapi.yaml",
