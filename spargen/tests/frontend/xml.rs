@@ -321,29 +321,43 @@ paths:
 
 #[test]
 fn json_alternative_wins_over_xml_on_same_body() {
-    // When a body offers both JSON and XML, media selection deterministically prefers JSON, so the
-    // API does not use XML at all — generation succeeds with no E009.
-    let spec = r##"
+    // When a body offers both JSON and XML, media selection deterministically prefers JSON, in
+    // either key order, so the API does not use XML at all: generation succeeds with no E009 and
+    // the XML codec runtime is not embedded.
+    let spec = |content: &str| {
+        format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /x:
     post:
       requestBody:
         content:
-          application/xml:
-            schema: { type: object }
-          application/json:
-            schema: { type: object, required: [id], properties: { id: { type: string } } }
-      responses:
-        "204": { description: No Content }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
+{content}      responses:
+        "204": {{ description: No Content }}
+"##
+        )
+    };
+    let xml = "          application/xml:\n            schema: { type: object }\n";
+    let json = "          application/json:\n            schema: { type: object, required: [id], properties: { id: { type: string } } }\n";
+    // The XML codec runtime is the only emitted source that names `quick_xml`, as the XML-only
+    // control shows.
+    let (control, control_code) = generate_with_code(&spec(xml));
+    assert_eq!(control.outcome(), Outcome::Generated, "{control:#?}");
+    assert!(control_code.contains("quick_xml::"), "{control_code}");
+    for content in [format!("{xml}{json}"), format!("{json}{xml}")] {
+        let (report, code) = generate_with_code(&spec(&content));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert!(
+            !code.contains("quick_xml::"),
+            "XML runtime embedded:\n{code}"
+        );
+    }
 }
 
 #[test]

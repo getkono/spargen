@@ -20,7 +20,14 @@ paths:
 "#;
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(code.contains("enum ResponseBody"), "{code}");
+    // Uninhabited means no variant at all: `contains("enum ResponseBody")` would also hold for an
+    // enum with variants, so the declaration itself is read.
+    let declaration: Vec<&str> = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub enum ResponseBody"))
+        .collect();
+    assert_eq!(declaration, ["pub enum ResponseBody {}"], "{code}");
 }
 
 #[test]
