@@ -106,7 +106,10 @@ fn e011_a_yaml_mapping_key_that_is_not_a_string_is_addressed_by_its_mapping() {
     let top_level = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n1: one\n";
     let referencing = root("{ $ref: './a.yaml' }");
     let referenced = "type: object\nproperties:\n  ? [x]\n  : { type: string }\n";
-    let cases: [(&[(&str, &str)], &str, bool, (u32, u32)); 4] = [
+    // The files, the expected pointer, whether the key lies in the root document, and its line
+    // and column.
+    type Case<'a> = (&'a [(&'a str, &'a str)], &'a str, bool, (u32, u32));
+    let cases: [Case; 4] = [
         (
             &[("openapi.yaml", &properties)],
             "/components/schemas/A/properties",
