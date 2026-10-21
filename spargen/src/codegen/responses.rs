@@ -74,7 +74,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
         );
         Some(quote! {
             #[doc = #doc]
-            #[allow(dead_code)]
+            #[allow(dead_code, deprecated)]
             #[derive(Debug, Clone)]
             pub struct #ident {
                 #(#fields),*
@@ -114,7 +114,7 @@ pub(super) fn emit_response_enum(operation: &Operation, names: &Names) -> TokenS
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names));
             quote! {
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 pub enum #ident {
                     #(#variants)*
@@ -193,7 +193,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 });
                 quote! {
-                    #[allow(dead_code)]
+                    #[allow(dead_code, deprecated)]
                     impl #error_ident {
                         /// The documented error body, whichever status carried it; `None` for a
                         /// documented bodyless status. The status is on the `ResponseValue` that
@@ -205,6 +205,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                         }
                     }
 
+                    #[allow(deprecated)]
                     impl support::ApiErrorBody for #error_ident {
                         type Body = #body_ty;
                         fn body(&self) -> Option<&#body_ty> {
@@ -231,7 +232,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 }
             });
             quote! {
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 pub enum #error_ident {
                     #(#variants)*
@@ -309,12 +310,12 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
             );
             quote! {
                 #[doc = #doc]
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 #deserialize
                 pub struct #error_ident(pub #ty);
 
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 impl #error_ident {
                     /// Unwrap to the documented error body.
                     pub fn into_inner(self) -> #ty {
@@ -322,6 +323,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 }
 
+                #[allow(deprecated)]
                 impl std::ops::Deref for #error_ident {
                     type Target = #ty;
                     fn deref(&self) -> &Self::Target {
@@ -335,12 +337,14 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 }
 
+                #[allow(deprecated)]
                 impl From<#ty> for #error_ident {
                     fn from(inner: #ty) -> Self {
                         Self(inner)
                     }
                 }
 
+                #[allow(deprecated)]
                 impl From<#error_ident> for #ty {
                     fn from(outer: #error_ident) -> Self {
                         outer.0
@@ -359,6 +363,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 // is the bare definition — unboxed, non-nullable — exactly as on the enum shape,
                 // so one bound covers both shapes of the same schema, and a `null` body answers
                 // `None` here as a nullable enum variant does.
+                #[allow(deprecated)]
                 impl support::ApiErrorBody for #error_ident {
                     type Body = #body;
                     fn body(&self) -> Option<&#body> {

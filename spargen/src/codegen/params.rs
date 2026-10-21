@@ -292,7 +292,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         }
     });
     quote! {
-        #[allow(dead_code)]
+        #[allow(dead_code, deprecated)]
         #[derive(Debug, Clone, Default, serde::Serialize)]
         pub struct #ident {
             #(#fields)*
@@ -300,7 +300,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
 
         // Setters named after fields can trip `wrong_self_convention` when a param is named
         // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
-        #[allow(dead_code, clippy::wrong_self_convention)]
+        #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
         impl #ident {
             #(#setters)*
         }

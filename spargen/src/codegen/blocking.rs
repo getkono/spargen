@@ -52,7 +52,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 
             #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
             #[forbid(unsafe_code)]
-            #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+            #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
             impl BlockingClient {
             /// Build a blocking client over a fresh default `reqwest::Client`.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
@@ -138,9 +138,6 @@ fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> T
         #docs
         #(#param_default_docs)*
         #deprecated
-        // A deprecated blocking wrapper intentionally forwards to its deprecated async twin. This
-        // suppresses only that internal call; `#deprecated` still warns consumers of this method.
-        #[allow(deprecated)]
         #[inline]
         pub fn #method_ident(
             &self,

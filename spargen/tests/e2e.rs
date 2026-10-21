@@ -736,6 +736,126 @@ fn every_cycle_member_decodes_its_wire_shape() {
     assert!(status.success(), "the alias-cycle fixture must lint clean");
 }
 
+/// Every item kind a `deprecated: true` component lowers to, each named by an operation, a struct
+/// field, another component, or a response enum, so the module names each one internally.
+const DEPRECATED_COMPONENTS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /legacy:
+    post:
+      operationId: postLegacy
+      parameters:
+        - { name: level, in: query, schema: { $ref: '#/components/schemas/Level' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Tree' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '404':
+          description: nf
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Flag' }
+  /mixed/{level}:
+    get:
+      operationId: getMixed
+      parameters:
+        - { name: level, in: path, required: true, schema: { $ref: '#/components/schemas/Level' } }
+        - { name: tags, in: header, schema: { $ref: '#/components/schemas/Tags' } }
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Level: { schema: { $ref: '#/components/schemas/Level' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mixed' }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '409':
+          description: conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tree' }
+  /form:
+    post:
+      operationId: postForm
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Legacy' }
+      responses:
+        '204': { description: stored }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+components:
+  schemas:
+    Mixed: { oneOf: [{ $ref: '#/components/schemas/Legacy' }, { $ref: '#/components/schemas/Tags' }] }
+    Level: { type: integer, enum: [1, 2], deprecated: true }
+    Flag: { type: boolean, enum: [true], deprecated: true }
+    Tags: { type: array, items: { type: string }, deprecated: true }
+    Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }
+    Forest: { type: array, items: { $ref: '#/components/schemas/Tree' } }
+    Legacy:
+      type: object
+      deprecated: true
+      required: [level, flag, tags, tree, forest]
+      properties:
+        level: { $ref: '#/components/schemas/Level' }
+        flag: { $ref: '#/components/schemas/Flag' }
+        tags: { $ref: '#/components/schemas/Tags' }
+        tree: { $ref: '#/components/schemas/Tree' }
+        forest: { $ref: '#/components/schemas/Forest' }
+"#;
+
+/// Issue #731: a deprecated component carries `#[deprecated]` whatever item it lowers to, and the
+/// module that names those items itself still compiles and lints clean under `-D warnings`.
+#[test]
+fn a_module_naming_its_deprecated_components_lints_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, DEPRECATED_COMPONENTS_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "deprecated_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a module naming its own deprecated components must lint clean"
+    );
+}
+
 const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }

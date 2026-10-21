@@ -97,8 +97,12 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             core: support::ClientCore,
         }
 
+        // `deprecated`: the module names its own deprecated components in signatures and decode
+        // paths, as `types`, the parameter structs, the response and error types, and the
+        // blocking twin do. A lint level is read at the use site, so a consumer naming a
+        // deprecated item is still warned.
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+        #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
         impl Client {
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::with_client(reqwest::Client::new(), base_url)

@@ -35,7 +35,7 @@ pub(super) fn emit_models(
     });
     quote! {
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_imports)]
+        #[allow(dead_code, deprecated, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
