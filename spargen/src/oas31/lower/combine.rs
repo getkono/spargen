@@ -27,8 +27,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         contributions: &[Contribution],
     ) -> Option<Ty> {
-        // Taken here, so a later merge never reads what was recorded for this one.
-        let value_variants = std::mem::take(&mut self.scalar_meet_value_variants);
         let mut has_object = contributions
             .iter()
             .any(|c| matches!(c, Contribution::Object { .. }));
@@ -143,9 +141,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 intersection = met;
             }
-            // A union member's `Value` variant took the other members' `null` from the meet,
-            // which the `allOf` already decided for the union by its own count (#660).
-            intersection = self.clear_value_variant_null(intersection, &value_variants, mark);
             // A `oneOf` the meets left with branches of one generated type collapses with `W001`,
             // as the meet of a union member does (#643); an `anyOf` member met with a `oneOf`
             // member left such `oneOf`s nested in its branches.
