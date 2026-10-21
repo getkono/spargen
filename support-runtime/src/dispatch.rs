@@ -117,12 +117,16 @@ fn base_for(core: &ClientCore, server: Option<&str>) -> Result<Url, Error<Infall
 
 /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
 fn append_query(url: &mut Url, query: &[String]) {
-    if query.is_empty() {
-        return;
+    if !query.is_empty() {
+        append_query_text(url, &query.join("&"));
     }
+}
+
+/// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
+fn append_query_text(url: &mut Url, text: &str) {
     let joined = match url.query() {
-        Some(existing) if !existing.is_empty() => format!("{existing}&{}", query.join("&")),
-        _ => query.join("&"),
+        Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
+        _ => text.to_owned(),
     };
     url.set_query(Some(&joined));
 }
@@ -152,11 +156,7 @@ pub fn build_url_with_query_string_on(
     url.set_query(None);
     append_query(&mut url, query);
     if let Some(query_string) = query_string {
-        let joined = match url.query() {
-            Some(existing) if !existing.is_empty() => format!("{existing}&{query_string}"),
-            _ => query_string.to_owned(),
-        };
-        url.set_query(Some(&joined));
+        append_query_text(&mut url, query_string);
     }
     Ok(url)
 }
