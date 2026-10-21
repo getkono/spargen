@@ -6381,6 +6381,22 @@ paths:
               additionalProperties: { type: string }
       responses:
         "204": { description: No Content }
+  # A nullable form body with a typed overflow: the overflow map's length is read through the
+  # `Option`, so this compiles only if that branch of the generated call does.
+  /form/additional/nullable:
+    post:
+      operationId: submitNullableFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: [object, 'null']
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
   /upload/additional:
     post:
       operationId: uploadAdditional

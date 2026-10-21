@@ -6716,6 +6716,20 @@ pub mod types {
         #[serde(flatten)]
         pub additional: BTreeMap<String, RequestBodyAdditional>,
     }
+    pub type RequestBodyaF8000e9c = String;
+    pub type RequestBodyAdditionalAba279dd = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBodyE2940da4 {
+        #[serde(
+            rename = "a",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub a: Option<RequestBodyaF8000e9c>,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+    }
     pub type RequestBodycaption820ffb52 = String;
     pub type RequestBodyAdditionalItem = i64;
     pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
@@ -7650,6 +7664,8 @@ pub type SerializeContentParamsError = std::convert::Infallible;
 pub type SubmitFormError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type SubmitFormAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type SubmitNullableFormAdditionalError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type UploadAdditionalError = std::convert::Infallible;
 #[allow(dead_code)]
@@ -10616,6 +10632,55 @@ Response `409`: binary error*/
     }
     ///Response `204`: No Content
     #[inline]
+    pub async fn submit_nullable_form_additional(
+        &self,
+        body: &Option<types::RequestBodyE2940da4>,
+    ) -> Result<
+        support::ResponseValue<()>,
+        support::Error<SubmitNullableFormAdditionalError>,
+    > {
+        let mut path = "/form/additional/nullable".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((
+                    support::FormMode::Text,
+                    body.as_ref().map_or(0, |body| body.additional.len()),
+                )),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitNullableFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
     pub async fn upload_additional(
         &self,
         body: &types::RequestBody1654af29,
@@ -11647,6 +11712,18 @@ Response `409`: binary error*/
             support::Error<SubmitFormAdditionalError>,
         > {
             self.runtime.block_on(self.inner.submit_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_nullable_form_additional(
+            &self,
+            body: &Option<types::RequestBodyE2940da4>,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitNullableFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
         }
         ///Response `204`: No Content
         #[allow(deprecated)]
