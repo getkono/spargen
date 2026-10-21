@@ -46,10 +46,9 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{Omit, OmitRule, UnknownOmitToken};
 
-/// The default cap on bytes of a response body retained on generated error variants.
-pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
 /// The default cap on diagnostics collected before batching stops.
 pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 

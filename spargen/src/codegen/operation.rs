@@ -4,16 +4,19 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{Api, MediaType, Operation, ParamLoc, Ty, TypeKind};
-use crate::name::{Names, OperationBindings};
+use crate::name::Names;
 
 use super::body::body_send_tokens;
 use super::dispatch::{
-    attach_auth_tokens, error_branch_tokens, error_type_ident, success_decode_tokens, success_type,
+    attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
+use super::idents::{
+    error_type_ident, operation_bindings, operation_method_ident, param_ident, params_struct_ident,
+};
 use super::params::{
-    cookie_param_tokens, json_querystring_tokens, param_value_tokens, query_param_tokens,
-    querystring_param_tokens,
+    cookie_param_tokens, json_querystring_tokens, location_statements, param_value_tokens,
+    query_param_tokens, querystring_param_tokens,
 };
 use super::ty::{reqwest_method, ty_tokens};
 
@@ -31,10 +34,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
     let cookies_binding = &bindings.cookies;
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
+    let method_ident = operation_method_ident(operation, names);
     let error_ident = error_type_ident(operation, names);
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names);
@@ -62,25 +62,13 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
                 #path_binding = #path_binding.replace(#placeholder, &#value);
             }
         });
-    let required_query = operation
-        .params
-        .iter()
-        .filter(|param| param.required && param.location == ParamLoc::Query)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            query_param_tokens(param, &name, quote! { &#ident }, query_binding)
-        });
-    let optional_query = operation
-        .params
-        .iter()
-        .filter(|param| !param.required && param.location == ParamLoc::Query)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            let serialize = query_param_tokens(param, &name, quote! { value }, query_binding);
-            optional_param_guard(bindings, ident, serialize)
-        });
+    let query = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::Query,
+        |param, value| query_param_tokens(param, &param.name, value, query_binding),
+    );
     let uses_querystring = operation
         .params
         .iter()
@@ -105,89 +93,48 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         Some(_) => quote! { let mut #raw_query_binding: Option<String> = None; },
         None => quote! { let #raw_query_binding: Option<String> = None; },
     });
-    let required_querystring = operation
-        .params
-        .iter()
-        .filter(|parameter| parameter.required && parameter.location == ParamLoc::QueryString)
-        // A required JSON whole-query value is already the raw query's initializer.
-        .filter(|parameter| {
-            !matches!(
-                &parameter.style,
-                crate::ir::ParamStyle::Content(MediaType::Json)
-            )
-        })
-        .map(|parameter| {
-            let ident = param_ident(names, operation, parameter);
-            querystring_param_tokens(
-                parameter,
-                quote! { &#ident },
-                query_binding,
-                raw_query_binding,
-            )
-        });
-    let optional_querystring = operation
-        .params
-        .iter()
-        .filter(|parameter| !parameter.required && parameter.location == ParamLoc::QueryString)
-        .map(|parameter| {
-            let ident = param_ident(names, operation, parameter);
-            let serialize = querystring_param_tokens(
-                parameter,
-                quote! { value },
-                query_binding,
-                raw_query_binding,
-            );
-            optional_param_guard(bindings, ident, serialize)
-        });
-    let required_headers = operation
-        .params
-        .iter()
-        .filter(|param| param.required && param.location == ParamLoc::Header)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            let value = param_value_tokens(param, quote! { &#ident });
+    let querystring = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::QueryString,
+        |parameter, value| {
+            // A required JSON whole-query value is already the raw query's initializer.
+            let initializes_raw_query = parameter.required
+                && matches!(
+                    &parameter.style,
+                    crate::ir::ParamStyle::Content(MediaType::Json)
+                );
+            if initializes_raw_query {
+                return quote! {};
+            }
+            querystring_param_tokens(parameter, value, query_binding, raw_query_binding)
+        },
+    );
+    let headers = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::Header,
+        |param, value| {
+            let name = &param.name;
+            let value = param_value_tokens(param, value);
             quote! { #request_binding = #request_binding.header(#name, #value); }
-        });
-    let optional_headers = operation
-        .params
-        .iter()
-        .filter(|param| !param.required && param.location == ParamLoc::Header)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            let value = param_value_tokens(param, quote! { value });
-            optional_param_guard(
-                bindings,
-                ident,
-                quote! { #request_binding = #request_binding.header(#name, #value); },
-            )
-        });
+        },
+    );
     let has_cookies = operation
         .params
         .iter()
         .any(|param| param.location == ParamLoc::Cookie);
     let cookie_init =
         has_cookies.then(|| quote! { let mut #cookies_binding: Vec<String> = Vec::new(); });
-    let required_cookies = operation
-        .params
-        .iter()
-        .filter(|param| param.required && param.location == ParamLoc::Cookie)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            cookie_param_tokens(param, &name, quote! { &#ident }, cookies_binding)
-        });
-    let optional_cookies = operation
-        .params
-        .iter()
-        .filter(|param| !param.required && param.location == ParamLoc::Cookie)
-        .map(|param| {
-            let name = param.name.clone();
-            let ident = param_ident(names, operation, param);
-            let serialize = cookie_param_tokens(param, &name, quote! { value }, cookies_binding);
-            optional_param_guard(bindings, ident, serialize)
-        });
+    let cookies = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::Cookie,
+        |param, value| cookie_param_tokens(param, &param.name, value, cookies_binding),
+    );
     let cookie_attach = has_cookies.then(|| {
         quote! {
             if !#cookies_binding.is_empty() {
@@ -245,18 +192,14 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             #(#path_replacements)*
             let mut #query_binding: Vec<String> = Vec::new();
             #raw_query_init
-            #(#required_query)*
-            #(#optional_query)*
-            #(#required_querystring)*
-            #(#optional_querystring)*
+            #(#query)*
+            #(#querystring)*
             let #url_binding = #build_url
                 .map_err(support::Error::widen)?;
             let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
-            #(#required_headers)*
-            #(#optional_headers)*
+            #(#headers)*
             #cookie_init
-            #(#required_cookies)*
-            #(#optional_cookies)*
+            #(#cookies)*
             #cookie_attach
             #body_send
             #attach_auth
@@ -301,10 +244,7 @@ fn operation_arg_normalizations(
     names: &Names,
 ) -> Vec<TokenStream> {
     let bindings = operation_bindings(operation, names);
-    let params_ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let params_ident = params_struct_ident(operation, names);
     let mut statements = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
         if takes_into_string(api, param.ty) {
@@ -334,10 +274,7 @@ pub(super) fn operation_args(
     names: &Names,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let bindings = operation_bindings(operation, names);
-    let params_ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let params_ident = params_struct_ident(operation, names);
     let mut args = Vec::new();
     let mut forwards = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
@@ -414,55 +351,4 @@ pub(super) fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStrea
             })
         })
         .collect()
-}
-
-/// The local and argument identifiers `name` allocated for one operation method's body.
-fn operation_bindings<'a>(operation: &Operation, names: &'a Names) -> &'a OperationBindings {
-    names
-        .operation_bindings
-        .get(&operation.id)
-        .expect("operation bindings allocated")
-}
-
-/// The statement that runs `body` with `value` bound to an optional parameter's value, when the
-/// caller supplied the optional-parameters bundle and set `ident` in it.
-fn optional_param_guard(
-    bindings: &OperationBindings,
-    ident: &crate::name::Ident,
-    body: TokenStream,
-) -> TokenStream {
-    let params_binding = bindings
-        .params
-        .as_ref()
-        .expect("optional parameters argument allocated");
-    quote! {
-        if let Some(value) = #params_binding
-            .as_ref()
-            .and_then(|params| params.#ident.as_ref())
-        {
-            #body
-        }
-    }
-}
-
-/// The identifier `name` allocated for `param`: its method argument when it is required, its
-/// `…Params` field and setter when it is optional. Looked up rather than escaped here, so two
-/// parameters whose names escape alike still get distinct identifiers.
-///
-/// `param` must be borrowed from `operation.params`; the allocation is positional, and it is found
-/// by address so that two parameters sharing a wire name in different locations stay apart.
-pub(super) fn param_ident<'a>(
-    names: &'a Names,
-    operation: &Operation,
-    param: &crate::ir::Parameter,
-) -> &'a crate::name::Ident {
-    let index = operation
-        .params
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, param))
-        .expect("a parameter is borrowed from its own operation");
-    &names
-        .parameters
-        .get(&operation.id)
-        .expect("parameter names allocated")[index]
 }

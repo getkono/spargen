@@ -2,16 +2,15 @@
 //! and dispatch the response by status into the typed success value or the typed error.
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use crate::ir::{
     Api, ApiKeyLoc, ErrorShape, HttpScheme, MediaType, Operation, SecurityScheme, SuccessShape, Ty,
-    TypeKind,
 };
 use crate::name::{Names, OperationBindings};
 
-use super::responses::response_payload_ty_tokens;
-use super::ty::ty_tokens;
+use super::idents::{status_variant_ident, success_enum_ident};
+use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
 /// `security` alternative whose schemes are all registered, through `support::attach_auth`. Empty
@@ -87,45 +86,27 @@ pub(super) fn error_branch_tokens(
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
                 .map(|(status, _)| runtime_status_spec(status))
                 .collect::<Vec<_>>();
-            let classify = if is_bytes_ty(api, *body_ty) {
-                quote! {
-                    support::classify_error_bytes(
-                        &self.core,
-                        response,
-                        &[#(#documented),*],
-                    )
-                    .await
-                }
+            // The raw-bytes classifier builds the newtype through `From<Bytes>` and takes no type
+            // argument; every other codec's classifier decodes into the aliased `E`.
+            let classifier = if is_bytes_ty(api, *body_ty) {
+                quote! { classify_error_bytes }
             } else {
                 match operation.responses.single_error_media() {
-                    Some(MediaType::Xml) => quote! {
-                        support::classify_error_xml::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
-                    Some(MediaType::Text) => quote! {
-                        support::classify_error_text::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
+                    Some(MediaType::Xml) => quote! { classify_error_xml::<#error_ty> },
+                    Some(MediaType::Text) => quote! { classify_error_text::<#error_ty> },
                     // JSON. A streaming error media never reaches this arm: lowering rejects a
                     // bodied stream on the error side (`Responses::stream_outside_single_success`),
                     // since a stream cannot be classified as one whole body.
-                    _ => quote! {
-                        support::classify_error::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
+                    _ => quote! { classify_error::<#error_ty> },
                 }
+            };
+            let classify = quote! {
+                support::#classifier(
+                    &self.core,
+                    response,
+                    &[#(#documented),*],
+                )
+                .await
             };
             quote! {
                 Err(#classify)
@@ -335,7 +316,7 @@ fn variant_body_decode(
     body_ty: Ty,
     success_variant: Option<TokenStream>,
 ) -> TokenStream {
-    let ty = response_payload_ty_tokens(body_ty, names, true);
+    let ty = boxed_ty_tokens(body_ty, names, true);
     let media = response_media_for_spec(&operation.responses, spec);
     let bytes = if success_variant.is_some() {
         quote! { body }
@@ -380,43 +361,6 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
     }
 }
 
-/// The type name of an operation's multi-status success response enum, `{Method}Response` as
-/// [`Names::success_enums`] allocates it.
-pub(super) fn success_enum_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .success_enums
-        .get(&operation.id)
-        .expect("success enum name allocated for an enum-shaped success")
-}
-
-/// The type name of an operation's error type, `{Method}Error` or `{Method}OperationError` as
-/// [`Names::operation_errors`] allocates it.
-pub(super) fn error_type_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .operation_errors
-        .get(&operation.id)
-        .expect("error type name allocated")
-}
-
-/// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
-/// code, `Status2xx` for a range, and `Default` for [`StatusSpec::Default`](crate::ir::StatusSpec)
-/// — the label [`crate::name::status_label`] gives the same selector's header struct.
-/// Deterministic and, within one enum, unique by construction (each selector appears once).
-/// Routed through the `name` escaper for validity.
-pub(super) fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
-    let raw = crate::name::status_label(spec);
-    format_ident!(
-        "{}",
-        crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
-    )
-}
-
 /// The runtime `support::StatusSpec` tokens for a documented status selector. `default` maps to
 /// `Any`: it is classified last, so it matches exactly the statuses no other entry claimed.
 fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
@@ -434,17 +378,6 @@ fn response_media_for_spec(
     spec: crate::ir::StatusSpec,
 ) -> Option<MediaType> {
     responses.get(spec).and_then(|response| response.media)
-}
-
-/// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
-/// only the definition's kind, which is sound because `LowerCtx::lower_response` (in
-/// `oas31/lower/response.rs`) refuses a nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>`
-/// body reaches these decode sites.
-pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
-    matches!(
-        api.types.get(ty.id).map(|definition| &definition.kind),
-        Some(TypeKind::Bytes)
-    )
 }
 
 #[cfg(test)]

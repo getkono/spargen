@@ -7,9 +7,9 @@ use quote::quote;
 use crate::ir::{Api, ErrorShape, Operation, SuccessShape, Ty};
 use crate::name::Names;
 
-use super::dispatch::{error_type_ident, is_bytes_ty, status_variant_ident, success_enum_ident};
 use super::docs::doc_tokens;
-use super::ty::ty_tokens;
+use super::idents::{error_type_ident, status_variant_ident, success_enum_ident};
+use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// Emit one typed header struct per documented status that declares response headers.
 ///
@@ -28,12 +28,16 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
         }
         let ident = names
             .response_header_structs
-            .get(&(operation.id.clone(), label.clone()))?;
-        let fields = response.headers.iter().map(|header| {
-            let field = names
+            .get(&(operation.id.clone(), label.clone()))
+            .expect("response header struct allocated");
+        let field_ident = |header: &crate::ir::ResponseHeader| {
+            names
                 .response_header_fields
                 .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                .expect("response header field allocated");
+                .expect("response header field allocated")
+        };
+        let fields = response.headers.iter().map(|header| {
+            let field = field_ident(header);
             // Header structs live beside `Client`, not inside `types`, so the type path must be
             // qualified — a header whose schema lowered to a named type would not resolve here.
             let ty = ty_tokens(header.ty, names, true);
@@ -48,10 +52,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
             quote! { #docs #deprecated pub #field: #ty }
         });
         let reads = response.headers.iter().map(|header| {
-            let field = names
-                .response_header_fields
-                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                .expect("response header field allocated");
+            let field = field_ident(header);
             let name = header.name.clone();
             let shape = match header.shape {
                 crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
@@ -131,7 +132,7 @@ fn response_variant_def(spec: crate::ir::StatusSpec, ty: Option<Ty>, names: &Nam
     let variant_ident = status_variant_ident(spec);
     match ty {
         Some(ty) => {
-            let ty = response_payload_ty_tokens(ty, names, true);
+            let ty = boxed_ty_tokens(ty, names, true);
             quote! { #variant_ident(#ty), }
         }
         None => quote! { #variant_ident, },
@@ -385,12 +386,6 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
             pub type #error_ident = std::convert::Infallible;
         },
     }
-}
-
-/// Multi-status response payloads are uniformly indirect for the same bounded-enum-size reason as
-/// schema unions. Single-body response aliases remain allocation-free.
-pub(super) fn response_payload_ty_tokens(ty: Ty, names: &Names, qualified: bool) -> TokenStream {
-    ty_tokens(Ty { boxed: true, ..ty }, names, qualified)
 }
 
 #[cfg(test)]

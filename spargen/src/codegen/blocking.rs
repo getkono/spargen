@@ -7,7 +7,14 @@ use crate::ir::{Api, Operation};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
+use super::idents::operation_method_ident;
 use super::operation::{operation_args, operation_return_ty, param_default_docs_tokens};
+
+/// The `cfg` every blocking item is emitted under, the facade here and the embedded
+/// `BlockingRuntime` beside it: the consumer crate's `blocking` feature, on a non-`wasm32` target.
+pub(super) fn blocking_cfg() -> TokenStream {
+    quote! { #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))] }
+}
 
 /// Emit the `BlockingClient`: a synchronous facade that owns the async `Client` plus a
 /// current-thread tokio runtime and drives each async operation to completion with `block_on`. It
@@ -31,6 +38,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
         Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";
+    let cfg = blocking_cfg();
     quote! {
         // In module/include!/macro output, `feature = "blocking"` resolves against the consumer
         // crate. Keep the cfgs inside an ungated lexical lint scope so crates that do not declare
@@ -41,7 +49,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 
             // `Debug` only: the owned current-thread `tokio::runtime::Runtime` is not `Clone`,
             // and cloning a blocking client would have to mean sharing or duplicating a reactor.
-            #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+            #cfg
             #[doc = #doc]
             #[derive(Debug)]
             #[allow(dead_code)]
@@ -50,7 +58,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
                 runtime: support::BlockingRuntime,
             }
 
-            #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+            #cfg
             #[forbid(unsafe_code)]
             #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
             impl BlockingClient {
@@ -125,10 +133,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 /// the async method to completion on the owned runtime. Same docs, deprecation, argument list, and
 /// return types as the async method (all built from the shared signature helpers).
 fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
+    let method_ident = operation_method_ident(operation, names);
     let docs = doc_tokens(&operation.docs);
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });

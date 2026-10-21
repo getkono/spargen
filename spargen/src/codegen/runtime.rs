@@ -4,6 +4,8 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
+use super::blocking::blocking_cfg;
+
 /// Emit the private `support` module, one submodule per freestanding runtime source: each file's
 /// text up to its `#[cfg(test)]` module, with `crate::` rewritten to `super::`, re-parsed as
 /// tokens. The module carries an outer `#[forbid(unsafe_code)]` (an inner `#![…]` would break
@@ -62,12 +64,13 @@ pub(super) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // `blocking` feature wired to an optional, non-wasm tokio dependency — which is what
     // `spargen deps` prints, commented out, and what the audit then requires.
     let blocking_inner = embed(&crate::support::blocking_runtime_file());
+    let blocking_cfg = blocking_cfg();
     let blocking_module = quote! {
-        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+        #blocking_cfg
         #blocking_inner
     };
     let blocking_reexport = quote! {
-        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+        #blocking_cfg
         pub use blocking::BlockingRuntime;
     };
     quote! {

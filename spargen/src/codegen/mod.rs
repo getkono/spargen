@@ -11,7 +11,9 @@
 //! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
 //! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
-//! module and the root re-exports), and the shared [`docs`] and [`ty`] renderers.
+//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, and [`idents`] (the
+//! allocated-name lookups and status variant names the operation, blocking-client, parameter,
+//! response and dispatch emitters read).
 
 mod blocking;
 mod body;
@@ -19,6 +21,7 @@ mod client;
 mod dispatch;
 mod docs;
 mod format;
+mod idents;
 mod models;
 mod operation;
 mod params;
@@ -47,12 +50,18 @@ pub(crate) struct CodegenOptions {
     pub(crate) error_body_cap: usize,
 }
 
+/// The default cap on bytes of a response body retained on generated error variants, which
+/// [`crate::Spec`] starts from.
+pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
+
+/// The options a `Spec` with every knob at its default selects; only tests build them this way.
+#[cfg(test)]
 impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
             feature_uuid: true,
             feature_time: true,
-            error_body_cap: 64 * 1024,
+            error_body_cap: DEFAULT_ERROR_BODY_CAP,
         }
     }
 }

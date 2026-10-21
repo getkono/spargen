@@ -1,9 +1,10 @@
-//! The Rust type a lowered [`Ty`] or [`Prim`] names, and the `reqwest::Method` an operation sends.
+//! The Rust type a lowered [`Ty`] or [`Prim`] names, whether a body takes the raw byte codec, and
+//! the `reqwest::Method` an operation sends.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{Prim, Ty};
+use crate::ir::{Api, Prim, Ty, TypeKind};
 use crate::name::Names;
 
 use super::CodegenOptions;
@@ -24,6 +25,26 @@ pub(super) fn ty_tokens(ty: Ty, names: &Names, qualified: bool) -> TokenStream {
         tokens = quote! { Option<#tokens> };
     }
     tokens
+}
+
+/// [`ty_tokens`] with the payload always boxed: the type a union variant or a multi-status
+/// response variant carries. Those payloads are uniformly indirect so an API's largest object
+/// variant cannot inflate every value of the enum (or trip strict `large_enum_variant` linting);
+/// single-body response aliases stay allocation-free. Recursive boxing is a boolean
+/// representation flag, so setting it again never produces `Box<Box<T>>`.
+pub(super) fn boxed_ty_tokens(ty: Ty, names: &Names, qualified: bool) -> TokenStream {
+    ty_tokens(Ty { boxed: true, ..ty }, names, qualified)
+}
+
+/// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
+/// only the definition's kind, which is sound because `LowerCtx::lower_response` (in
+/// `oas31/lower/response.rs`) refuses a nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>`
+/// body reaches these decode sites.
+pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
+    matches!(
+        api.types.get(ty.id).map(|definition| &definition.kind),
+        Some(TypeKind::Bytes)
+    )
 }
 
 /// The Rust type of a primitive, under the `uuid` and `time` mappings `options` selects.

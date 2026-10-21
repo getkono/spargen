@@ -194,21 +194,31 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         }
         let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
 
+        // Every variable has a builder field; only one that declares an `enum` has a typed enum,
+        // so that lookup is the variable's shape rather than an allocation to expect.
+        let field_ident = |name: &String| {
+            names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated")
+        };
+        let enum_ident = |name: &String| names.server_variable_enums.get(&(index, name.clone()));
+        let variant_ident = |name: &String, value: &String| {
+            names
+                .server_variable_variants
+                .get(&(index, name.clone(), value.clone()))
+                .expect("server variable variant allocated")
+        };
+
         let variable_enums = server.variables.iter().filter_map(|(name, variable)| {
-            let enum_ident = names.server_variable_enums.get(&(index, name.clone()))?;
+            let enum_ident = enum_ident(name)?;
             let variants = variable.enum_values.iter().map(|value| {
-                let variant = names
-                    .server_variable_variants
-                    .get(&(index, name.clone(), value.clone()))
-                    .expect("server variable variant allocated");
+                let variant = variant_ident(name, value);
                 let default = (value == &variable.default).then(|| quote! { #[default] });
                 quote! { #default #variant }
             });
             let arms = variable.enum_values.iter().map(|value| {
-                let variant = names
-                    .server_variable_variants
-                    .get(&(index, name.clone(), value.clone()))
-                    .expect("server variable variant allocated");
+                let variant = variant_ident(name, value);
                 quote! { Self::#variant => #value }
             });
             let doc = format!("Permitted values of the `{name}` server variable.");
@@ -231,11 +241,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let fields = server.variables.keys().map(|name| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            let field = field_ident(name);
+            match enum_ident(name) {
                 Some(enum_ident) => {
                     quote! { #field: #enum_ident }
                 }
@@ -244,11 +251,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let defaults = server.variables.iter().map(|(name, variable)| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            let field = field_ident(name);
+            match enum_ident(name) {
                 // The `#[default]` variant is the declared default, so `Default` is exact.
                 Some(enum_ident) => {
                     quote! { #field: <#enum_ident as Default>::default() }
@@ -261,16 +265,13 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let setters = server.variables.iter().map(|(name, variable)| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
+            let field = field_ident(name);
             let mut doc = format!("Set the `{name}` server variable.");
             if let Some(description) = &variable.description {
                 doc.push(' ');
                 doc.push_str(description);
             }
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            match enum_ident(name) {
                 Some(enum_ident) => {
                     quote! {
                         #[doc = #doc]
@@ -304,11 +305,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                 _ => quote! { url.push_str(#text); },
             },
             crate::ir::UrlSegment::Variable(name) => {
-                let field = names
-                    .server_variable_fields
-                    .get(&(index, name.clone()))
-                    .expect("server variable field allocated");
-                match names.server_variable_enums.get(&(index, name.clone())) {
+                let field = field_ident(name);
+                match enum_ident(name) {
                     Some(_) => quote! { url.push_str(self.#field.as_str()); },
                     None => quote! { url.push_str(&self.#field); },
                 }
@@ -319,11 +317,10 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         // would produce: an enum variable pins its default with `#[default]`, and a server with no
         // variables has nothing to default. A free-form variable carries a spec-declared string,
         // which the derive would replace with `""`.
-        let derivable_default = server.variables.iter().all(|(name, _)| {
-            names
-                .server_variable_enums
-                .contains_key(&(index, name.clone()))
-        });
+        let derivable_default = server
+            .variables
+            .keys()
+            .all(|name| enum_ident(name).is_some());
         let (derive_default, default_impl) = if derivable_default {
             (quote! { , Default }, quote! {})
         } else {
