@@ -44,8 +44,9 @@ fn e022_duplicate_object_key_is_rejected() {
     // A mapping that declares the same key twice used to be silently collapsed (JSON: last-wins;
     // YAML: `YamlLoader` errored) — now it is uniformly rejected with a stable code and a precise
     // span at the second (duplicate) occurrence, so a duplicated `type`/`properties` name cannot
-    // silently reach lowering.
-    let spec = r##"
+    // silently reach lowering. Both parsers report it at the duplicate key itself (#533), through
+    // `check` and `generate` alike, so the location oracle finds nothing to report.
+    let yaml = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths: {}
@@ -55,21 +56,38 @@ components:
       type: object
       type: string
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::DuplicateObjectKey), "{report:#?}");
-    // The diagnostic points at the duplicate `type` on line 9, not line 1.
-    let dup = report
-        .diagnostics()
-        .iter()
-        .find(|d| d.code == Code::DuplicateObjectKey)
-        .expect("duplicate-key diagnostic");
-    assert_eq!(dup.span.expect("span").start.line, 9, "{dup:#?}");
-
-    // check/generate parity: parsing runs before lowering, so `check` rejects identically.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::DuplicateObjectKey), "{checked:#?}");
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}, "components": {"schemas": {"Foo": {"type": "object", "type": "string"}}}}"#;
+    // The parser is chosen by extension, and the shared helpers write `openapi.yaml`, so the JSON
+    // document is written as `openapi.json` here to reach the JSON parser. The duplicate `type`
+    // sits on line 9 of the YAML document and on the JSON document's only line, not on line 1 of
+    // a whole-file span.
+    for (name, spec, line) in [("openapi.yaml", yaml, 9), ("openapi.json", json, 1)] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join(name), spec).unwrap();
+        let generated = run_generate(&build(dir.join(name), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join(name)));
+        for report in [checked, generated] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            let duplicate = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::DuplicateObjectKey)
+                .expect("duplicate-key diagnostic");
+            assert_eq!(
+                duplicate.pointer.as_str(),
+                "/components/schemas/Foo/type",
+                "{duplicate:#?}"
+            );
+            assert_eq!(
+                duplicate.span.expect("span").start.line,
+                line,
+                "{duplicate:#?}"
+            );
+            let violations = oracles::location_violations(report.diagnostics(), spec.as_bytes());
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
 }
 
 /// A document whose one schema's `maximum` is the YAML scalar `value`, on line 8.
