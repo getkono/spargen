@@ -257,6 +257,43 @@ paths:
 }
 
 #[test]
+fn a_urn_style_security_requirement_key_gets_todays_diagnostic() {
+    // The loader and lowering disagree on whether a key containing `:` is a URI reference: the
+    // loader does not fetch a `urn:`-style key, while lowering tries to resolve it. This pins the
+    // diagnostic that disagreement produces today, so a change to either `:` rule shows up here.
+    let report = generate(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+security:
+  - "urn:example:bearer": []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let summary: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .map(|d| (d.code, d.pointer.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        [(Code::UnknownSecurityScheme, "/paths/~1x/get")],
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics()[0]
+            .message
+            .contains("`urn:example:bearer`"),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn security_scheme_documentation_reaches_credential_registration() {
     // The support matrix promises `bearerFormat`, flows, `openIdConnectUrl` and deprecation become
     // rustdoc on credential registration. `SecuritySchemeObject` used to carry four fields and none
