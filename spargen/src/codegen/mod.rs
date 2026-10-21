@@ -49,12 +49,18 @@ pub(crate) struct CodegenOptions {
     pub(crate) error_body_cap: usize,
 }
 
+/// The default cap on bytes of a response body retained on generated error variants, which
+/// [`crate::Spec`] starts from.
+pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
+
+/// The options a `Spec` with every knob at its default selects; only tests build them this way.
+#[cfg(test)]
 impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
             feature_uuid: true,
             feature_time: true,
-            error_body_cap: 64 * 1024,
+            error_body_cap: DEFAULT_ERROR_BODY_CAP,
         }
     }
 }
