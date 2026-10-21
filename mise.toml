@@ -244,7 +244,9 @@ run = [
   "mkdir -p target/corpus-smoke",
   "cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1",
   "grep -q E001 target/corpus-smoke/github-30.json",
-  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json",
+  # `corpus/github-api-3-1/spargen.toml`, discovered beside the spec, raises the batch cap so the
+  # warning volume cannot hide a terminal diagnostic; the output is kept for inspection.
+  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json > target/corpus-smoke/github-31.json",
   "cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
   # `--batch-cap 100000` raises the cap as `corpus/github-api-3-1/spargen.toml` does for GitHub

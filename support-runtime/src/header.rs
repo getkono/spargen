@@ -14,6 +14,8 @@ use reqwest::header::HeaderMap;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::error::write_escaped;
+
 /// The wire shape a documented header value is parsed as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderShape {
@@ -74,14 +76,7 @@ impl fmt::Display for HeaderError {
                     formatter,
                     "response header `{name}` did not match its documented type: "
                 )?;
-                for c in message.chars() {
-                    if c.is_control() {
-                        write!(formatter, "{}", c.escape_debug())?;
-                    } else {
-                        write!(formatter, "{c}")?;
-                    }
-                }
-                Ok(())
+                write_escaped(formatter, message)
             }
         }
     }
