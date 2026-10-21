@@ -945,8 +945,8 @@ fn lower_bundle(
 }
 
 /// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// the internal preview. Returns the fully rendered module plan or `Err(())` with the layout error
-/// already pushed onto `diags`.
+/// the internal preview. Returns the fully rendered module plan or `Err(())` with the codegen or
+/// layout error already pushed onto `diags` as `E011`, so nothing is written or cached.
 fn build_emit_plan(
     spec: &Spec,
     api: &ir::Api,
@@ -961,7 +961,8 @@ fn build_emit_plan(
             feature_time: spec.time,
             error_body_cap: spec.error_body_cap,
         },
-    );
+    )
+    .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;
 
     let emit_options = emit::EmitOptions {
         spec: emit::SpecMeta {
