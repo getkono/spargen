@@ -761,7 +761,7 @@ fn an_sse_line_without_a_colon_is_a_field_with_an_empty_value() {
 
 /// JSON text sequences: bytes before the first record separator are discarded, a buffer with
 /// no separator is held until EOF and dropped there, and an empty record frames nothing and is
-/// consumed so the next call reaches the record after it.
+/// consumed so the same call reaches the record after it.
 #[test]
 fn json_sequence_discards_junk_and_skips_empty_records() {
     let mut buf = b"junk\x1e1\n".to_vec();
@@ -790,20 +790,18 @@ fn json_sequence_discards_junk_and_skips_empty_records() {
     );
     assert_eq!(buf, b"\x1e{\"a\":");
 
-    let mut buf = b"\x1e \n\x1e2\n".to_vec();
-    assert_eq!(
-        next_frame(&mut buf, Framing::JsonSequence, true),
-        FramePoll::NeedMore
-    );
-    assert_eq!(buf, b"\x1e2\n");
-    assert_eq!(
-        next_frame(&mut buf, Framing::JsonSequence, true),
-        FramePoll::Item {
-            payload: b"2".to_vec(),
-            metadata: SseMetadata::default(),
-        }
-    );
-    assert!(buf.is_empty());
+    // An empty record is consumed and the same call frames the record behind it, before EOF too.
+    for at_eof in [false, true] {
+        let mut buf = b"\x1e \n\x1e2\n\x1e".to_vec();
+        assert_eq!(
+            next_frame(&mut buf, Framing::JsonSequence, at_eof),
+            FramePoll::Item {
+                payload: b"2".to_vec(),
+                metadata: SseMetadata::default(),
+            }
+        );
+        assert_eq!(buf, b"\x1e");
+    }
 }
 
 /// A stream whose `ClientCore` bounds an unterminated item at `max_stream_frame` bytes and
@@ -848,6 +846,11 @@ fn an_unterminated_item_past_max_stream_frame_is_a_decode_error_that_ends_the_st
             Framing::SseJsonData,
             "data: {\"a\":1}\n\ndata: {\"b\":\"0123\"}",
             &b"data"[..],
+        ),
+        (
+            Framing::JsonSequence,
+            "\x1e\n\x1e{\"a\":1}\n\x1e{\"b\":\"0123456789\"}",
+            &b"\x1e{\"b"[..],
         ),
     ] {
         let policy = Arc::new(ImmediateReconnect {
@@ -903,6 +906,27 @@ fn an_unterminated_item_at_max_stream_frame_is_still_framed() {
         poll_ready(stream.next()).unwrap().unwrap(),
         serde_json::json!({"b": "01234567"})
     );
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// Empty JSON text sequence records do not hold back the complete records behind them: every
+/// record in a chunk is framed before what is left is measured against `max_stream_frame`, so a
+/// valid sequence whose items each fit is yielded whole even though the chunk exceeds the bound.
+#[test]
+fn json_sequence_records_behind_an_empty_record_are_framed_under_max_stream_frame() {
+    let policy = Arc::new(ImmediateReconnect::default());
+    let mut stream = bounded_stream(
+        "\x1e\n\x1e{\"a\":1}\n\x1e{\"a\":2}\n\x1e{\"a\":3}\n\x1e",
+        Framing::JsonSequence,
+        16,
+        policy.clone(),
+    );
+    for a in 1..=3 {
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({ "a": a })
+        );
+    }
     assert!(poll_ready(stream.next()).is_none());
 }
 

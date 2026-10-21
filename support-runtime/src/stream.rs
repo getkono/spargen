@@ -504,40 +504,42 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
 /// separator (or EOF). Newlines are record terminators/formatting and are trimmed around the JSON
 /// text, while embedded newlines remain valid JSON whitespace.
 fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
-    let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
-        if at_eof {
-            buffer.clear();
+    loop {
+        let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
+            if at_eof {
+                buffer.clear();
+            }
+            return FramePoll::NeedMore;
+        };
+        if first > 0 {
+            buffer.drain(..first);
         }
-        return FramePoll::NeedMore;
-    };
-    if first > 0 {
-        buffer.drain(..first);
-    }
-    let end = buffer[1..]
-        .iter()
-        .position(|byte| *byte == 0x1e)
-        .map(|index| index + 1);
-    let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
-        return FramePoll::NeedMore;
-    };
-    let mut payload = buffer[1..end].to_vec();
-    while payload.last().is_some_and(u8::is_ascii_whitespace) {
-        payload.pop();
-    }
-    let start = payload
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(payload.len());
-    payload.drain(..start);
-    if end == buffer.len() {
-        buffer.clear();
-    } else {
-        buffer.drain(..end);
-    }
-    if payload.is_empty() {
-        FramePoll::NeedMore
-    } else {
-        frame_item(payload)
+        let end = buffer[1..]
+            .iter()
+            .position(|byte| *byte == 0x1e)
+            .map(|index| index + 1);
+        let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
+            return FramePoll::NeedMore;
+        };
+        let mut payload = buffer[1..end].to_vec();
+        while payload.last().is_some_and(u8::is_ascii_whitespace) {
+            payload.pop();
+        }
+        let start = payload
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(payload.len());
+        payload.drain(..start);
+        if end == buffer.len() {
+            buffer.clear();
+        } else {
+            buffer.drain(..end);
+        }
+        // An empty record frames nothing; keep going so every complete record behind it is
+        // framed before the caller reads more bytes or measures what is left.
+        if !payload.is_empty() {
+            return frame_item(payload);
+        }
     }
 }
 
