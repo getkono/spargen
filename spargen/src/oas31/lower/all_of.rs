@@ -404,6 +404,73 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         (result, held.unwrap_or_default())
     }
 
+    /// Run `lower` with the union at `union` lowered as an input to an `allOf`'s scalar meet
+    /// ([`Self::scalar_meet_union`]): its indistinguishable branches stay apart until the meet
+    /// has made them what they are, and [`Self::collapse_met_one_ofs`] merges what it leaves
+    /// sharing one generated type (#678). Merged first, a branch the other members exclude was
+    /// folded into one they keep, so it was neither reported (`W011`) nor told apart from it,
+    /// where the sibling spelling of the same constraints reports it. The enclosing hold, if
+    /// any, is restored.
+    pub(super) fn lower_scalar_meet_union<T>(
+        &mut self,
+        union: &Provenance,
+        lower: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let enclosing = self.scalar_meet_union.replace(union.clone());
+        let lowered = lower(self);
+        self.scalar_meet_union = enclosing;
+        lowered
+    }
+
+    /// The `oneOf` target of `member`, a bare `$ref` to a root component that `contribution`
+    /// gathered as the one scalar it lowered to, lowered again under `hint` as an input to the
+    /// scalar meet ([`Self::lower_scalar_meet_union`]), where the component's own lowering merged
+    /// two or more of its branches into one variant: met as that merged type, the branches the
+    /// other members exclude were not told apart from the ones they keep, as they are in the
+    /// inline spelling (#678). The component keeps its own merged type, and its own `W001`s,
+    /// so the second lowering's are not raised again. `None` where nothing was merged, so the
+    /// component's type is met as it always was.
+    fn relower_merged_ref_union(
+        &mut self,
+        member: &Schema,
+        contribution: &Contribution,
+        hint: &str,
+    ) -> Option<Ty> {
+        let Contribution::Scalar(ty) = contribution else {
+            return None;
+        };
+        let reference = member.reference.as_deref()?;
+        reference.strip_prefix("#/components/schemas/")?;
+        let target = self
+            .ref_target_body(reference, &member.provenance)?
+            .into_owned();
+        let real_branches = target
+            .one_of
+            .iter()
+            .filter(|branch| !member_is_null_only(branch))
+            .count();
+        if real_branches < 2 || target.discriminator.is_some() {
+            return None;
+        }
+        let merged = match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Union(_)) => self
+                .union_variant_members
+                .get(&ty.id)
+                .is_some_and(|members| members.iter().any(|merged| merged.len() > 1)),
+            Some(TypeKind::Reserved) | None => false,
+            Some(_) => true,
+        };
+        if !merged {
+            return None;
+        }
+        let (relowered, _) = self.holding_untyped_warnings(|ctx| {
+            ctx.lower_scalar_meet_union(&target.provenance, |ctx| {
+                ctx.closed_narrowing(|ctx| ctx.lower_schema(&target, hint))
+            })
+        });
+        relowered
+    }
+
     /// Report, as raised, the `W001`s `held` back while an `allOf` gathered its members.
     fn report_held_untyped_warnings(&mut self, held: Vec<HeldUntypedWarning>) {
         for warning in held {
@@ -540,8 +607,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let slot = out.len();
         let from = self.graph_mark();
-        self.gather_member(member, hint, out)?;
+        match member {
+            // An inline union member is met with the other members before its indistinguishable
+            // branches merge, so the meet still tells apart a branch it excludes (#678).
+            SchemaOr::Schema(union) if union.reference.is_none() && schema_has_union(union) => {
+                self.lower_scalar_meet_union(&union.provenance, |ctx| {
+                    ctx.gather_member(member, hint, out)
+                })?;
+            }
+            _ => self.gather_member(member, hint, out)?,
+        }
         if let SchemaOr::Schema(member) = member {
+            if out.len() == slot + 1 {
+                let relowered_from = self.graph_mark();
+                if let Some(relowered) = self.relower_merged_ref_union(member, &out[slot], hint) {
+                    out[slot] = Contribution::Scalar(relowered);
+                    lowerings.push((member.provenance.clone(), relowered_from..self.graph_mark()));
+                }
+            }
             if (member.reference.is_some() || schema_has_union(member))
                 && out.len() == slot + 1
                 && matches!(out[slot], Contribution::Scalar(_))
@@ -745,10 +828,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .any(|contribution| matches!(contribution, Contribution::Refiner { .. }));
         if !has_object && !has_refiner && scoped.is_empty() {
-            // Its `W001` is held with the members', for the meet to settle (#660).
+            // Its `W001` is held with the members', for the meet to settle (#660), and so is the
+            // merge of its indistinguishable branches, for the meet to collapse (#678).
             let from = self.graph_mark();
-            let (lowered, union_held) =
-                self.holding_untyped_warnings(|ctx| ctx.lower_schema(union, &union_hint));
+            let (lowered, union_held) = self.holding_untyped_warnings(|ctx| {
+                ctx.lower_scalar_meet_union(&union.provenance, |ctx| {
+                    ctx.lower_schema(union, &union_hint)
+                })
+            });
             lowerings.push((union.provenance.clone(), from..self.graph_mark()));
             let mut held = held;
             held.extend(union_held);

@@ -250,6 +250,8 @@ fn lower_pass(
         stated_nothing_took_null: None,
         held_untyped_warnings: None,
         scalar_meet_value_variants: HashSet::new(),
+        scalar_meet_union: None,
+        scalar_meet_unmerged: HashSet::new(),
         union_variant_members: HashMap::new(),
         variant_meets: Vec::new(),
     };
@@ -948,6 +950,19 @@ struct LowerCtx<'a, 'doc> {
     /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
     /// is counted once (#660).
     scalar_meet_value_variants: HashSet<String>,
+    /// The union member of an `allOf` being lowered as an input to the `allOf`'s scalar meet
+    /// ([`LowerCtx::lower_scalar_meet_union`]). [`Self::lower_union_closed`] leaves its
+    /// indistinguishable variants unmerged, as it leaves [`Self::unmerged_union`]'s, so the meet
+    /// still tells apart the branches it excludes (`W011`), and records the union in
+    /// [`Self::scalar_meet_unmerged`] for [`Self::collapse_met_one_ofs`] to merge after the meet
+    /// (#678). Unlike [`Self::unmerged_union`] it changes nothing else about the union's lowering:
+    /// its `null` and its `W001` for `serde_json::Value` variants are the scalar meet's to settle,
+    /// as they are for a union lowered there on its own.
+    scalar_meet_union: Option<Provenance>,
+    /// The unions lowered as [`Self::scalar_meet_union`], whose indistinguishable variants
+    /// [`Self::collapse_met_one_ofs`] merges, with `W001`, wherever a scalar meet reaches them,
+    /// though the meet's own inserts begin after them.
+    scalar_meet_unmerged: HashSet<TypeId>,
     /// For each union [`Self::lower_union_closed`] lowered to an enum of two or more variants, the
     /// members each variant came from (more than one where indistinguishable branches merged), by
     /// their positions among the union's real members (the positions a `W011` names). Kept aligned
