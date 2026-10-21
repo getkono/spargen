@@ -149,7 +149,7 @@ fn e011_a_non_finite_yaml_float_is_rejected_as_the_json_parser_rejects_it() {
 /// point), generates cleanly under `spec.txt`.
 #[test]
 fn e011_an_extensionless_json_document_yaml_refuses_falls_back_to_json() {
-    let json = r#"{"openapi": "3.1.0", "info": {"title": "T😀", "version": "1.0.0"}, "paths": {}}"#;
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T\ud83d\ude00", "version": "1.0.0"}, "paths": {}}"#;
     // The premise: the same text under a YAML name is refused, so the fallback is what accepts it.
     let (yaml_named, _, _) = generate_and_check_files(&[("openapi.yaml", json)]);
     assert_eq!(yaml_named.outcome(), Outcome::Rejected, "{yaml_named:#?}");
