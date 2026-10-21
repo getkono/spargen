@@ -3215,6 +3215,64 @@ mod remote {
         }
     }
 
+    /// A `$ref` is an absolute URI exactly when it opens with an RFC 3986 scheme
+    /// (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` then `:`), so a non-`http(s)` one is `E003`
+    /// at its `$ref`, through `check` and `generate` alike, never a file read that fails as `E011`
+    /// (#720). A scheme with a digit, `+`, `-` or `.` counts, and so does a one-letter one: a
+    /// Windows drive-letter path such as `C:/specs/x.yaml` is the URI with scheme `c`, which the
+    /// `E003` explain text states.
+    #[test]
+    fn a_ref_with_any_rfc_3986_scheme_is_e003_and_a_drive_letter_is_one() {
+        for (reference, uri) in [
+            (
+                "git+https://example.com/s.yaml#/X",
+                "git+https://example.com/s.yaml",
+            ),
+            ("coap+tcp://h/s.yaml", "coap+tcp://h/s.yaml"),
+            ("x-1.a://h/s.yaml", "x-1.a://h/s.yaml"),
+            ("urn:foo:bar", "urn:foo:bar"),
+            ("C:/specs/x.yaml#/X", "C:/specs/x.yaml"),
+            ("c:specs/x.yaml", "c:specs/x.yaml"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+            let root = spec().replace(GIZMO_URL, reference);
+            std::fs::write(dir.join("openapi.yaml"), &root).unwrap();
+            let spec = Spec::new(dir.join("openapi.yaml"));
+            for check_only in [true, false] {
+                let report = if check_only {
+                    run_check(&spec)
+                } else {
+                    run_generate(
+                        &spec
+                            .clone()
+                            .build(dir.join("client.rs"))
+                            .cargo(CargoIntegration::Off),
+                    )
+                };
+                assert_eq!(
+                    located_at(&report, root.as_bytes(), Code::AbsoluteRefUnsupported),
+                    (
+                        "/paths/~1gizmo/get/responses/200/content/application~1json/schema/$ref"
+                            .to_owned(),
+                        13
+                    ),
+                    "{reference}, check only: {check_only}"
+                );
+                let message = &report.diagnostics()[0].message;
+                assert!(
+                    message.contains(&format!("`{uri}`")),
+                    "{reference}: {message}"
+                );
+            }
+        }
+        let explain = Code::AbsoluteRefUnsupported.explain();
+        assert!(
+            explain.contains("a Windows drive-letter path such as `C:/specs/x.yaml` is a URI"),
+            "{explain}"
+        );
+    }
+
     /// A URL cited from several sites is reported once per site, each at its own `$ref` (#534):
     /// the sites' locations differ, so `Diagnostics::emit` no longer merges them into one report
     /// per referring file, as it did while every report sat at the root. Unpinned (`E003`) and
