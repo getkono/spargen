@@ -306,14 +306,24 @@ const FOREIGN_OMIT_KEYS: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
-fn an_omit_entry_with_a_key_its_kind_does_not_use_is_accepted_today() {
+fn an_omit_entry_with_a_key_its_kind_does_not_use_is_rejected() {
+    // Presence dispatch once dropped these keys silently, so `file` beside `path` omitted the
+    // root document's path rather than failing (#730).
     let temp = tempfile::tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     let config = root.join("spargen.toml");
     for (entry, key, kind) in FOREIGN_OMIT_KEYS {
         std::fs::write(&config, format!("[[omit]]\n{entry}")).unwrap();
-        let loaded = spargen::Spec::new(root.join("openapi.yaml")).config_file(&config);
-        assert!(loaded.is_ok(), "`{key}` beside a {kind} rule: {loaded:?}");
+        let error = spargen::Spec::new(root.join("openapi.yaml"))
+            .config_file(&config)
+            .expect_err(&format!("`{key}` beside a {kind} rule must not load"))
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "omit rule #1: `{key}` does not apply to a {kind} rule"
+            )),
+            "{entry}: {error}"
+        );
     }
 }
 
