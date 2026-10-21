@@ -621,6 +621,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let member_hint = format!("{hint}Member{index}");
             self.gather_member_recording_unions(
                 member,
+                (&schema.provenance, index),
                 &member_hint,
                 out,
                 union_members,
@@ -639,6 +640,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn gather_member_recording_unions<'s>(
         &mut self,
         member: &'s SchemaOr,
+        entry: (&Provenance, usize),
         hint: &str,
         out: &mut Vec<Contribution>,
         union_members: &mut Vec<(usize, &'s Schema)>,
@@ -665,10 +667,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // branches merge, so the meet still tells apart a branch it excludes (#678).
             SchemaOr::Schema(union) if union.reference.is_none() && schema_has_union(union) => {
                 self.lower_scalar_meet_union(&union.provenance, |ctx| {
-                    ctx.gather_member(member, hint, out)
+                    ctx.gather_member(member, entry, hint, out)
                 })?;
             }
-            _ => self.gather_member(member, hint, out)?,
+            _ => self.gather_member(member, entry, hint, out)?,
         }
         if let SchemaOr::Schema(member) = member {
             if out.len() == slot + 1 {
@@ -863,6 +865,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     ctx.gather_member_recording_unions(
                         member,
+                        (&schema.provenance, index),
                         &format!("{hint}Member{index}"),
                         &mut contributions,
                         &mut union_members,

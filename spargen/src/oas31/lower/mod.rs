@@ -1000,11 +1000,17 @@ fn append_doc_note(docs: &mut Docs, note: String) {
     append_text(&mut docs.description, note);
 }
 
-/// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
-/// document root for a bare boolean member that carries none.
-fn member_provenance(member: &SchemaOr) -> crate::diag::Provenance {
-    match member {
-        SchemaOr::Schema(schema) => schema.provenance.clone(),
-        SchemaOr::Bool(_) => crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
-    }
+/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
+/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
+/// is written in, with the span of the node written there when the file holds one.
+fn all_of_entry_provenance(
+    resolver: &Resolver<'_>,
+    holder: &Provenance,
+    index: usize,
+) -> Provenance {
+    let pointer = holder.pointer.push("allOf").index(index);
+    let span = resolver
+        .node_at(resolver.written_in(holder), &pointer)
+        .map(|node| node.span);
+    Provenance::new(pointer, span)
 }
