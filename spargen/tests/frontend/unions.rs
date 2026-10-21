@@ -2480,37 +2480,6 @@ components:
     );
 }
 
-/// A union whose only non-null member has no typed intersection with the enclosing schema's own
-/// sibling constraints has no representable variant left. The multi-variant path already rejects
-/// that with `E007` once every variant is excluded, so the one-member collapse reports the same
-/// terminal code — otherwise the code would depend on how many variants the author happened to
-/// write. It used to be dropped silently.
-#[test]
-fn e007_fires_when_a_single_real_member_union_contradicts_its_sibling() {
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
-paths: {}
-components:
-  schemas:
-    Collapsed:
-      type: integer
-      oneOf:
-        - { type: string }
-        - { type: 'null' }
-"##;
-    let generated = generate(spec);
-    assert_eq!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
-    assert!(
-        has_code(&generated, Code::NonDisjointUnion),
-        "{generated:#?}"
-    );
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
-}
-
 /// An untyped object or array applicator beside `oneOf`/`anyOf` lowered to `TypeKind::Any`, which
 /// intersects as identity, so `required`, `additionalProperties`, `items` and `prefixItems` alone
 /// vanished from every branch with no diagnostic (#282). In JSON Schema 2020-12 such a keyword is
@@ -2914,6 +2883,12 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
     );
 }
 
+/// A union whose only non-null member has no typed intersection with the enclosing schema's own
+/// sibling constraints has no representable variant left. The multi-variant path already rejects
+/// that with `E007` once every variant is excluded, so the one-member collapse reports the same
+/// terminal code — otherwise the code would depend on how many variants the author happened to
+/// write. It used to be dropped silently.
+///
 /// Site B widened `E007`'s emission set, so its message has to describe the construct that actually
 /// reached it. A right code under a wrong message is still a wrong diagnostic: reusing the
 /// multi-variant path's wording verbatim would say "every variant impossible" of a union with one
