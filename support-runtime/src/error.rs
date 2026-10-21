@@ -170,11 +170,9 @@ impl<E> Error<E> {
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
-            Error::Api(value) => {
-                value.status() == StatusCode::TOO_MANY_REQUESTS || value.status().is_server_error()
-            }
+            Error::Api(value) => is_transient_status(value.status()),
             Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                is_transient_status(*status)
             }
             Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
         }
@@ -197,6 +195,13 @@ impl<E> Error<E> {
             | Error::InterruptedBody(_) => None,
         }
     }
+}
+
+/// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
+/// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
+/// response.
+pub(crate) fn is_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 impl Error<std::convert::Infallible> {

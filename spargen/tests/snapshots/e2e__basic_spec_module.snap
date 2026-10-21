@@ -1154,15 +1154,9 @@ mod support {
                     Error::Transport(_)
                     | Error::Timeout(_)
                     | Error::InterruptedBody(_) => true,
-                    Error::Api(value) => {
-                        value.status() == StatusCode::TOO_MANY_REQUESTS
-                            || value.status().is_server_error()
-                    }
+                    Error::Api(value) => is_transient_status(value.status()),
                     Error::UnexpectedStatus { status, .. }
-                    | Error::Decode { status, .. } => {
-                        *status == StatusCode::TOO_MANY_REQUESTS
-                            || status.is_server_error()
-                    }
+                    | Error::Decode { status, .. } => is_transient_status(*status),
                     Error::RequestConstruction(_)
                     | Error::Protocol(_)
                     | Error::Redirect(_) => false,
@@ -1186,6 +1180,12 @@ mod support {
                     | Error::InterruptedBody(_) => None,
                 }
             }
+        }
+        /// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
+        /// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
+        /// response.
+        pub(crate) fn is_transient_status(status: StatusCode) -> bool {
+            status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
         }
         impl Error<std::convert::Infallible> {
             /// Widen a never-typed failure into any operation's error type. Dispatch routines that cannot
@@ -3015,6 +3015,7 @@ mod support {
         use std::sync::Arc;
         use std::time::Duration;
         use reqwest::{Request, Response, StatusCode};
+        use super::error::is_transient_status;
         use super::transport::{ExecuteFuture, HttpBackend};
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
@@ -3085,9 +3086,7 @@ mod support {
                 match self {
                     RetryOutcome::Transport(error) => error.is_transient(),
                     RetryOutcome::Response(response) => {
-                        let status = response.status();
-                        status == StatusCode::TOO_MANY_REQUESTS
-                            || status.is_server_error()
+                        is_transient_status(response.status())
                     }
                 }
             }
