@@ -112,9 +112,10 @@ failures should be fixed promptly.
 
 ## `spargen.toml` and the analysis CLI
 
-`spargen check` can apply batch, carve, and omit settings from `spargen.toml` and
-repeatable flags while auditing a schema. This never generates code; keep the generation profile
-in `build.rs` or the macro invocation.
+The analysis subcommands that read a spec — `check`, `deps`, `lock`, and `diff` — apply the
+settings in `spargen.toml` and the shared flags while they work (`lock` uses only `batch_cap` of
+them). None of them generates code; keep the generation profile in `build.rs` or the macro
+invocation.
 
 `spargen.toml` is auto-discovered beside the spec (`--config <path>` overrides the location). Its
 omit-rule kinds are discriminated by **field presence** (TOML has no enums), and an entry that
@@ -175,9 +176,16 @@ spargen check spec.yaml \
   --omit-pointer "extra.yaml#/components/schemas/X"   # or "/pointer" for the root document
 ```
 
-**Precedence (low → high): built-in defaults < `spargen.toml` < CLI flags.** A missing
-auto-discovered config file is fine (defaults apply); a missing `--config` target, a malformed
-config file, or bad omit-flag syntax is a clear error with a non-zero (usage) exit — never a panic.
+**Precedence (low → high): built-in defaults < `spargen.toml` < CLI flags.** The caps a flag
+sets replace the file's, and omit flags add to its rules. The switches only turn their setting one
+way, so no flag undoes a file's `carve = true` (`--carve` only turns carving on), `uuid = false`
+(`--no-uuid` only turns it off), `time = false` (`--no-time` only turns it off), or
+`open_narrowing = true` (`--open-narrowing` only turns it on); edit the file or pass another
+`--config` instead. A missing auto-discovered config file is fine (defaults apply); a missing
+`--config` target, a malformed config file, or bad omit-flag syntax is a clear error with exit
+status 3 — never a panic. The
+[CLI reference](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#exit-status)
+lists every exit status.
 
 The same file is available to the generation APIs — `Spec::discover_config_file()` from `build.rs`,
 and automatically beside the spec for `generate_api!` — because it is parsed by the library, not by

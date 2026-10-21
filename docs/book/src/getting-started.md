@@ -3,7 +3,10 @@
 This walkthrough installs spargen, generates a client from a spec, and shows the shape of the
 generated API. The complete, runnable version is
 [`examples/petstore`](https://github.com/getkono/spargen/tree/master/examples/petstore) — it
-drives every generated feature against a local mock server.
+drives the generated client against a local mock server: path, query, header and `deepObject`
+parameters, JSON and multipart bodies, a multi-status response enum, typed servers and response
+headers, bearer auth, typed and undocumented error statuses, RFC 9457 problems, and the retry
+adapter. Its README lists exactly what each step exercises.
 
 ## Install
 
@@ -13,8 +16,8 @@ two compilation-time paths:
 - Add `spargen` under `[build-dependencies]` and call `spargen::generate` from `build.rs`.
 - Add `spargen-macro` under `[dependencies]` and invoke `generate_api!` in a Rust module.
 
-Both crates are host/build-time only. The optional CLI provides analysis and vendoring tools; it
-does not generate clients.
+Both crates are host/build-time only. The optional [CLI](./cli.md) provides analysis and vendoring
+tools; it has no `generate` subcommand.
 
 ## Generate a client
 
