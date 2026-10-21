@@ -15,7 +15,7 @@ use super::bundle::{classify_self, parse_by_name, SelfRegistration};
 use super::lock::{vendor_path_for_url, Lock};
 use super::parse_json;
 use super::remote::is_http_url;
-use super::vendor::{parse_scratch, self_identity, Base, SelfIdentity};
+use super::vendor::{parse_scratch_local, parse_scratch_remote, self_identity, Base, SelfIdentity};
 
 /// What a `$self` makes a document, in terms both copies can be compared in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,10 +189,14 @@ fn observe(accepts: impl Fn(&str) -> bool) -> Format {
     }
 }
 
-/// The lock walk's choice (`parse_scratch`) for the document named `name`: a local path, or the
-/// URL it was fetched from.
-fn lock_format(name: &str) -> Format {
-    observe(|text| parse_scratch(name, text).is_some())
+/// The lock walk's choice for the document named `name`: a local path (`parse_scratch_local`), or
+/// the URL it was fetched from (`parse_scratch_remote`).
+fn lock_format(name: &str, remote: bool) -> Format {
+    if remote {
+        observe(|text| parse_scratch_remote(name, text).is_some())
+    } else {
+        observe(|text| parse_scratch_local(name, text).is_some())
+    }
 }
 
 /// The build's choice (`parse_by_name`): a local document by its path, and a remote one by the
@@ -210,8 +214,6 @@ fn build_format(name: &str, remote: bool) -> Format {
 fn the_lock_and_the_build_parse_every_document_alike() {
     use Expect::{Both, Disagree};
     use Format::{Either, Json, Yaml};
-    // The lock cuts a local path at its first `?`; the build reads the extension through it.
-    const QUERY_BUG: u32 = 916;
     // The lock matches the suffix of a dot-file name; the build reads it as having no extension.
     const DOTFILE_BUG: u32 = 917;
     // The lock reads a remote URL's suffix through a trailing `/`; the build reads the vendored
@@ -229,23 +231,10 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("specs/api.JSON", Both(Json)),
         ("specs/api.Yaml", Both(Yaml)),
         ("specs/api.YML", Both(Yaml)),
-        // A query string, which a relative `$ref` carries into the local path it names.
-        (
-            "specs/api.json?v=1",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: QUERY_BUG,
-            },
-        ),
-        (
-            "specs/api.yaml?v=1",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: QUERY_BUG,
-            },
-        ),
+        // A query string, which a relative `$ref` carries into the local path it names (#916).
+        ("specs/api.json?v=1", Both(Either)),
+        ("specs/api.yaml?v=1", Both(Either)),
+        ("specs/api.json#x", Both(Either)),
         // A name that is only a dot and an extension.
         (
             "specs/.json",
@@ -307,7 +296,7 @@ fn the_lock_and_the_build_parse_every_document_alike() {
     let rows = rows.chain(remote.iter().map(|row| (row, true)));
     let mut failures = Vec::new();
     for ((name, expect), remote) in rows {
-        let got = (lock_format(name), build_format(name, remote));
+        let got = (lock_format(name, remote), build_format(name, remote));
         expect.check(&format!("`{name}`"), got, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

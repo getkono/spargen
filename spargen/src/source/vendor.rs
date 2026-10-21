@@ -233,7 +233,7 @@ pub(crate) fn vendor(
         input_error(diags, format!("failed to read `{spec}`: {error}"));
         Aborted
     })?;
-    let Some(root_value) = parse_scratch(spec.as_str(), &root_text) else {
+    let Some(root_value) = parse_scratch_local(spec.as_str(), &root_text) else {
         input_error(
             diags,
             format!("failed to parse `{spec}` while scanning for remote $refs"),
@@ -283,7 +283,7 @@ pub(crate) fn vendor(
                         let identity = scanned.identity(&target);
                         if scanned.seen_local.insert(identity.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
-                                if let Some(value) = parse_scratch(target.as_str(), &text) {
+                                if let Some(value) = parse_scratch_local(target.as_str(), &text) {
                                     scanned.local_docs.insert(identity, scanned.docs.len());
                                     let loaded = scanned.add(value, Base::Local(target));
                                     queue.push_back((loaded, JsonPointer::root()));
@@ -379,7 +379,7 @@ pub(crate) fn vendor(
                         sha256,
                     });
                     if let Ok(text) = String::from_utf8(bytes) {
-                        if let Some(value) = parse_scratch(&url, &text) {
+                        if let Some(value) = parse_scratch_remote(&url, &text) {
                             let next = scanned.docs.len();
                             scanned.remote_docs.insert(url.clone(), next);
                             scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
@@ -448,12 +448,26 @@ pub(crate) fn vendor(
     })
 }
 
-/// Parse text into a value tree for ref-scanning only, discarding parse diagnostics. Chooses the
-/// format the way the build does ([`parse_by_extension`]), from the text after the last `.` of
-/// `name` (a path or URL) with any `?` query or `#` fragment cut off first.
-pub(super) fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
-    let stem = name.split(['?', '#']).next().unwrap_or(name);
-    let extension = stem.rsplit_once('.').map(|(_, extension)| extension);
+/// Parse a local document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the text
+/// after the last `.` of `path`. A `?` or `#` in a local path is part of the file's name (a
+/// relative `$ref` such as `api.yaml?v=1` keeps its query in the path it names), so it is read
+/// through rather than cut off: `api.json?v=1` names no recognised extension here, as it names
+/// none to the build's `Utf8Path::extension` (#916).
+pub(super) fn parse_scratch_local(path: &str, text: &str) -> Option<SpannedValue> {
+    parse_scratch(path.rsplit_once('.').map(|(_, extension)| extension), text)
+}
+
+/// Parse a fetched document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the text
+/// after the last `.` of `url` with any `?` query or `#` fragment cut off first, as the vendored
+/// path the build reads drops them.
+pub(super) fn parse_scratch_remote(url: &str, text: &str) -> Option<SpannedValue> {
+    let stem = url.split(['?', '#']).next().unwrap_or(url);
+    parse_scratch(stem.rsplit_once('.').map(|(_, extension)| extension), text)
+}
+
+fn parse_scratch(extension: Option<&str>, text: &str) -> Option<SpannedValue> {
     parse_by_extension(
         crate::diag::FileId(0),
         extension,
