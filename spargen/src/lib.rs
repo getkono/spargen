@@ -194,6 +194,11 @@ impl Report {
     /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
     /// warning as `cargo::warning=`. Announcing a rejection as a warning would make the one
     /// message that stops generation look like the ones that do not.
+    ///
+    /// A directive is one line, and Cargo shows a build script's other stdout only under `-vv`,
+    /// so every line of a diagnostic's rendering (its location, pointer, and `help:` remedy
+    /// included) goes out as its own directive at that diagnostic's severity. A truncated report
+    /// ends with the truncation notice as a `cargo::warning=`.
     pub fn emit_cargo_diagnostics(&self) {
         for line in self.cargo_directive_lines() {
             println!("{line}");
@@ -203,13 +208,28 @@ impl Report {
     /// The directive lines [`Self::emit_cargo_diagnostics`] prints, split out so the severity
     /// mapping is testable without capturing the process's stdout.
     fn cargo_directive_lines(&self) -> Vec<String> {
-        self.diagnostics
-            .iter()
-            .map(|diagnostic| match diagnostic.severity {
-                Severity::Error => format!("cargo::error={diagnostic}"),
-                Severity::Warning => format!("cargo::warning={diagnostic}"),
-            })
-            .collect()
+        let mut lines = Vec::new();
+        for diagnostic in &self.diagnostics {
+            let directive = match diagnostic.severity {
+                Severity::Error => "cargo::error=",
+                Severity::Warning => "cargo::warning=",
+            };
+            let rendered = diagnostic.to_string();
+            lines.extend(rendered.lines().map(|line| format!("{directive}{line}")));
+        }
+        if self.truncated {
+            lines.push(format!("cargo::warning={}", self.truncation_notice()));
+        }
+        lines
+    }
+
+    /// The line saying the report stops at `batch_cap`, shared by [`Report`]'s `Display` and
+    /// [`Self::emit_cargo_diagnostics`] so the two cannot drift.
+    fn truncation_notice(&self) -> String {
+        format!(
+            "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
+            self.diagnostics.len()
+        )
     }
 
     /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
@@ -227,11 +247,7 @@ impl std::fmt::Display for Report {
             writeln!(formatter, "{diagnostic}")?;
         }
         if self.truncated {
-            writeln!(
-                formatter,
-                "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
-                self.diagnostics.len()
-            )?;
+            writeln!(formatter, "{}", self.truncation_notice())?;
         }
         Ok(())
     }
