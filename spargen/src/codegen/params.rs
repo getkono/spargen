@@ -237,9 +237,12 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         let wire = &param.name;
         // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
         // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
-        // again when it did not. A parameter serialization has no token that tells an explicit
-        // `null` from an absent value, so `Option<Option<T>>` would ask the caller for a
-        // distinction the wire cannot carry: absent and `null` both collapse to `None`.
+        // again when it did not, so absent and `null` both collapse to `None` and a `None` field
+        // is omitted. A schema-styled serialization (`style`/`explode`) has no token that tells
+        // an explicit `null` from an absent value, so `Option<Option<T>>` would ask the caller
+        // for a distinction the wire cannot carry. A `content` parameter of `application/json`
+        // does carry one, the text `null` (a required nullable one sends it for `None`), but
+        // its optional field takes the same single `Option`, so it never sends `null`.
         let ty = if param.ty.nullable {
             ty_tokens(param.ty, names, true)
         } else {
