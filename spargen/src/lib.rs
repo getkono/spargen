@@ -689,12 +689,7 @@ pub fn diff(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
 }
 
 fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
-    let mut old_diags = diag::Diagnostics::new(old.batch_cap);
-    let mut new_diags = diag::Diagnostics::new(new.batch_cap);
-    let old_lowered = lower_frontend(old, &mut old_diags);
-    let new_lowered = lower_frontend(new, &mut new_diags);
-
-    match (old_lowered, new_lowered) {
+    match (lower_side(old), lower_side(new)) {
         (Ok((old_api, old_names)), Ok((new_api, new_names))) => {
             let old_surface = surface::build(&old_api, &old_names);
             let new_surface = surface::build(&new_api, &new_names);
@@ -702,14 +697,25 @@ fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
         }
         // A spec that failed to lower has no surface, so the two are simply not comparable.
         (old_lowered, new_lowered) => Err(DiffRejection {
-            old: old_lowered
-                .is_err()
-                .then(|| report(old_diags, Outcome::Rejected)),
-            new: new_lowered
-                .is_err()
-                .then(|| report(new_diags, Outcome::Rejected)),
+            old: old_lowered.err(),
+            new: new_lowered.err(),
         }),
     }
+}
+
+/// Lower one side of a [`diff`]: through the carve driver when `spec.carve` asks for it, as
+/// [`run_mode`] does for every other entry point, and the plain frontend otherwise. A side that
+/// does not lower returns its rejection [`Report`].
+fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names), Report> {
+    let carved;
+    let spec = if spec.carve {
+        carved = carve_spec(spec)?;
+        &carved
+    } else {
+        spec
+    };
+    let mut diags = diag::Diagnostics::new(spec.batch_cap);
+    lower_frontend(spec, &mut diags).map_err(|()| report(diags, Outcome::Rejected))
 }
 
 /// The filesystem paths generation reads for `spec`: the root spec, every relative-file `$ref`
@@ -838,9 +844,8 @@ pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
 
 #[derive(Debug, Clone, Copy)]
 enum PipelineMode {
-    /// Frontend audit only, no codegen (`spargen::check`).
-    Check,
-    /// Lower far enough to derive the runtime dependency set, no codegen (`spargen::requirements`).
+    /// Lower far enough to derive the runtime dependency set, no codegen (`spargen::check` and
+    /// `spargen::requirements`).
     Requirements,
     /// Render in memory for the build cache or private proc-macro bridge.
     Preview,
@@ -968,7 +973,8 @@ fn build_emit_plan(
 
 /// Run `mode` over `spec` on the dedicated frontend stack, through the auto-carve driver when
 /// `spec.carve` asks for it and the plain pipeline otherwise. Every public entry point that runs
-/// the pipeline dispatches here, so the carve decision is made in one place.
+/// the pipeline dispatches here; [`diff`], which lowers two specs and runs no mode, makes the same
+/// decision per side in [`lower_side`], through the same [`carve_spec`] fixpoint.
 fn run_mode(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     run_on_frontend_stack(|| {
         if spec.carve {
@@ -989,7 +995,6 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     let requirements = runtime_contract::RuntimeRequirements::for_api(&api, spec);
 
     match mode {
-        PipelineMode::Check => return PipelineResult::bare(report(diags, Outcome::Clean)),
         PipelineMode::Requirements => {
             return PipelineResult {
                 report: report(diags, Outcome::Clean),
@@ -1006,9 +1011,9 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     };
 
     match mode {
-        // Handled above; `plan` was never built for them.
-        PipelineMode::Check | PipelineMode::Requirements => {
-            unreachable!("check and requirements return before codegen")
+        // Handled above; `plan` was never built for it.
+        PipelineMode::Requirements => {
+            unreachable!("requirements returns before codegen")
         }
         // Preview keeps the rendered plan and writes nothing.
         PipelineMode::Preview => PipelineResult {
@@ -1022,7 +1027,7 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
 /// Auto-carve driver: iterate the frontend to a fixpoint, omitting the smallest enclosing
 /// omittable construct for each rejection, then run `mode` for real with the carved omit set.
 ///
-/// Each round runs the frontend (in `Check` mode — no output is written while carving) with the
+/// Each round runs the frontend alone (no codegen, and no output is written while carving) with the
 /// current omit set. If it is not rejected, the carve converged and we run `mode` once with that
 /// omit set (which re-applies every omit rule, emitting a `W009` for each carved construct — carving
 /// is never silent). If it is rejected, we map the error pointers to omittable constructs
@@ -1034,6 +1039,16 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
 /// is omitted) or, if un-carvable, reported honestly — the document is never emitted broken. The
 /// round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
 fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
+    match carve_spec(spec) {
+        Ok(resolved) => run_pipeline(&resolved, mode),
+        Err(report) => PipelineResult::bare(report),
+    }
+}
+
+/// The carve fixpoint [`run_carve`] describes, without the final run: `spec` with `carve` off and
+/// the carved omit set in place of its own once the frontend lowers under it, or the rejection
+/// [`Report`] of the round that could make no progress (or of the last round, at the cap).
+fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     let mut omit = spec.omit.clone();
     let mut last_rejection: Option<Report> = None;
 
@@ -1043,7 +1058,7 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             carve: false,
             ..spec.clone()
         };
-        // The probe is the frontend alone — what a `Check` run does — kept by hand rather than
+        // The probe is the frontend alone — what a `check` run lowers — kept by hand rather than
         // through `run_pipeline` because the carve mapper needs the bundle it ran over: a
         // diagnostic's pointer addresses the file its span lies in, and only the bundle can name
         // that file in a rule or find the `$ref`s that reach it. The mapper must also see *every*
@@ -1055,13 +1070,12 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             .as_ref()
             .is_some_and(|bundle| lower_bundle(&probe, bundle, &mut diags).is_ok());
         if lowered {
-            // Converged: generate/preview/check for real with the carved omit set.
-            let resolved = Spec {
+            // Converged: the caller runs for real with the carved omit set.
+            return Ok(Spec {
                 omit,
                 carve: false,
                 ..spec.clone()
-            };
-            return run_pipeline(&resolved, mode);
+            });
         }
         let report = report(diags, Outcome::Rejected);
 
@@ -1075,16 +1089,20 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             .collect();
         if new_rules.is_empty() {
             // No progress possible — report the residual rejections (and any carved W009s) honestly.
-            return PipelineResult::bare(report);
+            return Err(report);
         }
         omit.rules.extend(new_rules);
         last_rejection = Some(report);
     }
 
     // Exhausted the round cap while still rejecting: return the last honest rejection report.
+    // With no round run at all, nothing was carved.
     match last_rejection {
-        Some(report) => PipelineResult::bare(report),
-        None => run_pipeline(spec, PipelineMode::Check),
+        Some(report) => Err(report),
+        None => Ok(Spec {
+            carve: false,
+            ..spec.clone()
+        }),
     }
 }
 
