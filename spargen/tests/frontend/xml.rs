@@ -733,6 +733,79 @@ components:
     );
 }
 
+/// Without a root `xml.name`, OpenAPI infers a component schema's element name as the component
+/// name. A struct an XML body reaches takes it as its container rename wherever it differs from
+/// the Rust identifier; an explicit root `xml.name` still wins, and a struct no XML body reaches
+/// carries none.
+#[test]
+fn a_component_name_names_the_element_an_xml_body_serializes_as() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/pet-item' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: '#/components/schemas/Pet' } }
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/order_item' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/json-item' } }
+components:
+  schemas:
+    pet-item:
+      type: object
+      properties:
+        id: { type: integer }
+    Pet:
+      type: object
+      properties:
+        id: { type: integer }
+    order_item:
+      type: object
+      xml: { name: order }
+      properties:
+        id: { type: integer }
+    json-item:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    let renames = |ty: &str| -> Vec<String> {
+        struct_attributes(&code, ty)
+            .into_iter()
+            .filter(|line| line.starts_with("#[serde(rename"))
+            .collect()
+    };
+    assert_eq!(
+        renames("PetItem"),
+        [r#"#[serde(rename = "pet-item")]"#],
+        "{code}"
+    );
+    assert!(renames("Pet").is_empty(), "{code}");
+    assert_eq!(
+        renames("OrderItem"),
+        [r#"#[serde(rename = "order")]"#],
+        "{code}"
+    );
+    assert!(renames("JsonItem").is_empty(), "{code}");
+}
+
 /// The inline schema of an XML body has no component name to infer the element from, so OpenAPI
 /// requires its `xml.name`; that name is honoured the same way.
 #[test]

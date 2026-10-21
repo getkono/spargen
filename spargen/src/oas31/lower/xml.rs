@@ -231,6 +231,17 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
     )
 }
 
+/// The component name of a schema at `pointer` directly under `components.schemas`, unescaped: the
+/// element name OpenAPI infers for it. A schema anywhere else has none.
+fn component_name(pointer: &JsonPointer) -> Option<String> {
+    match pointer.tokens().as_slice() {
+        [components, schemas, name] if components == "components" && schemas == "schemas" => {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
 /// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on
 /// any type that is not XML-dedicated (`W006`), apply root `xml.name`s, and report each hint the
 /// codec cannot honour (`E009` on a type an XML body reaches, `W006` elsewhere).
@@ -246,7 +257,9 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
 /// It also settles each schema's root `xml` object (`root_xml`, less the sites a field reads): a
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
 /// whoever else uses the type, and the field name of an array property whose items are that struct
-/// (unless the items name their elements themselves); and every hint the codec cannot honour — a
+/// (unless the items name their elements themselves); a component struct an XML body reaches with
+/// no root `xml.name` takes its component name as its XML root name; and every hint the codec
+/// cannot honour — a
 /// field's, an items', a root's, or one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is
 /// `E009` on a type an XML body reaches and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
@@ -292,9 +305,6 @@ pub(super) fn gate_xml_field_renames(
         })
         .collect();
     ref_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
-    if !any_hint && root_sites.is_empty() && ref_sites.is_empty() {
-        return;
-    }
 
     let mut xml_roots: Vec<TypeId> = Vec::new();
     let mut non_xml_roots: Vec<TypeId> = Vec::new();
@@ -320,6 +330,10 @@ pub(super) fn gate_xml_field_renames(
         for param in &operation.params {
             non_xml_roots.push(param.ty.id);
         }
+    }
+    // Cheap guard: no hint to settle and no XML body whose root element a component names.
+    if !any_hint && root_sites.is_empty() && ref_sites.is_empty() && xml_roots.is_empty() {
+        return;
     }
 
     let xml_reachable = reachable_types(graph, &xml_roots);
@@ -410,6 +424,24 @@ pub(super) fn gate_xml_field_renames(
         if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
             object.fields[index].xml.name = Some(name);
         }
+    }
+    // Without a root `xml.name`, OpenAPI infers a component schema's element name as the
+    // component's own name ("XML Node Names"), where quick-xml would write the Rust type's name.
+    // So a struct lowered from a schema directly under `components.schemas` takes that name as its
+    // XML root name; codegen writes it only where it differs from the struct's identifier. Only a
+    // struct some XML body reaches takes it: on any other, the name moves no wire. It is set after
+    // the item names above, which follow an explicit root `xml.name` only.
+    let inferred: Vec<(TypeId, String)> = graph
+        .emitted()
+        .filter(|(id, def)| {
+            xml_reachable.contains(id)
+                && matches!(def.kind, TypeKind::Struct(_))
+                && graph.xml_root_name(*id).is_none()
+        })
+        .filter_map(|(id, def)| Some((id, component_name(&def.provenance.pointer)?)))
+        .collect();
+    for (id, name) in inferred {
+        graph.set_xml_root_name(id, name);
     }
     for (_, root, target, at) in ref_sites {
         unsupported_reports.push((

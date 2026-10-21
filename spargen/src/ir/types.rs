@@ -19,7 +19,7 @@ pub(crate) struct TypeGraph {
     /// The definitions [`elide`](Self::elide) withheld from the output.
     elided: BTreeSet<TypeId>,
     /// The XML element name a struct serializes as at the root of an XML body, from the root
-    /// `xml.name` of the schema it was lowered from (see
+    /// `xml.name` of the schema it was lowered from or, for a component, its component name (see
     /// [`set_xml_root_name`](Self::set_xml_root_name)).
     xml_root_names: BTreeMap<TypeId, String>,
 }
