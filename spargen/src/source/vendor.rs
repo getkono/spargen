@@ -40,7 +40,10 @@ pub(crate) struct Fetched {
 }
 
 /// One vendored remote document, reported back from [`crate::vendor`].
+///
+/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct VendoredRef {
     /// The absolute URL that was pinned.
     pub url: String,
@@ -51,7 +54,10 @@ pub struct VendoredRef {
 }
 
 /// The result of a successful [`crate::vendor`] run.
+///
+/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct VendorReport {
     /// Every remote document that was fetched and pinned, in URL order.
     pub refs: Vec<VendoredRef>,
