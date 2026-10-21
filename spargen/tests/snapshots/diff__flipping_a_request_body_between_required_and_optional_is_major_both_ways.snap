@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|request-body-requiredness-changed|GET /pets|request body now optional
+bump=major
