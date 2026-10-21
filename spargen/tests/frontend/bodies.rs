@@ -199,6 +199,69 @@ paths:
 }
 
 #[test]
+fn a_body_key_in_another_letter_case_classifies_as_its_lowercase_spelling() {
+    // One case rule for every media key, not only the stream: `Application/JSON` is the JSON body
+    // `application/json` is, on a request and on a response: the same client, up to any place the
+    // document's spelling of the key is quoted.
+    let spec = |media: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          {media}:
+            schema: {{ $ref: '#/components/schemas/Pet' }}
+      responses:
+        '200':
+          description: ok
+          content:
+            {media}:
+              schema: {{ $ref: '#/components/schemas/Pet' }}
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name: {{ type: string }}
+"##
+        )
+    };
+    let (lower_report, lower_code) = generate_with_code(&spec("application/json"));
+    assert_ne!(
+        lower_report.outcome(),
+        Outcome::Rejected,
+        "{lower_report:#?}"
+    );
+    for media in ["Application/JSON", "APPLICATION/JSON"] {
+        let spec = spec(media);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            module_body(&code.replace(media, "application/json")),
+            module_body(&lower_code),
+            "{media} must generate what `application/json` does"
+        );
+        let checked = check(&spec);
+        assert_check_agrees(&report, &checked);
+    }
+}
+
+#[test]
 fn content_schema_outside_sse_remains_an_explicit_warning() {
     let spec = r##"
 openapi: 3.2.0

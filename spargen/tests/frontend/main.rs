@@ -210,6 +210,15 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     (report, code)
 }
 
+/// The emitted module below its provenance header, whose digests and spec path differ between
+/// two documents that generate the same client.
+fn module_body(code: &str) -> String {
+    code.lines()
+        .skip_while(|line| line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `check` must stand in for `generate`: the same accept/reject decision and the same sorted
 /// diagnostic codes. The outcomes themselves differ by design (`Clean` against `Generated`), since
 /// only one of the two writes a module.
