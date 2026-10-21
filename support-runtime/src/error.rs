@@ -7,8 +7,9 @@ use crate::{AuthError, ResponseValue};
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
 ///
-/// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
-/// guarantee, not a variant (see the crate docs). Every variant implements [`std::error::Error`]
+/// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
+/// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
+/// standard HTTP semantics. Every variant implements [`std::error::Error`]
 /// with full source chains, and `Debug` never leaks secrets.
 ///
 /// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new

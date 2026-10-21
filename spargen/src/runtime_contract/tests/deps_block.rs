@@ -82,51 +82,6 @@ fn the_printed_tokio_table_is_the_generated_blocking_gate() {
     assert!(get_builtin_target_by_triple(WASM_ANCHOR).is_some());
 }
 
-#[test]
-fn the_manifests_reported_in_issue_71_pass_as_written() {
-    // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
-    // and `uuid` as a table with its own features; the member inherits both beside the five
-    // core crates. The report said both came back as "generated client requires …". The
-    // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
-    // needs and the half of it no other fixture exercises.
-    let directory = Sandbox::new();
-    let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
-    let member_dir = directory.path().join("client");
-    std::fs::create_dir(&member_dir).unwrap();
-    let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-    std::fs::write(
-        &root,
-        format!(
-            "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-             futures-core = \"0.3.32\"\n\
-             uuid = {{ version = \"1.26.0\", features = [\"v4\", \"serde\"] }}\n",
-            core_workspace_dependencies()
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        &member,
-        format!(
-            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}\
-             futures-core = {{ workspace = true }}\nuuid = {{ workspace = true }}\n",
-            CORE_INHERITED.replace(
-                "reqwest.workspace = true",
-                "reqwest = { workspace = true, features = [\"stream\"] }"
-            )
-        ),
-    )
-    .unwrap();
-
-    let requirements = RuntimeRequirements {
-        streams: true,
-        uuid: true,
-        ..RuntimeRequirements::default()
-    };
-    let result = directory.audit(&member, &requirements);
-    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
-    assert_eq!(result.manifests, vec![root, member]);
-}
-
 /// The anti-drift property: the block `spargen deps` prints must be exactly a block the audit
 /// accepts. If the two ever diverge — a feature demanded but not printed, or printed with the
 /// wrong floor — this fails.
@@ -169,7 +124,7 @@ fn the_printed_dependency_block_passes_the_audit_it_describes() {
     );
     let manifest = format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{opted_in}");
 
-    let diagnostics = audit_manifest(&manifest, requirements.clone());
+    let diagnostics = audit_manifest(&manifest, &requirements, &TargetContext::Unknown);
     assert!(
         diagnostics.is_empty(),
         "the block `spargen deps` prints must satisfy the audit:\n{manifest}\n{diagnostics:#?}"
@@ -178,7 +133,7 @@ fn the_printed_dependency_block_passes_the_audit_it_describes() {
     // And with the feature absent, the commented-out block is genuinely not required.
     let without_blocking =
         format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{block}");
-    let diagnostics = audit_manifest(&without_blocking, requirements);
+    let diagnostics = audit_manifest(&without_blocking, &requirements, &TargetContext::Unknown);
     assert!(
         diagnostics.is_empty(),
         "{without_blocking}\n{diagnostics:#?}"

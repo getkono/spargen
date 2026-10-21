@@ -14,7 +14,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// before [`Self::meet_union_with_all_of`] or a `$ref`'s target met it. The pre-meet union
     /// itself and the branch types the meet replaced were emitted as public types nothing referred
     /// to (#561). [`Self::meet_ref_union_sibling`] also passes the ids the keywords beside the
-    /// union were lowered into, an input to the same meet (#571).
+    /// union were lowered into, an input to the same meet (#571). A position that drops or
+    /// replaces the type its schema lowered to passes that lowering too: a `format: binary`
+    /// parameter's bytes type, which the client takes as a `String` copy, and a response header
+    /// `W011` skips (#927).
     ///
     /// Unlike the meets' own inserts ([`Self::elide_meet_intermediates`]), these come from lowering
     /// a schema, so a memo may hold one: a component, remote or bundle target a branch `$ref`s and

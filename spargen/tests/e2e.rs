@@ -314,6 +314,37 @@ fn sweeping_removes_only_finished_runs() {
     );
 }
 
+/// Every runtime dependency's tested floor by crate name, as `spargen::requirements` states it for
+/// [`EVERY_CAPABILITY_SPEC`], whose table names every dependency the requirement table knows.
+///
+/// The fixture crate's manifest and the minimal-versions proof both read their floors here, so a
+/// floor bump in spargen moves them with it.
+fn runtime_floors() -> &'static std::collections::BTreeMap<&'static str, &'static str> {
+    static FLOORS: std::sync::OnceLock<std::collections::BTreeMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    FLOORS.get_or_init(|| {
+        let temp = tempfile::tempdir().unwrap();
+        let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+        std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
+        spargen::requirements(&Spec::new(spec))
+            .expect("spec lowers")
+            .dependencies
+            .into_iter()
+            .map(|dependency| (dependency.name, dependency.version))
+            .collect()
+    })
+}
+
+/// The tested floor of the runtime dependency `name`, from [`runtime_floors`].
+fn runtime_floor(name: &str) -> &'static str {
+    runtime_floors().get(name).unwrap_or_else(|| {
+        panic!(
+            "`{name}` is not a runtime dependency: {:#?}",
+            runtime_floors()
+        )
+    })
+}
+
 fn generate_fixture_crate(
     spec: &std::path::Path,
     out: &std::path::Path,
@@ -357,19 +388,29 @@ edition = "{edition}"
 blocking = ["dep:tokio"]
 
 [dependencies]
-bytes = {{ version = "1.12.1", features = ["serde"] }}
-futures-core = "0.3.32"
-quick-xml = {{ version = "0.41.0", features = ["serialize"] }}
-reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart", "stream"] }}
-secrecy = "0.10.3"
-serde = {{ version = "1.0.229", features = ["derive"] }}
-serde_json = "1.0.151"
-uuid = {{ version = "1.24.0", features = ["serde"] }}
-time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
+bytes = {{ version = "{bytes}", features = ["serde"] }}
+futures-core = "{futures_core}"
+quick-xml = {{ version = "{quick_xml}", features = ["serialize"] }}
+reqwest = {{ version = "{reqwest}", default-features = false, features = ["json", "multipart", "stream"] }}
+secrecy = "{secrecy}"
+serde = {{ version = "{serde}", features = ["derive"] }}
+serde_json = "{serde_json}"
+uuid = {{ version = "{uuid}", features = ["serde"] }}
+time = {{ version = "{time}", features = ["formatting", "parsing"] }}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
-"#
+tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
+"#,
+            bytes = runtime_floor("bytes"),
+            futures_core = runtime_floor("futures-core"),
+            quick_xml = runtime_floor("quick-xml"),
+            reqwest = runtime_floor("reqwest"),
+            secrecy = runtime_floor("secrecy"),
+            serde = runtime_floor("serde"),
+            serde_json = runtime_floor("serde_json"),
+            uuid = runtime_floor("uuid"),
+            time = runtime_floor("time"),
+            tokio = runtime_floor("tokio"),
         ),
     )
     .unwrap();
@@ -1819,18 +1860,11 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let lock: toml::Value =
         toml::from_str(&std::fs::read_to_string(out.join("Cargo.lock")).unwrap()).unwrap();
     let packages = lock["package"].as_array().unwrap();
-    for (name, expected) in [
-        ("bytes", "1.12.1"),
-        ("futures-core", "0.3.32"),
-        ("quick-xml", "0.41.0"),
-        ("reqwest", "0.12.28"),
-        ("secrecy", "0.10.3"),
-        ("serde", "1.0.229"),
-        ("serde_json", "1.0.151"),
-        ("time", "0.3.55"),
-        ("tokio", "1.53.1"),
-        ("uuid", "1.24.0"),
-    ] {
+    // Every floor the requirement table states: the ten crates the fixture manifest declares, so
+    // the proof cannot pass by the table having shrunk, and a crate added to it fails here until
+    // the fixture declares it too.
+    assert_eq!(runtime_floors().len(), 10, "{:#?}", runtime_floors());
+    for (&name, &expected) in runtime_floors() {
         assert!(
             packages.iter().any(|package| {
                 package["name"].as_str() == Some(name)

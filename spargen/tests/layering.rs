@@ -1581,7 +1581,6 @@ const MAX_FILE_LINES: usize = 1666;
 /// The files already over [`MAX_FILE_LINES`]. It only shrinks: an entry back under the limit, or
 /// no longer tracked, fails the gate until it is removed, and a new file over it is not added.
 const OVER_LENGTH_BASELINE: &[&str] = &[
-    "spargen/src/ir/media.rs",
     "spargen/tests/corpus_manifest.rs",
     "spargen/tests/diff.rs",
     "spargen/tests/e2e.rs",

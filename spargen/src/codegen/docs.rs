@@ -5,6 +5,10 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 /// Turn lowered documentation into `#[doc = …]` attributes so IDE hover shows the API docs.
+///
+/// The summary and description become paragraphs, the description dropped when it repeats the
+/// summary, and the title is used only when both are blank; blank fields count as absent, so a
+/// `Docs` with nothing but whitespace yields no attribute at all.
 pub(super) fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
     let mut paragraphs: Vec<&str> = Vec::new();
     let summary = docs

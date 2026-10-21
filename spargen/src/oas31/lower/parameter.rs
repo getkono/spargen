@@ -20,11 +20,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// parameter is conventionally just an opaque string, so a parameter whose type lowered to raw
     /// bytes is represented as a plain `String` instead — keeping the parameter renderable and
     /// matching the pre-`Bytes` behavior. Body/multipart binary lowering is unaffected.
-    fn remap_binary_param(&mut self, ty: Ty, hint: &str) -> Ty {
+    ///
+    /// `mark` is the [graph mark](Self::graph_mark) taken before `ty` was lowered. The bytes type
+    /// the copy replaces is [elided](Self::elide_unused_union_lowering) with whatever else that
+    /// lowering inserted and nothing else reaches, so it is not emitted as a public type nothing
+    /// refers to (#927); a component the parameter `$ref`s stays, since its memo holds it.
+    fn remap_binary_param(&mut self, ty: Ty, hint: &str, mark: u32) -> Ty {
         if matches!(
             self.graph.get(ty.id).map(|def| &def.kind),
             Some(TypeKind::Bytes)
         ) {
+            let lowered = mark..self.graph_mark();
+            self.elide_unused_union_lowering(lowered);
             let mut remapped = self.insert_type(
                 hint,
                 TypeKind::Primitive(Prim::String),
@@ -214,8 +221,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
         }
         let ty = if let Some(schema) = &parameter.schema {
+            let mark = self.graph_mark();
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
-            self.remap_binary_param(ty, &parameter.name)
+            self.remap_binary_param(ty, &parameter.name, mark)
         } else if let Some((media, object)) = parameter.content.iter().next() {
             let object = self.resolve_media_object(object, media)?;
             let media_name = media.clone();
@@ -255,8 +263,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
                 return None;
             };
+            let mark = self.graph_mark();
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
-            let ty = self.remap_binary_param(ty, &parameter.name);
+            let ty = self.remap_binary_param(ty, &parameter.name, mark);
             return Some(self.lowered_parameter(
                 parameter,
                 location,

@@ -212,6 +212,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// A defect in the document itself still rejects it, with the error reported where it is
     /// found: a reference that resolves to nothing, a `content` key spargen does not classify
     /// (`E009`), or a schema that fails to lower.
+    ///
+    /// A header skipped after its schema was lowered has the types that lowering inserted
+    /// [elided](Self::elide_unused_union_lowering) where nothing else reaches them, so they are
+    /// not emitted as public types nothing refers to (#927); a component the header `$ref`s stays,
+    /// since its memo holds it.
     fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
         let mut headers = Vec::new();
         for (name, header) in &response.headers {
@@ -233,10 +238,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let header = &header;
             // A Header Object may only use `simple`; the document schema already enforces that.
             let (ty, shape) = if let Some(schema) = &header.schema {
+                let mark = self.graph_mark();
                 let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
                 let Some(shape) = self.header_shape(ty) else {
+                    let lowered = mark..self.graph_mark();
+                    self.elide_unused_union_lowering(lowered);
                     // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
@@ -290,6 +298,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                     continue;
                 };
+                let mark = self.graph_mark();
                 let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
@@ -300,6 +309,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // representable: a list or an object under `text/plain` says nothing about how
                     // the value is framed, and `simple` is not that framing.
                     let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
+                        let lowered = mark..self.graph_mark();
+                        self.elide_unused_union_lowering(lowered);
                         // W011 case: response-header-untyped
                         Diagnostic::warning(
                             Code::DeclarationHasNoEffect,

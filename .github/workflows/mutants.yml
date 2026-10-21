@@ -40,4 +40,4 @@ jobs:
           tool: cargo-mutants@27.1.0
       # `mise run mutants`'s command, byte for byte
       # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
-      - run: cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3
+      - run: cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3

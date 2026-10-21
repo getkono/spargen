@@ -11,6 +11,7 @@ use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::all_of::MetUnionMember;
 use super::combine::{schema_has_union, sole_union_member};
+use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
@@ -596,14 +597,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
+        // On a schema whose `type` names `integer`, an integral float member is the integer it
+        // equals, as an integral float `default` on an `integer` field is (#828).
+        let integer = schema.types.types.contains(&JsonType::Integer);
         let mut variants = Vec::new();
         let mut repr = None;
         for value in remainder {
-            let scalar = match scalar_value(value) {
+            let scalar = match scalar_value(value, integer) {
                 Some(value) => value,
                 None => {
                     Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
-                        .message(non_scalar_enum_message(value))
+                        .message(non_scalar_enum_message(value, integer))
                         .emit(self.diags);
                     return None;
                 }
@@ -712,11 +716,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
-fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
+/// The enum variant an `enum`/`const` member becomes, or `None` where it has none. `integer` says
+/// the schema's `type` names `integer`: a float member is then read by [`exact_integer`], the rule
+/// an integral float `default` is read by, so `1.0` is the variant `1`.
+fn scalar_value(value: &SpannedValue, integer: bool) -> Option<ScalarValue> {
     match &value.node {
         Node::Bool(value) => Some(ScalarValue::Bool(*value)),
         Node::Number(Number::Int(value)) => Some(ScalarValue::Int(*value)),
         Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarValue::Int),
+        Node::Number(Number::Float(value)) if integer => {
+            exact_integer(*value).map(ScalarValue::Int)
+        }
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
     }
@@ -725,13 +735,19 @@ fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
 /// The `E008` message for an enum/const member `scalar_value` rejected, naming the reason that
 /// member is not representable: an object/array member, a float, and an integer above `i64::MAX`
 /// fail for different reasons, and a message blaming the wrong one misdirects the fix.
-fn non_scalar_enum_message(value: &SpannedValue) -> String {
+fn non_scalar_enum_message(value: &SpannedValue, integer: bool) -> String {
     match &value.node {
         Node::Number(Number::Float(float)) => format!(
             // `Debug`, so `1.0` reads as the float it is rather than `Display`'s `1`.
             "enum/const value {float:?} is a floating-point number, which has no Rust enum \
              discriminant (only string, integer, and boolean members are representable as enum \
-             variants)"
+             variants){}",
+            if integer || exact_integer(*float).is_none() {
+                ""
+            } else {
+                "; an integral float is read as the integer it equals only on a schema whose \
+                 `type` names `integer`"
+            }
         ),
         Node::Number(Number::UInt(uint)) => format!(
             "enum/const value {uint} exceeds i64::MAX, so it is not representable as an integer \
