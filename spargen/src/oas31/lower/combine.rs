@@ -940,19 +940,6 @@ pub(super) fn sole_union_member(schema: &Schema) -> Option<usize> {
     unions.next().is_none().then_some(index)
 }
 
-/// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
-/// [`LowerCtx::object_body`] carries each as a required field of its own, marked
-/// [`Field::undeclared`].
-pub(super) fn undeclared_required(schema: &Schema) -> Vec<String> {
-    let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
-    schema
-        .required
-        .iter()
-        .filter(|name| seen.insert(name.as_str()))
-        .cloned()
-        .collect()
-}
-
 /// The `E013` cycle wording for an `allOf` member that is a `$ref` to a root component still being
 /// lowered: refused before the component is read, and by [`LowerCtx::push_ref_member`] for the
 /// sub-file component that reaches its reservation the other way.

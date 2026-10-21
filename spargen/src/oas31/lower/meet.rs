@@ -14,6 +14,17 @@ use super::nullability::{non_nullable, type_accepts_null};
 use super::{LowerCtx, Refiner, ScopeReach};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Where the schema `ty` lowers from was authored: the location [`Self::meet_locations`]
+    /// recorded for a meet struct, else the type's own provenance, unless that is the document root
+    /// every synthesized type falls back to.
+    fn authored_location(&self, ty: Ty) -> Option<Provenance> {
+        if let Some(location) = self.meet_locations.get(&ty.id) {
+            return Some(location.clone());
+        }
+        let def = self.graph.get(ty.id)?;
+        (!def.provenance.pointer.as_str().is_empty()).then(|| def.provenance.clone())
+    }
+
     /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
     /// value must satisfy every member, so any member denying unknown keys forbids them outright),
     /// whatever the other side's value schema is. Two typed value schemas merge to their typed

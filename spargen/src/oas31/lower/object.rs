@@ -7,7 +7,6 @@ use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlField};
 use crate::oas31::{Schema, SchemaOr};
 
-use super::combine::undeclared_required;
 use super::xml::field_xml;
 use super::LowerCtx;
 
@@ -224,6 +223,19 @@ fn reject_heterogeneous_map_values(provenance: Provenance, diags: &mut Diagnosti
              primitive), or omit this API segment with spargen::omit!",
         )
         .emit(diags);
+}
+
+/// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
+/// [`LowerCtx::object_body`] carries each as a required field of its own, marked
+/// [`Field::undeclared`].
+fn undeclared_required(schema: &Schema) -> Vec<String> {
+    let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
+    schema
+        .required
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// The `deprecated`/`readOnly`/`writeOnly` annotations of one *property* subschema.
