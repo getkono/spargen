@@ -7,9 +7,8 @@ use quote::quote;
 use crate::ir::{Api, ErrorShape, Operation, SuccessShape, Ty};
 use crate::name::Names;
 
-use super::dispatch::{is_bytes_ty, status_variant_ident, success_enum_ident};
+use super::dispatch::{error_type_ident, is_bytes_ty, status_variant_ident, success_enum_ident};
 use super::docs::doc_tokens;
-use super::runtime::error_type_ident;
 use super::ty::ty_tokens;
 
 /// Emit one typed header struct per documented status that declares response headers.
@@ -110,11 +109,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
 pub(super) fn emit_response_enum(operation: &Operation, names: &Names) -> TokenStream {
     match operation.responses.success() {
         SuccessShape::Enum(entries) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let ident = success_enum_ident(method_ident);
+            let ident = success_enum_ident(operation, names);
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names));
@@ -147,11 +142,7 @@ fn response_variant_def(spec: crate::ir::StatusSpec, ty: Option<Ty>, names: &Nam
 /// entries of which at least one is bodied (several bodies, or one body beside a bodyless status),
 /// a transparent newtype for a lone bodied entry, and the uninhabited alias for no error body.
 pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
-    let error_ident = error_type_ident(method_ident.as_str());
+    let error_ident = error_type_ident(operation, names);
     let shape = operation.responses.error();
     let api_error_body = shape.api_error_body(&api.types);
     match shape {

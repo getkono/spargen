@@ -89,8 +89,8 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
     let blocking = blocking::emit_blocking_client(api, names);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
-    // The root surface is emitted from the lists `runtime` owns, which `error_type_ident` also
-    // reads.
+    // The root surface is emitted from the lists `name` owns, whose root scope reserves them before
+    // allocating the operation types declared beside them.
     let root_reexport = |names: &[&str]| {
         let idents = names.iter().map(|name| format_ident!("{}", name));
         quote! {
@@ -98,9 +98,9 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
             pub use support::{ #(#idents),* };
         }
     };
-    let root_exports = root_reexport(runtime::ROOT_REEXPORTS);
-    let stream_exports = uses_streams.then(|| root_reexport(runtime::STREAM_ROOT_REEXPORTS));
-    let datetime_exports = uses_time.then(|| root_reexport(runtime::DATETIME_ROOT_REEXPORTS));
+    let root_exports = root_reexport(crate::name::ROOT_REEXPORTS);
+    let stream_exports = uses_streams.then(|| root_reexport(crate::name::STREAM_ROOT_REEXPORTS));
+    let datetime_exports = uses_time.then(|| root_reexport(crate::name::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
         #root_exports
         #stream_exports
