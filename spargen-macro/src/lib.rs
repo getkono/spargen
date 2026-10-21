@@ -184,8 +184,9 @@ fn spec_for(args: &Args, consumer: &Consumer) -> syn::Result<spargen::Spec> {
 }
 
 /// The `compile_error!` text for a preview that produced no client, or `None` when it produced
-/// one. `raw` is the spec path as the macro was given it. Each error-severity diagnostic is one
-/// line under the heading; warnings are left out.
+/// one. `raw` is the spec path as the macro was given it. Each error-severity diagnostic follows
+/// the heading in `Diagnostic`'s own `Display`, the rendering the CLI and `Report` share; warnings
+/// are left out.
 fn failure_message(raw: &str, preview: &spargen::__private::MacroPreview) -> Option<String> {
     if preview.report.outcome() == spargen::Outcome::Generated && preview.contents.is_some() {
         return None;
@@ -201,10 +202,7 @@ fn failure_message(raw: &str, preview: &spargen::__private::MacroPreview) -> Opt
         message.push_str(": generation did not succeed");
     } else {
         for diagnostic in &errors {
-            message.push_str(&format!(
-                "\n  error[{}]: {} (at {})",
-                diagnostic.code, diagnostic.message, diagnostic.pointer
-            ));
+            message.push_str(&format!("\n{diagnostic}"));
         }
     }
     Some(message)
@@ -749,29 +747,31 @@ paths:
         assert_eq!(failure_message("openapi.yaml", &preview), None);
     }
 
-    /// The `compile_error!` text: the spec as the macro was given it, then one line per
-    /// error-severity diagnostic with its code, message and pointer.
+    /// The `compile_error!` text: the spec as the macro was given it, then each error-severity
+    /// diagnostic in `Diagnostic`'s own `Display`: code and message, span, pointer, and remedy.
     #[test]
-    fn a_rejected_spec_renders_each_error_with_its_code_and_pointer() {
+    fn a_rejected_spec_renders_each_error_with_its_code_span_and_remedy() {
         let scratch = Scratch::new("rejected");
         let spec = scratch.write(
             "openapi.yaml",
             "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
         );
         let preview = spargen::__private::preview(&Spec::new(spec));
-        // A root-level diagnostic's pointer is empty, and renders as `(at )`.
+        // A root-level diagnostic's pointer is empty, so no `at` line is rendered.
         assert_eq!(
             failure_message("specs/old.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `specs/old.yaml`\n  \
+            "spargen could not generate a client from `specs/old.yaml`\n\
              error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
-             3.2.x (at )"
+             3.2.x\n  --> 1:10\n  \
+             help: use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses \
+             different schema semantics"
         );
     }
 
-    /// Several errors are one line each, in the report's order; a warning beside them is not
-    /// rendered.
+    /// Several errors are each rendered in turn, in the report's order; a warning beside them is
+    /// not rendered.
     #[test]
-    fn every_error_is_its_own_line_and_warnings_are_left_out() {
+    fn every_error_is_rendered_in_order_and_warnings_are_left_out() {
         let scratch = Scratch::new("several");
         let spec = scratch.write(
             "openapi.yaml",
@@ -811,11 +811,13 @@ paths:
         );
         assert_eq!(
             failure_message("openapi.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `openapi.yaml`\n  \
-             error[E004]: unresolved schema reference `#/components/schemas/Missing` \
-             (at /paths/~1a/get/responses/200/content/application~1json/schema)\n  \
-             error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing` \
-             (at /paths/~1b/get/responses/200/content/application~1json/schema)"
+            "spargen could not generate a client from `openapi.yaml`\n\
+             error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
+             --> 14:23\n  \
+             at /paths/~1a/get/responses/200/content/application~1json/schema\n\
+             error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing`\n  \
+             --> 23:23\n  \
+             at /paths/~1b/get/responses/200/content/application~1json/schema"
         );
     }
 
