@@ -921,6 +921,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
+        // A definition is anonymous only when it has neither a document nor a pointer. A schema
+        // declared in the root document has an empty document and a pointer of its own, so it
+        // must still outrank the synthesized `Text` (root pointer) that `api` inserts first.
+        let mut api = api(Vec::new(), false);
+        let synthesized = api.types.iter().next().expect("the text type").0;
+        let declared = api.types.insert(TypeDef {
+            name_hint: "Text".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Default::default(),
+            provenance: Provenance::new(
+                JsonPointer::root()
+                    .push("components")
+                    .push("schemas")
+                    .push("Text"),
+                None,
+            ),
+            document: String::new(),
+        });
+
+        let names = allocate(&api, &mut Diagnostics::new(100));
+
+        assert_eq!(names.types[&declared].as_str(), "Text");
+        assert_ne!(names.types[&synthesized].as_str(), "Text");
+    }
+
     /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
     /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
     fn is_legal(text: &str) -> bool {
