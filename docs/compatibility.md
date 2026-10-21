@@ -117,7 +117,10 @@ repeatable flags while auditing a schema. This never generates code; keep the ge
 in `build.rs` or the macro invocation.
 
 `spargen.toml` is auto-discovered beside the spec (`--config <path>` overrides the location). Its
-omit-rule kinds are discriminated by **field presence** (TOML has no enums):
+omit-rule kinds are discriminated by **field presence** (TOML has no enums), and an entry that
+also sets a key its kind does not use — `file` or `name` beside `path`, `path`, `method` or
+`file` beside `component`, `name` beside `pointer` — is a config error naming the key and the
+kind, not a key silently dropped:
 
 ```toml
 uuid = true             # optional (default true); map `format: uuid` to `uuid::Uuid`

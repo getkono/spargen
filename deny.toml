@@ -51,6 +51,8 @@ allow-wildcard-paths = true
 # in `spargen/tests/corpus_manifest.rs` holds both.
 deny = [
     { name = "rustls", version = "<0.23.46", reason = "RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, RUSTSEC-2026-0349" },
+    { name = "rustls-webpki", version = "<0.103.16", reason = "RUSTSEC-2026-0382" },
+    { name = "webpki-roots", version = "<1.0.10", reason = "RUSTSEC-2026-0381" },
 ]
 
 [sources]
