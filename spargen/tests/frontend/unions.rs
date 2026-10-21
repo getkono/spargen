@@ -139,7 +139,7 @@ fn an_untyped_any_of_member_stays_silent() {
         );
         assert!(report.diagnostics().is_empty(), "{schema}: {report:#?}");
         assert!(code.contains("= serde_json::Value;"), "{schema}");
-        let found = oracles::unknown(oracles::indistinguishable_variants(&code));
+        let found = oracles::indistinguishable_variants(&code);
         assert!(found.is_empty(), "{schema}: {found:#?}");
     }
     let (report, _) = generate_with_code(
