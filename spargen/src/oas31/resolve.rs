@@ -12,10 +12,11 @@ pub(crate) struct Resolver<'doc> {
     bundle: &'doc InputBundle,
 }
 
-/// A resolved reference target. A `#/components/schemas/` ref written in the root document borrows
-/// the already-parsed component from the document; every other target — a pointer into a local
-/// file, a whole relative file, or a remote ref's vendored copy — is a schema parsed on the fly from
-/// its source node (owned).
+/// A resolved reference target. A `#/components/schemas/` ref written in the root document to a
+/// component declared inline borrows the already-parsed component from the document; every other
+/// target — an alias component (itself a `$ref`), a pointer into a local file, a whole relative
+/// file, or a remote ref's vendored copy — is a schema parsed on the fly from its source node
+/// (owned).
 #[derive(Debug)]
 pub(crate) struct Resolved<'doc> {
     /// The target schema.
@@ -184,9 +185,9 @@ impl<'doc> Resolver<'doc> {
     ) -> Result<Resolved<'doc>, Aborted> {
         let from = self.written_in(at);
 
-        // Root component refs borrow the already-parsed component so named types and recursion are
-        // shared. Every other JSON Pointer (including local relative files) is parsed from its
-        // source node with that node's own provenance.
+        // Root refs to an inline-declared component borrow the already-parsed component so named
+        // types and recursion are shared. Every other JSON Pointer (an alias component, local
+        // relative files included) is parsed from its source node with that node's own provenance.
         if from == self.bundle.root_id() {
             if let Some(name) = reference.strip_prefix("#/components/schemas/") {
                 if let Some(super::RefOr::Item(schema)) = self.document.components.schemas.get(name)
