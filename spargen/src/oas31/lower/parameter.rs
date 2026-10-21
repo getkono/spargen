@@ -45,6 +45,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "header" => ParamLoc::Header,
             "cookie" => ParamLoc::Cookie,
             "querystring" => ParamLoc::QueryString,
+            // Each document schema enumerates `in`, so a validated document does not reach this;
+            // it stays as the refusal for a path that skips validation.
             _ => {
                 Diagnostic::error(Code::InvalidInput, parameter.provenance.clone())
                     .message(format!(

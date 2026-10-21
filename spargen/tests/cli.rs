@@ -230,9 +230,9 @@ fn explain_rejects_an_unresolvable_code() {
     // an unresolvable code is a *usage* error — the user mistyped an argument — and `--format`
     // governs diagnostic *reports*. `check` and `diff` route their reports through `emit`, which
     // honours the flag; `config_error` renders usage errors as plain text everywhere, and the
-    // `Explain` arm renders its own the same way at `run.rs:103` — by convention, not by calling
-    // `config_error`, which no `Explain` path reaches. Pinned in both directions so the choice is
-    // recorded rather than merely current.
+    // `Command::Explain` arm's error branch in `cli/run.rs` renders its own the same way — by
+    // convention, not by calling `config_error`, which no `Explain` path reaches. Pinned in both
+    // directions so the choice is recorded rather than merely current.
     let as_json = Command::new(spargen_bin())
         .args(["explain", "E999", "--format", "json"])
         .output()

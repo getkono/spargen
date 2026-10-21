@@ -4,10 +4,11 @@
 //! Diagnostic codes and severities, each code's title and `spargen explain` text, the JSON
 //! Pointer + span model, and the [`InterpId`] (`INT-###`) a code may name for the interpretation
 //! its behavior depends on.
-//! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
+//! `diag` is the lowest layer, which every pipeline stage may reach, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
-//! construct, a [`Span`] (`file:line:column`) when the construct's location is known, a one-line
+//! construct, a [`Span`] (line and column within the file its [`FileId`] names) when the
+//! construct's location is known, a one-line
 //! message, an optional remedy, and the [`OutcomeClaim`] its message makes.
 //! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
 //! at the first error; presentation belongs to the optional binary.
@@ -25,7 +26,7 @@ pub(crate) use collect::{Aborted, Diagnostics};
 pub use interp::InterpId;
 pub(crate) use pointer::escape_token;
 pub use pointer::JsonPointer;
-pub(crate) use provenance::Provenance;
+pub use provenance::Provenance;
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
@@ -45,8 +46,14 @@ pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
     })
 }
 
-/// A single diagnostic emitted during parsing, validation, or codegen.
+/// A single diagnostic emitted during a pipeline run.
+///
+/// Every field is public, so a caller reads and updates each one directly. The struct is
+/// `#[non_exhaustive]`, so a field can be added without a breaking change: outside spargen a
+/// diagnostic is built through [`Diagnostic::error`] or [`Diagnostic::warning`], not by a struct
+/// literal.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct Diagnostic {
     /// The stable, documented code (`E###`/`W###`).
     pub code: Code,
@@ -142,11 +149,10 @@ impl std::fmt::Display for Diagnostic {
 impl Diagnostic {
     /// Begin building an error diagnostic for `code` at `at`.
     ///
-    /// Crate-internal: a [`Diagnostic`] is something spargen hands *out*, so the facade re-exports
-    /// the type for its public fields, not for construction. `Provenance` and `DiagnosticBuilder`
-    /// are deliberately not part of that facade, which would leave these constructors unnameable
-    /// — and so uncallable — from outside anyway.
-    pub(crate) fn error(code: Code, at: Provenance) -> DiagnosticBuilder {
+    /// The diagnostic claims [`OutcomeClaim::Rejected`], names `code`'s interpretation, carries
+    /// no file, and takes `code`'s title as its message unless [`DiagnosticBuilder::message`]
+    /// sets one.
+    pub fn error(code: Code, at: Provenance) -> DiagnosticBuilder {
         DiagnosticBuilder {
             code,
             severity: Severity::Error,
@@ -157,8 +163,9 @@ impl Diagnostic {
         }
     }
 
-    /// Begin building a warning diagnostic for `code` at `at`. Crate-internal, as [`Self::error`].
-    pub(crate) fn warning(code: Code, at: Provenance) -> DiagnosticBuilder {
+    /// Begin building a warning diagnostic for `code` at `at`. It claims
+    /// [`OutcomeClaim::Independent`]; everything else is as [`Self::error`] builds it.
+    pub fn warning(code: Code, at: Provenance) -> DiagnosticBuilder {
         DiagnosticBuilder {
             code,
             severity: Severity::Warning,
@@ -170,10 +177,11 @@ impl Diagnostic {
     }
 }
 
-/// Fluent builder for a [`Diagnostic`]; attaches the message, remedy, and interpretation before
-/// the diagnostic is recorded into a [`Diagnostics`] batch.
+/// Fluent builder for a [`Diagnostic`], begun by [`Diagnostic::error`] or [`Diagnostic::warning`]:
+/// attaches the message and remedy, then [`Self::build`] finishes the diagnostic.
 #[derive(Debug)]
-pub(crate) struct DiagnosticBuilder {
+#[must_use = "a builder does nothing until it is built"]
+pub struct DiagnosticBuilder {
     code: Code,
     severity: Severity,
     provenance: Provenance,
@@ -184,19 +192,19 @@ pub(crate) struct DiagnosticBuilder {
 
 impl DiagnosticBuilder {
     /// Set the one-line explanation.
-    pub(crate) fn message(mut self, message: impl Into<String>) -> Self {
+    pub fn message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self
     }
 
     /// Attach a remedy suggestion (rendered as a `help:` line).
-    pub(crate) fn remedy(mut self, remedy: impl Into<String>) -> Self {
+    pub fn remedy(mut self, remedy: impl Into<String>) -> Self {
         self.remedy = Some(remedy.into());
         self
     }
 
     /// Finish building the diagnostic.
-    pub(crate) fn build(self) -> Diagnostic {
+    pub fn build(self) -> Diagnostic {
         Diagnostic {
             code: self.code,
             severity: self.severity,

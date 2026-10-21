@@ -84,6 +84,10 @@ pub(crate) struct RequestBody {
 pub(crate) struct BodyEncoding {
     /// One entry per body-schema property, in the body struct's field order.
     pub(crate) properties: Vec<PropertyEncoding>,
+    /// The mode of the members of the body struct's typed `additionalProperties` overflow map,
+    /// which no Encoding Object can name: the default for the overflow's value type. `None` when
+    /// the body struct has no typed overflow.
+    pub(crate) additional: Option<EncodingMode>,
 }
 
 /// How one property of a form or multipart body is rendered.

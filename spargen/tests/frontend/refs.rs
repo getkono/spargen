@@ -1096,18 +1096,19 @@ fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
 /// An `allOf` member that is a direct `$ref` back to the sub-file schema currently being lowered.
 ///
 /// `push_ref_member` decides a member's contribution by reading `graph.get(ty.id).kind`. For a
-/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Any` the
-/// reservation was created with — **the id is right, the kind is not, and only the kind is read** —
-/// so the member was classified `Contribution::Scalar` and the whole property collapsed to
-/// `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that exact outcome: generated
-/// code "never silently degrades a typed schema to `serde_json::Value`", and every construct is
-/// "supported, warned, or rejected — no fourth, silent behavior".
+/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Reserved`
+/// the reservation was created with — **the id is right, the kind is not** — and the placeholder
+/// was once read as a scalar, so the member was classified `Contribution::Scalar` and the whole
+/// property collapsed to `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that
+/// exact outcome: generated code "never silently degrades a typed schema to `serde_json::Value`",
+/// and every construct is "supported, warned, or rejected — no fourth, silent behavior".
+/// `push_ref_member` now rejects a `TypeKind::Reserved` member with `E013`.
 ///
-/// The root document has always refused to read an in-progress member and rejected with `E013`.
-/// The remote path had the same pre-check but not the same coverage, and its id-keyed guard is this
-/// branch's own addition — see `remote::a_direct_recursive_all_of_member_in_a_vendored_document_is_rejected`,
-/// which is the fixture that guard did not have. All three spellings here must reach that same
-/// rejection: the bare sub-file name, the explicit file reference, and the root-document control.
+/// The root document refuses to read an in-progress member and rejects it with `E013`. On the
+/// remote path the id-keyed guard is pinned by
+/// `remote::a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected`. All
+/// three spellings here must reach that same rejection: the bare sub-file name, the explicit file
+/// reference, and the root-document control.
 #[test]
 fn a_direct_recursive_all_of_member_in_a_sub_file_is_rejected_as_the_root_document_is() {
     // One shape, two spellings of the same target. `PREFIX` is empty for the sub-file's own
@@ -3117,10 +3118,7 @@ mod remote {
     fn located_at(report: &Report, root: &[u8], code: Code) -> (String, u32) {
         let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [code], "{report:#?}");
-        let violations: Vec<String> = oracles::location_violations(report.diagnostics(), root)
-            .into_iter()
-            .map(|violation| violation.reason)
-            .collect();
+        let violations = oracles::location_violations(report.diagnostics(), root);
         assert!(violations.is_empty(), "{violations:#?}");
         let diag = &report.diagnostics()[0];
         let span = diag.span.expect("located at a span");

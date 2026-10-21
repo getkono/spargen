@@ -2509,56 +2509,115 @@ mod support {
         /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
         /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
         /// value is JSON `null` is omitted entirely rather than sent empty.
+        ///
+        /// `additional` is the body's typed `additionalProperties` overflow: the resolved mode of its
+        /// members (the default for their type, since no Encoding Object can name them) and how many
+        /// members the overflow map holds, which a generated struct serializes after its declared fields.
+        /// When it is `Some`, those members follow the declared ones, ordered by key, rendered in that
+        /// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
+        /// whose key repeats a declared property's name is never sent: the declared property's own value
+        /// is, or nothing when that property is absent, as in a multipart body.
         pub fn serialize_form_body<T: Serialize>(
             value: &T,
             properties: &[FormProperty],
+            additional: Option<(FormMode, usize)>,
         ) -> Result<String, ParameterError> {
-            let Value::Object(members) = serde_json::to_value(value)? else {
+            let text = serde_json::to_vec(value)?;
+            if text.first() != Some(&b'{') {
                 return Err(ParameterError::ExpectedObject);
-            };
+            }
+            let OrderedMembers(members) = serde_json::from_slice(&text)?;
+            let overflow_len = additional.map_or(0, |(_, len)| len);
+            let (declared, overflow) = members
+                .split_at(members.len().saturating_sub(overflow_len));
             let mut fragments: Vec<String> = Vec::new();
             for property in properties {
-                let Some(member) = members.get(property.name) else {
-                    continue;
-                };
-                if member.is_null() {
-                    continue;
+                if let Some((_, member)) = declared
+                    .iter()
+                    .find(|(name, _)| name == property.name)
+                {
+                    push_form_member(
+                        &mut fragments,
+                        property.name,
+                        member,
+                        property.mode,
+                    )?;
                 }
-                match property.mode {
-                    FormMode::Text => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    scalar(member, PercentEncoding::Form) ?
-                                ),
-                            )
-                    }
-                    FormMode::Json => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    encode(& serde_json::to_string(member) ?,
-                                    PercentEncoding::Form)
-                                ),
-                            )
-                    }
-                    FormMode::Style { style, explode, encoding } => {
-                        fragments
-                            .extend(
-                                style_fragments(
-                                    property.name,
-                                    member,
-                                    style,
-                                    explode,
-                                    encoding,
-                                )?,
-                            )
+            }
+            if let Some((mode, _)) = additional {
+                for (name, member) in overflow {
+                    if !properties.iter().any(|property| property.name == name) {
+                        push_form_member(&mut fragments, name, member, mode)?;
                     }
                 }
             }
             Ok(fragments.join("&"))
+        }
+        /// A JSON object's members in the order they were written, a repeated key kept each time it
+        /// appears.
+        struct OrderedMembers(Vec<(String, Value)>);
+        impl<'de> serde::Deserialize<'de> for OrderedMembers {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Self, D::Error> {
+                struct MembersVisitor;
+                impl<'de> serde::de::Visitor<'de> for MembersVisitor {
+                    type Value = OrderedMembers;
+                    fn expecting(
+                        &self,
+                        formatter: &mut fmt::Formatter<'_>,
+                    ) -> fmt::Result {
+                        formatter.write_str("a JSON object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<OrderedMembers, A::Error> {
+                        let mut members = Vec::new();
+                        while let Some(member) = map.next_entry::<String, Value>()? {
+                            members.push(member);
+                        }
+                        Ok(OrderedMembers(members))
+                    }
+                }
+                deserializer.deserialize_map(MembersVisitor)
+            }
+        }
+        /// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+        fn push_form_member(
+            fragments: &mut Vec<String>,
+            name: &str,
+            member: &Value,
+            mode: FormMode,
+        ) -> Result<(), ParameterError> {
+            if member.is_null() {
+                return Ok(());
+            }
+            match mode {
+                FormMode::Text => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), scalar(member,
+                                PercentEncoding::Form) ?
+                            ),
+                        )
+                }
+                FormMode::Json => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), encode(&
+                                serde_json::to_string(member) ?, PercentEncoding::Form)
+                            ),
+                        )
+                }
+                FormMode::Style { style, explode, encoding } => {
+                    fragments
+                        .extend(style_fragments(name, member, style, explode, encoding)?)
+                }
+            }
+            Ok(())
         }
         /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
         ///
@@ -3696,18 +3755,10 @@ mod support {
                 reason: OwnedReconnectReason,
             ) -> Option<StreamError> {
                 let Some(reconnect) = self.reconnect.as_mut() else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 let Some(policy) = reconnect.policy.as_ref() else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 let reason_ref = match &reason {
                     OwnedReconnectReason::EndOfStream => ReconnectReason::EndOfStream,
@@ -3717,16 +3768,21 @@ mod support {
                 };
                 let Some(wait) = policy
                     .reconnect(reconnect.attempt, reason_ref, self.reconnect_delay) else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 reconnect.attempt = reconnect.attempt.saturating_add(1);
                 self.buffer.clear();
                 self.state = StreamState::Waiting(wait);
                 None
+            }
+            /// End the stream without reconnecting: a clean end of stream yields nothing further, and a
+            /// failure is handed back to be yielded.
+            fn stop(&mut self, reason: OwnedReconnectReason) -> Option<StreamError> {
+                self.state = StreamState::Done;
+                match reason {
+                    OwnedReconnectReason::EndOfStream => None,
+                    OwnedReconnectReason::Failure(error) => Some(error),
+                }
             }
             fn reconnect_future(&self) -> Option<ReconnectFuture> {
                 let reconnect = self.reconnect.as_ref()?;
@@ -3787,11 +3843,7 @@ mod support {
         fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             loop {
                 if let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
-                    let mut end = nl;
-                    if end > 0 && buffer[end - 1] == b'\r' {
-                        end -= 1;
-                    }
-                    let line = buffer[..end].to_vec();
+                    let line = trim_cr(&buffer[..nl]).to_vec();
                     buffer.drain(..=nl);
                     if line.is_empty() {
                         continue;
@@ -3799,11 +3851,7 @@ mod support {
                     return frame_item(line);
                 }
                 if at_eof {
-                    let mut end = buffer.len();
-                    if end > 0 && buffer[end - 1] == b'\r' {
-                        end -= 1;
-                    }
-                    let line = buffer[..end].to_vec();
+                    let line = trim_cr(buffer).to_vec();
                     buffer.clear();
                     if line.is_empty() {
                         return FramePoll::NeedMore;
@@ -3897,11 +3945,7 @@ mod support {
                         return FramePoll::NeedMore;
                     }
                     if pos < buffer.len() {
-                        let mut line = &buffer[pos..];
-                        if line.last() == Some(&b'\r') {
-                            line = &line[..line.len() - 1];
-                        }
-                        append_sse_field(line, &mut fields);
+                        append_sse_field(trim_cr(&buffer[pos..]), &mut fields);
                     }
                     buffer.clear();
                 } else {
@@ -4011,11 +4055,11 @@ mod support {
         fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
             let rest = &buf[from..];
             let nl = rest.iter().position(|&b| b == b'\n')?;
-            let mut line = &rest[..nl];
-            if line.last() == Some(&b'\r') {
-                line = &line[..line.len() - 1];
-            }
-            Some((line, from + nl + 1))
+            Some((trim_cr(&rest[..nl]), from + nl + 1))
+        }
+        /// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n`.
+        fn trim_cr(line: &[u8]) -> &[u8] {
+            line.strip_suffix(b"\r").unwrap_or(line)
         }
         /// Decode one framed JSON payload into `T`. A parse failure becomes [`Error::Decode`] carrying the
         /// status and headers of the response the frame was read from, the serde path, and the raw frame —
@@ -4194,7 +4238,7 @@ mod support {
     pub use blocking::BlockingRuntime;
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, deprecated, unused_imports)]
 pub mod types {
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
@@ -6413,16 +6457,49 @@ pub mod types {
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
+    pub type RequestBodya = String;
+    pub type RequestBodyAdditional = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody3c5761a3 {
+        #[serde(rename = "a")]
+        pub a: RequestBodya,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditional>,
+    }
+    pub type RequestBodyaF8000e9c = String;
+    pub type RequestBodyAdditionalAba279dd = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBodyE2940da4 {
+        #[serde(
+            rename = "a",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub a: Option<RequestBodyaF8000e9c>,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+    }
+    pub type RequestBodycaption820ffb52 = String;
+    pub type RequestBodyAdditionalItem = i64;
+    pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody1654af29 {
+        #[serde(rename = "caption")]
+        pub caption: RequestBodycaption820ffb52,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
+    }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl BindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -6431,13 +6508,13 @@ impl BindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SignatureBindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional5db2f3f3>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SignatureBindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -6446,7 +6523,7 @@ impl SignatureBindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeParamsParams {
     #[serde(rename = "labels", skip_serializing_if = "Option::is_none")]
@@ -6456,7 +6533,7 @@ pub struct SerializeParamsParams {
     #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
     pub session: Option<types::Session>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SerializeParamsParams {
     ///Set the `labels` parameter.
     #[must_use]
@@ -6477,7 +6554,7 @@ impl SerializeParamsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetUserParams {
     ///Default: `1`.
@@ -6488,7 +6565,7 @@ pub struct GetUserParams {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<types::Type>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl GetUserParams {
     ///Set the `page` parameter.
     #[must_use]
@@ -6509,13 +6586,13 @@ impl GetUserParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetBlobParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor84222325>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl GetBlobParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -6524,13 +6601,13 @@ impl GetBlobParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PostNullableBytesParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor842223252>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl PostNullableBytesParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -6539,7 +6616,7 @@ impl PostNullableBytesParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeStylesParams {
     #[serde(rename = "space", skip_serializing_if = "Option::is_none")]
@@ -6551,7 +6628,7 @@ pub struct SerializeStylesParams {
     #[serde(rename = "reserved", skip_serializing_if = "Option::is_none")]
     pub reserved: Option<types::Reserved>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SerializeStylesParams {
     ///Set the `space` parameter.
     #[must_use]
@@ -6590,7 +6667,7 @@ pub type SerializeParamsError = std::convert::Infallible;
 pub type GetConjunctionError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetUserError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiError {
     Status404(Box<types::NotFoundError>),
@@ -6616,7 +6693,7 @@ impl support::ApiErrorProblem for GetMultiError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetSharedError {
     Status401,
@@ -6645,7 +6722,7 @@ impl support::ApiErrorProblem for GetSharedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetSharedError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6658,13 +6735,14 @@ impl GetSharedError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetSharedError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetSharedError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeError {
     Status404(Option<Box<types::MaybeProblem>>),
@@ -6693,7 +6771,7 @@ impl support::ApiErrorProblem for GetMaybeError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMaybeError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6706,6 +6784,7 @@ impl GetMaybeError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMaybeError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -6713,18 +6792,19 @@ impl support::ApiErrorBody for GetMaybeError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMultiDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMultiDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMultiDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetMultiDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -6736,11 +6816,13 @@ impl std::ops::DerefMut for GetMultiDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetMultiDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetMultiDefaultError> for types::Problem {
     fn from(outer: GetMultiDefaultError) -> Self {
         outer.0
@@ -6752,6 +6834,7 @@ impl std::fmt::Display for GetMultiDefaultError {
     }
 }
 impl std::error::Error for GetMultiDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMultiDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -6764,18 +6847,19 @@ impl support::ApiErrorProblem for GetMultiDefaultError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetPlainDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetPlainDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetPlainDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetPlainDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -6787,11 +6871,13 @@ impl std::ops::DerefMut for GetPlainDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetPlainDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetPlainDefaultError> for types::Problem {
     fn from(outer: GetPlainDefaultError) -> Self {
         outer.0
@@ -6803,6 +6889,7 @@ impl std::fmt::Display for GetPlainDefaultError {
     }
 }
 impl std::error::Error for GetPlainDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetPlainDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -6815,18 +6902,19 @@ impl support::ApiErrorProblem for GetPlainDefaultError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetUnitDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetUnitDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetUnitDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetUnitDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -6838,11 +6926,13 @@ impl std::ops::DerefMut for GetUnitDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetUnitDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetUnitDefaultError> for types::Problem {
     fn from(outer: GetUnitDefaultError) -> Self {
         outer.0
@@ -6854,6 +6944,7 @@ impl std::fmt::Display for GetUnitDefaultError {
     }
 }
 impl std::error::Error for GetUnitDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetUnitDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -6865,7 +6956,7 @@ impl support::ApiErrorProblem for GetUnitDefaultError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultError {
     Status404(Box<types::Problem>),
@@ -6895,7 +6986,7 @@ impl support::ApiErrorProblem for GetBodylessDefaultError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessDefaultError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6907,13 +6998,14 @@ impl GetBodylessDefaultError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultMultiError {
     Status404(Box<types::Problem>),
@@ -6952,7 +7044,7 @@ impl support::ApiErrorProblem for GetBodylessDefaultMultiError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessDefaultMultiError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6965,13 +7057,14 @@ impl GetBodylessDefaultMultiError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessDefaultMultiError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultMultiError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessSiblingError {
     Status403,
@@ -7001,7 +7094,7 @@ impl support::ApiErrorProblem for GetBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessSiblingError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7013,13 +7106,14 @@ impl GetBodylessSiblingError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessSiblingError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessSiblingError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetXmlBodylessSiblingError {
     Status403,
@@ -7051,7 +7145,7 @@ impl support::ApiErrorProblem for GetXmlBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetXmlBodylessSiblingError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7063,13 +7157,14 @@ impl GetXmlBodylessSiblingError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetXmlBodylessSiblingError {
     type Body = types::XmlReceipt;
     fn body(&self) -> Option<&types::XmlReceipt> {
         GetXmlBodylessSiblingError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetConditionalError {
     Status304,
@@ -7097,7 +7192,7 @@ impl support::ApiErrorProblem for GetConditionalError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetConditionalError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7109,6 +7204,7 @@ impl GetConditionalError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetConditionalError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -7116,18 +7212,19 @@ impl support::ApiErrorBody for GetConditionalError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMaybeSingleError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMaybeSingleError(pub Option<types::MaybeProblem>);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMaybeSingleError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> Option<types::MaybeProblem> {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetMaybeSingleError {
     type Target = Option<types::MaybeProblem>;
     fn deref(&self) -> &Self::Target {
@@ -7139,11 +7236,13 @@ impl std::ops::DerefMut for GetMaybeSingleError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<Option<types::MaybeProblem>> for GetMaybeSingleError {
     fn from(inner: Option<types::MaybeProblem>) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetMaybeSingleError> for Option<types::MaybeProblem> {
     fn from(outer: GetMaybeSingleError) -> Self {
         outer.0
@@ -7155,6 +7254,7 @@ impl std::fmt::Display for GetMaybeSingleError {
     }
 }
 impl std::error::Error for GetMaybeSingleError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMaybeSingleError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -7166,7 +7266,7 @@ impl support::ApiErrorProblem for GetMaybeSingleError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetAliasSharedError {
     Status404(Box<types::PlainMessage>),
@@ -7196,7 +7296,7 @@ impl support::ApiErrorProblem for GetAliasSharedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetAliasSharedError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7208,6 +7308,7 @@ impl GetAliasSharedError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetAliasSharedError {
     type Body = types::PlainMessage;
     fn body(&self) -> Option<&types::PlainMessage> {
@@ -7237,18 +7338,19 @@ pub type GetArtworkError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type PutArtworkError = std::convert::Infallible;
 ///The documented error body of this operation, wrapped so `Error<GetTextErrorError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetTextErrorError(pub types::ResponseBodyD00b95d0);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetTextErrorError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::ResponseBodyD00b95d0 {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetTextErrorError {
     type Target = types::ResponseBodyD00b95d0;
     fn deref(&self) -> &Self::Target {
@@ -7260,11 +7362,13 @@ impl std::ops::DerefMut for GetTextErrorError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::ResponseBodyD00b95d0> for GetTextErrorError {
     fn from(inner: types::ResponseBodyD00b95d0) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetTextErrorError> for types::ResponseBodyD00b95d0 {
     fn from(outer: GetTextErrorError) -> Self {
         outer.0
@@ -7276,6 +7380,7 @@ impl std::fmt::Display for GetTextErrorError {
     }
 }
 impl std::error::Error for GetTextErrorError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetTextErrorError {
     type Body = types::ResponseBodyD00b95d0;
     fn body(&self) -> Option<&types::ResponseBodyD00b95d0> {
@@ -7287,7 +7392,7 @@ impl support::ApiErrorProblem for GetTextErrorError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiError {
     Status400(Box<types::ResponseBody48bb7a8a>),
@@ -7336,8 +7441,14 @@ pub type SerializeContentParamsError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type SubmitFormError = std::convert::Infallible;
 #[allow(dead_code)]
-pub type DocumentedHeadersError = std::convert::Infallible;
+pub type SubmitFormAdditionalError = std::convert::Infallible;
 #[allow(dead_code)]
+pub type SubmitNullableFormAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type UploadAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type DocumentedHeadersError = std::convert::Infallible;
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetNoSuccessError {
     Status404(Box<types::ResponseBody2a32723f>),
@@ -7371,7 +7482,7 @@ pub type GetMaybeEmptyError = std::convert::Infallible;
 pub type GetXmlMaybeEmptyError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetRangedError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetErrorRangedError {
     Status409(Box<types::ConflictError>),
@@ -7401,45 +7512,45 @@ impl support::ApiErrorProblem for GetErrorRangedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiDefaultResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiResponse {
     Status200(Box<types::ResponseBody4450a524>),
     Status201(Box<types::ResponseBody6bf58d24>),
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeEmptyResponse {
     Status200(Box<types::MultiOk>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetXmlMaybeEmptyResponse {
     Status200(Box<types::XmlReceipt>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRangedResponse {
     Status200(Box<types::MultiOk>),
     Status2xx(Box<types::MultiCreated>),
 }
 ///Documented response headers for `putRanged` `Status206`.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub struct PutRangedStatus206Headers {
     pub content_range: Option<types::HeaderContentRange>,
@@ -7467,7 +7578,7 @@ impl PutRangedStatus206Headers {
     }
 }
 ///Documented response headers for `documentedHeaders` `Status204`.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub struct DocumentedHeadersStatus204Headers {
     pub x_trace_ids: Option<types::HeaderXTraceIds>,
@@ -7595,7 +7706,7 @@ pub struct Client {
     core: support::ClientCore,
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+#[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
 impl Client {
     pub fn new(
         base_url: &str,
@@ -10235,7 +10346,7 @@ Response `409`: binary error*/
                 mode: support::FormMode::Json,
             },
         ];
-        let body = support::serialize_form_body(body, FORM_PROPERTIES)
+        let body = support::serialize_form_body(body, FORM_PROPERTIES, None)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -10251,6 +10362,144 @@ Response `409`: binary error*/
         } else {
             Err(
                 support::unexpected_status::<SubmitFormError>(&self.core, response).await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_form_additional(
+        &self,
+        body: &types::RequestBody3c5761a3,
+    ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
+        let mut path = "/forms/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((support::FormMode::Text, body.additional.len())),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_nullable_form_additional(
+        &self,
+        body: &Option<types::RequestBodyE2940da4>,
+    ) -> Result<
+        support::ResponseValue<()>,
+        support::Error<SubmitNullableFormAdditionalError>,
+    > {
+        let mut path = "/form/additional/nullable".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((
+                    support::FormMode::Text,
+                    body.as_ref().map_or(0, |body| body.additional.len()),
+                )),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitNullableFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn upload_additional(
+        &self,
+        body: &types::RequestBody1654af29,
+    ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+        let mut path = "/upload/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut form = reqwest::multipart::Form::new();
+        let mut part = reqwest::multipart::Part::text(body.caption.to_string());
+        part = part
+            .mime_str("text/plain")
+            .map_err(support::Error::request_construction)?;
+        form = form.part("caption", part);
+        for (name, value) in &body.additional {
+            if matches!(name.as_str(), "caption") {
+                continue;
+            }
+            let mut part = reqwest::multipart::Part::text(
+                serde_json::to_string(value)
+                    .map_err(support::Error::request_construction)?,
+            );
+            part = part
+                .mime_str("application/json")
+                .map_err(support::Error::request_construction)?;
+            form = form.part(name.clone(), part);
+        }
+        request = request.multipart(form);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<UploadAdditionalError>(&self.core, response)
+                    .await,
             )
         }
     }
@@ -10640,7 +10889,13 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
     }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     #[forbid(unsafe_code)]
-    #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+    #[allow(
+        dead_code,
+        deprecated,
+        unused_mut,
+        unused_variables,
+        clippy::result_large_err
+    )]
     impl BlockingClient {
         /// Build a blocking client over a fresh default `reqwest::Client`.
         pub fn new(
@@ -10696,7 +10951,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn read_file(
             &self,
@@ -10705,7 +10959,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime.block_on(self.inner.read_file(path))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn binding_collisions(
             &self,
@@ -10721,7 +10974,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn signature_binding_collisions(
             &self,
@@ -10746,7 +10998,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_params(
             &self,
@@ -10759,7 +11010,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 .block_on(self.inner.serialize_params(ids, workflow_id, x_flags, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_conjunction(
             &self,
@@ -10767,7 +11017,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime.block_on(self.inner.get_conjunction())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn get_user(
             &self,
@@ -10785,7 +11034,6 @@ Response `204`: No Content
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_multi(
             &self,
@@ -10802,7 +11050,6 @@ Response `401`: Unauthorized
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_shared(
             &self,
@@ -10816,7 +11063,6 @@ Response `404`: Not Found
 Response `409`: Conflict
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe(
             &self,
@@ -10828,7 +11074,6 @@ Response `default`: Anything else*/
 Response `201`: Created
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_multi_default(
             &self,
@@ -10841,7 +11086,6 @@ Response `default`: Anything else*/
         /**Response `200`: OK
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_plain_default(
             &self,
@@ -10854,7 +11098,6 @@ Response `default`: Anything else*/
         /**Response `204`: No Content
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_unit_default(
             &self,
@@ -10866,7 +11109,6 @@ Response `default`: Anything else*/
 Response `404`: Not Found
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_default(
             &self,
@@ -10883,7 +11125,6 @@ Response `404`: Not Found
 Response `409`: Conflict
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_default_multi(
             &self,
@@ -10898,7 +11139,6 @@ Response `default`: Anything else*/
 Response `403`: Forbidden
 
 Response `404`: Not Found*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_sibling(
             &self,
@@ -10913,7 +11153,6 @@ Response `404`: Not Found*/
 Response `403`: Forbidden
 
 Response `404`: Not Found*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_xml_bodyless_sibling(
             &self,
@@ -10926,7 +11165,6 @@ Response `404`: Not Found*/
         /**Response `304`: Not Modified
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_conditional(
             &self,
@@ -10939,7 +11177,6 @@ Response `default`: Anything else*/
         /**Response `204`: No Content
 
 Response `400`: Bad Request*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe_single(
             &self,
@@ -10951,7 +11188,6 @@ Response `400`: Bad Request*/
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_alias_shared(
             &self,
@@ -10959,7 +11195,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_alias_shared())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn upload_file(
             &self,
@@ -10968,7 +11203,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.upload_file(body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_blob(
             &self,
@@ -10978,7 +11212,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_blob(token, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn post_raw(
             &self,
@@ -10987,7 +11220,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_raw(body))
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn post_nullable_bytes(
             &self,
@@ -11000,7 +11232,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_nullable_bytes(params, body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn post_nullable_parts(
             &self,
@@ -11009,7 +11240,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_nullable_parts(body))
         }
         ///Response `200`: rendered HTML
-        #[allow(deprecated)]
         #[inline]
         pub fn render_html(
             &self,
@@ -11020,7 +11250,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.render_html())
         }
         ///Response `200`: octocat art
-        #[allow(deprecated)]
         #[inline]
         pub fn get_octocat(
             &self,
@@ -11031,7 +11260,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_octocat())
         }
         ///Response `200`: raw bytes
-        #[allow(deprecated)]
         #[inline]
         pub fn download_raw(
             &self,
@@ -11042,7 +11270,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.download_raw())
         }
         ///Response `206`: partial content
-        #[allow(deprecated)]
         #[inline]
         pub fn put_ranged(
             &self,
@@ -11054,7 +11281,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.put_ranged(body))
         }
         ///Response `200`: the image
-        #[allow(deprecated)]
         #[inline]
         pub fn get_artwork(
             &self,
@@ -11066,7 +11292,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_artwork(id))
         }
         ///Response `204`: stored
-        #[allow(deprecated)]
         #[inline]
         pub fn put_artwork(
             &self,
@@ -11079,7 +11304,6 @@ Response `409`: Conflict*/
 
 Response `400`: textual failure*/
         #[deprecated]
-        #[allow(deprecated)]
         #[inline]
         pub fn get_text_error(
             &self,
@@ -11093,7 +11317,6 @@ Response `201`: binary success
 Response `400`: text error
 
 Response `409`: binary error*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_raw_multi(
             &self,
@@ -11104,7 +11327,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.get_raw_multi())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn submit_order(
             &self,
@@ -11116,7 +11338,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.submit_order(body))
         }
         ///Response `204`: patched
-        #[allow(deprecated)]
         #[inline]
         pub fn patch_merge_document(
             &self,
@@ -11129,7 +11350,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.patch_merge_document(id, body))
         }
         ///Response `204`: accepted
-        #[allow(deprecated)]
         #[inline]
         pub fn submit_legacy_order(
             &self,
@@ -11138,7 +11358,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.submit_legacy_order(body))
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn post_json_meta(
             &self,
@@ -11150,7 +11369,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.post_json_meta(body))
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat(
             &self,
@@ -11161,7 +11379,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat_lines(
             &self,
@@ -11172,7 +11389,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat_lines())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat_sequence(
             &self,
@@ -11183,7 +11399,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat_sequence())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_alternate_auth(
             &self,
@@ -11191,7 +11406,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.get_alternate_auth())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_styles(
             &self,
@@ -11204,7 +11418,6 @@ Response `409`: binary error*/
                 .block_on(self.inner.serialize_styles(matrix, label, raw, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_content_params(
             &self,
@@ -11222,7 +11435,6 @@ Response `409`: binary error*/
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn submit_form(
             &self,
@@ -11231,7 +11443,36 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.submit_form(body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_form_additional(
+            &self,
+            body: &types::RequestBody3c5761a3,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[inline]
+        pub fn submit_nullable_form_additional(
+            &self,
+            body: &Option<types::RequestBodyE2940da4>,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitNullableFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[inline]
+        pub fn upload_additional(
+            &self,
+            body: &types::RequestBody1654af29,
+        ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+            self.runtime.block_on(self.inner.upload_additional(body))
+        }
+        ///Response `204`: No Content
         #[inline]
         pub fn documented_headers(
             &self,
@@ -11241,7 +11482,6 @@ Response `409`: binary error*/
         /**Response `404`: Not Found
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_no_success(
             &self,
@@ -11254,7 +11494,6 @@ Response `default`: Anything else*/
         /**Response `200`: OK
 
 Response `204`: No Content*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe_empty(
             &self,
@@ -11267,7 +11506,6 @@ Response `204`: No Content*/
         /**Response `200`: OK
 
 Response `204`: No Content*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_xml_maybe_empty(
             &self,
@@ -11280,7 +11518,6 @@ Response `204`: No Content*/
         /**Response `2XX`: Any other success
 
 Response `200`: OK*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_ranged(
             &self,
@@ -11295,7 +11532,6 @@ Response `200`: OK*/
 Response `4XX`: Any other client error
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_error_ranged(
             &self,

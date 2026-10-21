@@ -2,9 +2,9 @@ use serde::Serialize;
 
 /// An RFC 6901 JSON Pointer addressing a construct in the input document.
 ///
-/// Used both for diagnostic addressing and for `$ref` fragment resolution. Reference tokens are
-/// escaped (`~0` for `~`, `~1` for `/`) on construction, so the stored string is always a valid
-/// pointer.
+/// Used both for diagnostic addressing and for `$ref` fragment resolution. [`push`](Self::push)
+/// and [`index`](Self::index) escape each reference token (`~0` for `~`, `~1` for `/`); the `From`
+/// conversions store an already-encoded pointer string verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct JsonPointer(String);
 

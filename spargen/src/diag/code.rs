@@ -318,7 +318,8 @@ impl Code {
         }
     }
 
-    /// The interpretation this code's behavior depends on, if any.
+    /// The interpretation this code's behavior depends on, if any. [`InterpId`] states the
+    /// reading behind each id this returns.
     pub fn interpretation(self) -> Option<InterpId> {
         match self {
             Code::UnsupportedOpenApiVersion => Some(InterpId(1)),

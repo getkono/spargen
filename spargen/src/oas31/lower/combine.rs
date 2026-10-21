@@ -15,7 +15,7 @@ use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmi
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
 use super::{
-    member_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
+    all_of_entry_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
     ScopedRefiners, MAX_SCHEMA_DEPTH,
 };
 
@@ -27,8 +27,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         contributions: &[Contribution],
     ) -> Option<Ty> {
-        // Taken here, so a later merge never reads what was recorded for this one.
-        let value_variants = std::mem::take(&mut self.scalar_meet_value_variants);
         let mut has_object = contributions
             .iter()
             .any(|c| matches!(c, Contribution::Object { .. }));
@@ -100,7 +98,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         additional: AdditionalProps::Allow,
                     }),
                 );
-                return Some(self.with_all_of_nullability(schema, ty));
+                return Some(ty);
             };
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
                 let merged = match self.intersect_types(
@@ -143,9 +141,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 intersection = met;
             }
-            // A union member's `Value` variant took the other members' `null` from the meet,
-            // which the `allOf` already decided for the union by its own count (#660).
-            intersection = self.clear_value_variant_null(intersection, &value_variants, mark);
             // A `oneOf` the meets left with branches of one generated type collapses with `W001`,
             // as the meet of a union member does (#643); an `anyOf` member met with a `oneOf`
             // member left such `oneOf`s nested in its branches.
@@ -160,7 +155,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|def| def.kind.clone())?;
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
-            return Some(self.with_all_of_nullability(schema, ty));
+            return Some(ty);
         }
 
         // All object members: flatten into one struct. Property union preserves first-seen order.
@@ -388,7 +383,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
         // it satisfies every member.
         ty.nullable = object_all_of_admits_null(contributions);
-        Some(self.with_all_of_nullability(schema, ty))
+        Some(ty)
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -400,7 +395,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
         for (index, member) in schema.all_of.iter().enumerate() {
-            self.gather_member(member, &format!("{hint}Member{index}"), out)?;
+            self.gather_member(
+                member,
+                (&schema.provenance, index),
+                &format!("{hint}Member{index}"),
+                out,
+            )?;
         }
         // The enclosing schema may carry its own object keywords beside `allOf`; fold them in last.
         if schema_is_object_like(schema) {
@@ -416,20 +416,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(())
     }
 
+    /// Push the contributions of one `allOf` member, `entry` being where it is written: the
+    /// provenance of the schema whose `allOf` holds it, and its index there. A member that is a
+    /// boolean schema carries no provenance of its own, so `entry` is what locates it.
     pub(super) fn gather_member(
         &mut self,
         member: &SchemaOr,
+        entry: (&Provenance, usize),
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        let schema = match member {
+        match member {
             // A `true`/`{}` member imposes no constraint.
-            SchemaOr::Bool(true) => return Some(()),
+            SchemaOr::Bool(true) => Some(()),
             SchemaOr::Bool(false) => {
-                return self.reject_all_of_false_member(member_provenance(member));
+                let (holder, index) = entry;
+                self.reject_all_of_false_member(all_of_entry_provenance(
+                    self.resolver,
+                    holder,
+                    index,
+                ))
             }
-            SchemaOr::Schema(schema) => schema.as_ref(),
-        };
+            SchemaOr::Schema(schema) => self.gather_schema_member(schema, hint, out),
+        }
+    }
+
+    /// [`Self::gather_member`] of a member that is a schema object, or of a schema gathered as
+    /// one: a `$ref` member's siblings, or a `$ref` target expanded in place.
+    fn gather_schema_member(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
         // An inline member, or a non-component target expanded in place, is read by its keywords
         // here rather than lowered through `lower_schema_inner`, which would report this.
         self.diagnose_standalone_discriminator(schema);
@@ -448,11 +467,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !schema_has_shape_constraint(&sibling) {
                 return Some(());
             }
-            return self.gather_member(
-                &SchemaOr::Schema(Box::new(sibling)),
-                &format!("{hint}Constraint"),
-                out,
-            );
+            return self.gather_schema_member(&sibling, &format!("{hint}Constraint"), out);
         }
 
         if !schema.all_of.is_empty() && !schema_has_union(schema) {
@@ -690,7 +705,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_too_deep(&target.provenance);
         }
         self.depth += 1;
-        let result = self.gather_member(&SchemaOr::Schema(Box::new(target)), hint, out);
+        let result = self.gather_schema_member(&target, hint, out);
         self.depth -= 1;
         result
     }

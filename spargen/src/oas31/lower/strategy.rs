@@ -96,15 +96,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A reservation has no body yet, so there is nothing to rank: least specific, alongside
             // `Any` and a missing definition.
             //
-            // This arm is **live**, not defensive. An earlier comment here claimed a union holding a
-            // reservation was rejected before ranking, and named a function that has never existed.
-            // Neither half was true: `lower_union`'s guard tests the *direct* member's id, while this
-            // function recurses through `Array` and `Union`, so an array-wrapped back edge —
-            // `anyOf: [{type: array, items: {$ref: self}}, …]` — reaches here on a document that
-            // generates cleanly, and the value returned is emitted into the client as the trial-match
-            // order of an `anyOf`. Ranking it least specific is the answer that matches what is known
-            // about it, which is nothing; it is pinned by
-            // `an_array_wrapped_union_back_edge_ranks_least_specific`.
+            // This arm is live, not defensive: `lower_union`'s guard tests the direct member's id,
+            // while this function recurses through `Array` and `Union`, so an array-wrapped back
+            // edge — `anyOf: [{type: array, items: {$ref: self}}, …]` — reaches here on a document
+            // that generates cleanly, and the value returned is emitted into the client as the
+            // trial-match order of an `anyOf`. Ranking it least specific matches what is known
+            // about it, which is nothing; `an_array_wrapped_union_back_edge_ranks_least_specific`
+            // pins it.
             Some(TypeKind::Reserved) => 0,
             Some(TypeKind::Any) | None => 0,
         };
@@ -113,7 +111,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// The JSON primitive category a lowered variant type serializes as, or `None` when it cannot be
-    /// statically categorized (an untyped `Any`, raw `Bytes`, or a nested union).
+    /// statically categorized: an untyped `Any`, raw `Bytes`, a nested union, the exact JSON
+    /// `null`, an uninhabited `Never`, a reservation, or a `TypeId` with no definition.
     ///
     /// This is [`value_category`] but for raw bytes, which a schema's instance holds as a (base64)
     /// string but a union's dispatch does not categorise.

@@ -912,8 +912,8 @@ fn w002_a_dangling_ref_in_a_webhook_body_is_not_e004() {
 
 #[test]
 fn path_item_ref_resolves_into_operations() {
-    // Regression: a Path Item `$ref` was ignored outright, so the path contributed no operations
-    // and the client silently generated with fewer methods than the document describes.
+    // A Path Item `$ref` resolves into the operations it holds, so the client has a method for
+    // every operation the document describes.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -1121,24 +1121,22 @@ paths:
 // The token rule is now the schema's, applied to the sub-file (#234); the case-insensitive
 // fixed-field rule is spargen's own, since the schema names the fixed fields in upper case only.
 
-#[test]
-fn e011_additional_operations_method_must_be_an_http_token() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    std::fs::write(
-        dir.join("openapi.yaml"),
-        r##"
+/// The root both fixtures below share: one Path Item, a `$ref` into `sub.yaml`.
+const ADDITIONAL_OPERATIONS_ROOT: &str = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
 paths:
   /x:
     $ref: './sub.yaml#/item'
-"##,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("sub.yaml"),
-        r##"
+"##;
+
+#[test]
+fn e011_additional_operations_method_must_be_an_http_token() {
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ADDITIONAL_OPERATIONS_ROOT),
+        (
+            "sub.yaml",
+            r##"
 item:
   additionalOperations:
     "pu rge":
@@ -1146,11 +1144,8 @@ item:
       responses:
         '204': { description: ok }
 "##,
-    )
-    .unwrap();
-    let out = dir.join("client.rs");
-    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
+        ),
+    ]);
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         // The metaschema reports a key its `propertyNames` pattern refuses at the map holding it.
@@ -1164,24 +1159,13 @@ item:
 
 #[test]
 fn e011_additional_operations_method_must_not_restate_a_fixed_field_method() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    std::fs::write(
-        dir.join("openapi.yaml"),
-        r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    $ref: './sub.yaml#/item'
-"##,
-    )
-    .unwrap();
     // Compared case-insensitively: `Get` is strictly a distinct RFC 9110 token, but no server
     // implements it and generating a second method shadowing `get` is worse than refusing.
-    std::fs::write(
-        dir.join("sub.yaml"),
-        r##"
+    let (generated, checked, _) = generate_and_check_files(&[
+        ("openapi.yaml", ADDITIONAL_OPERATIONS_ROOT),
+        (
+            "sub.yaml",
+            r##"
 item:
   additionalOperations:
     Get:
@@ -1189,11 +1173,8 @@ item:
       responses:
         '204': { description: ok }
 "##,
-    )
-    .unwrap();
-    let out = dir.join("client.rs");
-    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
+        ),
+    ]);
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let [(pointer, _)] = invalid_input_at(report)[..] else {

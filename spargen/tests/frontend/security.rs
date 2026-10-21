@@ -222,16 +222,10 @@ components:
 fn oas32_security_requirement_uri_resolves() {
     // OpenAPI 3.2 lets a requirement name a Security Scheme Object by URI. A component name always
     // wins, per the specification, so only a name matching no component is resolved as a reference.
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("bearer.yaml"),
-        "type: http\nscheme: bearer\n",
-    )
-    .unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec_path,
-        r##"
+    let (report, _, code) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
 security:
@@ -242,17 +236,23 @@ paths:
       responses:
         "204": { description: No Content }
 "##,
-    )
-    .unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    ));
+        ),
+        ("bearer.yaml", "type: http\nscheme: bearer\n"),
+    ]);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnknownSecurityScheme),
         "{report:#?}"
+    );
+    // The resolved scheme is attached to the operation under the requirement's own key: a
+    // requirement dropped on the way would generate cleanly and attach nothing.
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains(
+            "support::attach_auth(&self.core,request,&[&[support::AuthScheme{\
+             name:\"./bearer.yaml\",kind:support::AuthKind::Bearer,},][..],],)"
+        ),
+        "the URI requirement must attach as `AuthKind::Bearer`:\n{code}"
     );
 }
 

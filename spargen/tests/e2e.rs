@@ -736,6 +736,126 @@ fn every_cycle_member_decodes_its_wire_shape() {
     assert!(status.success(), "the alias-cycle fixture must lint clean");
 }
 
+/// Every item kind a `deprecated: true` component lowers to, each named by an operation, a struct
+/// field, another component, or a response enum, so the module names each one internally.
+const DEPRECATED_COMPONENTS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /legacy:
+    post:
+      operationId: postLegacy
+      parameters:
+        - { name: level, in: query, schema: { $ref: '#/components/schemas/Level' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Tree' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '404':
+          description: nf
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Flag' }
+  /mixed/{level}:
+    get:
+      operationId: getMixed
+      parameters:
+        - { name: level, in: path, required: true, schema: { $ref: '#/components/schemas/Level' } }
+        - { name: tags, in: header, schema: { $ref: '#/components/schemas/Tags' } }
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Level: { schema: { $ref: '#/components/schemas/Level' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mixed' }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '409':
+          description: conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tree' }
+  /form:
+    post:
+      operationId: postForm
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Legacy' }
+      responses:
+        '204': { description: stored }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+components:
+  schemas:
+    Mixed: { oneOf: [{ $ref: '#/components/schemas/Legacy' }, { $ref: '#/components/schemas/Tags' }] }
+    Level: { type: integer, enum: [1, 2], deprecated: true }
+    Flag: { type: boolean, enum: [true], deprecated: true }
+    Tags: { type: array, items: { type: string }, deprecated: true }
+    Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }
+    Forest: { type: array, items: { $ref: '#/components/schemas/Tree' } }
+    Legacy:
+      type: object
+      deprecated: true
+      required: [level, flag, tags, tree, forest]
+      properties:
+        level: { $ref: '#/components/schemas/Level' }
+        flag: { $ref: '#/components/schemas/Flag' }
+        tags: { $ref: '#/components/schemas/Tags' }
+        tree: { $ref: '#/components/schemas/Tree' }
+        forest: { $ref: '#/components/schemas/Forest' }
+"#;
+
+/// Issue #731: a deprecated component carries `#[deprecated]` whatever item it lowers to, and the
+/// module that names those items itself still compiles and lints clean under `-D warnings`.
+#[test]
+fn a_module_naming_its_deprecated_components_lints_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, DEPRECATED_COMPONENTS_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "deprecated_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a module naming its own deprecated components must lint clean"
+    );
+}
+
 const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -2620,6 +2740,59 @@ fn multipart_parts_carry_their_resolved_content_types() {
         .unwrap();
 
     server.join().unwrap();
+}
+
+/// The members of a typed `additionalProperties` overflow reach the wire on form-urlencoded and
+/// multipart bodies, as they do on JSON (#697): after the declared properties, ordered by key, in
+/// their type's default encoding — a text form field for a string, a JSON part under
+/// `application/json` for an integer array. An overflow key repeating a declared name is not sent
+/// a second time, and on both media the declared property's value is the one sent.
+#[test]
+fn additional_properties_reach_form_and_multipart_bodies() {
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_form_additional(&basic_client::types::RequestBody3c5761a3 {
+            a: "x".to_owned(),
+            additional: [
+                ("z".to_owned(), "last".to_owned()),
+                ("b c".to_owned(), "y&z".to_owned()),
+                ("a".to_owned(), "overflow".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /forms/additional HTTP/1.1"), "{request}");
+    assert!(request.ends_with("\r\n\r\na=x&b%20c=y%26z&z=last"), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .upload_additional(&basic_client::types::RequestBody1654af29 {
+            caption: "c".to_owned(),
+            additional: [
+                ("scores".to_owned(), vec![1, 2]),
+                ("caption".to_owned(), vec![9]),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /upload/additional HTTP/1.1"), "{request}");
+    assert_eq!(request.matches("name=\"caption\"").count(), 1, "{request}");
+    let caption = &request[request.find("name=\"caption\"").unwrap()..];
+    let (_, caption) = caption.split_once("\r\n\r\n").unwrap();
+    assert!(caption.starts_with("c\r\n"), "{caption}");
+    let position = request
+        .find("name=\"scores\"")
+        .unwrap_or_else(|| panic!("{request}"));
+    let part = &request[position..];
+    let (header, value) = part.split_once("\r\n\r\n").unwrap();
+    assert!(header.contains("Content-Type: application/json"), "{header}");
+    assert!(value.starts_with("[1,2]\r\n"), "{value}");
 }
 
 /// A raw byte request body is sent with the `Content-Type` its media key names: the octet gate
@@ -6307,6 +6480,58 @@ paths:
                 explode: false
               blob:
                 contentType: application/json
+      responses:
+        "204": { description: No Content }
+  # Typed `additionalProperties` on form-urlencoded and multipart bodies (#697): the overflow
+  # members are sent after the declared properties, each in its type's default encoding, as the
+  # JSON codec sends them. The form overflow is a string (a text field); the multipart overflow is
+  # an integer array (a JSON part under `application/json`).
+  /forms/additional:
+    post:
+      operationId: submitFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [a]
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  # A nullable form body with a typed overflow: the overflow map's length is read through the
+  # `Option`, so this compiles only if that branch of the generated call does.
+  /form/additional/nullable:
+    post:
+      operationId: submitNullableFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: [object, 'null']
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  /upload/additional:
+    post:
+      operationId: uploadAdditional
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [caption]
+              properties:
+                caption: { type: string }
+              additionalProperties:
+                type: array
+                items: { type: integer }
       responses:
         "204": { description: No Content }
   # Documented response headers whose schemas are NAMED components. The generated header struct

@@ -217,6 +217,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     target.value
                 ),
             ),
+            // The caller passes only a component member left with no tag, and such a member's
+            // name is claimed by a `mapping` key, so this arm is not reached; it stays as the
+            // refusal for a caller that passes another member.
             None => (
                 schema.provenance.clone(),
                 format!("no discriminator value selects union member {member}"),

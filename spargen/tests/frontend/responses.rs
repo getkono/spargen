@@ -57,7 +57,7 @@ fn multi_status_success_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two success statuses with DIFFERENT bodies used to degrade to `serde_json::Value` (W003).
     // W003 is retired: the success type is now a typed per-operation response enum, generated with
     // no diagnostic at all.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -90,12 +90,26 @@ components:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // No diagnostics at all — the retired W003 must not fire under any code.
     assert!(report.diagnostics().is_empty(), "{report:#?}");
+    // One variant per success status, each carrying its own typed body.
+    assert_eq!(
+        enum_variants(&code, "GetXResponse"),
+        [
+            "Status200(Box<types::BodyA>)",
+            "Status201(Box<types::BodyB>)"
+        ],
+        "{code}"
+    );
+    assert!(
+        code.contains("support::ResponseValue<GetXResponse>"),
+        "{code}"
+    );
+    assert_no_untyped_value(&code);
 }
 
 #[test]
 fn multi_status_error_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two error statuses with DIFFERENT bodies likewise generate a typed error enum, no W003.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -132,6 +146,14 @@ components:
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics().is_empty(), "{report:#?}");
+    // One variant per error status, each carrying its own typed body.
+    assert_eq!(
+        enum_variants(&code, "GetXError"),
+        ["Status404(Box<types::ErrA>)", "Status409(Box<types::ErrB>)"],
+        "{code}"
+    );
+    assert!(code.contains("support::Error<GetXError>"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -373,7 +395,7 @@ components:
 
 #[test]
 fn documented_response_headers_get_typed_accessors() {
-    // Regression: `response.headers` was dropped entirely, with no diagnostic.
+    // A response's documented `headers` each get a typed accessor on the generated response.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0

@@ -36,8 +36,8 @@ pub(super) fn lower_server_override(
 
 /// Render a lowered server URL template with each variable at its declared default.
 ///
-/// `lower_server` has already rejected a template naming an undeclared variable, so a missing
-/// entry here can only occur on a document that is already failing.
+/// `server` is one [`lower_server`] returned, and it returns none whose template names an
+/// undeclared variable, so every variable segment finds its declaration.
 fn render_server_url(server: &Server) -> String {
     let mut url = String::with_capacity(server.url.len());
     for segment in &server.segments {

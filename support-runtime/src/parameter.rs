@@ -467,46 +467,102 @@ pub enum FormStyle {
 /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
 /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
 /// value is JSON `null` is omitted entirely rather than sent empty.
+///
+/// `additional` is the body's typed `additionalProperties` overflow: the resolved mode of its
+/// members (the default for their type, since no Encoding Object can name them) and how many
+/// members the overflow map holds, which a generated struct serializes after its declared fields.
+/// When it is `Some`, those members follow the declared ones, ordered by key, rendered in that
+/// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
+/// whose key repeats a declared property's name is never sent: the declared property's own value
+/// is, or nothing when that property is absent, as in a multipart body.
 pub fn serialize_form_body<T: Serialize>(
     value: &T,
     properties: &[FormProperty],
+    additional: Option<(FormMode, usize)>,
 ) -> Result<String, ParameterError> {
-    let Value::Object(members) = serde_json::to_value(value)? else {
+    // Serialized to text and read back member by member, a repeated key kept: a
+    // `serde_json::Value` map keeps one entry per key, so a flattened overflow member would
+    // overwrite the declared field of the same name, or stand in for it when that field is
+    // skipped as `None`.
+    let text = serde_json::to_vec(value)?;
+    if text.first() != Some(&b'{') {
         return Err(ParameterError::ExpectedObject);
-    };
+    }
+    let OrderedMembers(members) = serde_json::from_slice(&text)?;
+    let overflow_len = additional.map_or(0, |(_, len)| len);
+    let (declared, overflow) = members.split_at(members.len().saturating_sub(overflow_len));
     let mut fragments: Vec<String> = Vec::new();
     for property in properties {
-        let Some(member) = members.get(property.name) else {
-            continue;
-        };
-        if member.is_null() {
-            continue;
+        if let Some((_, member)) = declared.iter().find(|(name, _)| name == property.name) {
+            push_form_member(&mut fragments, property.name, member, property.mode)?;
         }
-        match property.mode {
-            FormMode::Text => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                scalar(member, PercentEncoding::Form)?
-            )),
-            FormMode::Json => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                encode(&serde_json::to_string(member)?, PercentEncoding::Form)
-            )),
-            FormMode::Style {
-                style,
-                explode,
-                encoding,
-            } => fragments.extend(style_fragments(
-                property.name,
-                member,
-                style,
-                explode,
-                encoding,
-            )?),
+    }
+    if let Some((mode, _)) = additional {
+        // A generated body's overflow is a `BTreeMap`, so its members arrive ordered by key.
+        for (name, member) in overflow {
+            if !properties.iter().any(|property| property.name == name) {
+                push_form_member(&mut fragments, name, member, mode)?;
+            }
         }
     }
     Ok(fragments.join("&"))
+}
+
+/// A JSON object's members in the order they were written, a repeated key kept each time it
+/// appears.
+struct OrderedMembers(Vec<(String, Value)>);
+
+impl<'de> serde::Deserialize<'de> for OrderedMembers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MembersVisitor;
+        impl<'de> serde::de::Visitor<'de> for MembersVisitor {
+            type Value = OrderedMembers;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<OrderedMembers, A::Error> {
+                let mut members = Vec::new();
+                while let Some(member) = map.next_entry::<String, Value>()? {
+                    members.push(member);
+                }
+                Ok(OrderedMembers(members))
+            }
+        }
+        deserializer.deserialize_map(MembersVisitor)
+    }
+}
+
+/// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+fn push_form_member(
+    fragments: &mut Vec<String>,
+    name: &str,
+    member: &Value,
+    mode: FormMode,
+) -> Result<(), ParameterError> {
+    if member.is_null() {
+        return Ok(());
+    }
+    match mode {
+        FormMode::Text => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            scalar(member, PercentEncoding::Form)?
+        )),
+        FormMode::Json => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            encode(&serde_json::to_string(member)?, PercentEncoding::Form)
+        )),
+        FormMode::Style {
+            style,
+            explode,
+            encoding,
+        } => fragments.extend(style_fragments(name, member, style, explode, encoding)?),
+    }
+    Ok(())
 }
 
 /// The per-part values for one RFC 6570-mode `multipart/form-data` property.

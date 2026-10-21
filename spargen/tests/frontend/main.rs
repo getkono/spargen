@@ -12,9 +12,9 @@
 //! The last two oracles live in `oracles/`, shared with `fuzz_frontend.rs` and
 //! `lowering_props.rs`.
 //!
-//! This file holds that shared harness; the fixtures sit in one module per construct family
-//! beside it (`unions`, `ref_siblings`, `bodies`, ...), each reaching the harness through
-//! `use super::*`.
+//! This file holds that shared harness; the fixtures sit in one module per construct family or
+//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies`, ...), each reaching the
+//! harness through `use super::*`.
 
 use camino::Utf8PathBuf;
 use spargen::{
@@ -26,7 +26,11 @@ mod oracles;
 
 use oracles::types_module;
 
-mod all_of;
+mod all_of_arrays;
+mod all_of_meet_conflicts;
+mod all_of_merge;
+mod all_of_nullability;
+mod all_of_union_meet;
 mod audit_reach;
 mod bodies;
 mod defaults;
@@ -39,7 +43,9 @@ mod parameters;
 mod pattern_properties;
 mod placement;
 mod recursion;
-mod ref_siblings;
+mod ref_sibling_categories;
+mod ref_sibling_rejections;
+mod ref_sibling_unions;
 mod refs;
 mod requirements;
 mod responses;
@@ -49,12 +55,13 @@ mod security;
 mod servers;
 mod union_categories;
 mod union_nullability;
-mod unions;
+mod unions_collapse;
+mod unions_dispatch;
+mod unions_null_branches;
+mod unions_siblings;
 mod untyped_branch_nullability;
 mod xml;
 
-/// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
-/// tempdir (and any written output) is discarded once the report — which owns its data — is built.
 /// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
 /// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
 /// matters here — no `W013` polluting the diagnostics a fixture is asserting on.
@@ -86,12 +93,12 @@ fn run_check(spec: &Spec) -> Report {
     report
 }
 
-/// Fail unless every diagnostic in `report` is held to a real location (#454), except where an open
-/// issue tracks the gap: see [`oracles::location_violations`]. The root document is read back from
-/// `spec`'s path, so a span can be compared with the file it lies in.
+/// Fail unless every diagnostic in `report` is held to a real location (#454): see
+/// [`oracles::location_violations`]. The root document is read back from `spec`'s path, so a span
+/// can be compared with the file it lies in.
 fn assert_located(report: &Report, spec: &Spec) {
     let root = std::fs::read(spec.path()).unwrap_or_default();
-    let violations = oracles::unknown(oracles::location_violations(report.diagnostics(), &root));
+    let violations = oracles::location_violations(report.diagnostics(), &root);
     assert!(
         violations.is_empty(),
         "a `{}` run reported diagnostics with no real location: {violations:#?}",
@@ -99,9 +106,8 @@ fn assert_located(report: &Report, spec: &Spec) {
     );
 }
 
-/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no warning
-/// says why, except where an open issue tracks the gap: see
-/// [`oracles::indistinguishable_variants`].
+/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no `W001` at
+/// the union says why: see [`oracles::unexplained_variants`].
 fn assert_distinguishable_variants(report: &Report, code: &str) {
     let violations = oracles::unexplained_variants(report, code);
     assert!(
@@ -306,29 +312,23 @@ fn located(
     message: &str,
 ) -> Diagnostic {
     let (line, start, end) = span;
-    Diagnostic {
-        code,
-        severity: Severity::Warning,
-        pointer: spargen::JsonPointer::from(pointer),
-        span: Some(spargen::Span {
-            file: spargen::FileId(file),
-            start: spargen::Loc {
-                line,
-                col: 1,
-                offset: start,
-            },
-            end: spargen::Loc {
-                line,
-                col: 1,
-                offset: end,
-            },
-        }),
-        file: None,
-        message: message.to_owned(),
-        remedy: None,
-        interpretation: None,
-        claim: OutcomeClaim::Independent,
-    }
+    let span = spargen::Span {
+        file: spargen::FileId(file),
+        start: spargen::Loc {
+            line,
+            col: 1,
+            offset: start,
+        },
+        end: spargen::Loc {
+            line,
+            col: 1,
+            offset: end,
+        },
+    };
+    let at = spargen::Provenance::new(spargen::JsonPointer::from(pointer), Some(span));
+    let mut diagnostic = Diagnostic::warning(code, at).message(message).build();
+    diagnostic.interpretation = None;
+    diagnostic
 }
 
 /// The name of the `pub struct` that declares the first field line starting with `field`.
@@ -470,7 +470,8 @@ components:
 /// The root document is fixed — one operation whose `200` body `$ref`s `target` — and `lib` is
 /// written beside it as `lib.yaml`. Every shape below differs only in that sub-file, so what a
 /// fixture pins is the sub-file's own reference behaviour and nothing else. The tempdir is dropped
-/// on return; the report owns its data and the emitted source is read out first.
+/// on return; the report owns its data and the emitted source is read out first. The run is held
+/// to parity and parseability by [`generate_and_check_dir`].
 fn split(target: &str, lib: &str) -> (Report, Report, String) {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
@@ -494,11 +495,7 @@ fn split(target: &str, lib: &str) -> (Report, Report, String) {
     )
     .unwrap();
     std::fs::write(dir.join("lib.yaml"), lib).unwrap();
-    let out = dir.join("client.rs");
-    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-    (generated, checked, code)
+    generate_and_check_dir(&dir, "openapi.yaml")
 }
 
 /// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
@@ -714,8 +711,8 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
 /// Write a root document whose only Path Item is a `$ref` to a sibling file holding `path_item`,
 /// then run both entry points over it. The indirection is the point: the metaschema once validated
 /// the root document and nothing else, so a Path Item reached by `$ref` never met it, and these
-/// fixtures pin that it now does (#234). Returns `(generate, check)` so a fixture can assert the two agree, the way
-/// `PARITY_FIXTURES` does for inline specs — which those cannot, being single-file by construction.
+/// fixtures pin that it now does (#234). Returns `(generate, check)`, which
+/// [`generate_and_check_dir`] has already held to the same verdict and codes.
 fn generate_and_check_refd_path_item(path_item: &str) -> (Report, Report) {
     let (generated, checked, _) = generate_and_check_refd_path_item_with_code(path_item);
     (generated, checked)
@@ -733,29 +730,42 @@ fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Repo
     )
     .unwrap();
     std::fs::write(dir.join("pet.yaml"), path_item).unwrap();
-    let out = dir.join("client.rs");
-    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-    let code = std::fs::read_to_string(&out).unwrap_or_default();
-    (generated, checked, code)
+    generate_and_check_dir(&dir, "openapi.yaml")
 }
 
-/// Write `files` (the first is the root, `openapi.yaml`) into a tempdir and run both entry points.
+/// Write `files` (the first is the root, `openapi.yaml`) into a tempdir and run both entry points,
+/// as [`generate_and_check_dir`].
 fn generate_and_check_files(files: &[(&str, &str)]) -> (Report, Report, String) {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     for (name, text) in files {
         std::fs::write(dir.join(name), text).unwrap();
     }
-    let root = dir.join(files[0].0);
+    generate_and_check_dir(&dir, files[0].0)
+}
+
+/// Run both entry points over the multi-file description rooted at `dir/root`, writing the module
+/// to `dir/client.rs`, and hold the pair to the two oracles [`generate`] gives an inline spec:
+/// [`assert_check_agrees`] on the two reports and, for a `Generated` run, [`assert_parseable`] on
+/// the module. Returns `(generate, check, module)`, the module empty when nothing was written.
+///
+/// Every multi-file helper in this file ends here, so a fixture that writes several files gets the
+/// same parity and parseability checks as one written inline.
+fn generate_and_check_dir(dir: &camino::Utf8Path, root: &str) -> (Report, Report, String) {
+    let root = dir.join(root);
     let out = dir.join("client.rs");
     let generated = run_generate(&build(root.clone(), out.clone()));
     let checked = run_check(&Spec::new(root));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_check_agrees(&generated, &checked);
+    if generated.outcome() == Outcome::Generated {
+        assert_parseable(&code);
+    }
     (generated, checked, code)
 }
 
-/// Write `files` into a fresh directory and run both entry points over its `openapi.json`.
+/// Write `files` into a fresh directory and run both entry points over its `openapi.json`, as
+/// [`generate_and_check_dir`].
 fn run_placement(files: &[(&str, serde_json::Value)]) -> (Report, Report) {
     let (generated, checked, _) = run_placement_with_client(files);
     (generated, checked)
@@ -768,8 +778,5 @@ fn run_placement_with_client(files: &[(&str, serde_json::Value)]) -> (Report, Re
     for (name, value) in files {
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
-    let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
-    let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-    let checked = run_check(&Spec::new(dir.join("openapi.json")));
-    (generated, checked, client)
+    generate_and_check_dir(&dir, "openapi.json")
 }

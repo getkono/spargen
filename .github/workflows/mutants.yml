@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # `cargo test -p spargen --lib`, the unmutated baseline, hashes the LFS-backed corpus
-          # (`the_pinned_corpus_files_still_hash_to_their_manifest_sha256`).
+          # (`the_hasher_agrees_with_sha2_on_every_pinned_corpus_file`).
           lfs: true
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2

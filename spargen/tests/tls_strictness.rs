@@ -2,8 +2,8 @@
 //!
 //! A conformant peer behaves identically under every rustls release, so a test built on one
 //! cannot notice a change in what the fetcher accepts. RUSTSEC-2026-0285, fixed in
-//! `rustls 0.23.45` (the `rustls` floor in `spargen/Cargo.toml` now sits at 0.23.46), is exactly
-//! such a change: releases before it accepted a plaintext handshake record that carried a
+//! `rustls 0.23.45` (the `rustls` floor in `spargen/Cargo.toml` admits no release before it), is
+//! exactly such a change: releases before it accepted a plaintext handshake record that carried a
 //! key-changing message *and* a further handshake message, which RFC 8446 §5.1 forbids
 //! ("Handshake messages MUST NOT span key changes"). The peer here sends that record, so this
 //! suite fails on a rustls that relaxes the rule again.
