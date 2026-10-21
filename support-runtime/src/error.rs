@@ -93,15 +93,17 @@ pub enum Error<E> {
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
-        /// One path does not reach the cap and retains more than it: `EventStream`'s per-frame
-        /// decode retains one frame, already detached by the framer. The cap does not apply
-        /// because the bound there is the frame, not the response — but the frame buffer itself
-        /// is unbounded, so this is a real gap, not a safe exemption.
+        /// One path does not reach the cap and can retain more than it: `EventStream`'s
+        /// per-frame decode retains one whole frame, already detached by the framer. The bound
+        /// there is the frame, not the response: `ClientConfig::max_stream_frame` limits the
+        /// bytes buffered for an item before its terminator arrives. An item that passes that
+        /// limit is itself reported here, retaining at most `max_error_body` bytes of it.
         body: Bytes,
         /// Whether bytes were dropped from `body` to meet the cap.
         ///
-        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the path
-        /// above nothing is dropped because nothing is capped.
+        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the
+        /// per-frame decode path above nothing is dropped because nothing is capped. An item past
+        /// `max_stream_frame` always sets it.
         truncated: bool,
     },
     /// #9 — the connection dropped mid-stream on a streamed response.

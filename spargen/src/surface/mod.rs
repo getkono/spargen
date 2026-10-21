@@ -4,9 +4,11 @@
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
 //! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
 //! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
-//! client sees — the client methods (operations) and the public model types — then classifies every
-//! difference between an old and a new surface as a semver bump. It never emits code and has no
-//! effect on generation or the runtime; it backs `spargen diff`.
+//! client sees — the client methods (operations) with their typed response-header structs, the
+//! public model types with their typed `additionalProperties` maps, and the server builders with
+//! their variable enums — then classifies every difference between an old and a new surface as a
+//! semver bump. It never emits code and has no effect on generation or the runtime; it backs
+//! `spargen diff`.
 //!
 //! Per the product contract, "the semver surface is the public API of generated output".
 //!
@@ -36,13 +38,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
-    TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec,
+    SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
-/// The full consumer-visible surface of one generated client: its operations (client methods) and
-/// its public model types, each keyed by a stable identity so two surfaces can be diffed.
+/// The full consumer-visible surface of one generated client: its operations (client methods), its
+/// public model types, and its server builders, each keyed by a stable identity so two surfaces
+/// can be diffed.
 pub(crate) struct Surface {
     /// Operations keyed by `"METHOD /path"` — the stable endpoint identity (independent of a
     /// possibly-synthesised `operationId`).
@@ -54,6 +57,37 @@ pub(crate) struct Surface {
     /// a type that turns into one or out of one is a kind change rather than an addition or a
     /// removal.
     aliases: BTreeSet<String>,
+    /// The server builders of the generated `servers` module, keyed by generated builder name.
+    servers: BTreeMap<String, ServerSurface>,
+}
+
+/// One server builder's surface: a setter per server variable, keyed by the generated setter name.
+/// Its fields are private; a consumer reaches it through `new`, `url`, `Default`, which every
+/// builder has, and these setters.
+struct ServerSurface {
+    variables: BTreeMap<String, ServerVariableSurface>,
+}
+
+/// What a server variable's setter takes.
+#[derive(PartialEq, Eq)]
+enum ServerVariableSurface {
+    /// A free-form variable: `impl Into<String>`.
+    Free,
+    /// A variable with an `enum`: the generated variable enum, by name, and its variant names.
+    Enum {
+        name: String,
+        variants: BTreeSet<String>,
+    },
+}
+
+impl ServerVariableSurface {
+    /// The setter's argument type, as a consumer writes it.
+    fn argument(&self) -> String {
+        match self {
+            ServerVariableSurface::Free => "impl Into<String>".to_owned(),
+            ServerVariableSurface::Enum { name, .. } => format!("servers::{name}"),
+        }
+    }
 }
 
 /// One client method's surface: the generated method name, its parameters, request body, and the
@@ -73,6 +107,19 @@ struct OpSurface {
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
+    /// The typed response-header structs, keyed by the status they document as the specification
+    /// spells it (`200`, `4XX`, `default`). A status documenting no header has no entry.
+    response_headers: BTreeMap<String, HeadersSurface>,
+}
+
+/// One status's typed response-header struct: its generated name and its public fields, one per
+/// documented header, keyed by generated field name. A required header is a `T` field read with
+/// `require_header`, an optional one an `Option<T>` field.
+struct HeadersSurface {
+    /// The generated struct name.
+    name: String,
+    /// The header fields, keyed by generated field name.
+    fields: BTreeMap<String, FieldSurface>,
 }
 
 /// A request body's surface: a required body is a `&T` argument in the generated signature, an
@@ -101,8 +148,9 @@ struct ParamSurface {
 /// consumer already sees at every use site, so they are compared structurally there rather than as
 /// standalone entries.
 enum TypeSurface {
-    /// A `struct`: fields keyed by generated field name.
-    Struct(BTreeMap<String, FieldSurface>),
+    /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
+    /// when it has one.
+    Struct(BTreeMap<String, FieldSurface>, Option<OverflowSurface>),
     /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
     /// the generated name of the variant holding any other string.
     Enum(BTreeSet<String>, Option<String>),
@@ -120,7 +168,7 @@ impl TypeSurface {
     /// A short label for the generation kind, used to report a kind change (`struct` → `enum`, …).
     fn kind_label(&self) -> &'static str {
         match self {
-            TypeSurface::Struct(_) => "struct",
+            TypeSurface::Struct(..) => "struct",
             TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
             TypeSurface::Newtype(_) => "newtype",
@@ -135,6 +183,15 @@ impl TypeSurface {
 struct FieldSurface {
     ty: String,
     required: bool,
+}
+
+/// A struct's typed `additionalProperties` map, emitted as a public `#[serde(flatten)]` field of
+/// type `BTreeMap<String, T>`.
+struct OverflowSurface {
+    /// The generated field name.
+    field: String,
+    /// The canonical value type `T`.
+    ty: String,
 }
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
@@ -229,6 +286,42 @@ pub enum ChangeKind {
     VariantRemoved,
     /// A union variant's payload type changed. **Major**.
     VariantTypeChanged,
+    /// A documented status gained its typed response-header struct. **Minor** — a new type.
+    ResponseHeadersAdded,
+    /// A status's typed response-header struct was removed. **Major** — code naming it breaks.
+    ResponseHeadersRemoved,
+    /// A status's typed response-header struct was renamed. **Major**.
+    ResponseHeadersRenamed,
+    /// A new optional header was added to a response-header struct. **Minor** — an `Option<T>`
+    /// field, the struct-field rule.
+    ResponseHeaderAdded,
+    /// A new required header was added to a response-header struct. **Major** — reading the
+    /// headers now fails on a response without it, and every literal of the struct breaks.
+    RequiredResponseHeaderAdded,
+    /// A header was removed from a response-header struct. **Major**.
+    ResponseHeaderRemoved,
+    /// A response header's type changed. **Major** — its field's type changes.
+    ResponseHeaderTypeChanged,
+    /// A response header's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
+    ResponseHeaderRequirednessChanged,
+    /// A new server builder appeared in the `servers` module. **Minor** — a new type.
+    ServerAdded,
+    /// A server builder was removed. **Major** — code naming it breaks.
+    ServerRemoved,
+    /// A server builder gained a variable setter. **Minor** — the new variable defaults.
+    ServerVariableAdded,
+    /// A server builder lost a variable setter. **Major** — calls to it break.
+    ServerVariableRemoved,
+    /// A server variable's setter now takes another type: a free-form variable gained or lost its
+    /// `enum`, or its variable enum was renamed. **Major**.
+    ServerVariableTypeChanged,
+    /// A struct gained a typed `additionalProperties` map. **Minor** — a new public map field, the
+    /// optional-field rule.
+    AdditionalPropertiesAdded,
+    /// A struct lost its typed `additionalProperties` map. **Major** — reads of the field break.
+    AdditionalPropertiesRemoved,
+    /// The value type of a struct's typed `additionalProperties` map changed. **Major**.
+    AdditionalPropertiesTypeChanged,
 }
 
 impl ChangeKind {
@@ -240,7 +333,12 @@ impl ChangeKind {
             | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
             | ChangeKind::FieldAdded
-            | ChangeKind::VariantAdded => Impact::Minor,
+            | ChangeKind::VariantAdded
+            | ChangeKind::ResponseHeadersAdded
+            | ChangeKind::ResponseHeaderAdded
+            | ChangeKind::ServerAdded
+            | ChangeKind::ServerVariableAdded
+            | ChangeKind::AdditionalPropertiesAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::RequestBodyAdded
@@ -261,7 +359,18 @@ impl ChangeKind {
             | ChangeKind::FieldTypeChanged
             | ChangeKind::FieldRequirednessChanged
             | ChangeKind::VariantRemoved
-            | ChangeKind::VariantTypeChanged => Impact::Major,
+            | ChangeKind::VariantTypeChanged
+            | ChangeKind::ResponseHeadersRemoved
+            | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::RequiredResponseHeaderAdded
+            | ChangeKind::ResponseHeaderRemoved
+            | ChangeKind::ResponseHeaderTypeChanged
+            | ChangeKind::ResponseHeaderRequirednessChanged
+            | ChangeKind::ServerRemoved
+            | ChangeKind::ServerVariableRemoved
+            | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesRemoved
+            | ChangeKind::AdditionalPropertiesTypeChanged => Impact::Major,
         }
     }
 
@@ -295,6 +404,22 @@ impl ChangeKind {
             ChangeKind::VariantAdded => "variant-added",
             ChangeKind::VariantRemoved => "variant-removed",
             ChangeKind::VariantTypeChanged => "variant-type-changed",
+            ChangeKind::ResponseHeadersAdded => "response-headers-added",
+            ChangeKind::ResponseHeadersRemoved => "response-headers-removed",
+            ChangeKind::ResponseHeadersRenamed => "response-headers-renamed",
+            ChangeKind::ResponseHeaderAdded => "response-header-added",
+            ChangeKind::RequiredResponseHeaderAdded => "required-response-header-added",
+            ChangeKind::ResponseHeaderRemoved => "response-header-removed",
+            ChangeKind::ResponseHeaderTypeChanged => "response-header-type-changed",
+            ChangeKind::ResponseHeaderRequirednessChanged => "response-header-requiredness-changed",
+            ChangeKind::ServerAdded => "server-added",
+            ChangeKind::ServerRemoved => "server-removed",
+            ChangeKind::ServerVariableAdded => "server-variable-added",
+            ChangeKind::ServerVariableRemoved => "server-variable-removed",
+            ChangeKind::ServerVariableTypeChanged => "server-variable-type-changed",
+            ChangeKind::AdditionalPropertiesAdded => "additional-properties-added",
+            ChangeKind::AdditionalPropertiesRemoved => "additional-properties-removed",
+            ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
         }
     }
 }
@@ -429,6 +554,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 success: success_sig(&operation.responses.success(), api, names),
                 error: error_sig(&operation.responses.error(), api, names),
                 error_body: error_body_sig(&operation.responses.error(), api, names),
+                response_headers: response_headers(operation, api, names),
             },
         );
     }
@@ -461,7 +587,20 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         },
                     );
                 }
-                TypeSurface::Struct(fields)
+                // `Deny` and `Allow` only change what a decode accepts; neither declares a field.
+                let overflow = match &object.additional {
+                    AdditionalProps::Typed(ty) => Some(OverflowSurface {
+                        field: names
+                            .struct_overflow
+                            .get(&id)
+                            .expect("overflow field name allocated")
+                            .as_str()
+                            .to_owned(),
+                        ty: canon_ty(**ty, api, names),
+                    }),
+                    AdditionalProps::Allow | AdditionalProps::Deny => None,
+                };
+                TypeSurface::Struct(fields, overflow)
             }
             // Only string enums generate a real `pub enum` whose variants are surface. Integer /
             // boolean enums lower to a scalar alias and carry no variant surface — skip them here;
@@ -518,7 +657,96 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         operations,
         types,
         aliases,
+        servers: servers(api, names),
     }
+}
+
+/// The server builders codegen's `emit_servers` declares, named as it names them.
+fn servers(api: &Api, names: &Names) -> BTreeMap<String, ServerSurface> {
+    let mut builders = BTreeMap::new();
+    for (index, server) in api.servers.iter().enumerate() {
+        let name = names
+            .servers
+            .get(index)
+            .expect("server name allocated")
+            .as_str()
+            .to_owned();
+        let variables = server
+            .variables
+            .iter()
+            .map(|(variable, declared)| {
+                let key = (index, variable.clone());
+                let setter = names
+                    .server_variable_fields
+                    .get(&key)
+                    .expect("server variable field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = match names.server_variable_enums.get(&key) {
+                    Some(enum_name) => ServerVariableSurface::Enum {
+                        name: enum_name.as_str().to_owned(),
+                        variants: declared
+                            .enum_values
+                            .iter()
+                            .map(|value| {
+                                names
+                                    .server_variable_variants
+                                    .get(&(index, variable.clone(), value.clone()))
+                                    .expect("server variable variant allocated")
+                                    .as_str()
+                                    .to_owned()
+                            })
+                            .collect(),
+                    },
+                    None => ServerVariableSurface::Free,
+                };
+                (setter, surface)
+            })
+            .collect();
+        builders.insert(name, ServerSurface { variables });
+    }
+    builders
+}
+
+/// The typed response-header structs codegen's `emit_response_headers` declares for `operation`:
+/// one per documented status with at least one header, named and laid out as it names them.
+fn response_headers(
+    operation: &crate::ir::Operation,
+    api: &Api,
+    names: &Names,
+) -> BTreeMap<String, HeadersSurface> {
+    let mut structs = BTreeMap::new();
+    for (status, response) in operation.responses.entries() {
+        if response.headers.is_empty() {
+            continue;
+        }
+        let label = crate::name::status_label(status);
+        let name = names
+            .response_header_structs
+            .get(&(operation.id.clone(), label.clone()))
+            .expect("response header struct name allocated")
+            .as_str()
+            .to_owned();
+        let fields = response
+            .headers
+            .iter()
+            .map(|header| {
+                let field = names
+                    .response_header_fields
+                    .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                    .expect("response header field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = FieldSurface {
+                    ty: canon_ty(header.ty, api, names),
+                    required: header.required,
+                };
+                (field, surface)
+            })
+            .collect();
+        structs.insert(status.display_label(), HeadersSurface { name, fields });
+    }
+    structs
 }
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -526,6 +754,7 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
     let mut changes = Vec::new();
     diff_operations(old, new, &mut changes);
     diff_types(old, new, &mut changes);
+    diff_servers(old, new, &mut changes);
 
     // Deterministic order: most-severe first, then by location, then by machine code, then detail.
     changes.sort_by(|a, b| {
@@ -689,6 +918,186 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
     }
+    diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// The changes between two operations' typed response-header structs. A struct that appears is a
+/// new type nothing yet names, so it is additive whatever it holds; inside a struct present on
+/// both sides, a header is classified as a struct field is.
+fn diff_response_headers(
+    key: &str,
+    old: &BTreeMap<String, HeadersSurface>,
+    new: &BTreeMap<String, HeadersSurface>,
+    changes: &mut Vec<Change>,
+) {
+    for status in keys(old, new) {
+        let location = format!("{key} {status} headers");
+        match (old.get(status), new.get(status)) {
+            (None, Some(headers)) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersAdded,
+                location,
+                format!("response header struct `{}` added", headers.name),
+            )),
+            (Some(headers), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersRemoved,
+                location,
+                format!("response header struct `{}` removed", headers.name),
+            )),
+            (Some(old_headers), Some(new_headers)) => {
+                if old_headers.name != new_headers.name {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeadersRenamed,
+                        location,
+                        format!(
+                            "response header struct renamed `{}` -> `{}`",
+                            old_headers.name, new_headers.name
+                        ),
+                    ));
+                }
+                diff_header_fields(key, status, old_headers, new_headers, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between the fields of one status's response-header struct on both sides.
+fn diff_header_fields(
+    key: &str,
+    status: &str,
+    old: &HeadersSurface,
+    new: &HeadersSurface,
+    changes: &mut Vec<Change>,
+) {
+    for field in keys(&old.fields, &new.fields) {
+        let location = format!("{key} {status} header `{field}`");
+        match (old.fields.get(field), new.fields.get(field)) {
+            (None, Some(header)) => {
+                let (kind, label) = if header.required {
+                    (ChangeKind::RequiredResponseHeaderAdded, "required")
+                } else {
+                    (ChangeKind::ResponseHeaderAdded, "optional")
+                };
+                changes.push(Change::new(
+                    kind,
+                    location,
+                    format!("{label} response header added: `{}`", header.ty),
+                ));
+            }
+            (Some(header), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeaderRemoved,
+                location,
+                format!("response header removed (was `{}`)", header.ty),
+            )),
+            (Some(old_header), Some(new_header)) => {
+                if old_header.ty != new_header.ty {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderTypeChanged,
+                        location.clone(),
+                        format!(
+                            "response header type `{}` -> `{}`",
+                            old_header.ty, new_header.ty
+                        ),
+                    ));
+                }
+                if old_header.required != new_header.required {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderRequirednessChanged,
+                        location,
+                        format!(
+                            "response header now {}",
+                            if new_header.required {
+                                "required"
+                            } else {
+                                "optional"
+                            }
+                        ),
+                    ));
+                }
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between two `servers` modules: builders by name, each builder's setters, and the
+/// variants of each variable enum a setter takes on both sides.
+fn diff_servers(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
+    for name in keys(&old.servers, &new.servers) {
+        let location = format!("servers::{name}");
+        match (old.servers.get(name), new.servers.get(name)) {
+            (None, Some(_)) => changes.push(Change::new(
+                ChangeKind::ServerAdded,
+                location,
+                "new server builder",
+            )),
+            (Some(_), None) => changes.push(Change::new(
+                ChangeKind::ServerRemoved,
+                location,
+                "server builder removed",
+            )),
+            (Some(old_server), Some(new_server)) => {
+                diff_server_variables(&location, old_server, new_server, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between one server builder's setters on both sides.
+fn diff_server_variables(
+    builder: &str,
+    old: &ServerSurface,
+    new: &ServerSurface,
+    changes: &mut Vec<Change>,
+) {
+    for setter in keys(&old.variables, &new.variables) {
+        let location = format!("{builder}::{setter}");
+        match (old.variables.get(setter), new.variables.get(setter)) {
+            (None, Some(variable)) => changes.push(Change::new(
+                ChangeKind::ServerVariableAdded,
+                location,
+                format!("server variable added: `{}`", variable.argument()),
+            )),
+            (Some(variable), None) => changes.push(Change::new(
+                ChangeKind::ServerVariableRemoved,
+                location,
+                format!("server variable removed (was `{}`)", variable.argument()),
+            )),
+            // The same enum on both sides: the setter is unchanged, and the enum's variants are
+            // compared as any enum's are.
+            (
+                Some(ServerVariableSurface::Enum {
+                    name: old_name,
+                    variants: old_variants,
+                }),
+                Some(ServerVariableSurface::Enum {
+                    name: new_name,
+                    variants: new_variants,
+                }),
+            ) if old_name == new_name => {
+                diff_variant_set(
+                    &format!("servers::{new_name}"),
+                    old_variants,
+                    new_variants,
+                    changes,
+                );
+            }
+            (Some(old_variable), Some(new_variable)) if old_variable != new_variable => {
+                changes.push(Change::new(
+                    ChangeKind::ServerVariableTypeChanged,
+                    location,
+                    format!(
+                        "server variable type `{}` -> `{}`",
+                        old_variable.argument(),
+                        new_variable.argument()
+                    ),
+                ));
+            }
+            (Some(_), Some(_)) => {}
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
 }
 
 /// The key a parameter moved to: `key`'s wire name is declared exactly once in `here` and exactly
@@ -773,8 +1182,12 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
 
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
-        (TypeSurface::Struct(old_fields), TypeSurface::Struct(new_fields)) => {
+        (
+            TypeSurface::Struct(old_fields, old_overflow),
+            TypeSurface::Struct(new_fields, new_overflow),
+        ) => {
             diff_struct(name, old_fields, new_fields, changes);
+            diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
         }
         (TypeSurface::Enum(old_variants, old_open), TypeSurface::Enum(new_variants, new_open)) => {
             diff_variant_set(name, old_variants, new_variants, changes);
@@ -808,6 +1221,52 @@ fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>)
         name,
         format!("type kind `{old}` -> `{new}`"),
     ));
+}
+
+/// The changes to a struct's typed `additionalProperties` map. A map that moves to another field
+/// name (a declared property taking its spelling) is the old field removed and a new one added.
+fn diff_overflow(
+    name: &str,
+    old: Option<&OverflowSurface>,
+    new: Option<&OverflowSurface>,
+    changes: &mut Vec<Change>,
+) {
+    match (old, new) {
+        (Some(old_map), Some(new_map)) if old_map.field == new_map.field => {
+            if old_map.ty != new_map.ty {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesTypeChanged,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties type `BTreeMap<String, {}>` -> `BTreeMap<String, {}>`",
+                        old_map.ty, new_map.ty
+                    ),
+                ));
+            }
+        }
+        _ => {
+            if let Some(old_map) = old {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesRemoved,
+                    format!("{name}.{}", old_map.field),
+                    format!(
+                        "additional properties map removed (was `BTreeMap<String, {}>`)",
+                        old_map.ty
+                    ),
+                ));
+            }
+            if let Some(new_map) = new {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesAdded,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties map added: `BTreeMap<String, {}>`",
+                        new_map.ty
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn diff_struct(

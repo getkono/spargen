@@ -238,13 +238,11 @@ pub async fn decode_success_with<T>(
 /// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
 /// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
 pub async fn decode_success_bytes(
-    _core: &ClientCore,
+    core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    Ok(ResponseValue::new(status, headers, body))
+    // The decoder cannot fail, so `Error::Decode` is unreachable and the body is never capped.
+    decode_success_with(core, response, |body| Ok(body.clone())).await
 }
 
 /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
@@ -333,18 +331,22 @@ pub async fn classify_error_text<E>(
 where
     E: DeserializeOwned,
 {
-    classify_with(core, response, documented, decode_text_body::<E>).await
+    classify_with(core, response, documented, |body| {
+        decode_text_body::<E>(body)
+    })
+    .await
 }
 
 /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
 /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
 /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
-/// [`Error::UnexpectedStatus`] with the raw body preserved.
+/// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
+/// a raw binary error body keeps it without a copy.
 pub(crate) async fn classify_with<E>(
     core: &ClientCore,
     response: Response,
     documented: &[StatusSpec],
-    decode: impl FnOnce(&[u8]) -> Result<E, String>,
+    decode: impl FnOnce(&Bytes) -> Result<E, String>,
 ) -> Error<E> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -383,37 +385,16 @@ pub async fn classify_error_bytes<E: From<Bytes>>(
     response: Response,
     documented: &[StatusSpec],
 ) -> Error<E> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    match read_capped(core, response).await {
-        Ok((body, _truncated)) => {
-            if documented.iter().any(|spec| spec.matches(status)) {
-                Error::Api(ResponseValue::new(status, headers, E::from(body)))
-            } else {
-                Error::UnexpectedStatus {
-                    status,
-                    headers,
-                    body,
-                }
-            }
-        }
-        Err(error) => error,
-    }
+    // The decoder cannot fail, so `Error::Decode`, the one variant that would carry the flag, is
+    // unreachable.
+    classify_with(core, response, documented, |body| Ok(E::from(body.clone()))).await
 }
 
 /// Wrap a non-success response as [`Error::UnexpectedStatus`] (#7) for operations that document no
 /// error body at all, retaining at most `max_error_body` bytes.
 pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Error<E> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    match read_capped(core, response).await {
-        Ok((body, _truncated)) => Error::UnexpectedStatus {
-            status,
-            headers,
-            body,
-        },
-        Err(error) => error,
-    }
+    // No selector is documented, so the decoder is never run.
+    classify_with(core, response, &[], |_| Err(String::new())).await
 }
 
 /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.

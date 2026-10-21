@@ -321,6 +321,10 @@ pub(super) fn media_type_with_parameters(media: &str) -> Result<String, Paramete
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
 /// GitHub's documented octocat representation is a textual vendor media type. Concrete members of
 /// the `image`, `audio`, and `video` families are opaque octets, like the ranges naming them.
+///
+/// Every caller that asks what a media key *is* asks this, so one case rule holds everywhere: type
+/// and subtype are case-insensitive (RFC 9110 § 8.3.1), and the arms are matched against the
+/// lowercased essence, so `TEXT/EVENT-STREAM` is the stream `text/event-stream` is (#709).
 pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
     if !media_type_is_well_formed(essence) {
         return None;
@@ -328,7 +332,8 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
     if let Some(range) = classify_media_range(essence) {
         return Some(range);
     }
-    let classified = match essence {
+    let lowered = essence.to_ascii_lowercase();
+    let classified = match lowered.as_str() {
         "application/json" => (MediaType::Json, 0),
         media if media.starts_with("application/") && media.ends_with("+json") => {
             (MediaType::Json, 0)

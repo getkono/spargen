@@ -3256,7 +3256,7 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
     assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
-/// The rows of `schemas::a_cycle_closing_untyped_ref_branch_beside_a_null_branch_matches_the_same_union_outside_it`
+/// The rows of `untyped_branch_nullability::a_cycle_closing_untyped_ref_branch_beside_a_null_branch_matches_the_same_union_outside_it`
 /// for a component whose body is an untyped `allOf` rather than object keywords of its own, which
 /// lowers to the struct the members merge into (#627): `Node.next` sits in a member, `Holder.pick`
 /// carries the same union, and the two agree. A `oneOf` beside a `null` branch admits no `null`

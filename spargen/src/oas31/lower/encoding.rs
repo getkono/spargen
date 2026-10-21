@@ -316,11 +316,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
         // sent correctly, with the declared header attached. Media types are case-insensitive
-        // (RFC 9110 § 8.3.1) and the classifier's arms are spelled in lowercase, so the essence is
-        // classified lowercased: `Application/JSON` selects the codec `application/json` does,
-        // here and in the refusal below.
-        let classified = classify_media(&media_essence(&content_type).to_ascii_lowercase())
-            .map(|(codec, _)| codec);
+        // (RFC 9110 § 8.3.1) and `classify_media` matches them so: `Application/JSON` selects the
+        // codec `application/json` does, here and in the refusal below.
+        let classified = classify_media(media_essence(&content_type)).map(|(codec, _)| codec);
         let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
@@ -331,8 +329,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // whatever it declares, so a declaration that is not JSON (`application/xml` over an
         // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
-        // `classified` is the lowercased classification, so `Application/JSON` is judged as the
-        // JSON it is.
+        // `classified` is case-insensitive, so `Application/JSON` is judged as the JSON it is.
         //
         // A form-urlencoded field has no header, so the argument there is not the same one, but it
         // reaches the same rule: its `contentType` is the only statement of the syntax the field's

@@ -598,6 +598,54 @@ mod tests {
             .exists());
     }
 
+    /// Two URLs that differ only in their query are two documents (#713): each is vendored to a
+    /// file of its own, so every pin the lock records names a file holding exactly the bytes it
+    /// pins, and the lock `spargen lock` writes verifies.
+    #[test]
+    fn urls_differing_only_in_their_query_are_vendored_apart() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             components:\n\
+             \x20 schemas:\n\
+             \x20   A:\n\
+             \x20     $ref: \"https://api.example.com/a.yaml?v=1\"\n\
+             \x20   B:\n\
+             \x20     $ref: \"https://api.example.com/a.yaml?v=2\"\n",
+        )
+        .unwrap();
+        let mut docs = std::collections::HashMap::new();
+        docs.insert(
+            "https://api.example.com/a.yaml?v=1".to_owned(),
+            b"type: string\n".to_vec(),
+        );
+        docs.insert(
+            "https://api.example.com/a.yaml?v=2".to_owned(),
+            b"type: integer\n".to_vec(),
+        );
+        let fetcher = StubFetcher { docs };
+
+        let mut diags = Diagnostics::default();
+        let report =
+            vendor(&spec, &fetcher, &mut diags).unwrap_or_else(|_| panic!("{:?}", diags.items()));
+
+        assert_eq!(report.refs.len(), 2, "{:?}", report.refs);
+        assert_ne!(report.refs[0].path, report.refs[1].path);
+        for vendored in &report.refs {
+            let on_disk = std::fs::read(report.vendor_dir.join(&vendored.path)).unwrap();
+            assert_eq!(
+                sha256_hex(&on_disk),
+                vendored.sha256,
+                "`{}` no longer holds the bytes pinned for `{}`",
+                vendored.path,
+                vendored.url
+            );
+        }
+    }
+
     /// A redirect whose end carries a fragment is pinned with the fragment dropped: the lock's
     /// `retrieval_url` is a base URI, and the document's relative `$ref` resolves against the
     /// fragment-free URL (`c.yaml` beside it), not into the fragment (`tag.yaml#/x/c.yaml`).

@@ -6,12 +6,9 @@ use super::*;
 #[test]
 fn e011_official_structure_schema_rejects_missing_info() {
     let spec = "openapi: 3.1.0\npaths: {}\n";
-    let generated = generate(spec);
-    let checked = check(spec);
-    for report in [&generated, &checked] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]
@@ -44,8 +41,9 @@ fn e022_duplicate_object_key_is_rejected() {
     // A mapping that declares the same key twice used to be silently collapsed (JSON: last-wins;
     // YAML: `YamlLoader` errored) — now it is uniformly rejected with a stable code and a precise
     // span at the second (duplicate) occurrence, so a duplicated `type`/`properties` name cannot
-    // silently reach lowering.
-    let spec = r##"
+    // silently reach lowering. Both parsers report it at the duplicate key itself (#533), through
+    // `check` and `generate` alike, so the location oracle finds nothing to report.
+    let yaml = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths: {}
@@ -55,21 +53,38 @@ components:
       type: object
       type: string
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::DuplicateObjectKey), "{report:#?}");
-    // The diagnostic points at the duplicate `type` on line 9, not line 1.
-    let dup = report
-        .diagnostics()
-        .iter()
-        .find(|d| d.code == Code::DuplicateObjectKey)
-        .expect("duplicate-key diagnostic");
-    assert_eq!(dup.span.expect("span").start.line, 9, "{dup:#?}");
-
-    // check/generate parity: parsing runs before lowering, so `check` rejects identically.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::DuplicateObjectKey), "{checked:#?}");
+    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}, "components": {"schemas": {"Foo": {"type": "object", "type": "string"}}}}"#;
+    // The parser is chosen by extension, and the shared helpers write `openapi.yaml`, so the JSON
+    // document is written as `openapi.json` here to reach the JSON parser. The duplicate `type`
+    // sits on line 9 of the YAML document and on the JSON document's only line, not on line 1 of
+    // a whole-file span.
+    for (name, spec, line) in [("openapi.yaml", yaml, 9), ("openapi.json", json, 1)] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join(name), spec).unwrap();
+        let generated = run_generate(&build(dir.join(name), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join(name)));
+        for report in [checked, generated] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            let duplicate = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::DuplicateObjectKey)
+                .expect("duplicate-key diagnostic");
+            assert_eq!(
+                duplicate.pointer.as_str(),
+                "/components/schemas/Foo/type",
+                "{duplicate:#?}"
+            );
+            assert_eq!(
+                duplicate.span.expect("span").start.line,
+                line,
+                "{duplicate:#?}"
+            );
+            let violations = oracles::location_violations(report.diagnostics(), spec.as_bytes());
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
 }
 
 /// A document whose one schema's `maximum` is the YAML scalar `value`, on line 8.
@@ -455,13 +470,6 @@ paths:
         !has_code(&report, Code::UnsupportedOpenApiVersion),
         "{report:#?}"
     );
-    // check/generate parity: the same acceptance is reached without emitting.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedOpenApiVersion),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -471,17 +479,16 @@ fn oas30_document_still_rejected_e001() {
     for version in ["3.0.0", "3.0.3"] {
         let spec =
             format!("openapi: {version}\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n");
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{version} through {entry}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::UnsupportedOpenApiVersion),
-                "{version} through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{version}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnsupportedOpenApiVersion),
+            "{version}: {report:#?}"
+        );
     }
 }
 
@@ -599,17 +606,13 @@ paths:
             "https://spec.openapis.org/oas/3.1/dialect/base",
             "https://spec.openapis.org/oas/3.2/dialect/2025-09-17",
         ] {
-            let source = spec(version, dialect);
-            for report in [generate(&source), check(&source)] {
-                assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-                assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
-            }
+            let report = generate(&spec(version, dialect));
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
         }
-        let source = spec(version, "http://json-schema.org/draft-07/schema#");
-        for report in [generate(&source), check(&source)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
-        }
+        let report = generate(&spec(version, "http://json-schema.org/draft-07/schema#"));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
     }
 }
 
@@ -633,8 +636,6 @@ paths:
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -655,13 +656,6 @@ paths:
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
-    );
-    // check/generate parity.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::Oas32ConstructIgnored),
-        "{checked:#?}"
     );
 }
 
@@ -925,13 +919,12 @@ components:
         responses:
           "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::SpecUndefinedBehavior),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::SpecUndefinedBehavior),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -972,7 +965,6 @@ components:
         code.contains("Component-owned description"),
         "an undeclared `description` must stay the referenced item's:\n{code}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
 #[test]
@@ -1275,7 +1267,7 @@ fn a_dangling_pointer_ref_inside_an_extension_is_not_resolved() {
     );
     let inline =
         inline_spec_with_response_entries("        x-note: { $ref: '#/does/not/exist' }\n");
-    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+    for report in [&generated, &checked, &generate(&inline)] {
         assert!(report.outcome().is_success(), "{report:#?}");
         assert!(!has_code(report, Code::UnresolvedRef), "{report:#?}");
         assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
@@ -1292,7 +1284,7 @@ fn a_dangling_file_ref_inside_an_extension_is_not_read_like_a_pointer_ref() {
         "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    x-note: { $ref: 'nowhere.yaml' }\n",
     );
     let inline = inline_spec_with_response_entries("        x-note: { $ref: 'nowhere.yaml' }\n");
-    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+    for report in [&generated, &checked, &generate(&inline)] {
         assert!(report.outcome().is_success(), "{report:#?}");
         assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
     }
@@ -1319,13 +1311,12 @@ fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
         ("the Components Object", format!("{head}paths: {{}}\ncomponents:\n  x-note: {dangling}\n")),
     ];
     for (position, spec) in &cases {
-        for report in [&generate(spec), &check(spec)] {
-            assert!(report.outcome().is_success(), "{position}: {report:#?}");
-            assert!(
-                !has_code(report, Code::InvalidInput),
-                "{position}: {report:#?}"
-            );
-        }
+        let report = generate(spec);
+        assert!(report.outcome().is_success(), "{position}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{position}: {report:#?}"
+        );
     }
 }
 
@@ -1408,10 +1399,9 @@ fn an_uppercase_paths_object_key_is_not_a_specification_extension() {
     let spec = spec_with_paths_entries(
         "  X-note: { get: { operationId: ghost, responses: { '200': { description: ok } } } }\n",
     );
-    for report in [&generate(&spec), &check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 /// A root document whose `200` body is `$ref: '{target}'`, with `rest` appended at the top level.

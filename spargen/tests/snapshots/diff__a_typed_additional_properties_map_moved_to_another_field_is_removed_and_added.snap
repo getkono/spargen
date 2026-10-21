@@ -1,0 +1,8 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|additional-properties-removed|Pet.additional|additional properties map removed (was `BTreeMap<String, String>`)
+minor|field-added|Pet.additional|optional field added: `String`
+minor|additional-properties-added|Pet.additional_58d74607|additional properties map added: `BTreeMap<String, String>`
+bump=major

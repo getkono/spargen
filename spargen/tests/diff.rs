@@ -1546,6 +1546,449 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
     }
 }
 
+/// One `get /pets` operation, named `operation_id`, whose `200` response documents `headers` (a
+/// whole `headers:` block at 10-space indent, or `""` for none).
+fn with_headers(operation_id: &str, headers: &str) -> String {
+    full(
+        &format!(
+            "  /pets:
+    get:
+      operationId: {operation_id}
+      responses:
+        '200':
+          description: ok
+{headers}          content:
+            application/json:
+              schema: {PET_REF}
+"
+        ),
+        PET_SCHEMA,
+    )
+}
+
+const RATE_LIMIT_INT: &str = "          headers:
+            X-Rate-Limit:
+              required: true
+              schema: { type: integer }
+";
+
+const RATE_LIMIT_STRING: &str = "          headers:
+            X-Rate-Limit:
+              required: true
+              schema: { type: string }
+";
+
+const RATE_LIMIT_OPTIONAL: &str = "          headers:
+            X-Rate-Limit:
+              schema: { type: integer }
+";
+
+const RATE_LIMIT_AND_OPTIONAL_REQUEST_ID: &str = "          headers:
+            X-Rate-Limit:
+              required: true
+              schema: { type: integer }
+            X-Request-Id:
+              schema: { type: string }
+";
+
+const RATE_LIMIT_AND_REQUIRED_REQUEST_ID: &str = "          headers:
+            X-Rate-Limit:
+              required: true
+              schema: { type: integer }
+            X-Request-Id:
+              required: true
+              schema: { type: string }
+";
+
+#[test]
+fn changing_a_response_headers_type_is_major() {
+    // The header accessor's field type changes, so every read of it breaks (#726).
+    let report = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers("listPets", RATE_LIMIT_STRING),
+    );
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::ResponseHeaderTypeChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn adding_a_response_header_struct_is_minor_and_removing_one_is_major() {
+    let added = diff(
+        &with_headers("listPets", ""),
+        &with_headers("listPets", RATE_LIMIT_INT),
+    );
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::ResponseHeadersAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers("listPets", ""),
+    );
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::ResponseHeadersRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+#[test]
+fn adding_an_optional_response_header_is_minor_and_a_required_one_major() {
+    let optional = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers("listPets", RATE_LIMIT_AND_OPTIONAL_REQUEST_ID),
+    );
+    assert_eq!(
+        kinds(&optional),
+        vec![ChangeKind::ResponseHeaderAdded],
+        "{:?}",
+        optional.changes
+    );
+    assert_eq!(optional.bump, Impact::Minor);
+
+    // `from_headers` now fails on a response without it.
+    let required = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers("listPets", RATE_LIMIT_AND_REQUIRED_REQUEST_ID),
+    );
+    assert_eq!(
+        kinds(&required),
+        vec![ChangeKind::RequiredResponseHeaderAdded],
+        "{:?}",
+        required.changes
+    );
+    assert_eq!(required.bump, Impact::Major);
+
+    let removed = diff(
+        &with_headers("listPets", RATE_LIMIT_AND_OPTIONAL_REQUEST_ID),
+        &with_headers("listPets", RATE_LIMIT_INT),
+    );
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::ResponseHeaderRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+#[test]
+fn flipping_a_response_header_between_required_and_optional_is_major_both_ways() {
+    // `T` ↔ `Option<T>` on the header struct's field.
+    for (old, new) in [
+        (RATE_LIMIT_INT, RATE_LIMIT_OPTIONAL),
+        (RATE_LIMIT_OPTIONAL, RATE_LIMIT_INT),
+    ] {
+        let report = diff(
+            &with_headers("listPets", old),
+            &with_headers("listPets", new),
+        );
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::ResponseHeaderRequirednessChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
+fn renaming_an_operation_id_renames_its_response_header_struct() {
+    // The struct is named after the operation, so code naming it breaks beside the method's callers.
+    let report = diff(
+        &with_headers("listPets", RATE_LIMIT_INT),
+        &with_headers("fetchPets", RATE_LIMIT_INT),
+    );
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::MethodRenamed,
+            ChangeKind::ResponseHeadersRenamed
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+/// The `/pets` spec with a top-level `servers:` block (`servers` at 2-space indent, or `""` for none).
+fn with_servers(servers: &str) -> String {
+    format!(
+        "openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers:
+{servers}paths:
+{}components:
+  schemas:
+{PET_SCHEMA}",
+        pets_get("listPets", "", PET_REF)
+    )
+}
+
+const REGIONS_US_EU: &str = "  - url: 'https://{region}.example.com'
+    variables:
+      region: { default: us, enum: [us, eu] }
+";
+
+const REGIONS_US_EU_AP: &str = "  - url: 'https://{region}.example.com'
+    variables:
+      region: { default: us, enum: [us, eu, ap] }
+";
+
+const REGION_FREE_FORM: &str = "  - url: 'https://{region}.example.com'
+    variables:
+      region: { default: us }
+";
+
+const REGIONS_AND_VERSION: &str = "  - url: 'https://{region}.example.com/{version}'
+    variables:
+      region: { default: us, enum: [us, eu] }
+      version: { default: v1 }
+";
+
+const SANDBOX: &str = "  - url: 'https://sandbox.example.com'
+";
+
+#[test]
+fn adding_a_server_variable_value_is_minor_and_removing_one_is_major() {
+    // A variable's `enum` is a generated `pub enum` a consumer passes to its setter (#726).
+    let added = diff(
+        &with_servers(REGIONS_US_EU),
+        &with_servers(REGIONS_US_EU_AP),
+    );
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::VariantAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(
+        &with_servers(REGIONS_US_EU_AP),
+        &with_servers(REGIONS_US_EU),
+    );
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::VariantRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+#[test]
+fn adding_a_server_is_minor_and_removing_one_is_major() {
+    let more = format!("{REGIONS_US_EU}{SANDBOX}");
+    let added = diff(&with_servers(REGIONS_US_EU), &with_servers(&more));
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::ServerAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_servers(&more), &with_servers(REGIONS_US_EU));
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::ServerRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+#[test]
+fn adding_a_server_variable_is_minor_and_removing_one_is_major() {
+    let added = diff(
+        &with_servers(REGIONS_US_EU),
+        &with_servers(REGIONS_AND_VERSION),
+    );
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::ServerVariableAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(
+        &with_servers(REGIONS_AND_VERSION),
+        &with_servers(REGIONS_US_EU),
+    );
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::ServerVariableRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+#[test]
+fn a_server_variable_gaining_or_losing_its_enum_is_major_both_ways() {
+    // The setter takes `impl Into<String>` on one side and the variable enum on the other.
+    for (old, new) in [
+        (REGION_FREE_FORM, REGIONS_US_EU),
+        (REGIONS_US_EU, REGION_FREE_FORM),
+    ] {
+        let report = diff(&with_servers(old), &with_servers(new));
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::ServerVariableTypeChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+/// The `/pets` spec whose `Pet` carries `additional` (an `additionalProperties:` line at 6-space
+/// indent, or `""` for none).
+fn with_additional(additional: &str) -> String {
+    full(
+        &pets_get("listPets", "", PET_REF),
+        &format!("{PET_SCHEMA}{additional}"),
+    )
+}
+
+const ADDITIONAL_STRING: &str = "      additionalProperties: { type: string }\n";
+
+const ADDITIONAL_INTEGER: &str = "      additionalProperties: { type: integer }\n";
+
+#[test]
+fn changing_a_typed_additional_properties_map_is_major() {
+    // The map is a public `BTreeMap<String, T>` field, so its value type is surface (#726).
+    let report = diff(
+        &with_additional(ADDITIONAL_STRING),
+        &with_additional(ADDITIONAL_INTEGER),
+    );
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::AdditionalPropertiesTypeChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn adding_a_typed_additional_properties_map_is_minor_and_removing_one_is_major() {
+    let added = diff(&with_additional(""), &with_additional(ADDITIONAL_STRING));
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::AdditionalPropertiesAdded],
+        "{:?}",
+        added.changes
+    );
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(&with_additional(ADDITIONAL_STRING), &with_additional(""));
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::AdditionalPropertiesRemoved],
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+
+    // `false` changes what a decode accepts and declares no field, so it is no surface change.
+    let denied = diff(
+        &with_additional(""),
+        &with_additional("      additionalProperties: false\n"),
+    );
+    assert_eq!(kinds(&denied), vec![], "{:?}", denied.changes);
+}
+
+#[test]
+fn a_typed_additional_properties_map_moved_to_another_field_is_removed_and_added() {
+    // A declared `additional` property takes the overflow field's spelling, so the map moves to
+    // another field name: the old field is gone and a new one appears (#726).
+    let with_property = format!(
+        "{}{ADDITIONAL_STRING}",
+        PET_SCHEMA.replace(
+            "        name: { type: string }\n",
+            "        name: { type: string }\n        additional: { type: string }\n",
+        )
+    );
+    let report = diff(
+        &with_additional(ADDITIONAL_STRING),
+        &full(&pets_get("listPets", "", PET_REF), &with_property),
+    );
+    let mut moved: Vec<_> = report
+        .changes
+        .iter()
+        .filter(|change| {
+            matches!(
+                change.kind,
+                ChangeKind::AdditionalPropertiesRemoved | ChangeKind::AdditionalPropertiesAdded
+            )
+        })
+        .map(|change| (change.kind, change.location.as_str()))
+        .collect();
+    moved.sort_by_key(|(_, location)| *location);
+    assert_eq!(moved.len(), 2, "{:?}", report.changes);
+    assert_eq!(
+        moved[0],
+        (ChangeKind::AdditionalPropertiesRemoved, "Pet.additional"),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(moved[1].0, ChangeKind::AdditionalPropertiesAdded);
+    assert!(
+        moved[1].1.starts_with("Pet.additional") && moved[1].1 != "Pet.additional",
+        "{:?}",
+        report.changes
+    );
+    assert!(
+        !kinds(&report).contains(&ChangeKind::AdditionalPropertiesTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn renaming_a_server_variable_enum_under_the_same_builder_is_major() {
+    // `prod`'s `region` enum is `ProdRegion` until a server named `prod-region` takes that
+    // spelling: the `Prod` builder keeps its name, and its setter now takes the renamed enum.
+    let prod = "  - name: prod
+    url: 'https://{region}.example.com'
+    variables:
+      region: { default: us, enum: [us, eu] }
+";
+    let taken = format!("  - name: prod-region\n    url: 'https://other.example.com'\n{prod}");
+    let report = diff(
+        &with_servers(prod).replace("openapi: 3.1.0", "openapi: 3.2.0"),
+        &with_servers(&taken).replace("openapi: 3.1.0", "openapi: 3.2.0"),
+    );
+    let mut found = kinds(&report);
+    found.sort_by_key(|kind| kind.code());
+    assert_eq!(
+        found,
+        vec![
+            ChangeKind::ServerAdded,
+            ChangeKind::ServerVariableTypeChanged
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 // --- The JSON wire shape ------------------------------------------------------------------------
 
 /// `--format json` is the machine surface of `spargen diff`, and the CLI renders it straight from

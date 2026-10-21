@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|response-header-added|GET /pets 200 header `x_request_id`|optional response header added: `String`
+bump=minor

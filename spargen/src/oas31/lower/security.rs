@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::{ApiKeyLoc, HttpScheme, SchemeId, SecurityScheme, SecuritySchemeDef};
 use crate::oas31::{Document, RefOr, Resolver, SecurityRequirement};
+use crate::source::security_requirement_key_reference;
 
 pub(super) fn lower_security_requirement(
     requirement: &SecurityRequirement,
@@ -47,14 +48,13 @@ pub(super) fn resolve_external_security_schemes(
         }
         // Only a name that looks like a reference is worth resolving; a plain unknown name is an
         // ordinary undeclared-scheme error, reported at the requirement site.
-        let reference = match name.strip_prefix("./") {
-            Some(rest) => rest.to_owned(),
-            None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
-            None => continue,
+        // Lowering also reads a key containing `:` as a reference; the loader does not.
+        let Some(reference) = security_requirement_key_reference(&name, true) else {
+            continue;
         };
         let from = resolver.written_in(&at);
         let Ok(object) = resolver.resolve_component(
-            &reference,
+            reference,
             from,
             crate::oas31::deserialize::parse_security_scheme,
             diags,

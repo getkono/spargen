@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|required-response-header-added|GET /pets 200 header `x_request_id`|required response header added: `String`
+bump=major

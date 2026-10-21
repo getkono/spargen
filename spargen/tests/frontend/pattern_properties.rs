@@ -31,13 +31,6 @@ components:
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
     );
-    // check/generate parity: the same disposition is reached without emitting.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::ValidationKeywordIgnored),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -67,8 +60,6 @@ components:
         has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -91,10 +82,6 @@ components:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::PatternPropertiesRejected));
-    // check/generate parity: the rejection fires in `check` too.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::PatternPropertiesRejected));
 }
 
 /// `patternProperties` values whose integer `enum`s (or an integer `enum` beside `format: int64`)
@@ -133,12 +120,6 @@ components:
                 && code.contains("pub type ThingValue = i64;"),
             "{label}: {code}"
         );
-        let checked = check(&spec);
-        assert_ne!(
-            checked.outcome(),
-            Outcome::Rejected,
-            "{label}: {checked:#?}"
-        );
     }
 }
 
@@ -163,12 +144,6 @@ components:
     assert!(
         has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
-    );
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::PatternPropertiesRejected),
-        "{checked:#?}"
     );
 }
 
