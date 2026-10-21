@@ -683,12 +683,25 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("legacy"), "legacy field emitted: {code}");
     assert!(code.contains("current"), "current field emitted: {code}");
-    // Exactly one item is deprecated — the property that says so — not every field of the
-    // deprecated object, and not zero.
+    // Exactly the items whose own schema says `deprecated` carry the attribute: the object's
+    // struct, and the alias the `legacy` property's inline schema lowers to (#731) — not a field of
+    // the deprecated object, and not `current`'s alias.
+    let lines: Vec<&str> = code.lines().map(str::trim).collect();
+    let deprecated: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == "#[deprecated]")
+        .filter_map(|(at, _)| {
+            lines[at + 1..]
+                .iter()
+                .find(|line| !line.starts_with("#[") && !line.starts_with("///"))
+                .copied()
+        })
+        .collect();
     assert_eq!(
-        code.matches("#[deprecated]").count(),
-        1,
-        "exactly one item is deprecated, not every field of a deprecated object: {code}"
+        deprecated,
+        ["pub struct Item {", "pub type Itemlegacy = String;"],
+        "only the items whose schema says `deprecated`, no field of a deprecated object: {code}"
     );
 }
 
