@@ -193,6 +193,9 @@ pub(crate) fn write_cache(
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
 }
 
+/// Write the rendered module to `path`, leaving the file untouched when it already holds exactly
+/// `contents`, so an [`Outcome::Generated`](crate::Outcome::Generated) run rewrites the output
+/// only when its bytes change.
 pub(crate) fn write_output(path: &Utf8Path, contents: &str) -> Result<(), String> {
     if std::fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
         return Ok(());

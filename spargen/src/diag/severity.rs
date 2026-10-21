@@ -6,6 +6,8 @@ use serde::Serialize;
 pub enum Severity {
     /// Generation fails.
     Error,
-    /// Generation proceeds; the construct affects runtime validation but not the static shape.
+    /// Generation proceeds; the diagnostic reports a construct the generated client does not
+    /// carry as declared (an ignored keyword, an omitted or dropped construct), or a step of the
+    /// run that was skipped or degraded.
     Warning,
 }
