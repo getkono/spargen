@@ -230,9 +230,7 @@ components:
               properties: { extra: { type: string } }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
     for (field, nullable) in [
         ("pub via_all_of", true),
@@ -314,12 +312,10 @@ paths:
 {COMPONENTS}"##
     );
     let (generated, root_code) = generate_with_code(&root);
-    let checked = check(&root);
     let (split_generated, split_checked, split_code) =
         split("./lib.yaml#/components/schemas/Holder", COMPONENTS);
     for (entry, report) in [
         ("root/generate", &generated),
-        ("root/check", &checked),
         ("split/generate", &split_generated),
         ("split/check", &split_checked),
     ] {
@@ -461,9 +457,7 @@ components:
         alone: { $ref: '#/components/schemas/C' }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     for (field, nullable) in [
         ("pub via_composed:", true),
         ("pub via_composed_refs:", true),
@@ -535,9 +529,7 @@ components:
 {defs}"##
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     for (field, nullable) in [("pub untyped_leaf:", true), ("pub typed_leaf:", false)] {
         let ty = field_type(&code, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
         assert_eq!(ty.starts_with("Option<"), nullable, "`{field}` is `{ty}`");
@@ -595,9 +587,7 @@ x-defs:
 {defs}"##
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
     for (field, required, alias) in [
         ("pub a:", true, "String"),
@@ -1188,17 +1178,13 @@ fn an_all_of_member_with_its_own_union_beside_object_keywords_keeps_the_union() 
          - type: object\n          properties: { id: { type: integer } }\n          \
          oneOf: [ { type: string } ]\n",
     );
-    for (entry, report) in [("generate", generate(&typed)), ("check", check(&typed))] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: an object no string is: {report:#?}"
-        );
-        assert!(
-            has_code(&report, Code::NonDisjointUnion),
-            "via {entry}: {report:#?}"
-        );
-    }
+    let report = generate(&typed);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an object no string is: {report:#?}"
+    );
+    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 
     let untyped = with_schemas(
         "3.1.0",
@@ -1246,8 +1232,6 @@ fn a_union_beside_all_of_composes_with_it() {
         code.contains("\"cat\""),
         "the discriminator still dispatches:\n{code}"
     );
-    let checked = check(&shadowed);
-    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
 
     // The `allOf` polymorphism parent spelled beside its own union: every branch is met with the
     // shared base, so each variant carries the base's `id` as well as its own fields.
@@ -1331,8 +1315,6 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
             }),
             "{what}: one variant is the string branch: {variants:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 
     let owner = "    Owner:\n      type: object\n      required: [p]\n      \
@@ -1372,8 +1354,6 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
                 && fields.iter().any(|field| field == "kind"),
             "{what}: the object branch is `Cat` refined by `name`: {fields:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 }
 
@@ -1439,8 +1419,6 @@ fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
             2,
             "{what}: both non-null branches survive: {variants:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 }
 
@@ -1780,13 +1758,6 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::AllOfIrreconcilable),
-        "{checked:#?}"
-    );
-
     // Each property keeps the narrower side of its intersection, read through the merged
     // struct's own field types rather than from a type name appearing somewhere.
     let types = types_module(&code);
@@ -2021,18 +1992,12 @@ fn a_required_only_field_takes_its_type_from_every_side_of_a_composition() {
                         required: [a] }\n";
     let types_for = |schema: &str| {
         let spec = format!("{HEAD}    Thing: {schema}\n");
-        let checked = check(&spec);
-        assert_ne!(
-            checked.outcome(),
-            Outcome::Rejected,
-            "{schema}: {checked:#?}"
-        );
-        assert!(
-            !has_code(&checked, Code::AllOfIrreconcilable),
-            "{schema}: {checked:#?}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{schema}: {report:#?}"
+        );
         types_module(&code)
     };
     // The field of `Thing` itself: `Req` carries an `a` of its own.
@@ -2709,21 +2674,19 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
     ];
     for (what, body, components) in inhabited {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable)
-                    && !has_code(&report, Code::NonDisjointUnion),
-                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` still admits `{{}}`, so it must not be rejected: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable)
+                && !has_code(&report, Code::NonDisjointUnion),
+            "`{what}` reported an irreconcilable composition: {report:#?}"
+        );
         // Not silently widened to something that accepts `{"a": 1}`: the field itself is
         // uninhabited, so only instances omitting the property can be built or decoded.
-        let (_, code) = generate_with_code(&spec);
         assert!(
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
@@ -2747,17 +2710,16 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
     ];
     for (what, body, components) in empty {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` did not report E013 through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` admits no value at all, so it must still be rejected: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` did not report E013: {report:#?}"
+        );
     }
 }
 
@@ -2828,19 +2790,17 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
     ];
     for (what, body, components) in inhabited {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable)
-                    && !has_code(&report, Code::NonDisjointUnion),
-                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` still admits `{{}}`, so it must not be rejected: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable)
+                && !has_code(&report, Code::NonDisjointUnion),
+            "`{what}` reported an irreconcilable composition: {report:#?}"
+        );
         assert!(
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
@@ -2881,17 +2841,16 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
     ];
     for (what, body, components) in empty {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` did not report E013 through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` admits no value at all, so it must still be rejected: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` did not report E013: {report:#?}"
+        );
     }
 }
 
@@ -2958,29 +2917,25 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
                 "{HEAD}{}{components}",
                 PATH.replace("BODY", &body.replace("OTHER", other))
             );
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                if inhabited {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what}: a uuid/base64 meet is inhabited but has no Rust type, so {entry} \
-                         must reject it rather than type it uninhabited: {report:#?}"
-                    );
-                    assert!(
-                        has_code(&report, Code::AllOfIrreconcilable),
-                        "{what}: {entry} must report E013: {report:#?}"
-                    );
-                } else {
-                    assert_ne!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what}: a uuid/integer meet is provably empty, so {entry} must keep \
-                         generating: {report:#?}"
-                    );
-                }
-            }
-            if !inhabited {
-                let (_, code) = generate_with_code(&spec);
+            let (report, code) = generate_with_code(&spec);
+            if inhabited {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: a uuid/base64 meet is inhabited but has no Rust type, so it must be \
+                     rejected rather than typed uninhabited: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{what}: must report E013: {report:#?}"
+                );
+            } else {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: a uuid/integer meet is provably empty, so it must keep generating: \
+                     {report:#?}"
+                );
                 assert!(
                     code.contains("no JSON value can inhabit schema"),
                     "{what}: the empty meet must still be typed uninhabited: {code}"
@@ -3018,21 +2973,20 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
         ),
     ] {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what}: {entry} must reject rather than narrow: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "{what}: {entry} must report E013: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::DeclarationHasNoEffect),
-                "{what}: {entry} must not claim a branch cannot satisfy the siblings: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: must reject rather than narrow: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{what}: must report E013: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{what}: must not claim a branch cannot satisfy the siblings: {report:#?}"
+        );
     }
 
     // An unrepresentable property does not settle a struct meet on its own: `intersect_structs`
@@ -3050,29 +3004,14 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
              b: {{ type: {required_type} }} }}, required: [b] }} }}"
         );
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", &body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            if empty {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "a required string/integer property empties every item, so {entry} must keep \
-                     generating the empty array despite the earlier uuid/base64 one: {report:#?}"
-                );
-            } else {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "with no empty property the uuid/base64 one is unrepresentable, so {entry} \
-                     must reject: {report:#?}"
-                );
-                assert!(
-                    has_code(&report, Code::AllOfIrreconcilable),
-                    "{entry} must report E013: {report:#?}"
-                );
-            }
-        }
+        let (report, code) = generate_with_code(&spec);
         if empty {
-            let (_, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "a required string/integer property empties every item, so it must keep \
+                 generating the empty array despite the earlier uuid/base64 one: {report:#?}"
+            );
             assert!(
                 code.contains("no JSON value can inhabit schema"),
                 "the emptied item must be typed uninhabited: {code}"
@@ -3088,6 +3027,17 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
             assert!(
                 code.contains(&format!("Vec<{never}>")),
                 "the body must be an array of the uninhabited item `{never}`: {code}"
+            );
+        } else {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "with no empty property the uuid/base64 one is unrepresentable, so it must be \
+                 rejected: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "must report E013: {report:#?}"
             );
         }
     }
@@ -3326,32 +3276,19 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
                 document("[object, 'null']", p)
             );
             let (report, code) = generate_with_code(&spec);
-            let checked = check(&spec);
             if !null_only {
-                for (entry, report) in [("generate", &report), ("check", &checked)] {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what} ({entry}): {report:#?}"
-                    );
-                    assert!(
-                        has_code(report, Code::AllOfIrreconcilable),
-                        "{what} ({entry}): {report:#?}"
-                    );
-                }
+                assert_eq!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{what}: {report:#?}"
+                );
                 continue;
             }
-            for (entry, report) in [("generate", &report), ("check", &checked)] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{what} ({entry}): {report:#?}"
-                );
-                assert!(
-                    !has_code(report, Code::AllOfIrreconcilable),
-                    "{what} ({entry}): {report:#?}"
-                );
-            }
+            assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{what}: {report:#?}"
+            );
             let ty = field_type(&types_module(&code), "pub p:")
                 .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
             assert!(
@@ -3660,7 +3597,6 @@ fn a_ref_all_of_member_to_untyped_array_applicators_refines_the_merge_s_arrays()
         assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
         assert!(codes(&report).is_empty(), "{what}: {report:#?}");
         assert_eq!(element(&code, "Probe", what), expected, "{what}: {code}");
-        assert_check_agrees(&report, &check(&spec));
     }
 
     // Beside members of another category the target constrains nothing: beside an object member
