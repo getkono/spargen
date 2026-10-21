@@ -1,8 +1,9 @@
 //! The headline invariant (CLAUDE.md): same spargen version + spec + config produces
 //! byte-identical output. Generating the same spec into two module paths must yield identical code,
 //! the same outcome, and the same diagnostics in the same order. It is held over an inline spec,
-//! every generating corpus case, the broad `e2e.rs` spec (through `generate` and through the
-//! proc-macro preview), and generated union/`allOf` documents.
+//! every generating corpus case, the broad `e2e.rs` spec (through `generate` with default and with
+//! non-default options, and through the proc-macro preview), `e2e.rs`'s 3.2 and date specs, and
+//! generated union/`allOf` documents.
 
 use std::collections::BTreeSet;
 
@@ -61,8 +62,18 @@ components:
 /// output dirs: the provenance header (which records the source path) is held constant, isolating
 /// the invariant to generation order. Returns the outcome both runs reached.
 fn assert_generates_identically(spec_path: &Utf8PathBuf, label: &str) -> Outcome {
-    let (report_a, module_a) = generate_to_string(Spec::new(spec_path.clone()));
-    let (report_b, module_b) = generate_to_string(Spec::new(spec_path.clone()));
+    assert_configured_generates_identically(spec_path, label, |spec| spec).0
+}
+
+/// [`assert_generates_identically`] with `configure` applied to both runs' [`Spec`], returning the
+/// outcome and the module both runs wrote.
+fn assert_configured_generates_identically(
+    spec_path: &Utf8PathBuf,
+    label: &str,
+    configure: impl Fn(Spec) -> Spec,
+) -> (Outcome, Option<String>) {
+    let (report_a, module_a) = generate_to_string(configure(Spec::new(spec_path.clone())));
+    let (report_b, module_b) = generate_to_string(configure(Spec::new(spec_path.clone())));
     assert_eq!(
         report_a.outcome(),
         report_b.outcome(),
@@ -77,7 +88,7 @@ fn assert_generates_identically(spec_path: &Utf8PathBuf, label: &str) -> Outcome
         module_a == module_b,
         "{label}: generated module is not deterministic"
     );
-    report_a.outcome()
+    (report_a.outcome(), module_a)
 }
 
 /// Write `text` to `openapi.yaml` in a fresh directory, returning the directory and the path.
@@ -119,16 +130,25 @@ fn every_generating_corpus_case_is_byte_identical_across_runs() {
     assert!(generating > 0, "the manifest names no generating case");
 }
 
-/// The broad specification `e2e.rs` compile-checks, read out of that file so the two cannot drift.
-fn e2e_basic_spec() -> &'static str {
+/// The specification `e2e.rs` declares as the raw-string constant `name`, read out of that file so
+/// the two cannot drift.
+fn e2e_spec(name: &str) -> &'static str {
     const E2E: &str = include_str!("e2e.rs");
-    const OPEN: &str = "const BASIC_SPEC: &str = r##\"";
-    let start = E2E.find(OPEN).expect("e2e.rs declares `BASIC_SPEC`") + OPEN.len();
+    let open = format!("const {name}: &str = r##\"");
+    let start = E2E
+        .find(&open)
+        .unwrap_or_else(|| panic!("e2e.rs declares `{name}`"))
+        + open.len();
     // The first `"##` after the opening delimiter is the one that closes the raw string.
     let len = E2E[start..]
         .find("\"##")
-        .expect("`BASIC_SPEC` is a closed raw string");
+        .unwrap_or_else(|| panic!("`{name}` is a closed raw string"));
     &E2E[start..start + len]
+}
+
+/// The broad specification `e2e.rs` compile-checks.
+fn e2e_basic_spec() -> &'static str {
+    e2e_spec("BASIC_SPEC")
 }
 
 #[test]
@@ -137,6 +157,53 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs() {
     assert_eq!(
         assert_generates_identically(&spec_path, "e2e BASIC_SPEC"),
         Outcome::Generated
+    );
+}
+
+/// The OpenAPI 3.2 specification `e2e.rs` compile-checks: its constructs (`itemSchema` sequential
+/// media, the `query` method, `additionalOperations`) take code paths `BASIC_SPEC` does not
+/// reach.
+#[test]
+fn the_e2e_oas32_spec_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_spec("OAS32_SPEC"));
+    assert_eq!(
+        assert_generates_identically(&spec_path, "e2e OAS32_SPEC"),
+        Outcome::Generated
+    );
+}
+
+/// The date specification `e2e.rs` round-trips over the wire: both date formats in every
+/// position a value reaches the wire from.
+#[test]
+fn the_e2e_date_spec_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_spec("DATE_SPEC"));
+    assert_eq!(
+        assert_generates_identically(&spec_path, "e2e DATE_SPEC"),
+        Outcome::Generated
+    );
+}
+
+/// Every option set away from its default: the configuration is part of the invariant's input, so
+/// a non-default value must be as deterministic as the default one. The module must also differ
+/// from the default-option module, or the options reached nothing this test could hold.
+#[test]
+fn the_e2e_basic_spec_with_non_default_options_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_basic_spec());
+    let (outcome, module) =
+        assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
+            spec.uuid(false)
+                .time(false)
+                .open_narrowing(true)
+                .error_body_cap(1024)
+                .batch_cap(7)
+                .carve(true)
+        });
+    assert_eq!(outcome, Outcome::Generated);
+    let (_, default_module) =
+        assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC", |spec| spec);
+    assert_ne!(
+        module, default_module,
+        "the non-default options must change the emitted module"
     );
 }
 
