@@ -14,7 +14,7 @@
 //! [[remote]]
 //! url = "https://example.com/schemas/pet.yaml"
 //! sha256 = "…64 hex chars…"
-//! path = "example.com/schemas/pet.yaml"
+//! path = "example.com/schemas/f3820c2de591b025/pet.yaml"
 //! ```
 //!
 //! `path` is relative to the vendor directory ([`VENDOR_DIR`], `.spargen/vendor/` beside the spec),
@@ -308,8 +308,15 @@ impl PartialEntry {
 }
 
 /// Derive a deterministic, filesystem-safe vendor path for an absolute URL. `https://host/a/b.yaml`
-/// maps to `host/a/b.yaml`; every path segment is sanitized so the result never escapes the vendor
-/// directory (`..` and separators are neutralized).
+/// maps to `host/a/<digest>/b.yaml`; every path segment is sanitized so the result never escapes
+/// the vendor directory (`..` and separators are neutralized).
+///
+/// The readable part drops the scheme, the query and the fragment and folds every character
+/// outside `[A-Za-z0-9._-]` to `_`, so on its own it maps distinct URLs to one path (#713).
+/// `<digest>`, the first [`URL_DIGEST_HEX_LEN`] hex digits of the SHA-256 of the whole URL, keeps
+/// them apart, and sits in a directory of its own so the file keeps its name and its extension.
+/// A build reads each document from the `path` its pin records, never from this function, so a
+/// lock written under an earlier derivation still verifies.
 #[cfg(feature = "remote-fetch")]
 pub(crate) fn vendor_path_for_url(url: &str) -> String {
     let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -333,8 +340,16 @@ pub(crate) fn vendor_path_for_url(url: &str) -> String {
     if segments.is_empty() {
         segments.push("index".to_owned());
     }
+    let digest = super::sha256::sha256_hex(url.as_bytes());
+    let file = segments.len() - 1;
+    segments.insert(file, digest[..URL_DIGEST_HEX_LEN].to_owned());
     segments.join("/")
 }
+
+/// How many hex digits of the URL's SHA-256 [`vendor_path_for_url`] keeps: 64 bits, so two URLs
+/// one lock pins share a path only by a hash collision.
+#[cfg(feature = "remote-fetch")]
+const URL_DIGEST_HEX_LEN: usize = 16;
 
 #[cfg(feature = "remote-fetch")]
 fn sanitize_segment(segment: &str) -> String {
@@ -563,9 +578,16 @@ mod tests {
     #[cfg(feature = "remote-fetch")]
     #[test]
     fn vendor_path_is_sanitized() {
+        let url = "https://example.com/a/b.yaml";
+        let digest = &crate::source::sha256::sha256_hex(url.as_bytes())[..URL_DIGEST_HEX_LEN];
         assert_eq!(
-            vendor_path_for_url("https://example.com/a/b.yaml"),
-            "example.com/a/b.yaml"
+            vendor_path_for_url(url),
+            format!("example.com/a/{digest}/b.yaml")
+        );
+        // The module documentation's example lock.
+        assert_eq!(
+            vendor_path_for_url("https://example.com/schemas/pet.yaml"),
+            "example.com/schemas/f3820c2de591b025/pet.yaml"
         );
         // Traversal and odd characters can never escape the vendor root.
         let path = vendor_path_for_url("https://evil.test/../../etc/passwd");
