@@ -700,6 +700,10 @@ enum YamlFailure {
     /// The node at `span` sits deeper than [`MAX_NESTING_DEPTH`], itself or through the copy an
     /// alias expands to. `path` is built exactly as [`YamlFailure::DuplicateKey`]'s is.
     TooDeep { path: Vec<Segment>, span: Span },
+    /// The mapping key at `span` resolves to something other than a string, which no JSON
+    /// object can hold. A key has no segment of its own, so `path` addresses the mapping that
+    /// holds it, built as [`YamlFailure::DuplicateKey`]'s is from there up.
+    NonStringKey { path: Vec<Segment>, span: Span },
 }
 
 /// The copy that crossed the alias expansion budget.
@@ -718,7 +722,8 @@ impl YamlFailure {
         if let Self::DuplicateKey { path, .. }
         | Self::InvalidScalar { path, .. }
         | Self::ExpansionBudget { path, .. }
-        | Self::TooDeep { path, .. } = &mut self
+        | Self::TooDeep { path, .. }
+        | Self::NonStringKey { path, .. } = &mut self
         {
             path.push(segment);
         }
@@ -731,7 +736,8 @@ impl YamlFailure {
         if let Self::DuplicateKey { path, .. }
         | Self::InvalidScalar { path, .. }
         | Self::ExpansionBudget { path, .. }
-        | Self::TooDeep { path, .. } = &mut self
+        | Self::TooDeep { path, .. }
+        | Self::NonStringKey { path, .. } = &mut self
         {
             path.clear();
         }
@@ -827,6 +833,15 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
+            YamlFailure::NonStringKey { path, span } => {
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message("YAML object keys must be strings")
+                .emit(diags);
+                Aborted
+            }
         })
     }
 
@@ -908,13 +923,10 @@ impl YamlBuilder<'_> {
                         .build_node(depth + 1, diags)
                         .map_err(YamlFailure::in_key)?;
                     let Node::String(name) = key.node else {
-                        Diagnostic::error(
-                            Code::InvalidInput,
-                            Provenance::new(JsonPointer::root(), Some(key.span)),
-                        )
-                        .message("YAML object keys must be strings")
-                        .emit(diags);
-                        return Err(YamlFailure::Reported(Aborted));
+                        return Err(YamlFailure::NonStringKey {
+                            path: Vec::new(),
+                            span: key.span,
+                        });
                     };
                     if map.get(&name).is_some() {
                         return Err(YamlFailure::DuplicateKey {
@@ -1413,16 +1425,19 @@ mod tests {
     #[test]
     fn a_yaml_mapping_key_that_is_not_a_string_is_rejected_at_the_key() {
         // `1` and `true` are plain scalars that resolve to a number and a boolean, and a flow
-        // sequence is a key no JSON object can hold; each is refused at its own span.
-        for (text, line, col) in [
-            ("a: 1\n1: one\n", 2, 1),
-            ("a:\n  true: yes\n", 2, 3),
-            ("a: 1\n? [x]\n: v\n", 2, 3),
+        // sequence is a key no JSON object can hold; each is refused at its own span, addressed
+        // by the mapping that holds it (#923).
+        for (text, pointer, line, col) in [
+            ("a: 1\n1: one\n", "", 2, 1),
+            ("a:\n  true: yes\n", "/a", 2, 3),
+            ("a: 1\n? [x]\n: v\n", "", 2, 3),
+            ("a:\n  - b: 1\n    1.5: x\n", "/a/0", 3, 5),
         ] {
             let mut diags = Diagnostics::default();
             assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
             let diag = the_invalid_input(&diags);
             assert_eq!(diag.message, "YAML object keys must be strings", "{diag:?}");
+            assert_eq!(diag.pointer.as_str(), pointer, "{text}: {diag:?}");
             let span = diag.span.expect("key span");
             assert_eq!(
                 (span.start.line, span.start.col),

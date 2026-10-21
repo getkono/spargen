@@ -27,10 +27,12 @@ use yaml_rust2::{Yaml, YamlLoader};
 /// and column), with a span over the whole root, or that reports the root as a whole: the
 /// validator's verdict on the root value (an `OpenAPI structure violation` whose instance is the
 /// root, which the YAML parser spans only to the start of a flow collection's closing bracket), or
-/// a YAML stream that is not one document. Any other `E011` with an empty pointer, such as a
-/// mapping key that is not a string, reports a construct below the root with a pointer of its
-/// own, and is held to every rule.
-fn is_document_level(diagnostic: &Diagnostic, content_end: usize) -> bool {
+/// a YAML stream that is not one document, or a mapping key that is not a string where the root
+/// mapping itself holds one: such a key is addressed by the mapping that holds it (#923), which
+/// there is the root. Any other `E011` with an empty pointer, such as a non-string key in a
+/// mapping below the root, reports a construct below the root with a pointer of its own, and is
+/// held to every rule.
+fn is_document_level(diagnostic: &Diagnostic, root: &[u8], content_end: usize) -> bool {
     if diagnostic.code == Code::UnsupportedOpenApiVersion {
         return true;
     }
@@ -46,7 +48,23 @@ fn is_document_level(diagnostic: &Diagnostic, content_end: usize) -> bool {
             || diagnostic
                 .message
                 .starts_with("OpenAPI structure violation: ")
-            || diagnostic.message == "YAML input must contain exactly one document")
+            || diagnostic.message == "YAML input must contain exactly one document"
+            || (diagnostic.message == "YAML object keys must be strings"
+                && root_mapping_holds_a_non_string_key(root)))
+}
+
+/// Whether `root` is one YAML document whose top-level mapping has a key that is not a string.
+fn root_mapping_holds_a_non_string_key(root: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(root) else {
+        return false;
+    };
+    let Ok(documents) = YamlLoader::load_from_str(text) else {
+        return false;
+    };
+    match documents.as_slice() {
+        [Yaml::Hash(mapping)] => mapping.keys().any(|key| !matches!(key, Yaml::String(_))),
+        _ => false,
+    }
 }
 
 /// Each diagnostic in `diagnostics` that names no real location (#454).
@@ -73,7 +91,7 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Strin
     let mut violations = Vec::new();
     for diagnostic in diagnostics
         .iter()
-        .filter(|diagnostic| !is_document_level(diagnostic, content_end))
+        .filter(|diagnostic| !is_document_level(diagnostic, root, content_end))
     {
         let in_root = diagnostic.span.is_none_or(|span| span.file.0 == 0);
         let whole_root = diagnostic.span.is_some_and(|span| {

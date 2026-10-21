@@ -87,6 +87,70 @@ components:
     }
 }
 
+#[test]
+fn e011_a_yaml_mapping_key_that_is_not_a_string_is_addressed_by_its_mapping() {
+    // Issue #923: a mapping key that resolves to no string (`1`, `true`, a flow sequence) has no
+    // pointer segment of its own, and used to be reported with the empty pointer wherever it sat.
+    // It is addressed by the mapping that holds it, in the root document and in a referenced
+    // file alike, and spanned at the key itself.
+    let root = |schema: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    A: {schema}\n"
+        )
+    };
+    let properties = root("{ type: object, properties: { 1: { type: string } } }");
+    let tagged = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ntags:\n  - name: \
+                  t\n    true: yes\n";
+    // The root mapping itself holds the key, so the root document is the mapping that holds it.
+    let top_level = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n1: one\n";
+    let referencing = root("{ $ref: './a.yaml' }");
+    let referenced = "type: object\nproperties:\n  ? [x]\n  : { type: string }\n";
+    // The files, the expected pointer, whether the key lies in the root document, and its line
+    // and column.
+    type Case<'a> = (&'a [(&'a str, &'a str)], &'a str, bool, (u32, u32));
+    let cases: [Case; 4] = [
+        (
+            &[("openapi.yaml", &properties)],
+            "/components/schemas/A/properties",
+            true,
+            (6, 38),
+        ),
+        (&[("openapi.yaml", tagged)], "/tags/0", true, (6, 5)),
+        (&[("openapi.yaml", top_level)], "", true, (4, 1)),
+        (
+            &[("openapi.yaml", &referencing), ("a.yaml", referenced)],
+            "/properties",
+            false,
+            (3, 5),
+        ),
+    ];
+    for (files, pointer, in_root, (line, col)) in cases {
+        let (generated, checked, _) = generate_and_check_files(files);
+        for report in [&generated, &checked] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{files:?}: {report:#?}"
+            );
+            let diag = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.message == "YAML object keys must be strings")
+                .unwrap_or_else(|| panic!("{files:?}: no non-string-key E011 in {report:#?}"));
+            assert_eq!(diag.code, Code::InvalidInput, "{diag:#?}");
+            assert_eq!(diag.pointer.as_str(), pointer, "{files:?}: {diag:#?}");
+            let span = diag.span.expect("key span");
+            assert_eq!(span.file.0 == 0, in_root, "{files:?}: {diag:#?}");
+            assert_eq!(
+                (span.start.line, span.start.col),
+                (line, col),
+                "{files:?}: {diag:#?}"
+            );
+        }
+    }
+}
+
 /// A document whose one schema's `maximum` is the YAML scalar `value`, on line 8.
 fn maximum_document(value: &str) -> String {
     format!(
