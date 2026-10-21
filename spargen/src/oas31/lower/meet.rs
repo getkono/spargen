@@ -583,15 +583,9 @@ pub(super) enum NoMeet {
 /// a (base64) JSON string.
 pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
     match kind {
-        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
-        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
-        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
-        | TypeKind::Bytes => Some(JsonCategory::String),
-        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
-            ScalarRepr::String => JsonCategory::String,
-            ScalarRepr::Int => JsonCategory::Number,
-            ScalarRepr::Bool => JsonCategory::Boolean,
-        }),
+        TypeKind::Primitive(primitive) => Some(primitive_category(*primitive)),
+        TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(repr_category(enumeration.repr)),
         TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
         TypeKind::Struct(_) => Some(JsonCategory::Object),
         // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
@@ -639,15 +633,28 @@ fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     })
 }
 
-fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
-    match repr {
-        ScalarRepr::String => matches!(
-            primitive,
-            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
-        ),
-        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
-        ScalarRepr::Bool => primitive == Prim::Bool,
+/// The JSON category every value of a scalar primitive falls in.
+fn primitive_category(primitive: Prim) -> JsonCategory {
+    match primitive {
+        Prim::Bool => JsonCategory::Boolean,
+        Prim::I32 | Prim::I64 | Prim::F64 => JsonCategory::Number,
+        Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date => JsonCategory::String,
     }
+}
+
+/// The JSON category every member of a scalar enum backed by `repr` falls in.
+fn repr_category(repr: ScalarRepr) -> JsonCategory {
+    match repr {
+        ScalarRepr::String => JsonCategory::String,
+        ScalarRepr::Int => JsonCategory::Number,
+        ScalarRepr::Bool => JsonCategory::Boolean,
+    }
+}
+
+/// Whether an enum backed by `repr` and a `primitive` sit in one JSON category, so their
+/// intersection narrows the enum to the primitive.
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    repr_category(repr) == primitive_category(primitive)
 }
 
 /// Whether one side of an intersection carries a field for the wire name `wire`, declared or only
