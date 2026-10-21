@@ -211,10 +211,11 @@ impl InputBundle {
         Some((file, pointer))
     }
 
-    /// The base URL of a vendored remote document, which its relative references resolve against:
-    /// its `http`/`https` (or relative) `$self`, resolved against the retrieval URL, where it has
-    /// one, and otherwise the retrieval URL itself (the pin's `retrieval_url`, or its `url` when the
-    /// fetch was not redirected). `None` for a local document. See
+    /// The `http`/`https` base URL of `file`, which its relative references resolve against. For a
+    /// vendored remote document that is its `http`/`https` (or relative) `$self`, resolved against
+    /// the retrieval URL, where it has one, and otherwise the retrieval URL itself (the pin's
+    /// `retrieval_url`, or its `url` when the fetch was not redirected). For a local document it is
+    /// its `$self` when that is an absolute `http`/`https` URL. `None` otherwise. See
     /// [`Self::register_self_identity`].
     pub(crate) fn remote_origin(&self, file: FileId) -> Option<&str> {
         match self.origins.get(&file) {

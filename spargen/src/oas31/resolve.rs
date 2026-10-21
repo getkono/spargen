@@ -53,9 +53,10 @@ impl<'doc> Resolver<'doc> {
         self.bundle.root_id()
     }
 
-    /// The load-order-independent spelling of `file`: empty for the root document, the base URL
-    /// of a vendored remote document ([`InputBundle::remote_origin`]: its `$self`-derived base, or
-    /// its retrieval URL where it has no `$self`), and otherwise the local path relative to the root
+    /// The load-order-independent spelling of `file`: empty for the root document; the
+    /// `http`/`https` base URL [`InputBundle::remote_origin`] gives, where it gives one — a
+    /// vendored remote document's `$self`-derived base or retrieval URL, or a local document's
+    /// absolute `http`/`https` `$self`; and otherwise the local path relative to the root
     /// document's directory (the loaded path itself when it does not sit under that directory).
     ///
     /// A [`crate::diag::FileId`] is assigned as the bundle discovers files, so it changes when the

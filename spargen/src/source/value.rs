@@ -2,8 +2,10 @@ use crate::diag::{JsonPointer, Span};
 
 /// A JSON/YAML number, held as one of three concrete kinds. Both parsers classify an integer
 /// literal as `Int` when it fits `i64`, else `UInt` when it fits `u64`, else `Float`; a literal with
-/// a fraction or exponent is a `Float`. A literal that overflows to a non-finite `f64` (`1e999`) is
-/// rejected as out of range, and a wide integer stored as a `Float` keeps only `f64` precision.
+/// a fraction or exponent is a `Float`, and so is a YAML scalar with an explicit `!!float` tag,
+/// integer text included (`!!float 5` is `Float(5.0)`). A literal that overflows to a non-finite
+/// `f64` (`1e999`) is rejected as out of range, and a wide integer stored as a `Float` keeps only
+/// `f64` precision.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Number {
     /// A signed integer that fits `i64`.
