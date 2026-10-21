@@ -22,15 +22,28 @@ pub struct ClientConfig {
     /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
     ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
     ///   silently.
-    /// - One path is **not** capped at all: `EventStream`'s per-frame decode, which retains one
-    ///   frame drawn from a frame buffer that is itself unbounded.
+    /// - One path is **not** capped by it: `EventStream`'s per-frame decode, which retains the
+    ///   whole frame. That frame is bounded instead by [`Self::max_stream_frame`].
     pub max_error_body: usize,
+    /// Maximum bytes `EventStream` buffers for one item whose terminator has not arrived yet
+    /// (default 16 MiB): an SSE event before its blank line, an ndjson line before its newline, a
+    /// JSON text sequence record before the next separator.
+    ///
+    /// Once more than this many bytes of such an item are buffered, the stream yields
+    /// [`Error::Decode`] retaining at most `max_error_body` bytes of them, with `truncated` set,
+    /// and then ends, without consulting a reconnect policy. Complete items read in the same
+    /// chunk ahead of the over-limit one are yielded first. Bytes arrive a chunk at a time, so the
+    /// buffer may hold up to one chunk more than this limit before the check runs, and an item
+    /// whose terminator arrives in the same chunk that takes it past the limit is framed
+    /// normally.
+    pub max_stream_frame: usize,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             max_error_body: 64 * 1024,
+            max_stream_frame: 16 * 1024 * 1024,
         }
     }
 }
