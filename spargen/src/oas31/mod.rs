@@ -2,14 +2,15 @@
 //! layer-deps: source, ir, name, diag
 //!
 //! The OAS 3.1.x / 3.2.x typed document model, structural/meta-schema validation, `$ref`
-//! resolution, per-keyword disposition audit, and lowering `SpannedValue` → IR. The only subsystem
-//! that knows OpenAPI 3.1/3.2 syntax. OpenAPI 3.2 is a compatible extension of 3.1 and retains the
-//! same JSON Schema 2020-12 dialect, so both versions deliberately share this frontend and lower
-//! into the same IR.
+//! resolution, per-keyword disposition audit, and lowering `SpannedValue` → IR. The subsystem that
+//! models OpenAPI 3.1/3.2 syntax; `compat` walks the document's layout to apply omit rules, and
+//! `source` reads Security Requirement keys while it collects the references the bundle loads.
+//! OpenAPI 3.2 is a compatible extension of 3.1 and retains the same JSON Schema 2020-12 dialect,
+//! so both versions deliberately share this frontend and lower into the same IR.
 //!
-//! Frontend flow: [`MetaSchemaValidator::validate`] (the root document, and every file a `$ref`
-//! reaches) → [`parse_document`] → [`audit`](fn@audit) → [`lower`](fn@lower), with [`Resolver`]
-//! resolving `$ref`s throughout.
+//! Frontend flow: [`MetaSchemaValidator::validate`] (the root document, and every file it reaches
+//! through a `$ref` in an OpenAPI position) → [`parse_document`] → [`audit`](fn@audit) →
+//! [`lower`](fn@lower), with [`Resolver`] resolving `$ref`s throughout.
 
 mod audit;
 mod deserialize;

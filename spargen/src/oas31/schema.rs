@@ -24,6 +24,8 @@ pub(crate) struct Schema {
     pub(crate) additional_properties: Option<Box<SchemaOr>>,
     /// `patternProperties`: key-regex → value schema. Lowering composes the value schemas into the
     /// object's typed overflow map (the key regex itself is validation-only and surfaced as `W001`).
+    /// Lowering rejects it as `E005` beside `additionalProperties: false`, and when the pattern and
+    /// typed `additionalProperties` value schemas lower to different types.
     pub(crate) pattern_properties: IndexMap<String, SchemaOr>,
     /// `items`.
     pub(crate) items: Option<Box<SchemaOr>>,
@@ -65,9 +67,9 @@ pub(crate) struct Schema {
     pub(crate) validation: ValidationKeywords,
     /// `deprecated`.
     pub(crate) deprecated: bool,
-    /// `readOnly` (W-class annotation).
+    /// `readOnly`: documented on the field, not enforced.
     pub(crate) read_only: bool,
-    /// `writeOnly` (W-class annotation).
+    /// `writeOnly`: documented on the field, not enforced.
     pub(crate) write_only: bool,
     /// `title` → rustdoc.
     pub(crate) title: Option<String>,
@@ -78,8 +80,9 @@ pub(crate) struct Schema {
 }
 
 /// The OpenAPI `xml` object on a schema. `name`/`attribute` drive XML field renaming; the remaining
-/// hints (`namespace`/`prefix`/`wrapped`) are retained only so lowering can warn (`W006`) that they
-/// are ignored — quick-xml serde has no faithful representation for them.
+/// hints (`namespace`/`prefix`/`wrapped`) are retained only so lowering can report them — quick-xml
+/// serde has no faithful representation for them, so they are rejected (`E009`) on a type
+/// serialized as XML and warned (`W006`) as ignored elsewhere.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct XmlHints {
     /// `xml.name`: overrides the element/attribute wire name.
@@ -88,11 +91,11 @@ pub(crate) struct XmlHints {
     pub(crate) attribute: bool,
     /// OpenAPI 3.2 `nodeType`.
     pub(crate) node_type: Option<String>,
-    /// `xml.namespace`: an XML namespace URI (unsupported → `W006`).
+    /// `xml.namespace`: an XML namespace URI (unsupported → `E009`/`W006`).
     pub(crate) namespace: Option<String>,
-    /// `xml.prefix`: a namespace prefix (unsupported → `W006`).
+    /// `xml.prefix`: a namespace prefix (unsupported → `E009`/`W006`).
     pub(crate) prefix: Option<String>,
-    /// `xml.wrapped`: wrap an array in an outer element (unsupported → `W006`).
+    /// `xml.wrapped`: wrap an array in an outer element (unsupported → `E009`/`W006`).
     pub(crate) wrapped: bool,
 }
 

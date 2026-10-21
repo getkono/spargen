@@ -12,8 +12,10 @@ pub(crate) struct Resolver<'doc> {
     bundle: &'doc InputBundle,
 }
 
-/// A resolved reference target. Component refs borrow the target schema from the document; a remote
-/// ref yields a schema parsed on the fly from its vendored copy (owned).
+/// A resolved reference target. A `#/components/schemas/` ref written in the root document borrows
+/// the already-parsed component from the document; every other target — a pointer into a local
+/// file, a whole relative file, or a remote ref's vendored copy — is a schema parsed on the fly from
+/// its source node (owned).
 #[derive(Debug)]
 pub(crate) struct Resolved<'doc> {
     /// The target schema.
@@ -44,10 +46,8 @@ impl<'doc> Resolver<'doc> {
     ///
     /// `lower` needs it to tell a reference written in the root document from one written in a
     /// referenced sub-file, and the two branches that distinction gates both retarget a `$ref`
-    /// silently when it is wrong. It re-derived the answer as a hardcoded `FileId(0)`, correct only
-    /// because `InputBundle::load` happens to load the root before anything else; a constructor that
-    /// ever pre-loads a file — an in-memory bundle, a vendored preload, a test harness — would make
-    /// it wrong with no test to notice. The authority is one call away, so ask it.
+    /// silently when it is wrong. Asking the bundle keeps the answer independent of the order in
+    /// which files are loaded.
     pub(super) fn root_id(&self) -> crate::diag::FileId {
         self.bundle.root_id()
     }
@@ -171,9 +171,11 @@ impl<'doc> Resolver<'doc> {
         Some(self.bundle.file(file)?.path.as_path())
     }
 
-    /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/unpinned ref through
-    /// `diags`. Remote (`http`/`https`) refs are resolved hermetically from the vendored, hash-
-    /// pinned copy already loaded into the bundle — no network access.
+    /// Resolve a `$ref` string that appears at `at`, reporting `E004` through `diags` when the
+    /// reference places no target in the bundle; a target that does not parse as a schema is
+    /// reported by the parser, at the target. Remote (`http`/`https`) refs are resolved
+    /// hermetically from the vendored, hash-pinned copy already loaded into the bundle — no network
+    /// access.
     pub(crate) fn resolve(
         &self,
         reference: &str,
@@ -199,11 +201,6 @@ impl<'doc> Resolver<'doc> {
         self.resolve_bundle(reference, from, at, diags)
     }
 
-    /// Resolve a remote `$ref` against the vendored document already loaded into the bundle. The
-    /// fragment (a JSON Pointer) selects a subtree, whose `$ref`s are rewritten to absolute URLs so
-    /// nested remote/relative refs resolve against the vendored doc's own URL, then parsed to a
-    /// [`Schema`]. If the vendored doc is absent the bundle load already rejected it (`E003`/`E021`)
-    /// and aborted; this only re-checks defensively.
     /// Resolve a Path Item `$ref` into a parsed Path Item.
     ///
     /// Path Item references are ordinary bundle references: they may address a
@@ -294,6 +291,12 @@ impl<'doc> Resolver<'doc> {
         Ok((node, pointer))
     }
 
+    /// Resolve a schema `$ref` against the files already loaded into the bundle, local or remote.
+    /// The reference's JSON Pointer selects a subtree, which is parsed to a [`Schema`]. When the
+    /// subtree comes from a vendored remote document, its `$ref`s are first rewritten to absolute
+    /// URLs, so nested remote/relative refs resolve against that document's own URL. A remote
+    /// document that was never vendored was already rejected by the bundle load (`E003`/`E021`),
+    /// which aborted; the `E004` checks here re-check it defensively.
     fn resolve_bundle(
         &self,
         reference: &str,

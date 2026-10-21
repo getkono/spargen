@@ -138,7 +138,7 @@ pub(crate) struct OperationObject {
 #[derive(Debug, Clone)]
 pub(crate) struct ParameterObject {
     pub(crate) name: String,
-    /// `in`: `path` / `query` / `header` / `cookie`.
+    /// `in`: `path` / `query` / `header` / `cookie`, or OpenAPI 3.2's `querystring`.
     pub(crate) location: String,
     pub(crate) required: bool,
     pub(crate) deprecated: bool,
@@ -167,10 +167,12 @@ pub(crate) struct RequestBodyObject {
     pub(crate) provenance: Provenance,
 }
 
-/// An OAS Responses Object: per-status entries keyed by `"200"`, `"2XX"`, or `"default"`.
+/// An OAS Responses Object.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResponsesObject {
+    /// Per-status entries keyed by an exact status (`"200"`) or a status range (`"2XX"`).
     pub(crate) by_status: IndexMap<String, RefOr<ResponseObject>>,
+    /// The `default` entry, held apart from [`by_status`](Self::by_status).
     pub(crate) default: Option<RefOr<ResponseObject>>,
 }
 

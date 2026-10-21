@@ -59,7 +59,7 @@ fn is_document_level(diagnostic: &Diagnostic) -> bool {
 /// Each diagnostic in `diagnostics` that names no real location (#454).
 ///
 /// A diagnostic raised against a construct the lowering built for itself, such as the struct an
-/// `allOf` meet produces, used to carry the document root's provenance: an empty pointer, a span
+/// `allOf` meet produces, must not carry the document root's provenance: an empty pointer, a span
 /// over the whole file, and an empty type name in the message (`` in `` ``). So every diagnostic
 /// that is not [`is_document_level`] must have no empty backtick pair in its message, no span
 /// covering the whole root document `root`, and a non-empty pointer unless it lies in a referenced
@@ -286,7 +286,7 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
             for (second, other) in &payloads[at + 1..] {
                 if shape == other {
                     // Equal nominal payloads (two structs, or two string enums, of one
-                    // definition) are merged with `W001` since #492, so no issue tracks them.
+                    // definition) are merged with `W001` (#492), so no issue tracks them.
                     violations.push(Violation {
                         reason: format!(
                             "`oneOf` `{name}` variants `{first}` and `{second}` have one shape: \
