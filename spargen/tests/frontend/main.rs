@@ -84,12 +84,12 @@ fn run_check(spec: &Spec) -> Report {
     report
 }
 
-/// Fail unless every diagnostic in `report` is held to a real location (#454), except where an open
-/// issue tracks the gap: see [`oracles::location_violations`]. The root document is read back from
-/// `spec`'s path, so a span can be compared with the file it lies in.
+/// Fail unless every diagnostic in `report` is held to a real location (#454): see
+/// [`oracles::location_violations`]. The root document is read back from `spec`'s path, so a span
+/// can be compared with the file it lies in.
 fn assert_located(report: &Report, spec: &Spec) {
     let root = std::fs::read(spec.path()).unwrap_or_default();
-    let violations = oracles::unknown(oracles::location_violations(report.diagnostics(), &root));
+    let violations = oracles::location_violations(report.diagnostics(), &root);
     assert!(
         violations.is_empty(),
         "a `{}` run reported diagnostics with no real location: {violations:#?}",
@@ -97,9 +97,8 @@ fn assert_located(report: &Report, spec: &Spec) {
     );
 }
 
-/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no warning
-/// says why, except where an open issue tracks the gap: see
-/// [`oracles::indistinguishable_variants`].
+/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no `W001` at
+/// the union says why: see [`oracles::unexplained_variants`].
 fn assert_distinguishable_variants(report: &Report, code: &str) {
     let violations = oracles::unexplained_variants(report, code);
     assert!(

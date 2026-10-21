@@ -23,8 +23,8 @@
 //!   excluded-member `W011`s in every spelling of that constraint set.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
-//! and each generated union's variants are distinguishable by shape unless a warning says why or an
-//! open issue tracks the gap (#402). Each case of the first three properties moved into a
+//! and each generated union's variants are distinguishable by shape unless a `W001` at the union
+//! says why (#402). Each case of the first three properties moved into a
 //! referenced file (`oracles::relocate`) also reaches the same verdict, codes and shapes (#446).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,9 +67,8 @@ fn generate_module(spec: &str) -> (Report, String) {
 }
 
 /// `generate` on the root document at `root`, writing the module beside it, held to
-/// [`oracles::location_violations`] and, when it generates, to
-/// [`oracles::indistinguishable_variants`]: a union's variants are told apart by shape, or a
-/// warning says why, or an open issue tracks the gap.
+/// [`oracles::location_violations`] and, when it generates, to [`oracles::unexplained_variants`]:
+/// a union's variants are told apart by shape, or a `W001` at the union says why.
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
@@ -92,7 +91,7 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
 /// Fail unless every diagnostic in `report` names a real location (#454).
 fn assert_located(report: &Report, root: &Utf8Path) {
     let text = std::fs::read(root).unwrap_or_default();
-    let unlocated = oracles::unknown(oracles::location_violations(report.diagnostics(), &text));
+    let unlocated = oracles::location_violations(report.diagnostics(), &text);
     assert!(
         unlocated.is_empty(),
         "diagnostics with no real location: {unlocated:#?}"

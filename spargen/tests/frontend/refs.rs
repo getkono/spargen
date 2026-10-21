@@ -3118,10 +3118,7 @@ mod remote {
     fn located_at(report: &Report, root: &[u8], code: Code) -> (String, u32) {
         let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [code], "{report:#?}");
-        let violations: Vec<String> = oracles::location_violations(report.diagnostics(), root)
-            .into_iter()
-            .map(|violation| violation.reason)
-            .collect();
+        let violations = oracles::location_violations(report.diagnostics(), root);
         assert!(violations.is_empty(), "{violations:#?}");
         let diag = &report.diagnostics()[0];
         let span = diag.span.expect("located at a span");
