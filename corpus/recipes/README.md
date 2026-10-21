@@ -27,8 +27,8 @@ below. The test reads only these local files; it never hits the network.
   `type: ["integer","null"]`), an externally-tagged enum (`oneOf` of closed
   `additionalProperties: false` objects with unique required keys, dispatched by content), a
   by-JSON-type disjoint `oneOf` (`string | integer`), an `allOf` `#[serde(flatten)]` composition,
-  and a multi-status response. The `minimum`/`format` validation hints schemars emits are
-  faithfully ignored (`W001`).
+  and a multi-status response. The `minimum` validation hints schemars emits are faithfully
+  ignored (`W001`).
 - **`poem-openapi.json`** — a 3.0.0 document (with 3.0-style `nullable: true`); rejected on the
   version alone.
 - **`utoipa-untagged-overlap.json`** — one clean operation plus one operation whose response is an

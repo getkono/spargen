@@ -230,9 +230,7 @@ components:
               properties: { extra: { type: string } }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
     for (field, nullable) in [
         ("pub via_all_of", true),
@@ -314,12 +312,10 @@ paths:
 {COMPONENTS}"##
     );
     let (generated, root_code) = generate_with_code(&root);
-    let checked = check(&root);
     let (split_generated, split_checked, split_code) =
         split("./lib.yaml#/components/schemas/Holder", COMPONENTS);
     for (entry, report) in [
         ("root/generate", &generated),
-        ("root/check", &checked),
         ("split/generate", &split_generated),
         ("split/check", &split_checked),
     ] {
@@ -461,9 +457,7 @@ components:
         alone: { $ref: '#/components/schemas/C' }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     for (field, nullable) in [
         ("pub via_composed:", true),
         ("pub via_composed_refs:", true),
@@ -535,9 +529,7 @@ components:
 {defs}"##
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     for (field, nullable) in [("pub untyped_leaf:", true), ("pub typed_leaf:", false)] {
         let ty = field_type(&code, field).unwrap_or_else(|| panic!("no `{field}` field: {code}"));
         assert_eq!(ty.starts_with("Option<"), nullable, "`{field}` is `{ty}`");
@@ -595,9 +587,7 @@ x-defs:
 {defs}"##
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
     for (field, required, alias) in [
         ("pub a:", true, "String"),
@@ -639,6 +629,9 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
         "    NB:\n      type: [object, 'null']\n      properties:\n        a: { type: \
                          string }\n        b: { type: string }\n";
     let name = "    Name: { type: string }\n";
+    let other =
+        "    Other:\n      type: object\n      required: [a]\n      properties:\n        c: \
+                 { type: integer }\n";
     // Branches that state nothing, so each meets the target to the target itself. Untyped
     // `required` branches no longer do: each establishes an object that requires its key (#613).
     let keywordless = "[ {}, {} ]";
@@ -646,6 +639,7 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
     let single =
         "[ { type: object, required: [a], properties: { c: { type: integer } } }, { type: \
                   'null' } ]";
+    let single_ref = "[ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
     // (case, target, keyword, branches, the codes reported at `Pick`, `Pick`'s shape). `Fields`
     // carries whether the required `pick` property is `Option`, that is, whether `null` is valid.
     enum Shape {
@@ -719,6 +713,25 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             single,
             vec![],
             Shape::Fields(&["a", "b", "c"], false),
+        ),
+        // The same with its real branch a `$ref` (#491): met as `Other`, so `Pick` is `Base` and
+        // `Other` merged. Beside the nullable target `null` matches the target and exactly one
+        // branch, so the `oneOf` admits it.
+        (
+            "single nullable $ref branch",
+            "Base",
+            "oneOf",
+            single_ref,
+            vec![],
+            Shape::Fields(&["a", "b", "c"], false),
+        ),
+        (
+            "nullable target, single nullable $ref branch",
+            "NB",
+            "oneOf",
+            single_ref,
+            vec![],
+            Shape::Fields(&["a", "b", "c"], true),
         ),
     ];
     // A further conjunct `required: [a]`, which every instance satisfies as well, written as an
@@ -822,7 +835,7 @@ paths:
             application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
 components:
   schemas:
-{base}{nullable_base}{name}    Pick: {site}
+{base}{nullable_base}{name}{other}    Pick: {site}
     Holder:
       type: object
       properties:
@@ -864,15 +877,52 @@ components:
     }
 }
 
-/// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
-/// nest one union in another's branches, so the composition is rejected with the stable `E013` it
-/// has always drawn rather than emitting a union of identical variants (#463).
+/// An `allOf` with a union member takes its `null` from every conjunct, the enclosing schema's own
+/// `type` among them, exactly as `{$ref: T, type: …, oneOf|anyOf: […]}` and the union written
+/// beside the `allOf` do (#491). The `allOf` path once read nullability from the enclosing `type`
+/// alone after the meet (`with_all_of_nullability`), so beside a nullable target the spellings
+/// could differ in `Option<_>`. Each case is lowered in the three spellings as `Pick`, held by a
+/// required `pick`, and each must make `pick` optional exactly where `null` satisfies the target,
+/// the `type`, and the union (`oneOf`: exactly one branch).
 #[test]
-fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
-    let spec = r##"
+fn an_all_of_union_member_takes_null_from_every_conjunct_as_the_ref_spelling_does() {
+    let any_required = "anyOf: [ { required: [a] }, { required: [b] } ]";
+    let any_null_branch = "anyOf: [ { required: [a] }, { type: 'null' }, { required: [b] } ]";
+    let one_ref_or_null = "oneOf: [ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
+    let any_ref_or_null = "anyOf: [ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]";
+    // (target, the enclosing `type` keyword or none, the union, whether `pick` is optional).
+    let cases = [
+        ("NB", Some("[object, 'null']"), any_required, true),
+        ("Base", Some("[object, 'null']"), any_required, false),
+        ("NB", None, any_null_branch, true),
+        ("NB", None, one_ref_or_null, true),
+        ("NB", Some("object"), one_ref_or_null, false),
+        ("Base", Some("[object, 'null']"), one_ref_or_null, false),
+        ("NB", Some("[object, 'null']"), one_ref_or_null, true),
+        ("NB", None, any_ref_or_null, true),
+    ];
+    for (target, types, union, optional) in cases {
+        let target_ref = format!("'#/components/schemas/{target}'");
+        let types = types.map_or_else(String::new, |types| format!("type: {types}, "));
+        for (spelling, site) in [
+            (
+                "allOf member",
+                format!("{{ {types}allOf: [ {{ $ref: {target_ref} }}, {{ {union} }} ] }}"),
+            ),
+            (
+                "$ref sibling",
+                format!("{{ $ref: {target_ref}, {types}{union} }}"),
+            ),
+            (
+                "beside allOf",
+                format!("{{ {types}allOf: [ {{ $ref: {target_ref} }} ], {union} }}"),
+            ),
+        ] {
+            let spec = format!(
+                r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
 paths:
   /p:
     get:
@@ -881,30 +931,181 @@ paths:
         '200':
           description: ok
           content:
-            application/json: { schema: { $ref: '#/components/schemas/Pick' } }
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
 components:
   schemas:
     Base:
       type: object
       properties:
-        a: { type: string }
-        b: { type: string }
-    Pick:
-      allOf:
-        - $ref: '#/components/schemas/Base'
-        - oneOf: [ { required: [a] }, { required: [b] } ]
-        - anyOf: [ { required: [a] }, { required: [b] } ]
-"##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
+        a: {{ type: string }}
+        b: {{ type: string }}
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Other:
+      type: object
+      required: [a]
+      properties:
+        c: {{ type: integer }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+            );
+            let label = format!("{target}, {types}{union}, {spelling}");
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+            let types_code = types_module(&code);
+            let pick = field_type(&types_code, "pub pick")
+                .unwrap_or_else(|| panic!("{label}: no `pick` field: {types_code}"));
+            assert_eq!(
+                pick.starts_with("Option<"),
+                optional,
+                "{label}: `pick` is `{pick}`: {types_code}"
+            );
+        }
+    }
+}
+
+/// Object members are met with one `oneOf`/`anyOf` union branch by branch (#463); a second union
+/// would nest one union's branches under the other's, so an object composition with two or more
+/// unions to meet is rejected with `E013`'s `several-unions` case (#491), in every place an
+/// `allOf` gathers a union from: a second inline member, a `$ref` member to a union component, a
+/// union nested in an inner `allOf` (flattened into the merge), the schema's own object keywords
+/// beside two inline unions, and the union written beside the `allOf`. Before #491 each was
+/// reported as an object/scalar mix, which names no member the document wrote. The controls
+/// keep the rule to what it says: one union beside a `$ref` to a plain object component, a
+/// union of one real branch beside `null` (no union once lowered), and two unions with no object
+/// member (met as scalars) still generate.
+#[test]
+fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
+    let one = "{ oneOf: [ { required: [a] }, { required: [b] } ] }";
+    let any = "{ anyOf: [ { required: [a] }, { required: [b] } ] }";
+    let base = "{ $ref: '#/components/schemas/Base' }";
+    let union_ref = "{ $ref: '#/components/schemas/U' }";
+    let rejected = [
+        (
+            "oneOf and anyOf members",
+            format!("{{ allOf: [ {base}, {one}, {any} ] }}"),
+        ),
+        (
+            "two oneOf members",
+            format!("{{ allOf: [ {base}, {one}, {one} ] }}"),
+        ),
+        (
+            "a $ref member to a union",
+            format!("{{ allOf: [ {base}, {one}, {union_ref} ] }}"),
+        ),
+        (
+            "a union nested in an inner allOf",
+            format!("{{ allOf: [ {base}, {one}, {{ allOf: [ {any} ] }} ] }}"),
+        ),
+        (
+            "two unions nested in an inner allOf",
+            format!("{{ allOf: [ {base}, {{ allOf: [ {one}, {any} ] }} ] }}"),
+        ),
+        (
+            "the schema's own object keywords",
+            format!(
+                "{{ type: object, properties: {{ a: {{ type: string }} }}, allOf: [ {one}, {any} \
+                 ] }}"
+            ),
+        ),
+        (
+            "an inline member beside a union beside the allOf",
+            format!(
+                "{{ allOf: [ {base}, {any} ], oneOf: [ {{ required: [a] }}, {{ required: [b] }} \
+                 ] }}"
+            ),
+        ),
+        (
+            "a $ref member beside a union beside the allOf",
+            format!(
+                "{{ allOf: [ {base}, {union_ref} ], oneOf: [ {{ required: [a] }}, {{ required: \
+                 [b] }} ] }}"
+            ),
+        ),
+    ];
+    let generated = [
+        (
+            "one union beside a $ref to an object",
+            format!("{{ allOf: [ {base}, {one}, {{ $ref: '#/components/schemas/Other' }} ] }}"),
+        ),
+        (
+            "a union of one real branch beside null",
+            format!(
+                "{{ allOf: [ {base}, {{ oneOf: [ {{ $ref: '#/components/schemas/Other' }}, {{ \
+                 type: 'null' }} ] }} ] }}"
+            ),
+        ),
+        (
+            "two unions and no object member",
+            "{ allOf: [ { oneOf: [ { type: string }, { type: integer } ] }, { anyOf: [ { type: \
+             string }, { type: integer } ] } ] }"
+                .to_owned(),
+        ),
+    ];
+    let several = "more than one `oneOf`/`anyOf` union";
+    for (case, pick, expect_rejected) in rejected
+        .iter()
+        .map(|(case, pick)| (case, pick, true))
+        .chain(generated.iter().map(|(case, pick)| (case, pick, false)))
+    {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Pick' }} }}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Other:
+      type: object
+      properties:
+        c: {{ type: integer }}
+    U:
+      anyOf: [ {{ required: [a] }}, {{ required: [b] }} ]
+    Pick: {pick}
+"##
+        );
+        let report = generate(&spec);
+        let at_pick: Vec<&str> = report
             .diagnostics()
             .iter()
-            .any(|d| d.code == Code::AllOfIrreconcilable
-                && d.pointer.as_str() == "/components/schemas/Pick"),
-        "{report:#?}"
-    );
+            .filter(|d| {
+                d.code == Code::AllOfIrreconcilable
+                    && d.pointer.as_str() == "/components/schemas/Pick"
+            })
+            .map(|d| d.message.as_str())
+            .collect();
+        if expect_rejected {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                at_pick.len() == 1 && at_pick[0].contains(several),
+                "{case}: {report:#?}"
+            );
+        } else {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        }
+    }
 }
 
 /// Issue #419: a schema carrying `allOf` and `oneOf`/`anyOf` together lowered through the `allOf`
@@ -977,17 +1178,13 @@ fn an_all_of_member_with_its_own_union_beside_object_keywords_keeps_the_union() 
          - type: object\n          properties: { id: { type: integer } }\n          \
          oneOf: [ { type: string } ]\n",
     );
-    for (entry, report) in [("generate", generate(&typed)), ("check", check(&typed))] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: an object no string is: {report:#?}"
-        );
-        assert!(
-            has_code(&report, Code::NonDisjointUnion),
-            "via {entry}: {report:#?}"
-        );
-    }
+    let report = generate(&typed);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an object no string is: {report:#?}"
+    );
+    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 
     let untyped = with_schemas(
         "3.1.0",
@@ -1035,8 +1232,6 @@ fn a_union_beside_all_of_composes_with_it() {
         code.contains("\"cat\""),
         "the discriminator still dispatches:\n{code}"
     );
-    let checked = check(&shadowed);
-    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
 
     // The `allOf` polymorphism parent spelled beside its own union: every branch is met with the
     // shared base, so each variant carries the base's `id` as well as its own fields.
@@ -1120,8 +1315,6 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
             }),
             "{what}: one variant is the string branch: {variants:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 
     let owner = "    Owner:\n      type: object\n      required: [p]\n      \
@@ -1161,8 +1354,6 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
                 && fields.iter().any(|field| field == "kind"),
             "{what}: the object branch is `Cat` refined by `name`: {fields:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 }
 
@@ -1228,8 +1419,6 @@ fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
             2,
             "{what}: both non-null branches survive: {variants:?}\n{types}"
         );
-        let checked = check(&spec);
-        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
     }
 }
 
@@ -1569,13 +1758,6 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::AllOfIrreconcilable),
-        "{checked:#?}"
-    );
-
     // Each property keeps the narrower side of its intersection, read through the merged
     // struct's own field types rather than from a type name appearing somewhere.
     let types = types_module(&code);
@@ -1642,6 +1824,49 @@ components:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::AllOfIrreconcilable));
+}
+
+/// The boolean schema `false` admits no value, so an `allOf` holding it admits none either. It is
+/// rejected as the empty composition it is, at a component root and inside a property alike, and
+/// located at the `false` entry itself: its pointer and the span of the `false` it names (#832).
+#[test]
+fn e013_an_all_of_member_that_is_false() {
+    for (place, schemas, pointer) in [
+        (
+            "component",
+            "    Probe:\n      allOf: [ { type: object, properties: { a: { type: string } } }, false \
+             ]\n",
+            "/components/schemas/Probe/allOf/1",
+        ),
+        (
+            "property",
+            "    Probe:\n      type: object\n      properties:\n        p: { allOf: [ { type: \
+             string }, false ] }\n",
+            "/components/schemas/Probe/properties/p/allOf/1",
+        ),
+    ] {
+        let spec = with_schemas("3.1.0", schemas);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{place}: {report:#?}");
+            assert_eq!(
+                messages_for(&report, Code::AllOfIrreconcilable),
+                ["an `allOf` member is `false`"],
+                "{place}: {report:#?}"
+            );
+            let diagnostic = report
+                .diagnostics()
+                .iter()
+                .find(|d| d.code == Code::AllOfIrreconcilable)
+                .expect("the E013 asserted above");
+            assert_eq!(diagnostic.pointer.as_str(), pointer, "{place}: {report:#?}");
+            let span = diagnostic.span.expect("the `false` entry has a span");
+            assert_eq!(
+                &spec[span.start.offset..span.end.offset],
+                "false",
+                "{place}: {report:#?}"
+            );
+        }
+    }
 }
 
 /// Lay out a root document whose `Wrap` component is `allOf: [member]`, beside a `lib.yaml`
@@ -1810,18 +2035,12 @@ fn a_required_only_field_takes_its_type_from_every_side_of_a_composition() {
                         required: [a] }\n";
     let types_for = |schema: &str| {
         let spec = format!("{HEAD}    Thing: {schema}\n");
-        let checked = check(&spec);
-        assert_ne!(
-            checked.outcome(),
-            Outcome::Rejected,
-            "{schema}: {checked:#?}"
-        );
-        assert!(
-            !has_code(&checked, Code::AllOfIrreconcilable),
-            "{schema}: {checked:#?}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{schema}: {report:#?}"
+        );
         types_module(&code)
     };
     // The field of `Thing` itself: `Req` carries an `a` of its own.
@@ -2498,21 +2717,19 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
     ];
     for (what, body, components) in inhabited {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable)
-                    && !has_code(&report, Code::NonDisjointUnion),
-                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` still admits `{{}}`, so it must not be rejected: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable)
+                && !has_code(&report, Code::NonDisjointUnion),
+            "`{what}` reported an irreconcilable composition: {report:#?}"
+        );
         // Not silently widened to something that accepts `{"a": 1}`: the field itself is
         // uninhabited, so only instances omitting the property can be built or decoded.
-        let (_, code) = generate_with_code(&spec);
         assert!(
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
@@ -2536,17 +2753,16 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
     ];
     for (what, body, components) in empty {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` did not report E013 through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` admits no value at all, so it must still be rejected: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` did not report E013: {report:#?}"
+        );
     }
 }
 
@@ -2617,19 +2833,17 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
     ];
     for (what, body, components) in inhabited {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable)
-                    && !has_code(&report, Code::NonDisjointUnion),
-                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` still admits `{{}}`, so it must not be rejected: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable)
+                && !has_code(&report, Code::NonDisjointUnion),
+            "`{what}` reported an irreconcilable composition: {report:#?}"
+        );
         assert!(
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
@@ -2670,17 +2884,16 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
     ];
     for (what, body, components) in empty {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` did not report E013 through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` admits no value at all, so it must still be rejected: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` did not report E013: {report:#?}"
+        );
     }
 }
 
@@ -2747,29 +2960,25 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
                 "{HEAD}{}{components}",
                 PATH.replace("BODY", &body.replace("OTHER", other))
             );
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                if inhabited {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what}: a uuid/base64 meet is inhabited but has no Rust type, so {entry} \
-                         must reject it rather than type it uninhabited: {report:#?}"
-                    );
-                    assert!(
-                        has_code(&report, Code::AllOfIrreconcilable),
-                        "{what}: {entry} must report E013: {report:#?}"
-                    );
-                } else {
-                    assert_ne!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what}: a uuid/integer meet is provably empty, so {entry} must keep \
-                         generating: {report:#?}"
-                    );
-                }
-            }
-            if !inhabited {
-                let (_, code) = generate_with_code(&spec);
+            let (report, code) = generate_with_code(&spec);
+            if inhabited {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: a uuid/base64 meet is inhabited but has no Rust type, so it must be \
+                     rejected rather than typed uninhabited: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{what}: must report E013: {report:#?}"
+                );
+            } else {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: a uuid/integer meet is provably empty, so it must keep generating: \
+                     {report:#?}"
+                );
                 assert!(
                     code.contains("no JSON value can inhabit schema"),
                     "{what}: the empty meet must still be typed uninhabited: {code}"
@@ -2807,21 +3016,20 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
         ),
     ] {
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what}: {entry} must reject rather than narrow: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "{what}: {entry} must report E013: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::DeclarationHasNoEffect),
-                "{what}: {entry} must not claim a branch cannot satisfy the siblings: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: must reject rather than narrow: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{what}: must report E013: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{what}: must not claim a branch cannot satisfy the siblings: {report:#?}"
+        );
     }
 
     // An unrepresentable property does not settle a struct meet on its own: `intersect_structs`
@@ -2839,29 +3047,14 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
              b: {{ type: {required_type} }} }}, required: [b] }} }}"
         );
         let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", &body));
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            if empty {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "a required string/integer property empties every item, so {entry} must keep \
-                     generating the empty array despite the earlier uuid/base64 one: {report:#?}"
-                );
-            } else {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "with no empty property the uuid/base64 one is unrepresentable, so {entry} \
-                     must reject: {report:#?}"
-                );
-                assert!(
-                    has_code(&report, Code::AllOfIrreconcilable),
-                    "{entry} must report E013: {report:#?}"
-                );
-            }
-        }
+        let (report, code) = generate_with_code(&spec);
         if empty {
-            let (_, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "a required string/integer property empties every item, so it must keep \
+                 generating the empty array despite the earlier uuid/base64 one: {report:#?}"
+            );
             assert!(
                 code.contains("no JSON value can inhabit schema"),
                 "the emptied item must be typed uninhabited: {code}"
@@ -2877,6 +3070,17 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
             assert!(
                 code.contains(&format!("Vec<{never}>")),
                 "the body must be an array of the uninhabited item `{never}`: {code}"
+            );
+        } else {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "with no empty property the uuid/base64 one is unrepresentable, so it must be \
+                 rejected: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "must report E013: {report:#?}"
             );
         }
     }
@@ -3115,32 +3319,19 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
                 document("[object, 'null']", p)
             );
             let (report, code) = generate_with_code(&spec);
-            let checked = check(&spec);
             if !null_only {
-                for (entry, report) in [("generate", &report), ("check", &checked)] {
-                    assert_eq!(
-                        report.outcome(),
-                        Outcome::Rejected,
-                        "{what} ({entry}): {report:#?}"
-                    );
-                    assert!(
-                        has_code(report, Code::AllOfIrreconcilable),
-                        "{what} ({entry}): {report:#?}"
-                    );
-                }
+                assert_eq!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{what}: {report:#?}"
+                );
                 continue;
             }
-            for (entry, report) in [("generate", &report), ("check", &checked)] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{what} ({entry}): {report:#?}"
-                );
-                assert!(
-                    !has_code(report, Code::AllOfIrreconcilable),
-                    "{what} ({entry}): {report:#?}"
-                );
-            }
+            assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{what}: {report:#?}"
+            );
             let ty = field_type(&types_module(&code), "pub p:")
                 .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
             assert!(
@@ -3449,7 +3640,6 @@ fn a_ref_all_of_member_to_untyped_array_applicators_refines_the_merge_s_arrays()
         assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
         assert!(codes(&report).is_empty(), "{what}: {report:#?}");
         assert_eq!(element(&code, "Probe", what), expected, "{what}: {code}");
-        assert_check_agrees(&report, &check(&spec));
     }
 
     // Beside members of another category the target constrains nothing: beside an object member
@@ -3513,4 +3703,79 @@ fn a_ref_all_of_member_to_untyped_array_applicators_refines_the_merge_s_arrays()
         "W011 must sit at the target: {report:#?}"
     );
     assert_eq!(enum_variants(&code, "Probe").len(), 2, "{code}");
+}
+
+/// A union member of the `allOf` written beside a `oneOf` is met before its indistinguishable
+/// branches merge, as the bare `allOf` spelling meets it (#678): the branch the outer union's
+/// `integer` excludes is reported (`W011`), the branches the meet leaves sharing one generated type
+/// collapse with one `W001` at the schema, and the member's own unmerged lowering, an input to the
+/// meet, is not emitted as a public union whose indistinguishable variants reject every value.
+/// Written inline, or as a `$ref` to a component that merged them, alike; the component keeps its
+/// own merged type.
+#[test]
+fn an_all_of_union_member_beside_a_union_is_met_before_its_branches_merge() {
+    let member = "{ oneOf: [ { type: string }, { type: string, maxLength: 3 } ] }";
+    for (spelling, written) in [
+        ("inline", member),
+        ("a $ref", "{ $ref: '#/components/schemas/M' }"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {{ oneOf: [ {{ type: string }}, {{ type: integer }} ], allOf: [ {{ type: \
+                 [string, 'null'] }}, {written} ] }}\n    M: {member}\n    Holder: {{ type: \
+                 object, properties: {{ pick: {{ $ref: '#/components/schemas/Pick' }} }}, \
+                 required: [pick] }}\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
+        );
+        let at = |code: Code, pointer: &str| {
+            report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == code && d.pointer.as_str() == pointer)
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            at(Code::DeclarationHasNoEffect, "/components/schemas/Pick")
+                .iter()
+                .any(|message| message.starts_with("union member 1 cannot satisfy")),
+            "{spelling}: the excluded `integer` branch is reported: {report:#?}"
+        );
+        assert!(
+            at(Code::ValidationKeywordIgnored, "/components/schemas/Pick")
+                .iter()
+                .any(|message| message.contains("intersect to a union whose branches differ only")),
+            "{spelling}: the meet's collapse is reported at the schema: {report:#?}"
+        );
+        assert!(
+            at(
+                Code::ValidationKeywordIgnored,
+                "/components/schemas/Pick/allOf/1"
+            )
+            .is_empty(),
+            "{spelling}: the member is not merged before the meet: {report:#?}"
+        );
+        assert_eq!(
+            alias_target(&code, "Pick").as_deref(),
+            Some("String"),
+            "{code}"
+        );
+        assert_eq!(
+            alias_target(&code, "M").as_deref(),
+            Some("String"),
+            "{code}"
+        );
+        let types = types_module(&code);
+        assert!(
+            !types.contains("PickCompositionMember1"),
+            "{spelling}: the member's unmerged lowering is emitted unused:\n{types}"
+        );
+    }
 }

@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /pets|method renamed `list_pets` -> `fetch_pets`
+major|response-headers-renamed|GET /pets 200 headers|response header struct renamed `ListPetsStatus200Headers` -> `FetchPetsStatus200Headers`
+bump=major

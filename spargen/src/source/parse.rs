@@ -1,5 +1,5 @@
-use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser as YamlParser, Tag};
-use yaml_rust2::scanner::{Marker, TScalarStyle};
+use yaml_rust2::parser::{Event, Parser as YamlParser, Tag};
+use yaml_rust2::scanner::{Marker, ScanError, TScalarStyle};
 use yaml_rust2::Yaml;
 
 use crate::diag::{
@@ -50,33 +50,34 @@ pub(crate) fn parse_json(
 /// Parse a YAML 1.2 document into a span-preserving [`SpannedValue`] tree.
 ///
 /// YAML is restricted to the JSON-compatible subset OAS 3.1 prescribes: aliases expand to clones
-/// of their anchored nodes, and constructs outside that subset (non-string keys, multiple
-/// documents) are diagnosed. The low-level event API
-/// (`yaml_rust2::parser::Parser` + a [`MarkedEventReceiver`]) is used instead of `YamlLoader` so
-/// that each event's source [`Marker`] can be turned into a per-node span. Errors are reported
-/// through `diags`.
+/// of their anchored nodes, within [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] nodes per parse event,
+/// nesting is capped at [`MAX_NESTING_DEPTH`] as in JSON, copies of aliases included, and
+/// constructs outside that subset (non-string keys, multiple documents) are diagnosed. The
+/// low-level event API (`yaml_rust2::parser::Parser`, read by [`yaml_events`]) is used instead of
+/// `YamlLoader` so that each event's source [`Marker`] can be turned into a per-node span. Errors
+/// are reported through `diags`.
 pub(crate) fn parse_yaml(
     file: FileId,
     text: &str,
     diags: &mut Diagnostics,
 ) -> Result<SpannedValue, Aborted> {
     let positions = Positions::new(text);
-    let mut sink = EventSink::default();
-    let mut parser = YamlParser::new_from_str(text);
-    if let Err(error) = parser.load(&mut sink, true) {
-        let loc = positions.loc(error.marker().index());
-        Diagnostic::error(
-            Code::InvalidInput,
-            Provenance::new(JsonPointer::root(), Some(Span::point(file, loc))),
-        )
-        .message(format!("malformed YAML: {error}"))
-        .remedy("fix the YAML syntax before running spargen")
-        .emit(diags);
-        return Err(Aborted);
-    }
+    let events = match yaml_events(text) {
+        Ok(events) => events,
+        Err(error) => {
+            let loc = positions.loc(error.marker().index());
+            Diagnostic::error(
+                Code::InvalidInput,
+                Provenance::new(JsonPointer::root(), Some(Span::point(file, loc))),
+            )
+            .message(format!("malformed YAML: {error}"))
+            .remedy("fix the YAML syntax before running spargen")
+            .emit(diags);
+            return Err(Aborted);
+        }
+    };
 
-    let doc_count = sink
-        .events
+    let doc_count = events
         .iter()
         .filter(|(event, _)| matches!(event, Event::DocumentStart))
         .count();
@@ -92,10 +93,23 @@ pub(crate) fn parse_yaml(
 
     let mut builder = YamlBuilder {
         file,
-        events: &sink.events,
+        events: &events,
         positions: &positions,
         idx: 0,
         anchors: std::collections::HashMap::new(),
+        aliased: events
+            .iter()
+            .filter_map(|(event, _)| match event {
+                Event::Alias(id) => Some(*id),
+                _ => None,
+            })
+            .collect(),
+        nodes: 0,
+        kept: 0,
+        node_budget: events
+            .len()
+            .saturating_mul(ALIAS_EXPANSION_BUDGET_PER_EVENT),
+        deepest: 0,
     };
     builder.build(diags)
 }
@@ -129,8 +143,10 @@ const DUPLICATE_KEY_REMEDY: &str =
 
 // JSON: hand-rolled span-tracking recursive-descent parser
 
-/// Guard against unbounded recursion on pathological input (deeply nested `[[[…]]]`).
-const MAX_JSON_DEPTH: u32 = 256;
+/// The deepest a value may sit in a parsed document, the root at depth 0, in either parser. Both
+/// recurse once per level of nesting, so the cap bounds their stack on pathological input
+/// (`[[[…]]]`, or block-style `- - - …`), and a value past it is `E011`.
+const MAX_NESTING_DEPTH: u32 = 256;
 
 /// A JSON parse failure, carrying the precise source span it occurred at, the stable diagnostic
 /// code to raise, and the message/remedy to render. Most failures are syntax errors (`E011`
@@ -269,7 +285,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_value(&mut self, depth: u32) -> Result<SpannedValue, JsonError> {
-        if depth > MAX_JSON_DEPTH {
+        if depth > MAX_NESTING_DEPTH {
             return Err(self.error("JSON nesting is too deep"));
         }
         self.skip_ws();
@@ -600,16 +616,21 @@ impl<'a> JsonParser<'a> {
 
 // YAML: event-based span-tracking builder over the JSON-compatible subset
 
-/// Collects `(event, marker)` pairs from `yaml_rust2`'s push parser so the tree can be built in a
-/// second pass with lookahead to container-end markers.
-#[derive(Default)]
-struct EventSink {
-    events: Vec<(Event, Marker)>,
-}
-
-impl MarkedEventReceiver for EventSink {
-    fn on_event(&mut self, event: Event, marker: Marker) {
-        self.events.push((event, marker));
+/// Every `(event, marker)` pair `yaml_rust2`'s parser produces for `text`, through `StreamEnd`, so
+/// the tree can be built in a second pass with lookahead to container-end markers. The events are
+/// pulled one at a time rather than pushed by `Parser::load`, which recurses once per level of
+/// nesting and so would overflow the stack on a deep block-style document before
+/// [`YamlBuilder::build_node`] could refuse it.
+fn yaml_events(text: &str) -> Result<Vec<(Event, Marker)>, ScanError> {
+    let mut parser = YamlParser::new_from_str(text);
+    let mut events = Vec::new();
+    loop {
+        let (event, marker) = parser.next_token()?;
+        let end = event == Event::StreamEnd;
+        events.push((event, marker));
+        if end {
+            return Ok(events);
+        }
     }
 }
 
@@ -621,10 +642,32 @@ struct YamlBuilder<'a> {
     events: &'a [(Event, Marker)],
     positions: &'a Positions,
     idx: usize,
-    /// Anchor id → the node it labels, so aliases can be expanded exactly as `YamlLoader` does.
-    /// Populated post-order as each anchored node completes.
-    anchors: std::collections::HashMap<usize, SpannedValue>,
+    /// Anchor id → the node it labels, that node's expanded node count, and its height (how many
+    /// levels its deepest descendant sits below it), so aliases can be expanded exactly as
+    /// `YamlLoader` does and charged for what they copy, and for how deep the copy reaches.
+    /// Populated post-order as each anchored node in [`YamlBuilder::aliased`] completes.
+    anchors: std::collections::HashMap<usize, (SpannedValue, usize, u32)>,
+    /// The anchor ids some alias in the document names: only these anchored nodes are copied
+    /// into [`YamlBuilder::anchors`].
+    aliased: std::collections::HashSet<usize>,
+    /// Nodes in the tree built so far, each alias counted as the expanded size of its copy.
+    nodes: usize,
+    /// Nodes in the copies [`YamlBuilder::anchors`] keeps.
+    kept: usize,
+    /// The most nodes the built tree and the kept copies may hold together:
+    /// [`ALIAS_EXPANSION_BUDGET_PER_EVENT`] per event.
+    node_budget: usize,
+    /// The depth of the deepest node built so far inside the node being built, an alias counted
+    /// as reaching as deep as its copy does; [`YamlBuilder::build_node`] reads an anchored node's
+    /// height from it.
+    deepest: u32,
 }
+
+/// The nodes the built YAML tree may hold per event the parser produced. Without aliases a tree
+/// holds at most one node per event; each alias adds a copy of its anchored subtree, and nested
+/// anchors that alias the level below compound exponentially ("billion laughs"), so the copies
+/// are budgeted against the document's own size rather than left to exhaust memory.
+const ALIAS_EXPANSION_BUDGET_PER_EVENT: usize = 100;
 
 /// Why [`YamlBuilder::build_node`] stopped.
 enum YamlFailure {
@@ -638,13 +681,45 @@ enum YamlFailure {
         span: Span,
         name: String,
     },
+    /// The scalar at `span` denotes no JSON value (a non-finite float), for the reason `message`
+    /// gives. `path` is built exactly as [`YamlFailure::DuplicateKey`]'s is.
+    InvalidScalar {
+        path: Vec<Segment>,
+        span: Span,
+        message: String,
+    },
+    /// Copying the node at `span` (an alias's expansion, or an anchored node kept for its
+    /// aliases, as `site` says) would grow what the builder holds past `budget` nodes. `path` is
+    /// built exactly as [`YamlFailure::DuplicateKey`]'s is.
+    ExpansionBudget {
+        path: Vec<Segment>,
+        span: Span,
+        site: BudgetSite,
+        budget: usize,
+    },
+    /// The node at `span` sits deeper than [`MAX_NESTING_DEPTH`], itself or through the copy an
+    /// alias expands to. `path` is built exactly as [`YamlFailure::DuplicateKey`]'s is.
+    TooDeep { path: Vec<Segment>, span: Span },
+}
+
+/// The copy that crossed the alias expansion budget.
+#[derive(Clone, Copy)]
+enum BudgetSite {
+    /// An alias expanded to a copy of its anchored node.
+    Alias,
+    /// An anchored node copied into the anchor table for the aliases that name it.
+    Anchor,
 }
 
 impl YamlFailure {
     /// The failure as seen from the container one level up, which holds the failing node under
     /// `segment`.
     fn within(mut self, segment: Segment) -> Self {
-        if let Self::DuplicateKey { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. }
+        | Self::InvalidScalar { path, .. }
+        | Self::ExpansionBudget { path, .. }
+        | Self::TooDeep { path, .. } = &mut self
+        {
             path.push(segment);
         }
         self
@@ -653,7 +728,11 @@ impl YamlFailure {
     /// The failure as seen from a mapping whose key failed to build: a key has no pointer of its
     /// own, so a duplicate inside it is addressed by the mapping that holds the key.
     fn in_key(mut self) -> Self {
-        if let Self::DuplicateKey { path, .. } = &mut self {
+        if let Self::DuplicateKey { path, .. }
+        | Self::InvalidScalar { path, .. }
+        | Self::ExpansionBudget { path, .. }
+        | Self::TooDeep { path, .. } = &mut self
+        {
             path.clear();
         }
         self
@@ -661,6 +740,11 @@ impl YamlFailure {
 }
 
 impl YamlBuilder<'_> {
+    /// The nodes another copy may add before the tree and the kept copies cross the budget.
+    fn headroom(&self) -> usize {
+        self.node_budget.saturating_sub(self.nodes + self.kept)
+    }
+
     fn build(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, Aborted> {
         // Advance to the (single) document's first node event.
         while self.idx < self.events.len()
@@ -669,12 +753,11 @@ impl YamlBuilder<'_> {
             self.idx += 1;
         }
         self.idx += 1; // step past DocumentStart onto the root node
-        self.build_node(diags).map_err(|failure| match failure {
+        self.build_node(0, diags).map_err(|failure| match failure {
             YamlFailure::Reported(aborted) => aborted,
             YamlFailure::DuplicateKey { path, span, name } => {
-                // `YamlLoader` rejected duplicate mapping keys; keep rejecting them (now with a
-                // precise span at the second occurrence) rather than silently retaining a
-                // duplicate.
+                // A duplicate mapping key is rejected, at the span of its second occurrence,
+                // rather than silently retained.
                 Diagnostic::error(
                     Code::DuplicateObjectKey,
                     Provenance::new(pointer_of(&path), Some(span)),
@@ -684,14 +767,91 @@ impl YamlBuilder<'_> {
                 .emit(diags);
                 Aborted
             }
+            YamlFailure::InvalidScalar {
+                path,
+                span,
+                message,
+            } => {
+                // Worded as the JSON parser words its number errors, so one literal reads the
+                // same in either format.
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: {message} at line {} column {}",
+                    span.start.line, span.start.col
+                ))
+                .emit(diags);
+                Aborted
+            }
+            YamlFailure::ExpansionBudget {
+                path,
+                span,
+                site,
+                budget,
+            } => {
+                let what = match site {
+                    BudgetSite::Alias => "the alias",
+                    BudgetSite::Anchor => "the copy kept for aliases of the anchored node",
+                };
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: {what} at line {} column {} expands the document past \
+                     {budget} nodes ({ALIAS_EXPANSION_BUDGET_PER_EVENT} per parse event)",
+                    span.start.line, span.start.col
+                ))
+                .remedy(
+                    "write the repeated content out, or share it with a `$ref` instead of nested \
+                     YAML anchors and aliases",
+                )
+                .emit(diags);
+                Aborted
+            }
+            YamlFailure::TooDeep { path, span } => {
+                // Worded after the JSON parser's message for its own cap, so one document reads
+                // alike in either format.
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(pointer_of(&path), Some(span)),
+                )
+                .message(format!(
+                    "malformed YAML: YAML nesting is too deep at line {} column {} (more than \
+                     {MAX_NESTING_DEPTH} levels)",
+                    span.start.line, span.start.col
+                ))
+                .remedy("flatten the nesting, or share the repeated structure with a `$ref`")
+                .emit(diags);
+                Aborted
+            }
         })
     }
 
-    fn build_node(&mut self, diags: &mut Diagnostics) -> Result<SpannedValue, YamlFailure> {
+    /// Build the node the cursor is on, which sits at `depth` (the root at 0). The builder recurses
+    /// once per level, so a node deeper than [`MAX_NESTING_DEPTH`] is refused before it is
+    /// descended into, and so is an alias whose copy would reach past it.
+    fn build_node(
+        &mut self,
+        depth: u32,
+        diags: &mut Diagnostics,
+    ) -> Result<SpannedValue, YamlFailure> {
         let events = self.events;
         let positions = self.positions;
         let (event, marker) = &events[self.idx];
         let start = positions.loc(marker.index());
+        if depth > MAX_NESTING_DEPTH {
+            return Err(YamlFailure::TooDeep {
+                path: Vec::new(),
+                span: Span::point(self.file, start),
+            });
+        }
+        let nodes_before = self.nodes;
+        // The deepest node outside this one, restored once this one is built, so `deepest` then
+        // spans this node's subtree alone and gives its height.
+        let deepest_outside = std::mem::replace(&mut self.deepest, depth);
         // The anchor id (0 = none) labelling this node, captured before it is built so the
         // completed node can be registered for later alias expansion.
         let anchor_id = match event {
@@ -701,24 +861,30 @@ impl YamlBuilder<'_> {
         };
         let value = match event {
             Event::Scalar(value, style, _anchor, tag) => {
-                let node = scalar_to_node(value, *style, tag);
                 let end = scalar_end(positions, *style, value, marker.index());
+                let span = Span {
+                    file: self.file,
+                    start,
+                    end,
+                };
+                let node = scalar_to_node(value, *style, tag).map_err(|message| {
+                    YamlFailure::InvalidScalar {
+                        path: Vec::new(),
+                        span,
+                        message,
+                    }
+                })?;
                 self.idx += 1;
-                SpannedValue::new(
-                    node,
-                    Span {
-                        file: self.file,
-                        start,
-                        end,
-                    },
-                )
+                self.nodes += 1;
+                SpannedValue::new(node, span)
             }
             Event::SequenceStart(..) => {
                 self.idx += 1;
+                self.nodes += 1;
                 let mut items = Vec::new();
                 while !matches!(events[self.idx].0, Event::SequenceEnd) {
                     let item = self
-                        .build_node(diags)
+                        .build_node(depth + 1, diags)
                         .map_err(|failure| failure.within(Segment::Index(items.len())))?;
                     items.push(item);
                 }
@@ -735,9 +901,12 @@ impl YamlBuilder<'_> {
             }
             Event::MappingStart(..) => {
                 self.idx += 1;
+                self.nodes += 1;
                 let mut map = SpannedMap::default();
                 while !matches!(events[self.idx].0, Event::MappingEnd) {
-                    let key = self.build_node(diags).map_err(YamlFailure::in_key)?;
+                    let key = self
+                        .build_node(depth + 1, diags)
+                        .map_err(YamlFailure::in_key)?;
                     let Node::String(name) = key.node else {
                         Diagnostic::error(
                             Code::InvalidInput,
@@ -755,7 +924,7 @@ impl YamlBuilder<'_> {
                         });
                     }
                     let value = self
-                        .build_node(diags)
+                        .build_node(depth + 1, diags)
                         .map_err(|failure| failure.within(Segment::Key(name.clone())))?;
                     map.push(
                         SpannedKey {
@@ -779,12 +948,39 @@ impl YamlBuilder<'_> {
             Event::Alias(id) => {
                 // Expand the alias to a clone of its anchored node, mirroring `YamlLoader`:
                 // aliases resolve to concrete values and so stay within the JSON-compatible
-                // subset. An unknown anchor resolves to null, exactly as `YamlLoader` does.
+                // subset. An unknown anchor resolves to null, exactly as `YamlLoader` does. The
+                // copy is charged at its expanded size before it is made, so a document whose
+                // aliases compound is rejected at the alias that crosses the budget.
                 let id = *id;
-                self.idx += 1;
-                return Ok(self.anchors.get(&id).cloned().unwrap_or_else(|| {
+                let (anchored, size, height) = self
+                    .anchors
+                    .get(&id)
+                    .map_or((None, 1, 0), |(value, size, height)| {
+                        (Some(value), *size, *height)
+                    });
+                // A copy placed here reaches `height` levels below the alias; nested anchors that
+                // each alias the one before would otherwise stack copies past the cap.
+                if depth.saturating_add(height) > MAX_NESTING_DEPTH {
+                    return Err(YamlFailure::TooDeep {
+                        path: Vec::new(),
+                        span: Span::point(self.file, start),
+                    });
+                }
+                if size > self.headroom() {
+                    return Err(YamlFailure::ExpansionBudget {
+                        path: Vec::new(),
+                        span: Span::point(self.file, start),
+                        site: BudgetSite::Alias,
+                        budget: self.node_budget,
+                    });
+                }
+                let value = anchored.cloned().unwrap_or_else(|| {
                     SpannedValue::new(Node::Null, Span::point(self.file, start))
-                }));
+                });
+                self.idx += 1;
+                self.nodes += size;
+                self.deepest = deepest_outside.max(depth + height);
+                return Ok(value);
             }
             // The remaining events (stream/document delimiters, container ends) are consumed by
             // their openers and never begin a node.
@@ -798,8 +994,23 @@ impl YamlBuilder<'_> {
                 return Err(YamlFailure::Reported(Aborted));
             }
         };
-        if anchor_id > 0 {
-            self.anchors.insert(anchor_id, value.clone());
+        let height = self.deepest - depth;
+        self.deepest = self.deepest.max(deepest_outside);
+        // Keep a copy only for an anchor some alias names, and charge it like any other copy: a
+        // stack of nested anchors would otherwise each keep everything beneath it.
+        if anchor_id > 0 && self.aliased.contains(&anchor_id) {
+            let size = self.nodes - nodes_before;
+            if size > self.headroom() {
+                return Err(YamlFailure::ExpansionBudget {
+                    path: Vec::new(),
+                    span: Span::point(self.file, start),
+                    site: BudgetSite::Anchor,
+                    budget: self.node_budget,
+                });
+            }
+            self.kept += size;
+            self.anchors
+                .insert(anchor_id, (value.clone(), size, height));
         }
         Ok(value)
     }
@@ -808,7 +1019,8 @@ impl YamlBuilder<'_> {
 /// Interpret a YAML scalar exactly as `yaml_rust2`'s `YamlLoader` does (respecting quoting style
 /// and explicit `!!`-tags), then map it onto a [`Node`]. Reusing the crate's own scalar typing
 /// keeps parsed *values* identical to the previous `YamlLoader`-based path — only spans change.
-fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
+/// A float scalar with no finite value is an error, whose message [`yaml_float`] gives.
+fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Result<Node, String> {
     let yaml = if style != TScalarStyle::Plain {
         Yaml::String(value.to_owned())
     } else if let Some(Tag { handle, suffix }) = tag {
@@ -827,7 +1039,7 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
                 // bypasses the integer classification `yaml_scalar_to_node` gives a `Real`.
                 "float" => {
                     if is_yaml_real(value) {
-                        return Node::Number(Number::Float(value.parse().unwrap_or(0.0)));
+                        return yaml_float(value).map(|float| Node::Number(Number::Float(float)));
                     }
                     Yaml::BadValue
                 }
@@ -849,39 +1061,58 @@ fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Node {
 /// Map a scalar [`Yaml`] onto a [`Node`] (`BadValue` falls through to `Null`), classifying an
 /// integer literal as the JSON parser does: `yaml_rust2` reads one that overflows `i64` as a
 /// `Real`, so a `Real` whose text parses as a `u64` (`18446744073709551615`, `+…`) is a `UInt`;
-/// any other `Real` (a fraction, an exponent, a literal beyond `u64`) is a `Float`.
-fn yaml_scalar_to_node(yaml: Yaml) -> Node {
-    match yaml {
+/// any other `Real` (a fraction, an exponent, a literal beyond `u64`) is a `Float`, or the error
+/// [`yaml_float`] gives when it has no finite value.
+fn yaml_scalar_to_node(yaml: Yaml) -> Result<Node, String> {
+    Ok(match yaml {
         Yaml::Null | Yaml::BadValue => Node::Null,
         Yaml::Boolean(value) => Node::Bool(value),
         Yaml::Integer(value) => Node::Number(Number::Int(value)),
         Yaml::Real(value) => match value.parse::<u64>() {
             Ok(unsigned) => Node::Number(Number::UInt(unsigned)),
-            Err(_) => Node::Number(Number::Float(value.parse().unwrap_or(0.0))),
+            Err(_) => Node::Number(Number::Float(yaml_float(&value)?)),
         },
         Yaml::String(value) => Node::String(value),
         // Scalars never carry these variants; treat defensively as null.
         Yaml::Array(_) | Yaml::Hash(_) | Yaml::Alias(_) => Node::Null,
+    })
+}
+
+/// YAML 1.2's spellings of an infinity, which `yaml_rust2` reads as a float.
+const YAML_INFINITIES: [&str; 9] = [
+    ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF",
+];
+
+/// YAML 1.2's spellings of NaN, which `yaml_rust2` reads as a float.
+const YAML_NANS: [&str; 3] = [".nan", ".NaN", ".NAN"];
+
+/// The finite `f64` a YAML float scalar denotes, or why it has none. OpenAPI's JSON data model has
+/// no infinities or NaN, so YAML's special floats are rejected by name, and a literal that
+/// overflows to a non-finite `f64` (`1e999`) is out of range, worded as the JSON parser's
+/// `parse_f64` words it.
+fn yaml_float(text: &str) -> Result<f64, String> {
+    if YAML_INFINITIES.contains(&text) {
+        return Err(format!(
+            "number `{text}` is infinite, which JSON cannot represent"
+        ));
+    }
+    if YAML_NANS.contains(&text) {
+        return Err(format!(
+            "number `{text}` is NaN, which JSON cannot represent"
+        ));
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => Ok(value),
+        Ok(_) => Err(format!("number `{text}` is out of range")),
+        Err(_) => Err(format!("invalid number literal `{text}`")),
     }
 }
 
 /// Mirror `yaml_rust2`'s (private) `parse_f64` acceptance test for the explicit `!!float` tag.
 fn is_yaml_real(value: &str) -> bool {
-    matches!(
-        value,
-        ".inf"
-            | ".Inf"
-            | ".INF"
-            | "+.inf"
-            | "+.Inf"
-            | "+.INF"
-            | "-.inf"
-            | "-.Inf"
-            | "-.INF"
-            | ".nan"
-            | ".NaN"
-            | ".NAN"
-    ) || (value.bytes().any(|byte| byte.is_ascii_digit()) && value.parse::<f64>().is_ok())
+    YAML_INFINITIES.contains(&value)
+        || YAML_NANS.contains(&value)
+        || (value.bytes().any(|byte| byte.is_ascii_digit()) && value.parse::<f64>().is_ok())
 }
 
 /// A best-effort end position for a scalar: for a single-line scalar it spans the scalar text
@@ -1151,7 +1382,7 @@ mod tests {
         // `n` nested arrays put the innermost one at depth `n - 1`, so the deepest accepted
         // nesting is one past the cap and the next is refused, at the array that crosses it.
         let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
-        let deepest = MAX_JSON_DEPTH as usize + 1;
+        let deepest = MAX_NESTING_DEPTH as usize + 1;
         parse_json_ok(&nested(deepest));
 
         let mut diags = Diagnostics::default();
@@ -1270,6 +1501,43 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_yaml_float_points_at_its_element_or_at_the_mapping_holding_its_key() {
+        // An array element is addressed by its index; a key has no pointer of its own, so a
+        // non-finite float used as a key is addressed by the mapping that holds it, and is
+        // refused for its value before the key's type is ever looked at.
+        for (text, pointer, message) in [
+            (
+                "a:\n  enum: [1, .inf]\n",
+                "/a/enum/1",
+                "malformed YAML: number `.inf` is infinite, which JSON cannot represent \
+                 at line 2 column 13",
+            ),
+            (
+                "a:\n  - 0\n  - -1e999\n",
+                "/a/1",
+                "malformed YAML: number `-1e999` is out of range at line 3 column 5",
+            ),
+            (
+                "a:\n  .nan: x\n",
+                "/a",
+                "malformed YAML: number `.nan` is NaN, which JSON cannot represent \
+                 at line 2 column 3",
+            ),
+            (
+                "1e999: x\n",
+                "",
+                "malformed YAML: number `1e999` is out of range at line 1 column 1",
+            ),
+        ] {
+            let mut diags = Diagnostics::default();
+            assert!(parse_yaml(FileId(0), text, &mut diags).is_err(), "{text}");
+            let diag = the_invalid_input(&diags);
+            assert_eq!(diag.pointer.as_str(), pointer, "{text}: {diag:?}");
+            assert_eq!(diag.message, message, "{text}: {diag:?}");
+        }
+    }
+
+    #[test]
     fn yaml_rejects_duplicate_mapping_key() {
         let mut diags = Diagnostics::default();
         // `a` appears twice; the duplicate is on line 2.
@@ -1315,6 +1583,20 @@ mod tests {
         let root = parse_yaml_ok("a: &anchor 1\nb: *anchor\n");
         assert_eq!(root.get("a").unwrap().node, Node::Number(Number::Int(1)));
         assert_eq!(root.get("b").unwrap().node, Node::Number(Number::Int(1)));
+    }
+
+    #[test]
+    fn the_e011_explain_text_states_the_alias_expansion_budget() {
+        // `spargen explain E011` restates the budget as a literal, so it follows the constant.
+        let stated = format!("{ALIAS_EXPANSION_BUDGET_PER_EVENT} nodes per parse event");
+        assert!(Code::InvalidInput.explain().contains(&stated), "{stated}");
+    }
+
+    #[test]
+    fn the_e011_explain_text_states_the_nesting_cap() {
+        // `spargen explain E011` restates the cap as a literal, so it follows the constant.
+        let stated = format!("nested more than {MAX_NESTING_DEPTH} levels deep");
+        assert!(Code::InvalidInput.explain().contains(&stated), "{stated}");
     }
 
     #[test]

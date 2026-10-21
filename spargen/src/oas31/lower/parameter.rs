@@ -45,6 +45,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "header" => ParamLoc::Header,
             "cookie" => ParamLoc::Cookie,
             "querystring" => ParamLoc::QueryString,
+            // Each document schema enumerates `in`, so a validated document does not reach this;
+            // it stays as the refusal for a path that skips validation.
             _ => {
                 Diagnostic::error(Code::InvalidInput, parameter.provenance.clone())
                     .message(format!(
@@ -234,10 +236,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                 return None;
             }
-            let ty = object
-                .schema
-                .as_ref()
-                .and_then(|schema| self.lower_schema_ref(schema, &parameter.name))?;
+            // Without a schema there is no type to take the argument as, and lowering to nothing
+            // would drop the parameter from the operation unreported (#699).
+            let Some(schema) = object.schema.as_ref() else {
+                Diagnostic::error(
+                    Code::UnsupportedParameterStyle,
+                    parameter.provenance.clone(),
+                )
+                .message(format!(
+                    "`content` parameter `{}` has no schema for its `{media_name}` entry, so the \
+                     client has no type to serialize it from",
+                    parameter.name
+                ))
+                .remedy(format!(
+                    "give the `{media_name}` entry a `schema`, or describe the parameter with \
+                     `schema` and a serialization style"
+                ))
+                .emit(self.diags);
+                return None;
+            };
+            let ty = self.lower_schema_ref(schema, &parameter.name)?;
             let ty = self.remap_binary_param(ty, &parameter.name);
             return Some(self.lowered_parameter(
                 parameter,

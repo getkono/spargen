@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Freestanding runtime embedded into spargen-generated clients. Not published."
 publish = false
 
-# The runtime is embedded verbatim into generated output. Its dependency
+# The runtime is embedded into generated output. Its dependency
 # surface is the audited set used by generated clients — no spargen crate, and nothing
 # project-specific. Generated models may additionally reference the separately audited `uuid`
 # dependency; this crate holds only the embedded runtime, not those models. Each feature below is

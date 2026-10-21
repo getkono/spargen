@@ -61,3 +61,17 @@ pub(super) fn discriminator_target_identity(
     }
     identity
 }
+
+/// Resolve every schema `discriminator` names ([`super::Discriminator::entries`]) through
+/// [`discriminator_target_identity`], reporting each miss at its entry. What a Discriminator
+/// Object with no union membership to check asks of its targets: one on a schema with no
+/// `oneOf`/`anyOf`, or one in a subschema lowering never reads.
+pub(super) fn resolve_discriminator_targets(
+    resolver: &Resolver<'_>,
+    diags: &mut Diagnostics,
+    discriminator: &super::Discriminator,
+) {
+    for (tag, target) in discriminator.entries() {
+        discriminator_target_identity(resolver, diags, &discriminator_entry(tag), target);
+    }
+}

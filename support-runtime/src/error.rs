@@ -70,13 +70,11 @@ pub enum Error<E> {
         headers: HeaderMap,
         /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
         /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
-        /// cap. The generated shim for an operation with more than one documented success status
-        /// reads through `read_success_body`, which does not take the cap, so on that path the
-        /// body is retained whole (see `Decode`'s `body`).
+        /// cap.
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the status and headers the response
-    /// carried, the serde error path, and the raw body, capped on every path but the two named on
+    /// carried, the serde error path, and the raw body, capped on every path but the one named on
     /// `body` below. A documented error status whose body does not match its schema (a problem
     /// `type` the description does not list, or an HTML page from a proxy in front of the server)
     /// arrives here with its status and headers intact, so the caller can still act on them —
@@ -95,20 +93,17 @@ pub enum Error<E> {
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
-        /// Two paths do not reach the cap, for different reasons, and retain more than it:
-        ///
-        /// - The generated shim for an operation with more than one documented success status
-        ///   reads through `read_success_body`, which does not take the cap. Threading it through
-        ///   changes emitted output, so this is deferred rather than accepted. The same shim
-        ///   reaches `UnexpectedStatus` uncapped too.
-        /// - `EventStream`'s per-frame decode retains one frame, already detached by the framer.
-        ///   The cap does not apply because the bound there is the frame, not the response — but
-        ///   the frame buffer itself is unbounded, so this is a real gap, not a safe exemption.
+        /// One path does not reach the cap and can retain more than it: `EventStream`'s
+        /// per-frame decode retains one whole frame, already detached by the framer. The bound
+        /// there is the frame, not the response: `ClientConfig::max_stream_frame` limits the
+        /// bytes buffered for an item before its terminator arrives. An item that passes that
+        /// limit is itself reported here, retaining at most `max_error_body` bytes of it.
         body: Bytes,
         /// Whether bytes were dropped from `body` to meet the cap.
         ///
-        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the two
-        /// paths above nothing is dropped because nothing is capped.
+        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the
+        /// per-frame decode path above nothing is dropped because nothing is capped. An item past
+        /// `max_stream_frame` always sets it.
         truncated: bool,
     },
     /// #9 — the connection dropped mid-stream on a streamed response.
@@ -175,11 +170,9 @@ impl<E> Error<E> {
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
-            Error::Api(value) => {
-                value.status() == StatusCode::TOO_MANY_REQUESTS || value.status().is_server_error()
-            }
+            Error::Api(value) => is_transient_status(value.status()),
             Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                is_transient_status(*status)
             }
             Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
         }
@@ -202,6 +195,13 @@ impl<E> Error<E> {
             | Error::InterruptedBody(_) => None,
         }
     }
+}
+
+/// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
+/// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
+/// response.
+pub(crate) fn is_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 impl Error<std::convert::Infallible> {
@@ -429,18 +429,24 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 // enum variant, say) verbatim; its control characters are escaped so a value
                 // holding a LF, CR or tab cannot break or forge the message's line.
                 write!(f, "response decode failed ({status}) at ")?;
-                for c in path.chars() {
-                    if c.is_control() {
-                        write!(f, "{}", c.escape_debug())?;
-                    } else {
-                        write!(f, "{c}")?;
-                    }
-                }
-                Ok(())
+                write_escaped(f, path)
             }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
         }
     }
+}
+
+/// Write `text` with each control character replaced by its `escape_debug` form, so text quoted
+/// from a server (a LF, CR or tab included) cannot break or forge the line it is written into.
+pub(crate) fn write_escaped(f: &mut std::fmt::Formatter<'_>, text: &str) -> std::fmt::Result {
+    for c in text.chars() {
+        if c.is_control() {
+            write!(f, "{}", c.escape_debug())?;
+        } else {
+            write!(f, "{c}")?;
+        }
+    }
+    Ok(())
 }
 
 impl<E: std::error::Error + 'static> std::error::Error for Error<E> {

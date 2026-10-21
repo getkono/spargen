@@ -147,7 +147,8 @@ impl Omit {
                     return;
                 }
                 // Remove deepest-first (and, within one array parent, highest-index-first) so a
-                // parent removal never invalidates a still-pending child/sibling pointer.
+                // removal never invalidates a still-pending child/sibling pointer. The order is
+                // total, so the result does not depend on how `sort_by` treats ties.
                 pointers.sort_by(removal_order);
                 let describe = rule.describe();
                 let mut removed_any = false;
@@ -343,22 +344,38 @@ fn collect_pointers(value: &SpannedValue, base: &JsonPointer, out: &mut Vec<Json
     }
 }
 
-/// Deterministic, removal-safe ordering: deepest pointers first, and — within one array parent —
-/// highest index first, so removing one target never shifts a still-pending sibling/child.
+/// Deterministic, removal-safe total order: deepest pointers first, then grouped by parent
+/// pointer, and within one parent array index leaves highest first, so removing one target never
+/// shifts a still-pending sibling or child. Pointers of equal depth under different parents cannot
+/// disturb each other, so grouping them by parent only has to be total, not meaningful. Leaves
+/// that are not indices follow the index leaves and order by their text, and two leaves naming one
+/// index differently (`1`, `01`) by their text too, so no two distinct pointers compare equal:
+/// `sort_by` on anything weaker than a total order leaves the result unspecified, and may panic.
 fn removal_order(a: &JsonPointer, b: &JsonPointer) -> Ordering {
     let depth = |pointer: &JsonPointer| pointer.as_str().matches('/').count();
-    depth(b).cmp(&depth(a)).then_with(|| {
-        match (last_segment_index(a), last_segment_index(b)) {
-            // Both leaves are array indices: remove the larger index first.
-            (Some(ia), Some(ib)) => ib.cmp(&ia),
-            // Otherwise keep the caller's (source/document) order via a stable sort.
-            _ => Ordering::Equal,
-        }
-    })
+    let (parent_a, leaf_a) = split_leaf(a);
+    let (parent_b, leaf_b) = split_leaf(b);
+    depth(b)
+        .cmp(&depth(a))
+        .then_with(|| parent_a.cmp(parent_b))
+        .then_with(
+            || match (leaf_a.parse::<usize>().ok(), leaf_b.parse::<usize>().ok()) {
+                // Both leaves are array indices: remove the larger index first.
+                (Some(ia), Some(ib)) => ib.cmp(&ia),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+        )
+        .then_with(|| leaf_a.cmp(leaf_b))
 }
 
-fn last_segment_index(pointer: &JsonPointer) -> Option<usize> {
-    pointer.as_str().rsplit('/').next()?.parse::<usize>().ok()
+/// The pointer's parent and its last (still escaped) reference token.
+fn split_leaf(pointer: &JsonPointer) -> (&str, &str) {
+    pointer
+        .as_str()
+        .rsplit_once('/')
+        .unwrap_or(("", pointer.as_str()))
 }
 
 fn emit_invalid_rule(
@@ -450,12 +467,97 @@ mod tests {
     use super::carve::omittable_enclosing;
     use super::glob::escape_glob_meta;
     use super::{
-        carve_rules, glob_match, has_glob_meta, unescape_glob, ComponentKind, Diagnostic,
-        JsonPointer, Omit, OmitMethod, OmitRule, Provenance,
+        carve_rules, glob_match, has_glob_meta, removal_order, unescape_glob, ComponentKind,
+        Diagnostic, JsonPointer, Omit, OmitMethod, OmitRule, Provenance,
     };
     use crate::diag::{Code, Diagnostics};
     use crate::source::InputBundle;
     use proptest::prelude::*;
+
+    #[test]
+    fn the_accepted_lists_name_each_variant_exactly_once() {
+        // Each `match` names every variant's canonical spelling, so a new variant stops this test
+        // compiling until its spelling is written here. The assertions then hold `CANONICAL` to
+        // those spellings: entry `i` parses to the variant declared `i`th, whose spelling it is,
+        // and every variant listed below maps, in declaration order, onto `CANONICAL` exactly.
+        fn kind_spelling(kind: ComponentKind) -> &'static str {
+            match kind {
+                ComponentKind::Schemas => "schemas",
+                ComponentKind::Responses => "responses",
+                ComponentKind::Parameters => "parameters",
+                ComponentKind::RequestBodies => "request_bodies",
+                ComponentKind::Headers => "headers",
+                ComponentKind::SecuritySchemes => "security_schemes",
+                ComponentKind::PathItems => "path_items",
+                ComponentKind::MediaTypes => "media_types",
+            }
+        }
+        fn method_spelling(method: OmitMethod) -> &'static str {
+            match method {
+                OmitMethod::Get => "get",
+                OmitMethod::Put => "put",
+                OmitMethod::Post => "post",
+                OmitMethod::Delete => "delete",
+                OmitMethod::Options => "options",
+                OmitMethod::Head => "head",
+                OmitMethod::Patch => "patch",
+                OmitMethod::Trace => "trace",
+                OmitMethod::Query => "query",
+            }
+        }
+
+        for (index, token) in ComponentKind::CANONICAL.iter().enumerate() {
+            let kind: ComponentKind = token.parse().unwrap();
+            assert_eq!(
+                kind as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(kind_spelling(kind), *token);
+        }
+        let kinds = [
+            ComponentKind::Schemas,
+            ComponentKind::Responses,
+            ComponentKind::Parameters,
+            ComponentKind::RequestBodies,
+            ComponentKind::Headers,
+            ComponentKind::SecuritySchemes,
+            ComponentKind::PathItems,
+            ComponentKind::MediaTypes,
+        ];
+        assert_eq!(kinds.map(kind_spelling), ComponentKind::CANONICAL);
+
+        for (index, token) in OmitMethod::CANONICAL.iter().enumerate() {
+            let method: OmitMethod = token.parse().unwrap();
+            assert_eq!(
+                method as usize, index,
+                "`{token}` is out of declaration order"
+            );
+            assert_eq!(method_spelling(method), *token);
+        }
+        let methods = [
+            OmitMethod::Get,
+            OmitMethod::Put,
+            OmitMethod::Post,
+            OmitMethod::Delete,
+            OmitMethod::Options,
+            OmitMethod::Head,
+            OmitMethod::Patch,
+            OmitMethod::Trace,
+            OmitMethod::Query,
+        ];
+        assert_eq!(methods.map(method_spelling), OmitMethod::CANONICAL);
+
+        assert_eq!(
+            "nope".parse::<ComponentKind>().unwrap_err().to_string(),
+            "unknown component kind: `nope`; expected one of schemas/responses/parameters/\
+             request_bodies/headers/security_schemes/path_items/media_types"
+        );
+        assert_eq!(
+            "nope".parse::<OmitMethod>().unwrap_err().to_string(),
+            "unknown HTTP method: `nope`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
+    }
 
     #[test]
     fn glob_matcher_semantics() {
@@ -582,6 +684,28 @@ paths:
             let literal = unescape_glob(&pattern);
             prop_assert!(glob_match(&pattern, &literal), "{pattern:?} vs {literal:?}");
             prop_assert_eq!(glob_match(&pattern, &text), literal == text);
+        }
+
+        /// `removal_order` is a total order over mixed index and key pointers of shared and
+        /// distinct parents: antisymmetric, equal only for one pointer, and transitive.
+        #[test]
+        fn the_removal_order_is_total(
+            [a, b, c] in [(); 3].map(|()| {
+                prop::collection::vec(
+                    prop::sample::select(&["0", "1", "2", "9", "10", "01", "k", "x"][..]),
+                    1..4,
+                )
+            }),
+        ) {
+            let pointer = |tokens: &[&str]| {
+                tokens.iter().fold(JsonPointer::root(), |pointer, token| pointer.push(token))
+            };
+            let (a, b, c) = (pointer(&a), pointer(&b), pointer(&c));
+            prop_assert_eq!(removal_order(&a, &b), removal_order(&b, &a).reverse());
+            prop_assert_eq!(removal_order(&a, &b).is_eq(), a == b);
+            if removal_order(&a, &b).is_le() && removal_order(&b, &c).is_le() {
+                prop_assert!(removal_order(&a, &c).is_le(), "{a:?} {b:?} {c:?}");
+            }
         }
     }
 
@@ -828,6 +952,88 @@ components:
         assert!(keys_under(&bundle, "components", Some("schemas")).is_empty());
         // Three schemas and their three `type` members.
         assert_eq!(omitted_count(&diags), 6, "{:#?}", diags.items());
+        assert!(invalid_rule_messages(&diags).is_empty());
+    }
+
+    /// A spec whose root carries two 25-item arrays around a 25-key object: more same-depth glob
+    /// matches than the standard library's small-sort handles, so the removal order the glob arm
+    /// sorts them into is the comparator's alone.
+    fn long_arrays_spec() -> String {
+        let items = |prefix: &str| {
+            (0..25)
+                .map(|index| format!("{prefix}{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let object = (0..25)
+            .map(|index| format!("k{index}: v{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: t, version: 1.0.0 }}\npaths: {{}}\n\
+             x-list-a: [{}]\nx-obj: {{ {object} }}\nx-list-b: [{}]\n",
+            items("a"),
+            items("b"),
+        )
+    }
+
+    /// The string items of the root's `key` array, in order.
+    fn root_strings(bundle: &InputBundle, key: &str) -> Vec<String> {
+        bundle
+            .root()
+            .get(key)
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| panic!("`{key}` is not an array"))
+            .iter()
+            .map(|item| item.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Every element a glob pointer matches across arrays longer than the small-sort threshold is
+    /// removed, each with its own `W009` naming it, and nothing else is.
+    #[test]
+    fn a_glob_pointer_over_long_arrays_removes_exactly_its_matches() {
+        let mut bundle = bundle_of(&long_arrays_spec());
+        let mut diags = Diagnostics::default();
+        omit_of(vec![pointer_rule(None, "/x-*/*")])
+            .apply(&mut bundle, &mut diags)
+            .unwrap();
+        assert_eq!(omitted_count(&diags), 75, "{:#?}", diags.items());
+        assert!(invalid_rule_messages(&diags).is_empty());
+        assert!(root_strings(&bundle, "x-list-a").is_empty());
+        assert!(root_strings(&bundle, "x-list-b").is_empty());
+        assert!(keys_under(&bundle, "x-obj", None).is_empty());
+
+        // A pattern matching a subset: indices `10`..`19` and keys `k10`..`k19` only. The survivors
+        // are exactly the unmatched elements, in their original order, and each `W009` names a
+        // pointer the rule matched.
+        let mut bundle = bundle_of(&long_arrays_spec());
+        let mut diags = Diagnostics::default();
+        omit_of(vec![pointer_rule(None, "/x-*/*1?")])
+            .apply(&mut bundle, &mut diags)
+            .unwrap();
+        let surviving = |prefix: &str| {
+            (0..25)
+                .filter(|index| !(10..20).contains(index))
+                .map(|index| format!("{prefix}{index}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(root_strings(&bundle, "x-list-a"), surviving("a"));
+        assert_eq!(root_strings(&bundle, "x-list-b"), surviving("b"));
+        assert_eq!(keys_under(&bundle, "x-obj", None), surviving("k"));
+        let mut named = diags
+            .items()
+            .iter()
+            .filter(|d| d.code == Code::OmittedConstruct)
+            .map(|d| d.pointer.as_str().to_owned())
+            .collect::<Vec<_>>();
+        named.sort();
+        let mut expected = ["/x-list-a/", "/x-obj/k", "/x-list-b/"]
+            .iter()
+            .flat_map(|base| (10..20).map(move |index| format!("{base}{index}")))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(named, expected);
         assert!(invalid_rule_messages(&diags).is_empty());
     }
 

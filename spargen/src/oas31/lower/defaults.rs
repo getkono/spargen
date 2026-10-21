@@ -183,18 +183,13 @@ pub(super) fn retype_field_defaults(
 }
 
 /// Recover the JSON value a representable default was decided from, so it can be decided again
-/// against another type. An integral float is classified as the integer JSON Schema says it is: a
-/// `number` field's `3` is carried as `3.0`, and the `integer` it narrows to admits it.
+/// against another type. A float is classified by [`classify_float`]: a `number` field's `3` is
+/// carried as `3.0`, and the `integer` it narrows to admits it.
 pub(super) fn reclassify_default(value: &DefaultValue) -> RawDefault {
     match value {
         DefaultValue::Bool(value) => RawDefault::Bool(*value),
         DefaultValue::Int(value) => RawDefault::Int(*value),
-        DefaultValue::Float(value)
-            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 =>
-        {
-            RawDefault::Int(*value as i64)
-        }
-        DefaultValue::Float(value) => RawDefault::Float(*value),
+        DefaultValue::Float(value) => classify_float(*value),
         DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
             RawDefault::Str(value.clone())
         }
@@ -227,9 +222,26 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
         Node::Number(Number::UInt(value)) => {
             i64::try_from(*value).map_or(RawDefault::Float(*value as f64), RawDefault::Int)
         }
-        Node::Number(Number::Float(value)) => RawDefault::Float(*value),
+        Node::Number(Number::Float(value)) => classify_float(*value),
         Node::String(value) => RawDefault::Str(value.clone()),
         Node::Null | Node::Array(_) | Node::Object(_) => RawDefault::Other,
+    }
+}
+
+/// Classify a float as JSON Schema compares numbers, by value: an integral float of magnitude
+/// below 2^53 is that integer (`3.0` is `3`), so an `integer` field admits it under the same width
+/// check as an integer literal. Anything else — a fraction, or a magnitude of 2^53 or more — stays a
+/// float.
+fn classify_float(value: f64) -> RawDefault {
+    // At 2^53 and above, consecutive `f64` values are 2 or more apart, so every one of them is
+    // integral: `12345678901234567.5` parses to `12345678901234568.0`, and its fraction is gone
+    // before this sees it. Below 2^53 every integer is exact, so an integral float there names the
+    // integer its literal wrote, to the precision every float default is parsed at.
+    const EXACT_INTEGER_BOUND: f64 = 9_007_199_254_740_992.0; // 2^53
+    if value.fract() == 0.0 && value.abs() < EXACT_INTEGER_BOUND {
+        RawDefault::Int(value as i64)
+    } else {
+        RawDefault::Float(value)
     }
 }
 
@@ -338,5 +350,91 @@ fn raw_display(value: &SpannedValue) -> String {
                 .join(", ");
             format!("{{{entries}}}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The arms of [`representable_default`] and [`classify_default`] pinned directly: a scalar
+    //! `enum` of integers or booleans, and an unsigned literal on either side of `i64::MAX`.
+
+    use super::{classify_default, representable_default, RawDefault};
+    use crate::diag::{Diagnostics, FileId};
+    use crate::ir::{DefaultValue, Openness, ScalarEnum, ScalarRepr, ScalarValue, TypeKind};
+    use crate::source::{Node, Number, SpannedValue};
+
+    fn scalar_enum(repr: ScalarRepr, variants: Vec<ScalarValue>) -> TypeKind {
+        TypeKind::Enum(ScalarEnum {
+            repr,
+            variants,
+            openness: Openness::Closed,
+        })
+    }
+
+    fn parsed(yaml: &str) -> SpannedValue {
+        let mut diags = Diagnostics::default();
+        crate::source::parse_yaml(FileId(0), yaml, &mut diags)
+            .unwrap_or_else(|_| panic!("probe does not parse: {yaml}"))
+    }
+
+    #[test]
+    fn an_integer_enum_takes_exactly_its_member_values() {
+        let kind = scalar_enum(
+            ScalarRepr::Int,
+            vec![ScalarValue::Int(1), ScalarValue::Int(2)],
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(2), Some(&kind)),
+            Some(DefaultValue::Int(2))
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(3), Some(&kind)),
+            None
+        );
+        // The integer arm is held to an integer set: a string set spelling the same digits is no
+        // home for an integer literal, and an integer set none for a boolean.
+        let digits = scalar_enum(
+            ScalarRepr::String,
+            vec![ScalarValue::String("2".to_owned())],
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(2), Some(&digits)),
+            None
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Bool(true), Some(&kind)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_boolean_enum_takes_exactly_its_member_values() {
+        let kind = scalar_enum(ScalarRepr::Bool, vec![ScalarValue::Bool(true)]);
+        assert_eq!(
+            representable_default(&RawDefault::Bool(true), Some(&kind)),
+            Some(DefaultValue::Bool(true))
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Bool(false), Some(&kind)),
+            None
+        );
+        assert_eq!(
+            representable_default(&RawDefault::Int(1), Some(&kind)),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unsigned_literal_is_an_integer_only_within_i64() {
+        // The parser yields `UInt` only above `i64::MAX`; that value is no `i64`, so it is carried
+        // as the float JSON's number is, never wrapped into a negative integer.
+        let above = parsed("18446744073709551615");
+        assert_eq!(above.node, Node::Number(Number::UInt(u64::MAX)));
+        assert!(
+            matches!(classify_default(&above), RawDefault::Float(value) if value == u64::MAX as f64)
+        );
+        // An unsigned value that fits is the integer it is.
+        let within = SpannedValue::new(Node::Number(Number::UInt(5)), above.span);
+        assert!(matches!(classify_default(&within), RawDefault::Int(5)));
     }
 }

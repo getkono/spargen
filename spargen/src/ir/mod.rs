@@ -62,23 +62,21 @@ impl Api {
                 .is_some_and(|body| body.media == MediaType::Xml);
             let response_xml = operation
                 .responses
-                .by_status
-                .iter()
-                .map(|(_, response)| response)
-                .chain(operation.responses.default.as_ref())
-                .any(|response| response.media == Some(MediaType::Xml));
+                .entries()
+                .any(|(_, response)| response.media == Some(MediaType::Xml));
             request_xml || response_xml
         })
     }
 
-    /// Whether the type graph contains a `format: date-time` or `format: date` primitive. Drives
-    /// the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime newtypes and the `time`
-    /// requirement.
+    /// Whether the types the output carries contain a `format: date-time` or `format: date`
+    /// primitive. Drives the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime
+    /// newtypes and the `time` requirement. An [elided](TypeGraph::elide) definition is no type of
+    /// the output, so it counts for nothing here, as in `check_invariants` (#723).
     ///
     /// This is a property of the API alone; whether those primitives actually *become* the newtypes
     /// additionally depends on the `time` config knob, which callers apply themselves.
     pub(crate) fn uses_time(&self) -> bool {
-        self.types.iter().any(|(_, definition)| {
+        self.types.emitted().any(|(_, definition)| {
             matches!(
                 definition.kind,
                 TypeKind::Primitive(Prim::Date | Prim::DateTime)
@@ -98,31 +96,24 @@ impl Api {
     /// field, additional-properties value or union variant containing one, a JSON `content`
     /// parameter containing one, or a serde-encoded body (JSON, form, XML or a sequential stream)
     /// containing one other than a whole non-streaming `bytes` body, which is sent and read raw.
-    /// Drives the `serde` feature of the `bytes` requirement.
+    /// Drives the `serde` feature of the `bytes` requirement. Only the models the output carries
+    /// count: an [elided](TypeGraph::elide) definition is none of them (#723).
     pub(crate) fn uses_bytes_serde(&self) -> bool {
         let model_needs_serde =
             self.types
-                .iter()
-                .any(|(_, definition)| match &definition.kind {
-                    TypeKind::Struct(object) => {
-                        object.fields.iter().any(|field| {
-                            contains_bytes(&self.types, field.ty.id, &mut BTreeSet::new())
-                        }) || match &object.additional {
-                            AdditionalProps::Typed(ty) => {
-                                contains_bytes(&self.types, ty.id, &mut BTreeSet::new())
-                            }
-                            AdditionalProps::Allow | AdditionalProps::Deny => false,
-                        }
+                .emitted()
+                .any(|(id, definition)| match &definition.kind {
+                    // A model whose fields, additional-properties value or variants reach `bytes`:
+                    // exactly what `contains_bytes` walks from the model itself.
+                    TypeKind::Struct(_) | TypeKind::Union(_) => {
+                        contains_bytes(&self.types, id, &mut BTreeSet::new())
                     }
-                    TypeKind::Union(union) => union.variants.iter().any(|variant| {
-                        contains_bytes(&self.types, variant.ty.id, &mut BTreeSet::new())
-                    }),
                     // Requirements are derived only from an `Api` that passed `check_invariants`,
                     // which rejects a surviving reservation. Answering `false` would under-declare
                     // a runtime dependency for a shape nobody computed.
                     TypeKind::Reserved => unreachable!(
                         "a reservation reached the runtime contract; `check_invariants` should \
-                         have rejected it"
+                     have rejected it"
                     ),
                     _ => false,
                 });
@@ -134,19 +125,13 @@ impl Api {
                 }) || operation.request_body.as_ref().is_some_and(|body| {
                     body.ty
                         .is_some_and(|ty| self.typed_body_needs_bytes_serde(body.media, ty.id))
-                }) || operation
-                    .responses
-                    .by_status
-                    .iter()
-                    .map(|(_, response)| response)
-                    .chain(operation.responses.default.iter())
-                    .any(|response| {
-                        response.body.is_some_and(|ty| {
-                            response.media.is_some_and(|media| {
-                                self.typed_body_needs_bytes_serde(media, ty.id)
-                            })
-                        })
+                }) || operation.responses.entries().any(|(_, response)| {
+                    response.body.is_some_and(|ty| {
+                        response
+                            .media
+                            .is_some_and(|media| self.typed_body_needs_bytes_serde(media, ty.id))
                     })
+                })
             })
     }
 

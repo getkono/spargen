@@ -2,8 +2,8 @@
 //!
 //! A conformant peer behaves identically under every rustls release, so a test built on one
 //! cannot notice a change in what the fetcher accepts. RUSTSEC-2026-0285, fixed in
-//! `rustls 0.23.45` (the `rustls` floor in `spargen/Cargo.toml` now sits at 0.23.46), is exactly
-//! such a change: releases before it accepted a plaintext handshake record that carried a
+//! `rustls 0.23.45` (the `rustls` floor in `spargen/Cargo.toml` admits no release before it), is
+//! exactly such a change: releases before it accepted a plaintext handshake record that carried a
 //! key-changing message *and* a further handshake message, which RFC 8446 §5.1 forbids
 //! ("Handshake messages MUST NOT span key changes"). The peer here sends that record, so this
 //! suite fails on a rustls that relaxes the rule again.
@@ -26,8 +26,10 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use camino::Utf8PathBuf;
-use spargen::{Code, Outcome, Spec};
+use spargen::Spec;
+
+#[path = "shared/remote.rs"]
+mod remote;
 
 const HANDSHAKE: u8 = 0x16;
 const ALERT: u8 = 0x15;
@@ -162,48 +164,15 @@ fn observe_reply(stream: &mut TcpStream) -> Reply {
     }
 }
 
-/// A root description with one operation whose response schema is the remote `url`.
-fn workspace(url: &str) -> (tempfile::TempDir, Utf8PathBuf) {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let spec = dir.join("openapi.yaml");
-    let document = format!(
-        "openapi: 3.1.0\n\
-         info: {{ title: T, version: 1.0.0 }}\n\
-         paths:\n  \
-         /pet:\n    \
-         get:\n      \
-         operationId: getPet\n      \
-         responses:\n        \
-         '200':\n          \
-         description: ok\n          \
-         content:\n            \
-         application/json:\n              \
-         schema: {{ $ref: '{url}' }}\n"
-    );
-    std::fs::write(&spec, document).unwrap();
-    (temp, spec)
-}
-
 /// Run `spargen lock`'s fetch against `flight` and return the E025 message and the peer's view.
 fn lock_against(flight: Flight) -> (String, Reply) {
     let (url, peer) = start_peer(flight);
-    let (_temp, spec) = workspace(&url);
+    let (_temp, spec) = remote::workspace(&[&url]);
 
     let report = spargen::vendor(&Spec::new(spec.clone())).unwrap_err();
     let reply = peer.join().unwrap();
 
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    let diagnostics = report.diagnostics();
-    assert_eq!(diagnostics.len(), 1, "{report:#?}");
-    assert_eq!(diagnostics[0].code, Code::RemoteFetchFailed, "{report:#?}");
-    let message = diagnostics[0].message.clone();
-    assert!(message.contains(&url), "{message}");
-    assert!(
-        !spec.with_file_name(".spargen").exists(),
-        "a failed fetch must vendor nothing"
-    );
-    (message, reply)
+    (remote::fetch_failure(&report, &spec, &url), reply)
 }
 
 #[test]

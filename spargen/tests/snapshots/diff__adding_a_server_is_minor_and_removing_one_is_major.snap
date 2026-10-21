@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|server-added|servers::Server1|new server builder
+bump=minor

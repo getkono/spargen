@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|response-headers-added|GET /pets 200 headers|response header struct `ListPetsStatus200Headers` added
+bump=minor

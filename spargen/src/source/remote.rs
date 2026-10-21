@@ -59,9 +59,15 @@ pub(crate) fn is_http_url(reference: &str) -> bool {
     reference.starts_with("http://") || reference.starts_with("https://")
 }
 
-fn has_uri_scheme(reference: &str) -> bool {
+/// Whether `reference` opens with an RFC 3986 scheme, `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`
+/// followed by `:`. A one-letter scheme counts, so a Windows drive-letter path such as
+/// `C:/x.yaml` is an absolute URI with scheme `c`, as the `E003` explain text states; a relative
+/// path whose first segment holds a `:` is written `./a:b.yaml`, as RFC 3986 §4.2 requires.
+pub(crate) fn has_uri_scheme(reference: &str) -> bool {
     reference.split_once(':').is_some_and(|(scheme, _)| {
-        !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic())
+        let mut chars = scheme.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     })
 }
 
@@ -261,6 +267,27 @@ const NAME_KEYED_FIELDS: &[&str] = &[
     "definitions",
 ];
 
+/// The URI reference a Security Requirement Object key names, or `None` when the key reads as a
+/// component name.
+///
+/// A key starting with `./` is a reference to the rest of the key, and a key containing `/` or `#`
+/// is a reference as written. `colon_marks_reference` is the caller's rule for a key whose only
+/// marker is `:`, such as `urn:example:bearer`: the loader passes `false` and does not fetch it,
+/// while lowering passes `true` and tries to resolve it.
+pub(crate) fn security_requirement_key_reference(
+    key: &str,
+    colon_marks_reference: bool,
+) -> Option<&str> {
+    if let Some(rest) = key.strip_prefix("./") {
+        Some(rest)
+    } else if key.contains('/') || key.contains('#') || (colon_marks_reference && key.contains(':'))
+    {
+        Some(key)
+    } else {
+        None
+    }
+}
+
 /// Collect Security Requirement Object keys that name a scheme by URI rather than component name.
 fn collect_security_requirement_refs(
     value: &SpannedValue,
@@ -279,12 +306,7 @@ fn collect_security_requirement_refs(
                 continue;
             };
             for (key, _) in map.iter() {
-                // A single-segment name is a component name unless `./` forces the URI reading.
-                let reference = if let Some(rest) = key.name.strip_prefix("./") {
-                    rest
-                } else if key.name.contains('/') || key.name.contains('#') {
-                    key.name.as_str()
-                } else {
+                let Some(reference) = security_requirement_key_reference(&key.name, false) else {
                     continue;
                 };
                 refs.push(CollectedRef {
@@ -371,6 +393,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_security_requirement_key_is_a_reference_by_its_markers() {
+        for colon in [false, true] {
+            assert_eq!(security_requirement_key_reference("bearer", colon), None);
+            assert_eq!(
+                security_requirement_key_reference("./bearer.yaml", colon),
+                Some("bearer.yaml")
+            );
+            assert_eq!(
+                security_requirement_key_reference("schemes/bearer.yaml", colon),
+                Some("schemes/bearer.yaml")
+            );
+            assert_eq!(
+                security_requirement_key_reference("#/components/securitySchemes/b", colon),
+                Some("#/components/securitySchemes/b")
+            );
+        }
+        // Only the `:` marker depends on the caller's rule.
+        assert_eq!(
+            security_requirement_key_reference("urn:example:bearer", false),
+            None
+        );
+        assert_eq!(
+            security_requirement_key_reference("urn:example:bearer", true),
+            Some("urn:example:bearer")
+        );
+    }
+
+    #[test]
     fn classifies_refs_by_origin() {
         assert_eq!(
             classify_ref("#/components/schemas/A", None),
@@ -388,6 +438,34 @@ mod tests {
             classify_ref("urn:foo:bar", None),
             RefTarget::UnsupportedRemote("urn:foo:bar".to_owned())
         );
+        // Any RFC 3986 scheme is absolute, a one-letter (drive-letter) one included (#720).
+        for uri in [
+            "git+https://h/x.yaml",
+            "coap+tcp://h",
+            "x-1.a:y",
+            "C:/s/x.yaml",
+        ] {
+            assert_eq!(
+                classify_ref(&format!("{uri}#/A"), None),
+                RefTarget::UnsupportedRemote(uri.to_owned())
+            );
+            assert!(is_absolute_ref(uri), "{uri}");
+        }
+        // A `:` outside a valid scheme leaves the ref a relative path.
+        for path in [
+            "./a:b.yaml",
+            "s/a:b.yaml",
+            "1a:b.yaml",
+            "+a:b",
+            "a_b:c",
+            ":x",
+        ] {
+            assert_eq!(
+                classify_ref(path, None),
+                RefTarget::LocalRelative(path.to_owned())
+            );
+            assert!(!is_absolute_ref(path), "{path}");
+        }
         // A relative ref inside a remote doc resolves against that doc's URL.
         assert_eq!(
             classify_ref("../s/y.yaml#/B", Some("https://h/a/x.yaml")),

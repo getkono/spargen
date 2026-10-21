@@ -47,8 +47,10 @@ pub(super) fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
     }
 }
 
-/// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
-/// their declared OpenAPI style; `content`-typed parameters retain their media codec.
+/// Render a parameter value from a borrowed expression: a path or header parameter of any style,
+/// or a `content`-typed parameter in any location. Schema-typed parameters use their declared
+/// style (`matrix`, `label`, and `simple` for every other); `content`-typed parameters retain
+/// their media codec.
 ///
 /// Path values are percent-encoded here, at serialization time, whether schema- or
 /// `content`-typed. Splicing a raw value into the path template would let a value containing `/`,
@@ -99,7 +101,8 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
 
 /// Emit serialization of one query parameter into the operation's fragment vector.
 ///
-/// Fragments arrive at `build_url` already percent-encoded, so the style's delimiters stay
+/// Fragments arrive at `support::build_url_on` (or `build_url_with_query_string_on`, beside a
+/// whole-query value) already percent-encoded, so the style's delimiters stay
 /// literal and remain distinguishable from the same character inside a value.
 pub(super) fn query_param_tokens(
     param: &crate::ir::Parameter,
@@ -234,9 +237,12 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         let wire = &param.name;
         // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
         // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
-        // again when it did not — otherwise a nullable optional param becomes `Option<Option<T>>`
-        // and the query/header `value.to_string()` serialization would not compile
-        // (`Option<T>: !Display`). Absent and `null` both collapse to `None`.
+        // again when it did not, so absent and `null` both collapse to `None` and a `None` field
+        // is omitted. A schema-styled serialization (`style`/`explode`) has no token that tells
+        // an explicit `null` from an absent value, so `Option<Option<T>>` would ask the caller
+        // for a distinction the wire cannot carry. A `content` parameter of `application/json`
+        // does carry one, the text `null` (a required nullable one sends it for `None`), but
+        // its optional field takes the same single `Option`, so it never sends `null`.
         let ty = if param.ty.nullable {
             ty_tokens(param.ty, names, true)
         } else {
@@ -286,7 +292,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         }
     });
     quote! {
-        #[allow(dead_code)]
+        #[allow(dead_code, deprecated)]
         #[derive(Debug, Clone, Default, serde::Serialize)]
         pub struct #ident {
             #(#fields)*
@@ -294,7 +300,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
 
         // Setters named after fields can trip `wrong_self_convention` when a param is named
         // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
-        #[allow(dead_code, clippy::wrong_self_convention)]
+        #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
         impl #ident {
             #(#setters)*
         }

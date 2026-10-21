@@ -20,18 +20,12 @@ pub(crate) enum IdentRole {
 /// keywords escaped as raw identifiers (`r#type`) where legal and via a trailing underscore
 /// otherwise, and leading digits / invalid starts repaired.
 pub(crate) fn escape(raw: &str, role: IdentRole) -> Ident {
+    // Each conversion yields a non-empty run of ASCII alphanumerics and underscores, falling back
+    // to `Generated` / `generated` itself when nothing survives segmentation.
     let mut ident = match role {
         IdentRole::Type | IdentRole::Variant => to_pascal_case(raw),
         IdentRole::Field | IdentRole::Method | IdentRole::Param => to_snake_case(raw),
     };
-
-    ident.retain(|ch| ch == '_' || ch.is_ascii_alphanumeric());
-    if ident.is_empty() {
-        ident = match role {
-            IdentRole::Type | IdentRole::Variant => "Generated".to_owned(),
-            _ => "generated".to_owned(),
-        };
-    }
 
     if ident.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
         ident = match role {
@@ -124,6 +118,42 @@ mod tests {
         tokens.next().is_none() && ident == text
     }
 
+    /// Is `text` an identifier Rust accepts in a name position: one identifier token that `syn`
+    /// parses as a [`syn::Ident`], which refuses every keyword in `syn`'s own list? That list is
+    /// independent of [`KEYWORDS`], so this oracle catches a keyword left bare even when the table
+    /// and `is_keyword` agree on missing it. `syn` parses edition 2024's `gen` as an identifier,
+    /// so `gen_is_escaped_although_edition_2021_would_accept_it` pins that word instead.
+    fn is_legal_identifier(text: &str) -> bool {
+        lexes_as_one_identifier(text)
+            && syn::parse_str::<syn::Ident>(text).is_ok_and(|ident| ident == text)
+    }
+
+    /// Raw names biased towards the inputs `escape` has to escape: a keyword alone, a keyword
+    /// recased or wrapped in separators that casing strips (` type`, `TYPE`, `self-`), or a
+    /// leading digit, and otherwise an arbitrary string.
+    fn keyword_biased_name() -> impl Strategy<Value = String> {
+        let keyword = proptest::sample::select(KEYWORDS);
+        let decorated = (
+            proptest::sample::select(&["", " ", "_", "-", "__", "1", "$"][..]),
+            keyword.clone(),
+            prop_oneof![Just(false), Just(true)],
+            proptest::sample::select(&["", " ", "_", "-", "!", "_1"][..]),
+        )
+            .prop_map(|(prefix, word, upper, suffix)| {
+                let word = if upper {
+                    word.to_ascii_uppercase()
+                } else {
+                    word.to_owned()
+                };
+                format!("{prefix}{word}{suffix}")
+            });
+        prop_oneof![
+            2 => keyword.prop_map(str::to_owned),
+            2 => decorated,
+            1 => ".{0,48}",
+        ]
+    }
+
     /// Byte-identical output requires identifier allocation to keep each input's spelling, and a
     /// hash-ordered rewrite is the first thing that breaks it. Calling `escape` twice and comparing
     /// cannot fail; this table does, the moment any role spells any of these differently. Columns
@@ -199,7 +229,7 @@ mod tests {
                 let ident = escape(keyword, *role);
                 let text = ident.as_str();
                 assert!(
-                    lexes_as_one_identifier(text),
+                    is_legal_identifier(text),
                     "escape({keyword:?}, {role:?}) produced {text:?}, which is not an identifier"
                 );
                 // Stronger than "did not return its own input": escaping one keyword into a
@@ -312,13 +342,14 @@ mod tests {
 
     proptest! {
         /// The invariant `Ident`'s constructor documents but does not check: whatever a spec puts
-        /// in a name position, `escape` returns something Rust will accept.
+        /// in a name position, `escape` returns something Rust will accept — a keyword included,
+        /// which a lexer alone would let through.
         #[test]
-        fn escape_always_yields_a_legal_identifier(raw in ".{0,48}") {
+        fn escape_always_yields_a_legal_identifier(raw in keyword_biased_name()) {
             for role in ROLES {
                 let ident = escape(&raw, *role);
                 prop_assert!(
-                    lexes_as_one_identifier(ident.as_str()),
+                    is_legal_identifier(ident.as_str()),
                     "escape({raw:?}, {role:?}) produced {:?}",
                     ident.as_str()
                 );

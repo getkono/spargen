@@ -49,6 +49,56 @@ components:
 }
 
 #[test]
+fn an_http_authentication_scheme_matches_in_any_letter_case() {
+    // OpenAPI makes the `http` scheme's `scheme` value case-insensitive (RFC 9110), and
+    // `Bearer` is a common spelling. Matching only the lowercase literals rejected it with E012,
+    // so every spelling here must lower to the scheme its lowercase form names.
+    for (spelling, kind) in [
+        ("bearer", "Bearer"),
+        ("Bearer", "Bearer"),
+        ("BEARER", "Bearer"),
+        ("bEaReR", "Bearer"),
+        ("basic", "Basic"),
+        ("Basic", "Basic"),
+        ("BASIC", "Basic"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      security:
+        - token: []
+      responses:
+        "204": {{ description: No Content }}
+components:
+  securitySchemes:
+    token: {{ type: http, scheme: {spelling} }}
+"##
+        );
+        let report = check(&spec);
+        assert!(
+            !has_code(&report, Code::UnknownSecurityScheme),
+            "`{spelling}`: {report:#?}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{spelling}`: {report:#?}"
+        );
+        let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let attached = format!("name:\"token\",kind:support::AuthKind::{kind},");
+        assert!(
+            compact.contains(&attached),
+            "`{spelling}` must attach as `AuthKind::{kind}`:\n{code}"
+        );
+    }
+}
+
+#[test]
 fn e004_a_security_scheme_ref_that_cannot_be_followed_says_why() {
     // A security scheme `$ref` is followed one hop into this document's
     // `#/components/securitySchemes/`. Each way that fails used to share one message,
@@ -172,16 +222,10 @@ components:
 fn oas32_security_requirement_uri_resolves() {
     // OpenAPI 3.2 lets a requirement name a Security Scheme Object by URI. A component name always
     // wins, per the specification, so only a name matching no component is resolved as a reference.
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("bearer.yaml"),
-        "type: http\nscheme: bearer\n",
-    )
-    .unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec_path,
-        r##"
+    let (report, _, code) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
 security:
@@ -192,16 +236,59 @@ paths:
       responses:
         "204": { description: No Content }
 "##,
-    )
-    .unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    ));
+        ),
+        ("bearer.yaml", "type: http\nscheme: bearer\n"),
+    ]);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
+    );
+    // The resolved scheme is attached to the operation under the requirement's own key: a
+    // requirement dropped on the way would generate cleanly and attach nothing.
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains(
+            "support::attach_auth(&self.core,request,&[&[support::AuthScheme{\
+             name:\"./bearer.yaml\",kind:support::AuthKind::Bearer,},][..],],)"
+        ),
+        "the URI requirement must attach as `AuthKind::Bearer`:\n{code}"
+    );
+}
+
+#[test]
+fn a_urn_style_security_requirement_key_gets_todays_diagnostic() {
+    // The loader and lowering disagree on whether a key containing `:` is a URI reference: the
+    // loader does not fetch a `urn:`-style key, while lowering tries to resolve it. This pins the
+    // diagnostic that disagreement produces today, so a change to either `:` rule shows up here.
+    let report = generate(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+security:
+  - "urn:example:bearer": []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let summary: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .map(|d| (d.code, d.pointer.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        [(Code::UnknownSecurityScheme, "/paths/~1x/get")],
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics()[0]
+            .message
+            .contains("`urn:example:bearer`"),
         "{report:#?}"
     );
 }

@@ -3,65 +3,59 @@
 //! properties (`lowering_props.rs`), so each holds every run it makes to the same bar (#475):
 //!
 //! * [`location_violations`]: every diagnostic names a real location (#454);
-//! * [`indistinguishable_variants`]: every union's variants can be told apart (#402);
+//! * [`indistinguishable_variants`]: every union's variants can be told apart (#402), unless a
+//!   `W001` at the union says why ([`unexplained_variants`]);
 //! * [`relocate`] and [`shape`]: moving a document's schemas into a referenced file changes no
 //!   verdict, code or shape (#446).
 //!
-//! Each oracle reports the defects it finds that an open issue already tracks as known, carrying
-//! the issue number, so a caller can let them through while the issue is open. The fixtures in
-//! `frontend/` that pin each known entry fail once the issue's fix lands, and the entry goes with
-//! them, so the set of known gaps can only shrink.
+//! Each oracle returns the defects it finds, one reason each; a caller fails on any of them.
 
 // Each test crate that declares this module uses the part of it its runs need.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use spargen::{Code, Diagnostic, Report};
 use yaml_rust2::{Yaml, YamlLoader};
 
-/// One defect an oracle found.
-#[derive(Debug)]
-pub struct Violation {
-    /// What is wrong, and where.
-    pub reason: String,
-    /// The open issue that tracks this defect, when it is a known one.
-    pub known: Option<u32>,
-}
-
-/// The diagnostics whose pointer is still the document root although the construct they report has
-/// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
-/// their empty pointer as known; every other rule still applies to them, each checked on its own.
-pub const KNOWN_ROOT_POINTERS: &[(Code, u32)] = &[];
-
-/// The diagnostics whose span still covers the whole root document although the construct they
-/// report has a span of its own, each with the open issue that tracks it. [`location_violations`]
-/// reports that span as known; every other rule still applies to them, each checked on its own.
-pub const KNOWN_WHOLE_ROOT_SPANS: &[(Code, u32)] = &[];
-
-/// The issue `table` tracks `code` under, if any.
-fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
-    table
-        .iter()
-        .find(|(known, _)| *known == code)
-        .map(|(_, issue)| *issue)
-}
-
-/// Whether `diagnostic` is about the document as a whole, so the root is its true location: an
-/// unsupported `openapi` version (`E001`), and an invalid input document (`E011`) the validator
-/// could place nowhere below the root.
-fn is_document_level(diagnostic: &Diagnostic) -> bool {
-    diagnostic.code == Code::UnsupportedOpenApiVersion
-        || (diagnostic.code == Code::InvalidInput && diagnostic.pointer.as_str().is_empty())
+/// Whether `diagnostic` is about the root document as a whole, so the root is its true location:
+/// an unsupported `openapi` version (`E001`), and an invalid input document (`E011`) with an empty
+/// pointer that the frontend could place nowhere smaller than the root document itself. That is an
+/// `E011` in the root document with no span (the root document could not be read, or the pipeline
+/// itself failed), with a span at a single point (a syntax error the parser places only by line
+/// and column), with a span over the whole root, or that reports the root as a whole: the
+/// validator's verdict on the root value (an `OpenAPI structure violation` whose instance is the
+/// root, which the YAML parser spans only to the start of a flow collection's closing bracket), or
+/// a YAML stream that is not one document. Any other `E011` with an empty pointer, such as a
+/// mapping key that is not a string, reports a construct below the root with a pointer of its
+/// own, and is held to every rule.
+fn is_document_level(diagnostic: &Diagnostic, content_end: usize) -> bool {
+    if diagnostic.code == Code::UnsupportedOpenApiVersion {
+        return true;
+    }
+    if diagnostic.code != Code::InvalidInput || !diagnostic.pointer.as_str().is_empty() {
+        return false;
+    }
+    let Some(span) = diagnostic.span else {
+        return true;
+    };
+    span.file.0 == 0
+        && (span.start.offset == span.end.offset
+            || (span.start.line == 1 && span.end.offset >= content_end)
+            || diagnostic
+                .message
+                .starts_with("OpenAPI structure violation: ")
+            || diagnostic.message == "YAML input must contain exactly one document")
 }
 
 /// Each diagnostic in `diagnostics` that names no real location (#454).
 ///
 /// A diagnostic raised against a construct the lowering built for itself, such as the struct an
-/// `allOf` meet produces, used to carry the document root's provenance: an empty pointer, a span
+/// `allOf` meet produces, must not carry the document root's provenance: an empty pointer, a span
 /// over the whole file, and an empty type name in the message (`` in `` ``). So every diagnostic
-/// that is not [`is_document_level`] must have no empty backtick pair in its message, no span
+/// that is not [`is_document_level`] must have no empty backtick pair in its message (unless the
+/// root document itself holds one, which a message may quote), no span
 /// covering the whole root document `root`, and a non-empty pointer unless it lies in a referenced
 /// file. A pointer addresses the file its span lies in, and the root of a referenced file is a
 /// construct of its own (a whole-file `$ref` target); the root of the root document is not. The
@@ -70,15 +64,16 @@ fn is_document_level(diagnostic: &Diagnostic) -> bool {
 /// A span covers the whole root when it starts on the first line and runs to the last
 /// non-whitespace byte: the root value's span, which the YAML parser starts at the first value
 /// rather than at offset 0.
-pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Violation> {
+pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<String> {
     let content_end = root
         .iter()
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(0, |at| at + 1);
+    let quotes_empty_pair = root.windows(2).any(|pair| pair == b"``");
     let mut violations = Vec::new();
     for diagnostic in diagnostics
         .iter()
-        .filter(|diagnostic| !is_document_level(diagnostic))
+        .filter(|diagnostic| !is_document_level(diagnostic, content_end))
     {
         let in_root = diagnostic.span.is_none_or(|span| span.file.0 == 0);
         let whole_root = diagnostic.span.is_some_and(|span| {
@@ -87,35 +82,40 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Viola
                 && content_end > 0
                 && span.end.offset >= content_end
         });
-        // Each rule is checked on its own, so a diagnostic that breaks two reports both, and a
-        // known gap under one rule never hides a break of another.
-        if diagnostic.message.contains("``") {
-            violations.push(Violation {
-                reason: format!("the message names something empty (``): {diagnostic:?}"),
-                known: None,
-            });
+        // Each rule is checked on its own, so a diagnostic that breaks two reports both.
+        if diagnostic.message.contains("``") && !quotes_empty_pair {
+            violations.push(format!(
+                "the message names something empty (``): {diagnostic:?}"
+            ));
         }
         if in_root && diagnostic.pointer.as_str().is_empty() {
-            violations.push(Violation {
-                reason: format!("the pointer is empty: {diagnostic:?}"),
-                known: known_in(KNOWN_ROOT_POINTERS, diagnostic.code),
-            });
+            violations.push(format!("the pointer is empty: {diagnostic:?}"));
         }
         if whole_root {
-            violations.push(Violation {
-                reason: format!("the span covers the whole root document: {diagnostic:?}"),
-                known: known_in(KNOWN_WHOLE_ROOT_SPANS, diagnostic.code),
-            });
+            violations.push(format!(
+                "the span covers the whole root document: {diagnostic:?}"
+            ));
         }
     }
     violations
 }
 
 /// Everything from the generated `types` module to the end of the file, or nothing when no module
-/// was emitted. The embedded runtime before it is not generated from the document.
-fn types_module(code: &str) -> &str {
+/// was emitted: the provenance header and the embedded runtime before it are stripped, since they
+/// are not generated from the document.
+///
+/// It is **not** bounded at the module's closing brace: the returned text also carries the
+/// `Client` impl and the emitted scaffolding after `types`. A `.contains(…)` on it can therefore
+/// match client code rather than a lowered type; a check that must pin a lowered type should match
+/// a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
+///
+/// Two generations of the *same* spec already differ as whole files: the header carries the output
+/// path and a per-run `input-sha256`/`content-sha256`. So comparing two generated clients whole
+/// proves nothing about what they lowered to. Comparing from `pub mod types {` onward compares
+/// what the two documents actually lowered to.
+pub fn types_module(code: &str) -> String {
     code.find("pub mod types {")
-        .map_or("", |start| &code[start..])
+        .map_or_else(String::new, |start| code[start..].to_owned())
 }
 
 /// The item declarations of a generated module, keyed by name: each `pub type`, `pub struct` and
@@ -237,9 +237,17 @@ impl Declarations {
 /// specific match is selected, so a typed variant still takes every value it accepts, and a
 /// `serde_json::Value` variant, the lowering of an untyped member (`{}`, `true`), takes only the
 /// rest. That is the faithful lowering of what the document says, so it is not reported.
-pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
+pub fn indistinguishable_variants(code: &str) -> Vec<String> {
+    union_violations(code)
+        .into_iter()
+        .map(|(_, reason)| reason)
+        .collect()
+}
+
+/// [`indistinguishable_variants`], each reason with the name of the union it is about.
+fn union_violations(code: &str) -> Vec<(String, String)> {
     let types = types_module(code);
-    let declarations = Declarations::read(types);
+    let declarations = Declarations::read(&types);
     let mut violations = Vec::new();
     for (name, (kind, _, body)) in &declarations.items {
         if *kind != "enum" || !types.contains(&format!("serde::Deserialize<'de> for {name} {{")) {
@@ -265,24 +273,24 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
         }
         for (variant, shape) in &payloads {
             if shape == "serde_json::Value" {
-                violations.push(Violation {
-                    reason: format!("`oneOf` `{name}` variant `{variant}` is `serde_json::Value`"),
-                    known: None,
-                });
+                violations.push((
+                    name.clone(),
+                    format!("`oneOf` `{name}` variant `{variant}` is `serde_json::Value`"),
+                ));
             }
         }
         for (at, (first, shape)) in payloads.iter().enumerate() {
             for (second, other) in &payloads[at + 1..] {
                 if shape == other {
                     // Equal nominal payloads (two structs, or two string enums, of one
-                    // definition) are merged with `W001` since #492, so no issue tracks them.
-                    violations.push(Violation {
-                        reason: format!(
+                    // definition) are merged with `W001` (#492), so none should be left.
+                    violations.push((
+                        name.clone(),
+                        format!(
                             "`oneOf` `{name}` variants `{first}` and `{second}` have one shape: \
                              {shape}"
                         ),
-                        known: None,
-                    });
+                    ));
                 }
             }
         }
@@ -290,29 +298,81 @@ pub fn indistinguishable_variants(code: &str) -> Vec<Violation> {
     violations
 }
 
-/// The reason of each violation among `violations` that no open issue tracks.
-pub fn unknown(violations: Vec<Violation>) -> Vec<String> {
-    violations
-        .into_iter()
-        .filter(|violation| violation.known.is_none())
-        .map(|violation| violation.reason)
+/// `name` with everything but its ASCII letters and digits dropped, lowercased: how a schema name
+/// and the Rust type name allocated from it compare (`my_pet` and `MyPet` are both `mypet`).
+fn normalized(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
         .collect()
 }
 
-/// The [`indistinguishable_variants`] of `code` a `Generated` run must not have emitted: none,
-/// when the run reported a warning that can say why; otherwise every one no open issue tracks.
+/// The component schema `pointer` lies under, if any: `Pet` for `/components/schemas/Pet/oneOf`.
+fn component_of(pointer: &str) -> Option<String> {
+    let rest = pointer.strip_prefix("/components/schemas/")?;
+    let name = rest.split('/').next()?;
+    Some(name.replace("~1", "/").replace("~0", "~"))
+}
+
+/// Whether `diagnostic` is a `W001` that explains why a `oneOf`'s variants cannot be told apart:
+/// a member or variant that lowers to `serde_json::Value`, which accepts every value, or members
+/// or branches that lower to one generated type, or differ only in keywords it does not carry.
+fn explains_union(diagnostic: &Diagnostic) -> bool {
+    diagnostic.code == Code::ValidationKeywordIgnored
+        && [
+            "to `serde_json::Value`, which accepts every value",
+            "lower to the same generated type",
+            "differ only in keywords",
+        ]
+        .iter()
+        .any(|says| diagnostic.message.contains(says))
+}
+
+/// The [`indistinguishable_variants`] of `code` a `Generated` run must not have emitted: every one
+/// except those of a union a `W001` of `report` explains at the union's own pointer.
+///
+/// A union is tied to a pointer only through its name: a `W001` that [explains a
+/// union](explains_union) at a pointer under the component schema `C` excuses one union whose name
+/// begins with `C`'s, as every type lowered under `C` is named (`U`'s property `p` is `Up`). Each
+/// such warning excuses one union, so two unions cannot shelter behind one warning, and a warning
+/// anywhere else, or of any other kind, excuses none.
 pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
-    if report.warnings().next().is_some() {
-        return Vec::new();
+    let violations = union_violations(code);
+    let mut explanations: Vec<String> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| explains_union(diagnostic))
+        .filter_map(|diagnostic| component_of(diagnostic.pointer.as_str()))
+        .map(|component| normalized(&component))
+        .collect();
+    let unions: BTreeSet<&str> = violations.iter().map(|(name, _)| name.as_str()).collect();
+    let mut excused = BTreeSet::new();
+    for union in unions {
+        let name = normalized(union);
+        // The longest matching component first, so `Pet` takes `Pet`'s warning before `P` can.
+        let best = explanations
+            .iter()
+            .enumerate()
+            .filter(|(_, component)| name.starts_with(component.as_str()))
+            .max_by_key(|(_, component)| component.len())
+            .map(|(at, _)| at);
+        if let Some(at) = best {
+            explanations.remove(at);
+            excused.insert(union);
+        }
     }
-    unknown(indistinguishable_variants(code))
+    violations
+        .iter()
+        .filter(|(name, _)| !excused.contains(name.as_str()))
+        .map(|(_, reason)| reason.clone())
+        .collect()
 }
 
 /// The shape of the type the module `code` declares as `name`: what it stands for with every name
 /// it reaches expanded, so two modules that lower one schema under different names agree. `name`
 /// itself when the module declares nothing by that name.
 pub fn shape(code: &str, name: &str) -> String {
-    Declarations::read(types_module(code)).shape_of(name, 8)
+    Declarations::read(&types_module(code)).shape_of(name, 8)
 }
 
 /// A YAML string scalar.

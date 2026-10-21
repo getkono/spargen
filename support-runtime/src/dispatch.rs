@@ -1,5 +1,5 @@
 //! The small set of dispatch routines shared within a generated client: build URL →
-//! attach auth → send → classify status → decode. Sharing happens *within* a generated client
+//! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
 //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
 //!
 //! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
@@ -8,12 +8,10 @@
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use reqwest::header::HeaderValue;
-use reqwest::{Request, RequestBuilder, Response, Url};
-use secrecy::{ExposeSecret, SecretString};
+use reqwest::{Request, Response, Url};
 use serde::de::DeserializeOwned;
 
-use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, RequestError, ResponseValue};
+use crate::{ClientCore, Error, ResponseValue};
 
 /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
 /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
@@ -161,176 +159,6 @@ pub fn build_url_with_query_string_on(
     Ok(url)
 }
 
-/// Attach credentials for an operation's security requirement. `requirements` is an OR
-/// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
-/// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
-/// security optional and always satisfies. If no alternative is satisfiable the request fails
-/// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
-/// token provider that fails does too, as [`RequestError::CredentialProvider`].
-///
-/// **Selection is on registration, not on success, and there is no fall-through.** Once an
-/// alternative is chosen, a failure while attaching it — a token provider that errors, or a
-/// credential registered under a kind its scheme cannot use — fails the call, even when a later
-/// alternative is fully registered and would have succeeded. Falling through would send
-/// credentials the caller's registration did not select, silently, on a call they had expressed a
-/// different intent for; an error they can see is the better failure.
-///
-/// A caller who wants the *other* alternative unregisters a scheme of the earlier one with
-/// [`ClientCore::remove_credential`] (the generated client's `without_credential`); selection then
-/// passes over the earlier alternative and reaches the later one on the next call. Registering the
-/// fallback as well is not enough on its own, because selection stops at the first satisfiable
-/// alternative and the earlier one stays satisfied until one of its schemes is removed.
-pub async fn attach_auth(
-    core: &ClientCore,
-    request: RequestBuilder,
-    requirements: &[&[AuthScheme]],
-) -> Result<RequestBuilder, Error<Infallible>> {
-    // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
-    // would fall through the loop below without choosing anything, and the call would fail as
-    // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
-    // — `codegen/dispatch.rs` omits it for an operation with no `security` — but this function
-    // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
-    // a generated client, so this is a contract, not dead code, and spargen's own runtime tests
-    // (which are not embedded) hold it to that.
-    if requirements.is_empty() {
-        return Ok(request);
-    }
-    // Selection and reporting are one computation: an alternative is chosen exactly when the list
-    // of its unregistered schemes is empty, and that same list is what `MissingCredential`
-    // reports for it. So every reported inner list is non-empty by construction, and the outer
-    // list is non-empty because `requirements` is.
-    let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(requirements.len());
-    for alternative in requirements {
-        let mut missing = Vec::new();
-        let mut registered = Vec::with_capacity(alternative.len());
-        for scheme in *alternative {
-            match resolve(core, scheme) {
-                Resolution::Transport => {}
-                Resolution::Registered(credential) => registered.push((scheme, credential)),
-                Resolution::Missing => missing.push(scheme.name),
-            }
-        }
-        if missing.is_empty() {
-            let mut request = request;
-            for (scheme, credential) in registered {
-                request = apply_credential(request, scheme, credential).await?;
-            }
-            return Ok(request);
-        }
-        alternatives.push(missing);
-    }
-    Err(Error::RequestConstruction(
-        RequestError::MissingCredential { alternatives },
-    ))
-}
-
-/// How one scheme of a security alternative is satisfied, if at all.
-enum Resolution<'a> {
-    /// Satisfied by the transport itself; nothing is attached to the request.
-    Transport,
-    /// Satisfied by the credential registered under the scheme's name.
-    Registered(&'a Credential),
-    /// Not satisfied: the caller still has to register a credential for it.
-    Missing,
-}
-
-/// The single answer to "does this scheme block its alternative?", read by both the selection
-/// and the `MissingCredential` report in [`attach_auth`]. The match is exhaustive over
-/// [`AuthKind`], so a new kind has to state how it is satisfied before it compiles.
-fn resolve<'a>(core: &'a ClientCore, scheme: &AuthScheme) -> Resolution<'a> {
-    match scheme.kind {
-        // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
-        // registered credential and never blocks an alternative from being chosen.
-        AuthKind::MutualTls => Resolution::Transport,
-        AuthKind::Bearer
-        | AuthKind::Basic
-        | AuthKind::ApiKeyHeader(_)
-        | AuthKind::ApiKeyQuery(_)
-        | AuthKind::ApiKeyCookie(_) => match core.credential(scheme.name) {
-            Some(credential) => Resolution::Registered(credential),
-            None => Resolution::Missing,
-        },
-    }
-}
-
-async fn apply_credential(
-    request: RequestBuilder,
-    scheme: &AuthScheme,
-    credential: &Credential,
-) -> Result<RequestBuilder, Error<Infallible>> {
-    // A provider yields a single secret, usable anywhere a bearer token or apiKey fits. Only a kind
-    // that takes a token asks it for one, so a provider registered under a scheme that takes none
-    // is the same mismatch whether or not a refresh would have succeeded. `attach_auth` skips
-    // `MutualTls` before calling this, so the `MutualTls` term below is never evaluated from there;
-    // it is deliberate defence, so a caller that bypasses the skip still never fetches a token.
-    let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
-    let token: Option<SecretString> = match credential {
-        Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
-        Credential::Provider(provider) if takes_token => {
-            Some(provider().await.map_err(|source| {
-                Error::RequestConstruction(RequestError::CredentialProvider {
-                    scheme: scheme.name,
-                    source,
-                })
-            })?)
-        }
-        Credential::Provider(_) | Credential::Basic { .. } => None,
-    };
-    match scheme.kind {
-        AuthKind::Basic => match credential {
-            Credential::Basic { username, password } => {
-                Ok(request.basic_auth(username, Some(password.expose_secret())))
-            }
-            _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
-        },
-        AuthKind::Bearer => match token {
-            Some(token) => Ok(request.bearer_auth(token.expose_secret())),
-            None => Err(credential_mismatch(scheme.name, "bearer", credential)),
-        },
-        AuthKind::ApiKeyHeader(name) => match token {
-            Some(token) => Ok(request.header(name, sensitive_value(token.expose_secret())?)),
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
-        },
-        AuthKind::ApiKeyQuery(name) => match token {
-            Some(token) => Ok(request.query(&[(name, token.expose_secret())])),
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
-        },
-        // Satisfied by the transport; `attach_auth` never reaches this arm.
-        AuthKind::MutualTls => Ok(request),
-        AuthKind::ApiKeyCookie(name) => match token {
-            Some(token) => {
-                let cookie = format!("{name}={}", token.expose_secret());
-                Ok(request.header(reqwest::header::COOKIE, sensitive_value(&cookie)?))
-            }
-            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
-        },
-    }
-}
-
-fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
-    let mut value = HeaderValue::from_str(secret).map_err(Error::request_construction)?;
-    value.set_sensitive(true);
-    Ok(value)
-}
-
-fn credential_mismatch(
-    scheme: &'static str,
-    required: &'static str,
-    credential: &Credential,
-) -> Error<Infallible> {
-    let registered = match credential {
-        Credential::Bearer(_) => "Bearer",
-        Credential::Basic { .. } => "Basic",
-        Credential::ApiKey(_) => "ApiKey",
-        Credential::Provider(_) => "Provider",
-    };
-    Error::RequestConstruction(RequestError::CredentialMismatch {
-        scheme,
-        required,
-        registered,
-    })
-}
-
 /// Send a prepared request through the core's transport [`crate::HttpBackend`], mapping
 /// transport/timeout/protocol/redirect failures into the taxonomy. The backend reports failures as
 /// a [`crate::TransportError`] wrapping the originating `reqwest::Error`; that error is run back
@@ -372,7 +200,7 @@ pub async fn decode_success_text<T>(
 where
     T: DeserializeOwned,
 {
-    decode_success_with(core, response, decode_text_body::<T>).await
+    decode_success_with(core, response, |body| decode_text_body::<T>(body)).await
 }
 
 /// The body every structured success decoder shares: read the whole body, run `decode` over it, and
@@ -380,10 +208,14 @@ where
 /// decoder's message as its `path` and a body capped at `max_error_body`. Deserialization needs the
 /// whole body, so peak memory here is inherent to typed decoding; only what the error *retains* is
 /// capped.
-pub(crate) async fn decode_success_with<T>(
+///
+/// Generated code for a multi-status success enum calls it from the arm whose selector matched,
+/// with a `decode` that builds that arm's variant. `decode` receives the `Bytes` itself so a raw
+/// binary variant keeps it without a copy.
+pub async fn decode_success_with<T>(
     core: &ClientCore,
     response: Response,
-    decode: impl FnOnce(&[u8]) -> Result<T, String>,
+    decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -406,13 +238,11 @@ pub(crate) async fn decode_success_with<T>(
 /// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
 /// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
 pub async fn decode_success_bytes(
-    _core: &ClientCore,
+    core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    Ok(ResponseValue::new(status, headers, body))
+    // The decoder cannot fail, so `Error::Decode` is unreachable and the body is never capped.
+    decode_success_with(core, response, |body| Ok(body.clone())).await
 }
 
 /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
@@ -434,19 +264,6 @@ where
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     serde_json::from_value(serde_json::Value::String(text.to_owned()))
         .map_err(|error| error.to_string())
-}
-
-/// Read a success response body whole, returning its status, headers, and raw bytes so generated
-/// code can select the matching per-status variant and decode it. Non-generic: the per-variant
-/// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
-/// which owns the status→variant table and its distinct body types.
-pub async fn read_success_body(
-    response: Response,
-) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes), Error<Infallible>> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    Ok((status, headers, body))
 }
 
 /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
@@ -514,18 +331,22 @@ pub async fn classify_error_text<E>(
 where
     E: DeserializeOwned,
 {
-    classify_with(core, response, documented, decode_text_body::<E>).await
+    classify_with(core, response, documented, |body| {
+        decode_text_body::<E>(body)
+    })
+    .await
 }
 
 /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
 /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
 /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
-/// [`Error::UnexpectedStatus`] with the raw body preserved.
+/// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
+/// a raw binary error body keeps it without a copy.
 pub(crate) async fn classify_with<E>(
     core: &ClientCore,
     response: Response,
     documented: &[StatusSpec],
-    decode: impl FnOnce(&[u8]) -> Result<E, String>,
+    decode: impl FnOnce(&Bytes) -> Result<E, String>,
 ) -> Error<E> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -564,37 +385,16 @@ pub async fn classify_error_bytes<E: From<Bytes>>(
     response: Response,
     documented: &[StatusSpec],
 ) -> Error<E> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    match read_capped(core, response).await {
-        Ok((body, _truncated)) => {
-            if documented.iter().any(|spec| spec.matches(status)) {
-                Error::Api(ResponseValue::new(status, headers, E::from(body)))
-            } else {
-                Error::UnexpectedStatus {
-                    status,
-                    headers,
-                    body,
-                }
-            }
-        }
-        Err(error) => error,
-    }
+    // The decoder cannot fail, so `Error::Decode`, the one variant that would carry the flag, is
+    // unreachable.
+    classify_with(core, response, documented, |body| Ok(E::from(body.clone()))).await
 }
 
 /// Wrap a non-success response as [`Error::UnexpectedStatus`] (#7) for operations that document no
 /// error body at all, retaining at most `max_error_body` bytes.
 pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Error<E> {
-    let status = response.status();
-    let headers = response.headers().clone();
-    match read_capped(core, response).await {
-        Ok((body, _truncated)) => Error::UnexpectedStatus {
-            status,
-            headers,
-            body,
-        },
-        Err(error) => error,
-    }
+    // No selector is documented, so the decoder is never run.
+    classify_with(core, response, &[], |_| Err(String::new())).await
 }
 
 /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.

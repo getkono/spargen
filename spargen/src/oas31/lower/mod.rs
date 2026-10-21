@@ -45,7 +45,7 @@ use crate::ir::{
 };
 use crate::name::synth_operation_id;
 
-use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema, SchemaOr};
+use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema};
 
 use combine::{Gathering, RecordedContribution};
 use defaults::retype_field_defaults;
@@ -54,7 +54,7 @@ use security::{
     lower_security_requirement, lower_security_schemes, resolve_external_security_schemes,
 };
 use server::{lower_server, lower_server_override, parse_path_template};
-use xml::gate_xml_field_renames;
+use xml::{gate_xml_field_renames, RootXml, XmlSite};
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
 /// `allOf`/`oneOf`/`anyOf` member, and resolved `$ref` target descends one level through
@@ -123,15 +123,10 @@ fn memoised_answer<T: Copy>(
 fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
     provenance
         .pointer
-        .as_str()
-        .rsplit('/')
-        .next()
+        .tokens()
+        .pop()
         .filter(|token| !token.is_empty())
-        .map_or_else(
-            || fallback.to_owned(),
-            // Order matters: `~1` first, then `~0`, or a literal `~01` would decode as `/`.
-            |token| token.replace("~1", "/").replace("~0", "~"),
-        )
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
@@ -247,14 +242,17 @@ fn lower_pass(
         narrowing_opens: false,
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
+        root_xml: HashMap::new(),
+        field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        untyped_beside_null_member: None,
         stated_nothing_took_null: None,
         held_untyped_warnings: None,
-        scalar_meet_value_variants: HashSet::new(),
+        scalar_meet_union: None,
+        scalar_meet_unmerged: HashSet::new(),
         union_variant_members: HashMap::new(),
         variant_meets: Vec::new(),
+        deferred_map_values: Vec::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -489,14 +487,26 @@ fn lower_pass(
         }
     }
 
+    // Every reservation is filled now, so the map-value comparisons a reservation held back can
+    // be decided.
+    ctx.check_deferred_map_values();
+
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
     retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);
 
-    // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
-    // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
-    // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
-    gate_xml_field_renames(&mut ctx.graph, &operations, &ctx.meet_locations, ctx.diags);
+    // A field's `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only
+    // be applied to a schema used *exclusively* as an XML body — otherwise the rename would corrupt
+    // the JSON wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable
+    // type, apply each root `xml.name`, and disposition every hint the codec cannot honour.
+    gate_xml_field_renames(
+        &mut ctx.graph,
+        &operations,
+        &ctx.meet_locations,
+        &ctx.root_xml,
+        &ctx.field_xml_sites,
+        ctx.diags,
+    );
 
     let mut api_description = document.info.summary.clone();
     if let Some(description) = &document.info.description {
@@ -663,6 +673,11 @@ impl CategoryMask {
     /// Whether the set admits a category other than `category`.
     fn admits_besides(self, category: JsonCategory) -> bool {
         self.0 & !Self::bit(category) != 0
+    }
+
+    /// Whether the set names a category, and only categories `outer` admits too.
+    fn is_within(self, outer: Self) -> bool {
+        self.0 != 0 && self.0 & !outer.0 == 0
     }
 }
 
@@ -889,6 +904,13 @@ struct LowerCtx<'a, 'doc> {
     /// provenance, which ranks it after every declared schema when type names collide; this is
     /// where `W005` and `W006` raised against it point instead of that root (#454).
     meet_locations: HashMap<TypeId, Provenance>,
+    /// The `xml` object of every schema a definition was lowered from, read as that schema's root
+    /// ([`Self::record_root_xml`]), by the site it was written at. The definitions keep the site,
+    /// so [`gate_xml_field_renames`] finds each one from the types it produced once ids are final.
+    root_xml: HashMap<XmlSite, RootXml>,
+    /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
+    /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
+    field_xml_sites: HashSet<XmlSite>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the
@@ -901,12 +923,6 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
-    /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
-    /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
-    /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
-    /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
-    untyped_beside_null_member: Option<Provenance>,
     /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
     /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
     /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
@@ -923,14 +939,19 @@ struct LowerCtx<'a, 'doc> {
     /// (`{}`, `true`) is `Value`; the meet then gives it the other members' type, so the warning
     /// is raised for the variants the meet leaves `Value` alone (#660).
     held_untyped_warnings: Option<Vec<HeldUntypedWarning>>,
-    /// The variant hints of the `Value` variants of the union members an `allOf`'s scalar meet
-    /// meets, whose `null` the `allOf` decided by the union's own count
-    /// ([`Self::union_members_take_scalar_null`]) rather than by a branch that states `null`
-    /// (beside which the copy is a second branch `null` matches, and stays). `Value` is the
-    /// identity of the meet, so the meet hands each the other members' `null` a second time;
-    /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
-    /// is counted once (#660).
-    scalar_meet_value_variants: HashSet<String>,
+    /// The union member of an `allOf` being lowered as an input to the `allOf`'s scalar meet
+    /// ([`LowerCtx::lower_scalar_meet_union`]). [`Self::lower_union_closed`] leaves its
+    /// indistinguishable variants unmerged, as it leaves [`Self::unmerged_union`]'s, so the meet
+    /// still tells apart the branches it excludes (`W011`), and records the union in
+    /// [`Self::scalar_meet_unmerged`] for [`Self::collapse_met_one_ofs`] to merge after the meet
+    /// (#678). Unlike [`Self::unmerged_union`] it changes nothing else about the union's lowering:
+    /// its `null` and its `W001` for `serde_json::Value` variants are the scalar meet's to settle,
+    /// as they are for a union lowered there on its own.
+    scalar_meet_union: Option<Provenance>,
+    /// The unions lowered as [`Self::scalar_meet_union`], whose indistinguishable variants
+    /// [`Self::collapse_met_one_ofs`] merges, with `W001`, wherever a scalar meet reaches them,
+    /// though the meet's own inserts begin after them.
+    scalar_meet_unmerged: HashSet<TypeId>,
     /// For each union [`Self::lower_union_closed`] lowered to an enum of two or more variants, the
     /// members each variant came from (more than one where indistinguishable branches merged), by
     /// their positions among the union's real members (the positions a `W011` names). Kept aligned
@@ -942,6 +963,11 @@ struct LowerCtx<'a, 'doc> {
     /// meet made to report, as `W011`, a union member's branch it kept nowhere
     /// ([`Self::warn_excluded_union_member_branches`]).
     variant_meets: Vec<(TypeId, usize, bool)>,
+    /// The `patternProperties`/`additionalProperties` value types whose one-map homogeneity
+    /// [`Self::lower_pattern_additional`] could not decide because a value reached a reservation,
+    /// with the object's provenance, in source order; [`Self::check_deferred_map_values`] decides
+    /// them once lowering has filled every reservation.
+    deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
 }
 
 /// The options that change what lowering produces.
@@ -952,22 +978,23 @@ pub(crate) struct LowerOptions {
 }
 
 /// Append a note as a trailing rustdoc paragraph on a type's [`Docs`], used to surface a
-/// component-root `default` on the generated named type.
+/// component-root `default` on the generated named type. An empty description counts as absent,
+/// as in [`append_text`].
 fn append_doc_note(docs: &mut Docs, note: String) {
-    match &mut docs.description {
-        Some(description) => {
-            description.push_str("\n\n");
-            description.push_str(&note);
-        }
-        None => docs.description = Some(note),
-    }
+    append_text(&mut docs.description, note);
 }
 
-/// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
-/// document root for a bare boolean member that carries none.
-fn member_provenance(member: &SchemaOr) -> crate::diag::Provenance {
-    match member {
-        SchemaOr::Schema(schema) => schema.provenance.clone(),
-        SchemaOr::Bool(_) => crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
-    }
+/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
+/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
+/// is written in, with the span of the node written there when the file holds one.
+fn all_of_entry_provenance(
+    resolver: &Resolver<'_>,
+    holder: &Provenance,
+    index: usize,
+) -> Provenance {
+    let pointer = holder.pointer.push("allOf").index(index);
+    let span = resolver
+        .node_at(resolver.written_in(holder), &pointer)
+        .map(|node| node.span);
+    Provenance::new(pointer, span)
 }

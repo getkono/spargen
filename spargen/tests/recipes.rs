@@ -4,8 +4,9 @@
 //!
 //! Each case reads a vendored spec under `corpus/recipes/` that mirrors that framework's OUTPUT
 //! IDIOMS (see `corpus/recipes/README.md` for provenance and the verified version constants) and
-//! asserts spargen's outcome and, for each idiom a generating case lists, the generated type it
-//! lowers to, so the recipes in `docs/recipes.md` stay honest:
+//! asserts spargen's outcome, that each of a generating case's operations becomes a method, and,
+//! for each schema idiom (nullables, `allOf` merges, unions), the generated type it lowers to, so
+//! the recipes in `docs/recipes.md` stay honest:
 //!
 //! * `utoipa` (emits OpenAPI 3.1.0) — generates cleanly; exercises `type: [T, null]` nullables,
 //!   nullable `$ref` via a `oneOf` `null` member, `allOf`-composed models, and a `discriminator`ed
@@ -22,7 +23,12 @@
 //! reads local files (no network).
 
 use camino::Utf8PathBuf;
-use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{Code, Outcome, Report, Spec};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::generate_to_string;
 
 /// Absolute path to a vendored recipe spec (workspace root is one level up from this crate).
 fn recipe_path(name: &str) -> Utf8PathBuf {
@@ -41,15 +47,7 @@ fn check(name: &str) -> Report {
 /// Run `generate` on a vendored recipe spec (optionally with `--carve`), returning the report and
 /// the emitted module text (when generation ran). Output goes to a throwaway tempdir.
 fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
-    let temp = tempfile::tempdir().unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let build = Spec::new(recipe_path(name))
-        .carve(carve)
-        .build(out.clone())
-        .cargo(CargoIntegration::Off);
-    let report = spargen::generate(&build);
-    let text = std::fs::read_to_string(out).ok();
-    (report, text)
+    generate_to_string(Spec::new(recipe_path(name)).carve(carve))
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
@@ -247,7 +245,7 @@ fn aide_document_generates_with_only_validation_warnings() {
         "no errors expected: {:?}",
         report.diagnostics()
     );
-    // schemars emits `minimum`/`format` validation hints that spargen faithfully ignores (W001);
+    // schemars emits `minimum` validation hints that spargen faithfully ignores (W001);
     // any other diagnostic class would be a surprise the recipe should mention.
     assert!(
         report
@@ -257,8 +255,7 @@ fn aide_document_generates_with_only_validation_warnings() {
         "only validation-only warnings expected: {:?}",
         report.diagnostics()
     );
-    // ...and those hints do fire: `corpus/README.md` lists this recipe as firing `W001`, and the
-    // `all` above holds vacuously when nothing fires.
+    // ...and those hints do fire: the `all` above holds vacuously when nothing fires.
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "W001 expected for schemars' validation hints: {:?}",
@@ -344,11 +341,26 @@ fn poem_openapi_document_is_rejected_e001() {
 
 #[test]
 fn utoipa_untagged_overlap_generates_a_typed_union() {
-    let (report, text) = generate("utoipa-untagged-overlap.json", false);
-    assert_eq!(report.outcome(), Outcome::Generated);
-    assert!(
-        !has_code(&report, Code::NonDisjointUnion),
+    // "generate (clean)" in `corpus/recipes/README.md`: `check` finds nothing to report, and
+    // `generate` agrees with it.
+    let checked = check("utoipa-untagged-overlap.json");
+    assert_eq!(
+        checked.outcome(),
+        Outcome::Clean,
         "overlapping numeric branches are supported: {:?}",
+        checked.diagnostics()
+    );
+
+    let (report, text) = generate("utoipa-untagged-overlap.json", false);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Generated,
+        "{:?}",
+        report.diagnostics()
+    );
+    assert!(
+        report.diagnostics().is_empty(),
+        "a clean recipe generates without diagnostics: {:?}",
         report.diagnostics()
     );
 
@@ -358,9 +370,21 @@ fn utoipa_untagged_overlap_generates_a_typed_union() {
         text.contains("fn measure"),
         "the union operation is emitted"
     );
-    assert!(
-        text.contains("ResponseBodyVariant0(Box<ResponseBodyVariant0>)")
-            && text.contains("ResponseBodyVariant1(Box<ResponseBodyVariant1>)"),
-        "the overlapping response remains a typed, boxed enum: {text}"
+    assert_eq!(
+        enum_variants(&text, "ResponseBody"),
+        [
+            "ResponseBodyVariant0(Box<ResponseBodyVariant0>)",
+            "ResponseBodyVariant1(Box<ResponseBodyVariant1>)"
+        ],
+        "the overlapping response remains a typed, boxed enum"
+    );
+    // The payloads keep their declared formats: `int64` and `double`, not a widened number.
+    assert_eq!(
+        alias_target(&text, "ResponseBodyVariant0").as_deref(),
+        Some("i64")
+    );
+    assert_eq!(
+        alias_target(&text, "ResponseBodyVariant1").as_deref(),
+        Some("f64")
     );
 }

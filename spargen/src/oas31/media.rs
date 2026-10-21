@@ -163,6 +163,48 @@ pub(super) fn first_list_element(list: &str) -> &str {
     list.trim()
 }
 
+/// An RFC 9110 § 5.6.2 `tchar`.
+fn tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// Whether `name` is an RFC 9110 § 5.1 field name: a `token`, one or more `tchar`.
+pub(super) fn is_field_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(tchar)
+}
+
+/// Whether `value` is an RFC 9110 § 5.5 field value: `field-vchar` (visible ASCII or `obs-text`,
+/// any byte above 0x7F) with spaces and tabs only between two of them.
+///
+/// Every value this admits is one the generated client's `HeaderValue::try_from` accepts too,
+/// which refuses only control characters other than a tab, and DEL.
+pub(super) fn is_field_value(value: &str) -> bool {
+    let vchar = |byte: u8| byte.is_ascii_graphic() || byte >= 0x80;
+    let bytes = value.as_bytes();
+    bytes
+        .iter()
+        .all(|&byte| vchar(byte) || matches!(byte, b' ' | b'\t'))
+        && bytes.first().is_none_or(|&byte| vchar(byte))
+        && bytes.last().is_none_or(|&byte| vchar(byte))
+}
+
 /// Why a media type's parameter list cannot be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ParameterFault {
@@ -183,26 +225,6 @@ pub(super) enum ParameterFault {
 /// dropped, since the multipart transport's parser refuses whitespace before a `;` and an empty
 /// parameter, both of which RFC 9110 admits.
 pub(super) fn media_type_with_parameters(media: &str) -> Result<String, ParameterFault> {
-    fn tchar(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-    }
     fn ows(bytes: &[u8], mut at: usize) -> usize {
         while matches!(bytes.get(at), Some(b' ' | b'\t')) {
             at += 1;
@@ -299,6 +321,10 @@ pub(super) fn media_type_with_parameters(media: &str) -> Result<String, Paramete
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
 /// GitHub's documented octocat representation is a textual vendor media type. Concrete members of
 /// the `image`, `audio`, and `video` families are opaque octets, like the ranges naming them.
+///
+/// Every caller that asks what a media key *is* asks this, so one case rule holds everywhere: type
+/// and subtype are case-insensitive (RFC 9110 § 8.3.1), and the arms are matched against the
+/// lowercased essence, so `TEXT/EVENT-STREAM` is the stream `text/event-stream` is (#709).
 pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
     if !media_type_is_well_formed(essence) {
         return None;
@@ -306,7 +332,8 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
     if let Some(range) = classify_media_range(essence) {
         return Some(range);
     }
-    let classified = match essence {
+    let lowered = essence.to_ascii_lowercase();
+    let classified = match lowered.as_str() {
         "application/json" => (MediaType::Json, 0),
         media if media.starts_with("application/") && media.ends_with("+json") => {
             (MediaType::Json, 0)
@@ -342,10 +369,9 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 /// which is the only honest reading of "whatever this server detected". A range ranks below every
 /// codec spargen has (`text/*` at 7, every other family at 8), so a concrete sibling outranks it —
 /// with one deliberate exception on responses: a concrete `image`/`audio`/`video` member (9,
-/// `classify_binary_family`) sits *below* both, because a response listing a range beside
-/// `image/png` generated from the range before that family classified and must keep doing so. A
-/// request never selects a range while a concrete key classifies (`choose_media`), since a range
-/// is not a `Content-Type`.
+/// `classify_binary_family`) sits *below* both, so a response listing a range beside `image/png`
+/// generates from the range. A request never selects a range while a concrete key classifies
+/// (`choose_media`), since a range is not a `Content-Type`.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
 /// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
@@ -368,11 +394,10 @@ pub(super) fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// `bytes::Bytes`. It sits at the very end of the ladder, below every other key spargen can
 /// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so on a
 /// response a family key is generated only when it is the sole key that classifies, which is
-/// exactly the shape #82 reports (`image/jpeg` as the only content key), and no response that
-/// generated before the family rule existed changes its selection or body type. A request body is
-/// the one place a family key outranks a range: a range cannot be sent as `Content-Type`, and
-/// every such request was rejected before, so preferring the concrete key only turns a rejection
-/// into a client.
+/// exactly the shape #82 reports (`image/jpeg` as the only content key), and a response with any
+/// other classifying key generates from one of those. A request body is the one place a family key
+/// outranks a range: a range cannot be sent as `Content-Type`, so a request body listing a range
+/// beside a family key sends the family key.
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be

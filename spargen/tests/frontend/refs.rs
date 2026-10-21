@@ -1096,18 +1096,19 @@ fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
 /// An `allOf` member that is a direct `$ref` back to the sub-file schema currently being lowered.
 ///
 /// `push_ref_member` decides a member's contribution by reading `graph.get(ty.id).kind`. For a
-/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Any` the
-/// reservation was created with — **the id is right, the kind is not, and only the kind is read** —
-/// so the member was classified `Contribution::Scalar` and the whole property collapsed to
-/// `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that exact outcome: generated
-/// code "never silently degrades a typed schema to `serde_json::Value`", and every construct is
-/// "supported, warned, or rejected — no fourth, silent behavior".
+/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Reserved`
+/// the reservation was created with — **the id is right, the kind is not** — and the placeholder
+/// was once read as a scalar, so the member was classified `Contribution::Scalar` and the whole
+/// property collapsed to `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that
+/// exact outcome: generated code "never silently degrades a typed schema to `serde_json::Value`",
+/// and every construct is "supported, warned, or rejected — no fourth, silent behavior".
+/// `push_ref_member` now rejects a `TypeKind::Reserved` member with `E013`.
 ///
-/// The root document has always refused to read an in-progress member and rejected with `E013`.
-/// The remote path had the same pre-check but not the same coverage, and its id-keyed guard is this
-/// branch's own addition — see `remote::a_direct_recursive_all_of_member_in_a_vendored_document_is_rejected`,
-/// which is the fixture that guard did not have. All three spellings here must reach that same
-/// rejection: the bare sub-file name, the explicit file reference, and the root-document control.
+/// The root document refuses to read an in-progress member and rejects it with `E013`. On the
+/// remote path the id-keyed guard is pinned by
+/// `remote::a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected`. All
+/// three spellings here must reach that same rejection: the bare sub-file name, the explicit file
+/// reference, and the root-document control.
 #[test]
 fn a_direct_recursive_all_of_member_in_a_sub_file_is_rejected_as_the_root_document_is() {
     // One shape, two spellings of the same target. `PREFIX` is empty for the sub-file's own
@@ -2968,6 +2969,67 @@ components:
     assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
 }
 
+/// A relative-file `$ref` whose target cannot be read is an `E011` located at that `$ref`, with its
+/// value's span in the file that holds it, not at the root document's root (#711): from the root
+/// document and from a referenced file, through `check` and `generate` alike.
+#[test]
+fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
+    let root = "openapi: 3.1.0\n\
+                info: { title: T, version: 1.0.0 }\n\
+                paths:\n\
+                \x20 /pet:\n\
+                \x20   get:\n\
+                \x20     responses:\n\
+                \x20       '200':\n\
+                \x20         description: ok\n\
+                \x20         content:\n\
+                \x20           application/json:\n\
+                \x20             schema: { $ref: 'TARGET#/Pet' }\n";
+    let lib = "Pet:\n\
+               \x20 type: object\n\
+               \x20 properties:\n\
+               \x20   tag: { $ref: './missing.yaml#/Tag' }\n";
+    for (target, file, pointer, line) in [
+        (
+            "./missing.yaml",
+            0,
+            "/paths/~1pet/get/responses/200/content/application~1json/schema/$ref",
+            11,
+        ),
+        ("lib.yaml", 1, "/Pet/properties/tag/$ref", 4),
+    ] {
+        for check_only in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+            std::fs::write(dir.join("openapi.yaml"), root.replace("TARGET", target)).unwrap();
+            std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+            let input = Spec::new(dir.join("openapi.yaml"));
+            let report = if check_only {
+                run_check(&input)
+            } else {
+                run_generate(
+                    &input
+                        .build(dir.join("client.rs"))
+                        .cargo(CargoIntegration::Off),
+                )
+            };
+            let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
+            assert_eq!(reported, [Code::InvalidInput], "{report:#?}");
+            let diag = &report.diagnostics()[0];
+            assert!(
+                diag.message.contains("failed to read") && diag.message.contains("missing.yaml"),
+                "{diag:?}"
+            );
+            let span = diag.span.expect("located at a span");
+            assert_eq!(
+                (diag.pointer.as_str(), span.file.0, span.start.line),
+                (pointer, file, line),
+                "{target}, check only: {check_only}: {diag:?}"
+            );
+        }
+    }
+}
+
 /// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
 /// in a tempdir with a hand-written lock + vendored file (no network) and run `generate`/`check`.
 mod remote {
@@ -3056,10 +3118,7 @@ mod remote {
     fn located_at(report: &Report, root: &[u8], code: Code) -> (String, u32) {
         let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [code], "{report:#?}");
-        let violations: Vec<String> = oracles::location_violations(report.diagnostics(), root)
-            .into_iter()
-            .map(|violation| violation.reason)
-            .collect();
+        let violations = oracles::location_violations(report.diagnostics(), root);
         assert!(violations.is_empty(), "{violations:#?}");
         let diag = &report.diagnostics()[0];
         let span = diag.span.expect("located at a span");
@@ -3152,6 +3211,64 @@ mod remote {
                 "{spec}"
             );
         }
+    }
+
+    /// A `$ref` is an absolute URI exactly when it opens with an RFC 3986 scheme
+    /// (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` then `:`), so a non-`http(s)` one is `E003`
+    /// at its `$ref`, through `check` and `generate` alike, never a file read that fails as `E011`
+    /// (#720). A scheme with a digit, `+`, `-` or `.` counts, and so does a one-letter one: a
+    /// Windows drive-letter path such as `C:/specs/x.yaml` is the URI with scheme `c`, which the
+    /// `E003` explain text states.
+    #[test]
+    fn a_ref_with_any_rfc_3986_scheme_is_e003_and_a_drive_letter_is_one() {
+        for (reference, uri) in [
+            (
+                "git+https://example.com/s.yaml#/X",
+                "git+https://example.com/s.yaml",
+            ),
+            ("coap+tcp://h/s.yaml", "coap+tcp://h/s.yaml"),
+            ("x-1.a://h/s.yaml", "x-1.a://h/s.yaml"),
+            ("urn:foo:bar", "urn:foo:bar"),
+            ("C:/specs/x.yaml#/X", "C:/specs/x.yaml"),
+            ("c:specs/x.yaml", "c:specs/x.yaml"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+            let root = spec().replace(GIZMO_URL, reference);
+            std::fs::write(dir.join("openapi.yaml"), &root).unwrap();
+            let spec = Spec::new(dir.join("openapi.yaml"));
+            for check_only in [true, false] {
+                let report = if check_only {
+                    run_check(&spec)
+                } else {
+                    run_generate(
+                        &spec
+                            .clone()
+                            .build(dir.join("client.rs"))
+                            .cargo(CargoIntegration::Off),
+                    )
+                };
+                assert_eq!(
+                    located_at(&report, root.as_bytes(), Code::AbsoluteRefUnsupported),
+                    (
+                        "/paths/~1gizmo/get/responses/200/content/application~1json/schema/$ref"
+                            .to_owned(),
+                        13
+                    ),
+                    "{reference}, check only: {check_only}"
+                );
+                let message = &report.diagnostics()[0].message;
+                assert!(
+                    message.contains(&format!("`{uri}`")),
+                    "{reference}: {message}"
+                );
+            }
+        }
+        let explain = Code::AbsoluteRefUnsupported.explain();
+        assert!(
+            explain.contains("a Windows drive-letter path such as `C:/specs/x.yaml` is a URI"),
+            "{explain}"
+        );
     }
 
     /// A URL cited from several sites is reported once per site, each at its own `$ref` (#534):
@@ -3259,6 +3376,71 @@ mod remote {
         let (report, _temp, _out) = run(Some(lock(GIZMO_SHA256)), None, false);
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+    }
+
+    /// A vendored document's `$self` with a scheme of its own (`urn:x:y`) is its identity as
+    /// written, wherever the document was retrieved from, as a local document's is: a reference
+    /// naming `urn:x:y` reaches the document the pinned URL loaded. Joined under the retrieval
+    /// URL instead (`https://api.example.com/schemas/urn:x:y`), it matches no reference, and the
+    /// second one is rejected as unpinned (`E003`) (#718).
+    #[test]
+    fn a_vendored_documents_opaque_self_is_an_identity_a_reference_reaches() {
+        const PETS_URL: &str = "https://api.example.com/schemas/pets.yaml";
+        const PETS_YAML: &str = "$self: 'urn:x:y'\n\
+                                 components:\n  \
+                                 schemas:\n    \
+                                 Pet:\n      \
+                                 type: object\n      \
+                                 properties:\n        \
+                                 name:\n          \
+                                 type: string\n";
+        const PETS_SHA: &str = "e945f51ca0c7b3ff66b5e27e4709f6227172613023e1f62bd06a91f9261daf25";
+
+        // The pinned URL is named first, so the document is loaded before the opaque reference is
+        // walked.
+        let spec = format!(
+            "openapi: 3.2.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /a:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{PETS_URL}#/components/schemas/Pet\" }}\n\
+             \x20 /b:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"urn:x:y#/components/schemas/Pet\" }}\n"
+        );
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{PETS_URL}\"\nsha256 = \"{PETS_SHA}\"\npath = \
+             \"api.example.com/schemas/pets.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/pets.yaml", PETS_YAML)];
+
+        for check_only in [true, false] {
+            let (report, _temp, out) = run_layout(&spec, Some(&lock), &vendor, check_only);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "check only: {check_only}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AbsoluteRefUnsupported),
+                "check only: {check_only}: {report:#?}"
+            );
+            if !check_only {
+                let generated = std::fs::read_to_string(&out).expect("module written");
+                assert!(generated.contains("pub name"), "{generated}");
+            }
+        }
     }
 
     /// Lay out `spec` + `lock` + arbitrary vendored files `(vendor-relative path, bytes)` in a
@@ -3833,7 +4015,8 @@ mod remote {
     }
 
     /// A vendored file whose bytes match the pin but are not UTF-8 is `E011` naming the URL it
-    /// was vendored for, not drift: the hash already agrees.
+    /// was vendored for, not drift: the hash already agrees. It is located at the `$ref` that
+    /// names the URL, as `E003` and `E021` are, not at the root (#711).
     #[test]
     fn a_vendored_file_that_is_not_utf8_is_e011() {
         use sha2::{Digest, Sha256};
@@ -3843,9 +4026,13 @@ mod remote {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         let message = format!("vendored file for `{GIZMO_URL}` is not valid UTF-8");
+        let pointer = "/paths/~1gizmo/get/responses/200/content/application~1json/schema/$ref";
         assert_eq!(
             invalid_input_with_bytes(lock(&sha256).as_bytes(), Some(bytes)),
-            [(String::new(), message.clone()), (String::new(), message)]
+            [
+                (pointer.to_owned(), message.clone()),
+                (pointer.to_owned(), message)
+            ]
         );
     }
 

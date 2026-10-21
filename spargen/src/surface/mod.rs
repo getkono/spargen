@@ -3,10 +3,12 @@
 //!
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
 //! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
-//! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
-//! client sees — the client methods (operations) and the public model types — then classifies every
-//! difference between an old and a new surface as a semver bump. It never emits code and has no
-//! effect on generation or the runtime; it backs `spargen diff`.
+//! allocated [`crate::name::Names`] and models these parts of what a *consumer* of the generated
+//! client sees: the client methods (operations) with their typed response-header structs, the
+//! public model types with their typed `additionalProperties` maps, and the server builders with
+//! their variable enums — then classifies every difference between an old and a new surface as a
+//! semver bump. It never emits code and has no effect on generation or the runtime; it backs
+//! `spargen diff`.
 //!
 //! Per the product contract, "the semver surface is the public API of generated output".
 //!
@@ -36,13 +38,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
-    TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec,
+    SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
-/// The full consumer-visible surface of one generated client: its operations (client methods) and
-/// its public model types, each keyed by a stable identity so two surfaces can be diffed.
+/// The full consumer-visible surface of one generated client: its operations (client methods), its
+/// public model types, and its server builders, each keyed by a stable identity so two surfaces
+/// can be diffed.
 pub(crate) struct Surface {
     /// Operations keyed by `"METHOD /path"` — the stable endpoint identity (independent of a
     /// possibly-synthesised `operationId`).
@@ -54,6 +57,37 @@ pub(crate) struct Surface {
     /// a type that turns into one or out of one is a kind change rather than an addition or a
     /// removal.
     aliases: BTreeSet<String>,
+    /// The server builders of the generated `servers` module, keyed by generated builder name.
+    servers: BTreeMap<String, ServerSurface>,
+}
+
+/// One server builder's surface: a setter per server variable, keyed by the generated setter name.
+/// Its fields are private; a consumer reaches it through `new`, `url`, `Default`, which every
+/// builder has, and these setters.
+struct ServerSurface {
+    variables: BTreeMap<String, ServerVariableSurface>,
+}
+
+/// What a server variable's setter takes.
+#[derive(PartialEq, Eq)]
+enum ServerVariableSurface {
+    /// A free-form variable: `impl Into<String>`.
+    Free,
+    /// A variable with an `enum`: the generated variable enum, by name, and its variant names.
+    Enum {
+        name: String,
+        variants: BTreeSet<String>,
+    },
+}
+
+impl ServerVariableSurface {
+    /// The setter's argument type, as a consumer writes it.
+    fn argument(&self) -> String {
+        match self {
+            ServerVariableSurface::Free => "impl Into<String>".to_owned(),
+            ServerVariableSurface::Enum { name, .. } => format!("servers::{name}"),
+        }
+    }
 }
 
 /// One client method's surface: the generated method name, its parameters, request body, and the
@@ -64,9 +98,8 @@ struct OpSurface {
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, ParamSurface>,
-    /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
-    /// required `&T` argument in the generated signature (the IR does not model an optional body).
-    request_body: Option<String>,
+    /// The request body, or `None` for a bodyless operation or a body without a type.
+    request_body: Option<BodySurface>,
     /// Canonical rendering of the success return type.
     success: String,
     /// Canonical rendering of the error type.
@@ -74,6 +107,28 @@ struct OpSurface {
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
+    /// The typed response-header structs, keyed by the status they document as the specification
+    /// spells it (`200`, `4XX`, `default`). A status documenting no header has no entry.
+    response_headers: BTreeMap<String, HeadersSurface>,
+}
+
+/// One status's typed response-header struct: its generated name and its public fields, one per
+/// documented header, keyed by generated field name. A required header is a `T` field read with
+/// `require_header`, an optional one an `Option<T>` field.
+struct HeadersSurface {
+    /// The generated struct name.
+    name: String,
+    /// The header fields, keyed by generated field name.
+    fields: BTreeMap<String, FieldSurface>,
+}
+
+/// A request body's surface: a required body is a `&T` argument in the generated signature, an
+/// optional one `Option<&T>`.
+struct BodySurface {
+    /// The canonical body type.
+    ty: String,
+    /// Whether the body is `required`.
+    required: bool,
 }
 
 /// A parameter's identity: its wire name and its location as the OpenAPI `in` value spells it.
@@ -93,8 +148,9 @@ struct ParamSurface {
 /// consumer already sees at every use site, so they are compared structurally there rather than as
 /// standalone entries.
 enum TypeSurface {
-    /// A `struct`: fields keyed by generated field name.
-    Struct(BTreeMap<String, FieldSurface>),
+    /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
+    /// when it has one.
+    Struct(BTreeMap<String, FieldSurface>, Option<OverflowSurface>),
     /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
     /// the generated name of the variant holding any other string.
     Enum(BTreeSet<String>, Option<String>),
@@ -112,7 +168,7 @@ impl TypeSurface {
     /// A short label for the generation kind, used to report a kind change (`struct` → `enum`, …).
     fn kind_label(&self) -> &'static str {
         match self {
-            TypeSurface::Struct(_) => "struct",
+            TypeSurface::Struct(..) => "struct",
             TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
             TypeSurface::Newtype(_) => "newtype",
@@ -127,6 +183,15 @@ impl TypeSurface {
 struct FieldSurface {
     ty: String,
     required: bool,
+}
+
+/// A struct's typed `additionalProperties` map, emitted as a public `#[serde(flatten)]` field of
+/// type `BTreeMap<String, T>`.
+struct OverflowSurface {
+    /// The generated field name.
+    field: String,
+    /// The canonical value type `T`.
+    ty: String,
 }
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
@@ -167,12 +232,15 @@ pub enum ChangeKind {
     OperationRemoved,
     /// The generated method name for an endpoint changed. **Major** — the callable renames.
     MethodRenamed,
-    /// A request body was added to an operation. **Major** — a new required `&T` argument.
+    /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
     RequestBodyRemoved,
     /// An operation's request-body type changed. **Major**.
     RequestBodyTypeChanged,
+    /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
+    /// `Option<&T>`.
+    RequestBodyRequirednessChanged,
     /// An operation's success return type changed. **Major**.
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
@@ -218,6 +286,42 @@ pub enum ChangeKind {
     VariantRemoved,
     /// A union variant's payload type changed. **Major**.
     VariantTypeChanged,
+    /// A documented status gained its typed response-header struct. **Minor** — a new type.
+    ResponseHeadersAdded,
+    /// A status's typed response-header struct was removed. **Major** — code naming it breaks.
+    ResponseHeadersRemoved,
+    /// A status's typed response-header struct was renamed. **Major**.
+    ResponseHeadersRenamed,
+    /// A new optional header was added to a response-header struct. **Minor** — an `Option<T>`
+    /// field, the struct-field rule.
+    ResponseHeaderAdded,
+    /// A new required header was added to a response-header struct. **Major** — reading the
+    /// headers now fails on a response without it, and every literal of the struct breaks.
+    RequiredResponseHeaderAdded,
+    /// A header was removed from a response-header struct. **Major**.
+    ResponseHeaderRemoved,
+    /// A response header's type changed. **Major** — its field's type changes.
+    ResponseHeaderTypeChanged,
+    /// A response header's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
+    ResponseHeaderRequirednessChanged,
+    /// A new server builder appeared in the `servers` module. **Minor** — a new type.
+    ServerAdded,
+    /// A server builder was removed. **Major** — code naming it breaks.
+    ServerRemoved,
+    /// A server builder gained a variable setter. **Minor** — the new variable defaults.
+    ServerVariableAdded,
+    /// A server builder lost a variable setter. **Major** — calls to it break.
+    ServerVariableRemoved,
+    /// A server variable's setter now takes another type: a free-form variable gained or lost its
+    /// `enum`, or its variable enum was renamed. **Major**.
+    ServerVariableTypeChanged,
+    /// A struct gained a typed `additionalProperties` map. **Minor** — a new public map field, the
+    /// optional-field rule.
+    AdditionalPropertiesAdded,
+    /// A struct lost its typed `additionalProperties` map. **Major** — reads of the field break.
+    AdditionalPropertiesRemoved,
+    /// The value type of a struct's typed `additionalProperties` map changed. **Major**.
+    AdditionalPropertiesTypeChanged,
 }
 
 impl ChangeKind {
@@ -229,12 +333,18 @@ impl ChangeKind {
             | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
             | ChangeKind::FieldAdded
-            | ChangeKind::VariantAdded => Impact::Minor,
+            | ChangeKind::VariantAdded
+            | ChangeKind::ResponseHeadersAdded
+            | ChangeKind::ResponseHeaderAdded
+            | ChangeKind::ServerAdded
+            | ChangeKind::ServerVariableAdded
+            | ChangeKind::AdditionalPropertiesAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
+            | ChangeKind::RequestBodyRequirednessChanged
             | ChangeKind::SuccessTypeChanged
             | ChangeKind::ErrorTypeChanged
             | ChangeKind::ApiErrorBodyRemoved
@@ -249,7 +359,18 @@ impl ChangeKind {
             | ChangeKind::FieldTypeChanged
             | ChangeKind::FieldRequirednessChanged
             | ChangeKind::VariantRemoved
-            | ChangeKind::VariantTypeChanged => Impact::Major,
+            | ChangeKind::VariantTypeChanged
+            | ChangeKind::ResponseHeadersRemoved
+            | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::RequiredResponseHeaderAdded
+            | ChangeKind::ResponseHeaderRemoved
+            | ChangeKind::ResponseHeaderTypeChanged
+            | ChangeKind::ResponseHeaderRequirednessChanged
+            | ChangeKind::ServerRemoved
+            | ChangeKind::ServerVariableRemoved
+            | ChangeKind::ServerVariableTypeChanged
+            | ChangeKind::AdditionalPropertiesRemoved
+            | ChangeKind::AdditionalPropertiesTypeChanged => Impact::Major,
         }
     }
 
@@ -262,6 +383,7 @@ impl ChangeKind {
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",
+            ChangeKind::RequestBodyRequirednessChanged => "request-body-requiredness-changed",
             ChangeKind::SuccessTypeChanged => "success-type-changed",
             ChangeKind::ErrorTypeChanged => "error-type-changed",
             ChangeKind::ApiErrorBodyAdded => "api-error-body-added",
@@ -282,6 +404,22 @@ impl ChangeKind {
             ChangeKind::VariantAdded => "variant-added",
             ChangeKind::VariantRemoved => "variant-removed",
             ChangeKind::VariantTypeChanged => "variant-type-changed",
+            ChangeKind::ResponseHeadersAdded => "response-headers-added",
+            ChangeKind::ResponseHeadersRemoved => "response-headers-removed",
+            ChangeKind::ResponseHeadersRenamed => "response-headers-renamed",
+            ChangeKind::ResponseHeaderAdded => "response-header-added",
+            ChangeKind::RequiredResponseHeaderAdded => "required-response-header-added",
+            ChangeKind::ResponseHeaderRemoved => "response-header-removed",
+            ChangeKind::ResponseHeaderTypeChanged => "response-header-type-changed",
+            ChangeKind::ResponseHeaderRequirednessChanged => "response-header-requiredness-changed",
+            ChangeKind::ServerAdded => "server-added",
+            ChangeKind::ServerRemoved => "server-removed",
+            ChangeKind::ServerVariableAdded => "server-variable-added",
+            ChangeKind::ServerVariableRemoved => "server-variable-removed",
+            ChangeKind::ServerVariableTypeChanged => "server-variable-type-changed",
+            ChangeKind::AdditionalPropertiesAdded => "additional-properties-added",
+            ChangeKind::AdditionalPropertiesRemoved => "additional-properties-removed",
+            ChangeKind::AdditionalPropertiesTypeChanged => "additional-properties-type-changed",
         }
     }
 }
@@ -385,8 +523,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let method_name = names
             .operations
             .get(&operation.id)
-            .map(|ident| ident.as_str().to_owned())
-            .unwrap_or_else(|| operation.id.0.clone());
+            .expect("operation name allocated")
+            .as_str()
+            .to_owned();
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
@@ -399,11 +538,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             );
         }
 
-        let request_body = operation
-            .request_body
-            .as_ref()
-            .and_then(|body| body.ty)
-            .map(|ty| canon_ty(ty, api, names));
+        let request_body = operation.request_body.as_ref().and_then(|body| {
+            body.ty.map(|ty| BodySurface {
+                ty: canon_ty(ty, api, names),
+                required: body.required,
+            })
+        });
 
         operations.insert(
             key,
@@ -414,6 +554,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 success: success_sig(&operation.responses.success(), api, names),
                 error: error_sig(&operation.responses.error(), api, names),
                 error_body: error_body_sig(&operation.responses.error(), api, names),
+                response_headers: response_headers(operation, api, names),
             },
         );
     }
@@ -422,10 +563,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     let mut aliases = BTreeSet::new();
     // An elided type has a name but no item, so it is no part of the surface.
     for (id, def) in api.types.emitted() {
-        let name = match names.types.get(&id) {
-            Some(ident) => ident.as_str().to_owned(),
-            None => continue,
-        };
+        let name = names
+            .types
+            .get(&id)
+            .expect("type name allocated")
+            .as_str()
+            .to_owned();
         let surface = match &def.kind {
             TypeKind::Struct(object) => {
                 let mut fields = BTreeMap::new();
@@ -433,8 +576,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     let field_name = names
                         .fields
                         .get(&(id, field.name.wire.clone()))
-                        .map(|ident| ident.as_str().to_owned())
-                        .unwrap_or_else(|| field.name.wire.clone());
+                        .expect("field name allocated")
+                        .as_str()
+                        .to_owned();
                     fields.insert(
                         field_name,
                         FieldSurface {
@@ -443,7 +587,20 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         },
                     );
                 }
-                TypeSurface::Struct(fields)
+                // `Deny` and `Allow` only change what a decode accepts; neither declares a field.
+                let overflow = match &object.additional {
+                    AdditionalProps::Typed(ty) => Some(OverflowSurface {
+                        field: names
+                            .struct_overflow
+                            .get(&id)
+                            .expect("overflow field name allocated")
+                            .as_str()
+                            .to_owned(),
+                        ty: canon_ty(**ty, api, names),
+                    }),
+                    AdditionalProps::Allow | AdditionalProps::Deny => None,
+                };
+                TypeSurface::Struct(fields, overflow)
             }
             // Only string enums generate a real `pub enum` whose variants are surface. Integer /
             // boolean enums lower to a scalar alias and carry no variant surface — skip them here;
@@ -466,8 +623,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     let variant_name = names
                         .variants
                         .get(&(id, variant.name_hint.clone()))
-                        .map(|ident| ident.as_str().to_owned())
-                        .unwrap_or_else(|| variant.name_hint.clone());
+                        .expect("union variant name allocated")
+                        .as_str()
+                        .to_owned();
                     variants.insert(variant_name, canon_ty(variant.ty, api, names));
                 }
                 TypeSurface::Union(variants)
@@ -499,7 +657,96 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         operations,
         types,
         aliases,
+        servers: servers(api, names),
     }
+}
+
+/// The server builders codegen's `emit_servers` declares, named as it names them.
+fn servers(api: &Api, names: &Names) -> BTreeMap<String, ServerSurface> {
+    let mut builders = BTreeMap::new();
+    for (index, server) in api.servers.iter().enumerate() {
+        let name = names
+            .servers
+            .get(index)
+            .expect("server name allocated")
+            .as_str()
+            .to_owned();
+        let variables = server
+            .variables
+            .iter()
+            .map(|(variable, declared)| {
+                let key = (index, variable.clone());
+                let setter = names
+                    .server_variable_fields
+                    .get(&key)
+                    .expect("server variable field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = match names.server_variable_enums.get(&key) {
+                    Some(enum_name) => ServerVariableSurface::Enum {
+                        name: enum_name.as_str().to_owned(),
+                        variants: declared
+                            .enum_values
+                            .iter()
+                            .map(|value| {
+                                names
+                                    .server_variable_variants
+                                    .get(&(index, variable.clone(), value.clone()))
+                                    .expect("server variable variant allocated")
+                                    .as_str()
+                                    .to_owned()
+                            })
+                            .collect(),
+                    },
+                    None => ServerVariableSurface::Free,
+                };
+                (setter, surface)
+            })
+            .collect();
+        builders.insert(name, ServerSurface { variables });
+    }
+    builders
+}
+
+/// The typed response-header structs codegen's `emit_response_headers` declares for `operation`:
+/// one per documented status with at least one header, named and laid out as it names them.
+fn response_headers(
+    operation: &crate::ir::Operation,
+    api: &Api,
+    names: &Names,
+) -> BTreeMap<String, HeadersSurface> {
+    let mut structs = BTreeMap::new();
+    for (status, response) in operation.responses.entries() {
+        if response.headers.is_empty() {
+            continue;
+        }
+        let label = crate::name::status_label(status);
+        let name = names
+            .response_header_structs
+            .get(&(operation.id.clone(), label.clone()))
+            .expect("response header struct name allocated")
+            .as_str()
+            .to_owned();
+        let fields = response
+            .headers
+            .iter()
+            .map(|header| {
+                let field = names
+                    .response_header_fields
+                    .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                    .expect("response header field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = FieldSurface {
+                    ty: canon_ty(header.ty, api, names),
+                    required: header.required,
+                };
+                (field, surface)
+            })
+            .collect();
+        structs.insert(status.display_label(), HeadersSurface { name, fields });
+    }
+    structs
 }
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -507,6 +754,7 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
     let mut changes = Vec::new();
     diff_operations(old, new, &mut changes);
     diff_types(old, new, &mut changes);
+    diff_servers(old, new, &mut changes);
 
     // Deterministic order: most-severe first, then by location, then by machine code, then detail.
     changes.sort_by(|a, b| {
@@ -561,22 +809,40 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         ));
     }
     match (&old.request_body, &new.request_body) {
-        (None, Some(ty)) => changes.push(Change::new(
+        (None, Some(body)) => changes.push(Change::new(
             ChangeKind::RequestBodyAdded,
             key,
-            format!("request body added: `{ty}`"),
+            format!("request body added: `{}`", body.ty),
         )),
-        (Some(ty), None) => changes.push(Change::new(
+        (Some(body), None) => changes.push(Change::new(
             ChangeKind::RequestBodyRemoved,
             key,
-            format!("request body removed (was `{ty}`)"),
+            format!("request body removed (was `{}`)", body.ty),
         )),
-        (Some(old_ty), Some(new_ty)) if old_ty != new_ty => changes.push(Change::new(
-            ChangeKind::RequestBodyTypeChanged,
-            key,
-            format!("request body type `{old_ty}` -> `{new_ty}`"),
-        )),
-        _ => {}
+        (Some(old_body), Some(new_body)) => {
+            if old_body.ty != new_body.ty {
+                changes.push(Change::new(
+                    ChangeKind::RequestBodyTypeChanged,
+                    key,
+                    format!("request body type `{}` -> `{}`", old_body.ty, new_body.ty),
+                ));
+            }
+            if old_body.required != new_body.required {
+                changes.push(Change::new(
+                    ChangeKind::RequestBodyRequirednessChanged,
+                    key,
+                    format!(
+                        "request body now {}",
+                        if new_body.required {
+                            "required"
+                        } else {
+                            "optional"
+                        }
+                    ),
+                ));
+            }
+        }
+        (None, None) => {}
     }
     if old.success != new.success {
         changes.push(Change::new(
@@ -649,6 +915,186 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                     ),
                 ));
             }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+    diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// The changes between two operations' typed response-header structs. A struct that appears is a
+/// new type nothing yet names, so it is additive whatever it holds; inside a struct present on
+/// both sides, a header is classified as a struct field is.
+fn diff_response_headers(
+    key: &str,
+    old: &BTreeMap<String, HeadersSurface>,
+    new: &BTreeMap<String, HeadersSurface>,
+    changes: &mut Vec<Change>,
+) {
+    for status in keys(old, new) {
+        let location = format!("{key} {status} headers");
+        match (old.get(status), new.get(status)) {
+            (None, Some(headers)) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersAdded,
+                location,
+                format!("response header struct `{}` added", headers.name),
+            )),
+            (Some(headers), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersRemoved,
+                location,
+                format!("response header struct `{}` removed", headers.name),
+            )),
+            (Some(old_headers), Some(new_headers)) => {
+                if old_headers.name != new_headers.name {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeadersRenamed,
+                        location,
+                        format!(
+                            "response header struct renamed `{}` -> `{}`",
+                            old_headers.name, new_headers.name
+                        ),
+                    ));
+                }
+                diff_header_fields(key, status, old_headers, new_headers, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between the fields of one status's response-header struct on both sides.
+fn diff_header_fields(
+    key: &str,
+    status: &str,
+    old: &HeadersSurface,
+    new: &HeadersSurface,
+    changes: &mut Vec<Change>,
+) {
+    for field in keys(&old.fields, &new.fields) {
+        let location = format!("{key} {status} header `{field}`");
+        match (old.fields.get(field), new.fields.get(field)) {
+            (None, Some(header)) => {
+                let (kind, label) = if header.required {
+                    (ChangeKind::RequiredResponseHeaderAdded, "required")
+                } else {
+                    (ChangeKind::ResponseHeaderAdded, "optional")
+                };
+                changes.push(Change::new(
+                    kind,
+                    location,
+                    format!("{label} response header added: `{}`", header.ty),
+                ));
+            }
+            (Some(header), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeaderRemoved,
+                location,
+                format!("response header removed (was `{}`)", header.ty),
+            )),
+            (Some(old_header), Some(new_header)) => {
+                if old_header.ty != new_header.ty {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderTypeChanged,
+                        location.clone(),
+                        format!(
+                            "response header type `{}` -> `{}`",
+                            old_header.ty, new_header.ty
+                        ),
+                    ));
+                }
+                if old_header.required != new_header.required {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderRequirednessChanged,
+                        location,
+                        format!(
+                            "response header now {}",
+                            if new_header.required {
+                                "required"
+                            } else {
+                                "optional"
+                            }
+                        ),
+                    ));
+                }
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between two `servers` modules: builders by name, each builder's setters, and the
+/// variants of each variable enum a setter takes on both sides.
+fn diff_servers(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
+    for name in keys(&old.servers, &new.servers) {
+        let location = format!("servers::{name}");
+        match (old.servers.get(name), new.servers.get(name)) {
+            (None, Some(_)) => changes.push(Change::new(
+                ChangeKind::ServerAdded,
+                location,
+                "new server builder",
+            )),
+            (Some(_), None) => changes.push(Change::new(
+                ChangeKind::ServerRemoved,
+                location,
+                "server builder removed",
+            )),
+            (Some(old_server), Some(new_server)) => {
+                diff_server_variables(&location, old_server, new_server, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between one server builder's setters on both sides.
+fn diff_server_variables(
+    builder: &str,
+    old: &ServerSurface,
+    new: &ServerSurface,
+    changes: &mut Vec<Change>,
+) {
+    for setter in keys(&old.variables, &new.variables) {
+        let location = format!("{builder}::{setter}");
+        match (old.variables.get(setter), new.variables.get(setter)) {
+            (None, Some(variable)) => changes.push(Change::new(
+                ChangeKind::ServerVariableAdded,
+                location,
+                format!("server variable added: `{}`", variable.argument()),
+            )),
+            (Some(variable), None) => changes.push(Change::new(
+                ChangeKind::ServerVariableRemoved,
+                location,
+                format!("server variable removed (was `{}`)", variable.argument()),
+            )),
+            // The same enum on both sides: the setter is unchanged, and the enum's variants are
+            // compared as any enum's are.
+            (
+                Some(ServerVariableSurface::Enum {
+                    name: old_name,
+                    variants: old_variants,
+                }),
+                Some(ServerVariableSurface::Enum {
+                    name: new_name,
+                    variants: new_variants,
+                }),
+            ) if old_name == new_name => {
+                diff_variant_set(
+                    &format!("servers::{new_name}"),
+                    old_variants,
+                    new_variants,
+                    changes,
+                );
+            }
+            (Some(old_variable), Some(new_variable)) if old_variable != new_variable => {
+                changes.push(Change::new(
+                    ChangeKind::ServerVariableTypeChanged,
+                    location,
+                    format!(
+                        "server variable type `{}` -> `{}`",
+                        old_variable.argument(),
+                        new_variable.argument()
+                    ),
+                ));
+            }
+            (Some(_), Some(_)) => {}
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
     }
@@ -736,8 +1182,12 @@ fn diff_types(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
 
 fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec<Change>) {
     match (old, new) {
-        (TypeSurface::Struct(old_fields), TypeSurface::Struct(new_fields)) => {
+        (
+            TypeSurface::Struct(old_fields, old_overflow),
+            TypeSurface::Struct(new_fields, new_overflow),
+        ) => {
             diff_struct(name, old_fields, new_fields, changes);
+            diff_overflow(name, old_overflow.as_ref(), new_overflow.as_ref(), changes);
         }
         (TypeSurface::Enum(old_variants, old_open), TypeSurface::Enum(new_variants, new_open)) => {
             diff_variant_set(name, old_variants, new_variants, changes);
@@ -771,6 +1221,52 @@ fn push_kind_change(name: &str, old: &str, new: &str, changes: &mut Vec<Change>)
         name,
         format!("type kind `{old}` -> `{new}`"),
     ));
+}
+
+/// The changes to a struct's typed `additionalProperties` map. A map that moves to another field
+/// name (a declared property taking its spelling) is the old field removed and a new one added.
+fn diff_overflow(
+    name: &str,
+    old: Option<&OverflowSurface>,
+    new: Option<&OverflowSurface>,
+    changes: &mut Vec<Change>,
+) {
+    match (old, new) {
+        (Some(old_map), Some(new_map)) if old_map.field == new_map.field => {
+            if old_map.ty != new_map.ty {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesTypeChanged,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties type `BTreeMap<String, {}>` -> `BTreeMap<String, {}>`",
+                        old_map.ty, new_map.ty
+                    ),
+                ));
+            }
+        }
+        _ => {
+            if let Some(old_map) = old {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesRemoved,
+                    format!("{name}.{}", old_map.field),
+                    format!(
+                        "additional properties map removed (was `BTreeMap<String, {}>`)",
+                        old_map.ty
+                    ),
+                ));
+            }
+            if let Some(new_map) = new {
+                changes.push(Change::new(
+                    ChangeKind::AdditionalPropertiesAdded,
+                    format!("{name}.{}", new_map.field),
+                    format!(
+                        "additional properties map added: `BTreeMap<String, {}>`",
+                        new_map.ty
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn diff_struct(
@@ -985,14 +1481,15 @@ fn canon_container(kind: &TypeKind, api: &Api, names: &Names) -> String {
     }
 }
 
-/// The generated type name for a nominal reference, falling back to a structural placeholder if the
-/// id somehow lacks an allocated name (never expected post-allocation).
+/// The generated type name for a nominal reference: the name `name` allocated, which codegen's
+/// `ty_tokens` expects in the same way.
 fn nominal_name(ty: Ty, names: &Names) -> String {
     names
         .types
         .get(&ty.id)
-        .map(|ident| ident.as_str().to_owned())
-        .unwrap_or_else(|| "Unknown".to_owned())
+        .expect("type name allocated")
+        .as_str()
+        .to_owned()
 }
 
 /// Render an operation's success shape to a stable string.
@@ -1074,577 +1571,4 @@ fn method_label(method: &crate::ir::Method) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::{ChangeKind, Impact};
-
-    /// Every change kind, produced by an exhaustive match so a new variant does not compile until
-    /// it is listed — which is what makes the coverage assertions below closed over the enum.
-    /// `ChangeKind` is `#[non_exhaustive]`, so this list can only live inside the crate; the
-    /// fixtures that drive each kind live in `tests/diff.rs`, which cannot match exhaustively.
-    fn all_kinds() -> Vec<ChangeKind> {
-        let every = [
-            ChangeKind::OperationAdded,
-            ChangeKind::OperationRemoved,
-            ChangeKind::MethodRenamed,
-            ChangeKind::RequestBodyAdded,
-            ChangeKind::RequestBodyRemoved,
-            ChangeKind::RequestBodyTypeChanged,
-            ChangeKind::SuccessTypeChanged,
-            ChangeKind::ErrorTypeChanged,
-            ChangeKind::ApiErrorBodyAdded,
-            ChangeKind::ApiErrorBodyRemoved,
-            ChangeKind::RequiredParamAdded,
-            ChangeKind::OptionalParamAdded,
-            ChangeKind::ParamRemoved,
-            ChangeKind::ParamTypeChanged,
-            ChangeKind::ParamRequirednessChanged,
-            ChangeKind::TypeAdded,
-            ChangeKind::TypeRemoved,
-            ChangeKind::TypeKindChanged,
-            ChangeKind::FieldAdded,
-            ChangeKind::RequiredFieldAdded,
-            ChangeKind::FieldRemoved,
-            ChangeKind::FieldTypeChanged,
-            ChangeKind::FieldRequirednessChanged,
-            ChangeKind::VariantAdded,
-            ChangeKind::VariantRemoved,
-            ChangeKind::VariantTypeChanged,
-        ];
-        for kind in every {
-            // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
-            // until it is named, and the length assertion then fails until it joins `every`.
-            match kind {
-                ChangeKind::OperationAdded
-                | ChangeKind::OperationRemoved
-                | ChangeKind::MethodRenamed
-                | ChangeKind::RequestBodyAdded
-                | ChangeKind::RequestBodyRemoved
-                | ChangeKind::RequestBodyTypeChanged
-                | ChangeKind::SuccessTypeChanged
-                | ChangeKind::ErrorTypeChanged
-                | ChangeKind::ApiErrorBodyAdded
-                | ChangeKind::ApiErrorBodyRemoved
-                | ChangeKind::RequiredParamAdded
-                | ChangeKind::OptionalParamAdded
-                | ChangeKind::ParamRemoved
-                | ChangeKind::ParamTypeChanged
-                | ChangeKind::ParamRequirednessChanged
-                | ChangeKind::TypeAdded
-                | ChangeKind::TypeRemoved
-                | ChangeKind::TypeKindChanged
-                | ChangeKind::FieldAdded
-                | ChangeKind::RequiredFieldAdded
-                | ChangeKind::FieldRemoved
-                | ChangeKind::FieldTypeChanged
-                | ChangeKind::FieldRequirednessChanged
-                | ChangeKind::VariantAdded
-                | ChangeKind::VariantRemoved
-                | ChangeKind::VariantTypeChanged => {}
-            }
-        }
-        every.to_vec()
-    }
-
-    /// The `variant -> Rust identifier` mapping, for the source scan below.
-    fn variant_name(kind: ChangeKind) -> &'static str {
-        match kind {
-            ChangeKind::OperationAdded => "OperationAdded",
-            ChangeKind::OperationRemoved => "OperationRemoved",
-            ChangeKind::MethodRenamed => "MethodRenamed",
-            ChangeKind::RequestBodyAdded => "RequestBodyAdded",
-            ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
-            ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
-            ChangeKind::SuccessTypeChanged => "SuccessTypeChanged",
-            ChangeKind::ErrorTypeChanged => "ErrorTypeChanged",
-            ChangeKind::ApiErrorBodyAdded => "ApiErrorBodyAdded",
-            ChangeKind::ApiErrorBodyRemoved => "ApiErrorBodyRemoved",
-            ChangeKind::RequiredParamAdded => "RequiredParamAdded",
-            ChangeKind::OptionalParamAdded => "OptionalParamAdded",
-            ChangeKind::ParamRemoved => "ParamRemoved",
-            ChangeKind::ParamTypeChanged => "ParamTypeChanged",
-            ChangeKind::ParamRequirednessChanged => "ParamRequirednessChanged",
-            ChangeKind::TypeAdded => "TypeAdded",
-            ChangeKind::TypeRemoved => "TypeRemoved",
-            ChangeKind::TypeKindChanged => "TypeKindChanged",
-            ChangeKind::FieldAdded => "FieldAdded",
-            ChangeKind::RequiredFieldAdded => "RequiredFieldAdded",
-            ChangeKind::FieldRemoved => "FieldRemoved",
-            ChangeKind::FieldTypeChanged => "FieldTypeChanged",
-            ChangeKind::FieldRequirednessChanged => "FieldRequirednessChanged",
-            ChangeKind::VariantAdded => "VariantAdded",
-            ChangeKind::VariantRemoved => "VariantRemoved",
-            ChangeKind::VariantTypeChanged => "VariantTypeChanged",
-        }
-    }
-
-    #[test]
-    fn the_kind_list_covers_the_whole_enum() {
-        assert_eq!(
-            all_kinds().len(),
-            26,
-            "a `ChangeKind` variant reached the exhaustive match without joining the list"
-        );
-    }
-
-    /// The codes are the JSON surface of `spargen diff`, so they are consumed by scripts: two
-    /// kinds sharing one, or a code that is not kebab-case, would break a caller silently.
-    #[test]
-    fn every_kind_has_a_distinct_kebab_case_code() {
-        let codes: BTreeSet<&str> = all_kinds().iter().map(|kind| kind.code()).collect();
-        assert_eq!(codes.len(), all_kinds().len(), "two kinds share a code");
-        for code in codes {
-            assert!(!code.is_empty());
-            assert!(
-                code.chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
-                "`{code}` is not kebab-case"
-            );
-            assert!(!code.starts_with('-') && !code.ends_with('-'), "`{code}`");
-        }
-    }
-
-    /// The codes are only *actually* the JSON surface if they are what `Serialize` emits. The
-    /// derive would emit the Rust variant name instead, silently disagreeing with both `code` and
-    /// the human rendering — so pin the two together over the whole enum.
-    #[test]
-    fn every_kind_serializes_as_its_code() {
-        for kind in all_kinds() {
-            let json = serde_json::to_string(&kind).expect("a kind serializes");
-            assert_eq!(
-                json,
-                format!("\"{}\"", kind.code()),
-                "{kind:?} does not serialize as its code"
-            );
-        }
-    }
-
-    /// Same contract one level up: `impact` and `bump` are read by scripts that branch on the
-    /// semver bump, and `--format human` spells it lowercase. The derive would emit `"Major"`.
-    #[test]
-    fn every_impact_serializes_as_its_lowercase_label() {
-        for impact in [Impact::Patch, Impact::Minor, Impact::Major] {
-            let json = serde_json::to_string(&impact).expect("an impact serializes");
-            assert_eq!(json, format!("\"{}\"", impact.as_str()), "{impact:?}");
-        }
-    }
-
-    /// Additive changes are minor and everything else is major. Stated as a closed list so that
-    /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
-    /// edit here rather than a silent consequence of moving a match arm.
-    #[test]
-    fn only_the_six_additive_kinds_are_minor() {
-        const MINOR: &[ChangeKind] = &[
-            ChangeKind::OperationAdded,
-            ChangeKind::ApiErrorBodyAdded,
-            ChangeKind::OptionalParamAdded,
-            ChangeKind::TypeAdded,
-            ChangeKind::FieldAdded,
-            ChangeKind::VariantAdded,
-        ];
-        for kind in all_kinds() {
-            let expected = if MINOR.contains(&kind) {
-                Impact::Minor
-            } else {
-                Impact::Major
-            };
-            assert_eq!(
-                kind.impact(),
-                expected,
-                "{} is classified {:?}",
-                kind.code(),
-                kind.impact()
-            );
-        }
-    }
-
-    /// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
-    /// had a fixture; the rest were classified by policy alone, with nothing proving the
-    /// classifier ever produces them. This makes "per change kind" mean what it says.
-    ///
-    /// A bare mention is not a fixture: `kinds(&report).contains(&ChangeKind::X)` passes beside
-    /// spurious extra changes, and a filter on `X` asserts nothing about whether `X` was produced.
-    /// So each kind must be named inside an `assert_eq!` — the exact change list a fixture expects.
-    #[test]
-    fn every_kind_has_a_fixture_in_the_diff_suite() {
-        // A packaged `.crate` is tested outside the workspace, so the check is skipped there —
-        // gated on the workspace marker, not on the file, so that inside the repository a missing
-        // or renamed suite fails instead of passing with a line on stderr nobody reads.
-        let Some(root) = repo_root() else {
-            eprintln!("skipping: not tested from the workspace");
-            return;
-        };
-        let suite = read_repo_file(&root, "spargen/tests/diff.rs");
-        let asserted = assert_eq_spans(&suite);
-        for kind in all_kinds() {
-            let variant = variant_name(kind);
-            let needle = format!("ChangeKind::{variant}");
-            let pinned = suite.match_indices(&needle).any(|(at, _)| {
-                let whole = suite[at + needle.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|next| !next.is_alphanumeric() && next != '_');
-                whole && asserted.iter().any(|span| span.contains(&at))
-            });
-            assert!(
-                pinned,
-                "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs",
-                kind.code()
-            );
-        }
-    }
-
-    /// The byte span of every `assert_eq!(…)` argument list in `source`, found by bracket depth.
-    /// String literals (plain and raw) are skipped, so a bracket inside a message or an inline
-    /// spec does not end a span early.
-    fn assert_eq_spans(source: &str) -> Vec<std::ops::Range<usize>> {
-        const OPEN: &str = "assert_eq!(";
-        let bytes = source.as_bytes();
-        let mut spans = Vec::new();
-        for (start, _) in source.match_indices(OPEN) {
-            let mut at = start + OPEN.len();
-            let mut depth = 1_usize;
-            while depth > 0 {
-                let Some(&byte) = bytes.get(at) else {
-                    panic!("unbalanced `assert_eq!(` at byte {start} of spargen/tests/diff.rs")
-                };
-                match byte {
-                    b'(' | b'[' | b'{' => depth += 1,
-                    b')' | b']' | b'}' => depth -= 1,
-                    b'"' => at = skip_string(bytes, at, 0),
-                    // A character literal such as `'}'` or `'\''`; a lifetime has no closing `'`.
-                    b'\'' if bytes.get(at + 2) == Some(&b'\'') => at += 2,
-                    b'\''
-                        if bytes.get(at + 1) == Some(&b'\\')
-                            && bytes.get(at + 3) == Some(&b'\'') =>
-                    {
-                        at += 3;
-                    }
-                    b'r' if matches!(bytes.get(at + 1), Some(b'#' | b'"'))
-                        && !bytes[at - 1].is_ascii_alphanumeric()
-                        && bytes[at - 1] != b'_' =>
-                    {
-                        let hashes = bytes[at + 1..].iter().take_while(|b| **b == b'#').count();
-                        at = skip_string(bytes, at + 1 + hashes, hashes);
-                    }
-                    _ => {}
-                }
-                at += 1;
-            }
-            spans.push(start..at);
-        }
-        spans
-    }
-
-    /// The index of the closing `"` (and its `hashes` trailing `#`s) of the string literal whose
-    /// opening `"` is at `open`; a plain literal (`hashes == 0`) honours backslash escapes.
-    fn skip_string(bytes: &[u8], open: usize, hashes: usize) -> usize {
-        let mut at = open + 1;
-        loop {
-            match bytes.get(at) {
-                None => panic!("unterminated string literal at byte {open}"),
-                Some(b'\\') if hashes == 0 => at += 2,
-                Some(b'"')
-                    if bytes[at + 1..].iter().take(hashes).all(|b| *b == b'#')
-                        && bytes.len() > at + hashes =>
-                {
-                    return at + hashes;
-                }
-                Some(_) => at += 1,
-            }
-        }
-    }
-
-    /// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
-    /// carries no workspace manifest. Gating on the *workspace marker* rather than on the file
-    /// under inspection is deliberate: inside the repository a missing `tests/diff.rs` must fail
-    /// the test, not silently skip it.
-    fn repo_root() -> Option<std::path::PathBuf> {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
-        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-        manifest.contains("[workspace]").then_some(root)
-    }
-
-    /// Read a file the repository must carry, failing — never skipping — when it is absent.
-    /// Only call this under [`repo_root`], which is what decides whether the file must exist.
-    fn read_repo_file(root: &std::path::Path, relative: &str) -> String {
-        std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
-            panic!("{relative} must exist in the repository, and reading it failed: {error}")
-        })
-    }
-
-    /// Once the workspace gate has passed, a missing input is a failure: a skip keyed on the file
-    /// itself turned a renamed `tests/diff.rs` into a silent pass (#409).
-    #[test]
-    #[should_panic(expected = "must exist in the repository")]
-    fn a_missing_repository_file_fails_rather_than_skips() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        read_repo_file(root, "tests/no-such-suite.rs");
-    }
-
-    /// One node of a synthetic type tree: every [`crate::ir::TypeKind`] `canon_ty` renders, with
-    /// the nullability and boxing a reference to it may carry.
-    #[derive(Debug, Clone)]
-    struct Node {
-        shape: Shape,
-        nullable: bool,
-        boxed: bool,
-    }
-
-    #[derive(Debug, Clone)]
-    enum Shape {
-        Primitive(crate::ir::Prim),
-        /// A struct, string enum, union or uninhabited type: rendered by its allocated name.
-        Nominal(NominalKind),
-        IntEnum,
-        BoolEnum,
-        Bytes,
-        Null,
-        Any,
-        Array(Box<Node>),
-        Tuple(Vec<Node>),
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum NominalKind {
-        Struct,
-        StringEnum,
-        Union,
-        Never,
-    }
-
-    fn node() -> impl proptest::strategy::Strategy<Value = Node> {
-        use crate::ir::Prim;
-        use proptest::prelude::*;
-        let leaf = prop_oneof![
-            proptest::sample::select(vec![
-                Prim::Bool,
-                Prim::String,
-                Prim::I32,
-                Prim::I64,
-                Prim::F64,
-                Prim::Uuid,
-                Prim::DateTime,
-                Prim::Date,
-            ])
-            .prop_map(Shape::Primitive),
-            proptest::sample::select(vec![
-                NominalKind::Struct,
-                NominalKind::StringEnum,
-                NominalKind::Union,
-                NominalKind::Never,
-            ])
-            .prop_map(Shape::Nominal),
-            Just(Shape::IntEnum),
-            Just(Shape::BoolEnum),
-            Just(Shape::Bytes),
-            Just(Shape::Null),
-            Just(Shape::Any),
-        ];
-        let wrap = |shape| {
-            (shape, any::<bool>(), any::<bool>()).prop_map(|(shape, nullable, boxed)| Node {
-                shape,
-                nullable,
-                boxed,
-            })
-        };
-        wrap(leaf.boxed()).prop_recursive(4, 24, 4, move |inner| {
-            wrap(
-                prop_oneof![
-                    inner.clone().prop_map(|item| Shape::Array(Box::new(item))),
-                    proptest::collection::vec(inner, 0..4).prop_map(Shape::Tuple),
-                ]
-                .boxed(),
-            )
-        })
-    }
-
-    /// Insert `node` into `api`'s type graph bottom-up, naming each nominal definition, and return
-    /// the reference to it. Definitions are made through `reserve` and filled in place, which is
-    /// how a graph is built without naming `crate::diag` (a layer this subsystem does not take).
-    fn insert(
-        node: &Node,
-        api: &mut crate::ir::Api,
-        names: &mut crate::name::Names,
-    ) -> crate::ir::Ty {
-        use crate::ir::{
-            AdditionalProps, Openness, ScalarEnum, ScalarRepr, Struct, TypeKind, Union, UnionMode,
-            UnionStrategy,
-        };
-        let scalar_enum = |repr| {
-            TypeKind::Enum(ScalarEnum {
-                repr,
-                variants: Vec::new(),
-                openness: Openness::Closed,
-            })
-        };
-        let kind = match &node.shape {
-            Shape::Primitive(prim) => TypeKind::Primitive(*prim),
-            Shape::Nominal(NominalKind::Struct) => TypeKind::Struct(Struct {
-                fields: Vec::new(),
-                additional: AdditionalProps::Allow,
-            }),
-            Shape::Nominal(NominalKind::StringEnum) => scalar_enum(ScalarRepr::String),
-            Shape::Nominal(NominalKind::Union) => TypeKind::Union(Union {
-                variants: Vec::new(),
-                strategy: UnionStrategy::Trial {
-                    mode: UnionMode::OneOf,
-                    priorities: Vec::new(),
-                },
-            }),
-            Shape::Nominal(NominalKind::Never) => TypeKind::Never,
-            Shape::IntEnum => scalar_enum(ScalarRepr::Int),
-            Shape::BoolEnum => scalar_enum(ScalarRepr::Bool),
-            Shape::Bytes => TypeKind::Bytes,
-            Shape::Null => TypeKind::Null,
-            Shape::Any => TypeKind::Any,
-            Shape::Array(item) => TypeKind::Array(Box::new(insert(item, api, names))),
-            Shape::Tuple(items) => {
-                TypeKind::Tuple(items.iter().map(|item| insert(item, api, names)).collect())
-            }
-        };
-        let id = api.types.reserve();
-        api.types.get_mut(id).expect("just reserved").kind = kind;
-        if let Shape::Nominal(_) = node.shape {
-            names.types.insert(
-                id,
-                crate::name::Ident::new(format!("Nominal{}", names.types.len())),
-            );
-        }
-        crate::ir::Ty {
-            id,
-            nullable: node.nullable,
-            boxed: node.boxed,
-        }
-    }
-
-    /// The single generic argument of `ty` when it is the bare path `wrapper<…>`.
-    fn generic_argument<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
-        let syn::Type::Path(path) = ty else {
-            return None;
-        };
-        let [segment] = path.path.segments.iter().collect::<Vec<_>>()[..] else {
-            return None;
-        };
-        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            return None;
-        };
-        if segment.ident != wrapper {
-            return None;
-        }
-        match arguments.args.iter().collect::<Vec<_>>()[..] {
-            [syn::GenericArgument::Type(inner)] => Some(inner),
-            _ => None,
-        }
-    }
-
-    /// The bare single-identifier path `ty` names, if it is one.
-    fn bare_name(ty: &syn::Type) -> Option<String> {
-        let syn::Type::Path(path) = ty else {
-            return None;
-        };
-        match path.path.segments.iter().collect::<Vec<_>>()[..] {
-            [segment] if segment.arguments.is_empty() => Some(segment.ident.to_string()),
-            _ => None,
-        }
-    }
-
-    /// Hold the parsed rendering of `node` to its structure: `Option<…>` exactly when nullable,
-    /// never a `Box` (boxing is not a surface distinction), a tuple of exactly N elements exactly
-    /// when the kind is `Tuple(N)` (`Null` is the one other `()`, the unit type codegen also emits
-    /// for it), `Vec<…>` around an array's item, and otherwise the scalar label or allocated name.
-    fn check(
-        node: &Node,
-        ty: crate::ir::Ty,
-        parsed: &syn::Type,
-        api: &crate::ir::Api,
-        names: &crate::name::Names,
-    ) -> Result<(), proptest::test_runner::TestCaseError> {
-        use crate::ir::TypeKind;
-        use proptest::{prop_assert, prop_assert_eq};
-        let parsed = if node.nullable {
-            let inner = generic_argument(parsed, "Option");
-            prop_assert!(inner.is_some(), "a nullable reference renders `Option<…>`");
-            inner.expect("checked")
-        } else {
-            prop_assert!(generic_argument(parsed, "Option").is_none());
-            parsed
-        };
-        prop_assert!(
-            generic_argument(parsed, "Box").is_none(),
-            "boxing is rendered"
-        );
-        let kind = &api.types.get(ty.id).expect("inserted").kind;
-        let tuple = match parsed {
-            syn::Type::Tuple(tuple) => Some(tuple.elems.len()),
-            _ => None,
-        };
-        let expected_tuple = match kind {
-            TypeKind::Tuple(items) => Some(items.len()),
-            TypeKind::Null => Some(0),
-            TypeKind::Reserved => unreachable!("`insert` fills every reservation it makes"),
-            _ => None,
-        };
-        prop_assert_eq!(tuple, expected_tuple, "tuple arity of {:?}", kind);
-        prop_assert!(
-            !matches!(parsed, syn::Type::Paren(_)),
-            "a parenthesized type"
-        );
-        let expected = match &node.shape {
-            Shape::Tuple(nodes) => {
-                let (syn::Type::Tuple(tuple), TypeKind::Tuple(items)) = (parsed, kind) else {
-                    unreachable!("arity checked above")
-                };
-                for ((node, item), element) in nodes.iter().zip(items).zip(&tuple.elems) {
-                    check(node, *item, element, api, names)?;
-                }
-                return Ok(());
-            }
-            Shape::Array(node) => {
-                let TypeKind::Array(item) = kind else {
-                    unreachable!("`insert` builds an array for an array node")
-                };
-                let inner = generic_argument(parsed, "Vec");
-                prop_assert!(inner.is_some(), "an array renders `Vec<…>`");
-                return check(node, **item, inner.expect("checked"), api, names);
-            }
-            // The arity check above is all there is to `()`.
-            Shape::Null => return Ok(()),
-            Shape::Primitive(prim) => super::prim_label(*prim).to_owned(),
-            Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
-            Shape::IntEnum => "i64".to_owned(),
-            Shape::BoolEnum => "bool".to_owned(),
-            Shape::Bytes => "Bytes".to_owned(),
-            Shape::Any => "Value".to_owned(),
-        };
-        prop_assert_eq!(bare_name(parsed), Some(expected));
-        Ok(())
-    }
-
-    proptest::proptest! {
-        /// `canon_ty` renders every type tree as a Rust type that parses, and whose structure is
-        /// the tree's: in particular a one-position tuple keeps the trailing comma that makes it
-        /// `(T,)` rather than a parenthesized `T` (#449), at any depth.
-        #[test]
-        fn canon_ty_parses_as_the_type_its_tree_describes(node in node()) {
-            let mut api = crate::ir::Api {
-                info: crate::ir::Info {
-                    title: "T".to_owned(),
-                    version: "1".to_owned(),
-                    description: None,
-                },
-                servers: Vec::new(),
-                operations: Vec::new(),
-                types: Default::default(),
-                security_schemes: Default::default(),
-            };
-            let mut names = crate::name::Names::default();
-            let ty = insert(&node, &mut api, &mut names);
-            let rendered = super::canon_ty(ty, &api, &names);
-            let parsed = syn::parse_str::<syn::Type>(&rendered);
-            proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
-            check(&node, ty, &parsed.expect("checked"), &api, &names)?;
-        }
-    }
-}
+mod tests;

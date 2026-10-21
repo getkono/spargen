@@ -5,9 +5,9 @@
 //! and drives the generated async operation futures to completion on it — the blocking client is a
 //! thin shim that reuses every line of the async dispatch, adding no logic of its own.
 //!
-//! This module is compiled only under the `blocking` feature, which pulls in `tokio` with just the
-//! `rt` feature. A client built without the feature carries no tokio dependency and no blocking
-//! client at all.
+//! This module is compiled only under the `blocking` feature on a non-wasm32 target, and pulls in
+//! `tokio` with just the `rt` feature. A client built without the feature, or for wasm32, carries
+//! no tokio dependency and no blocking client at all.
 //!
 //! # Nested-runtime caveat
 //!

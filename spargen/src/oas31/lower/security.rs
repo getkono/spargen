@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::{ApiKeyLoc, HttpScheme, SchemeId, SecurityScheme, SecuritySchemeDef};
 use crate::oas31::{Document, RefOr, Resolver, SecurityRequirement};
+use crate::source::security_requirement_key_reference;
 
 pub(super) fn lower_security_requirement(
     requirement: &SecurityRequirement,
@@ -47,14 +48,13 @@ pub(super) fn resolve_external_security_schemes(
         }
         // Only a name that looks like a reference is worth resolving; a plain unknown name is an
         // ordinary undeclared-scheme error, reported at the requirement site.
-        let reference = match name.strip_prefix("./") {
-            Some(rest) => rest.to_owned(),
-            None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
-            None => continue,
+        // Lowering also reads a key containing `:` as a reference; the loader does not.
+        let Some(reference) = security_requirement_key_reference(&name, true) else {
+            continue;
         };
         let from = resolver.written_in(&at);
         let Ok(object) = resolver.resolve_component(
-            &reference,
+            reference,
             from,
             crate::oas31::deserialize::parse_security_scheme,
             diags,
@@ -131,9 +131,14 @@ pub(super) fn lower_security_schemes(
             }
         };
         let lowered = match scheme.scheme_type.as_str() {
+            // OpenAPI makes the authentication scheme name case-insensitive, as RFC 9110 does.
             "http" => match scheme.scheme.as_deref() {
-                Some("bearer") => SecurityScheme::Http(HttpScheme::Bearer),
-                Some("basic") => SecurityScheme::Http(HttpScheme::Basic),
+                Some(value) if value.eq_ignore_ascii_case("bearer") => {
+                    SecurityScheme::Http(HttpScheme::Bearer)
+                }
+                Some(value) if value.eq_ignore_ascii_case("basic") => {
+                    SecurityScheme::Http(HttpScheme::Basic)
+                }
                 other => {
                     // `digest`, `negotiate`, and friends need a challenge/response exchange that a
                     // statically-attached credential cannot perform.
@@ -145,8 +150,8 @@ pub(super) fn lower_security_schemes(
                             other.unwrap_or("<missing>")
                         ))
                         .remedy(
-                            "use `bearer` or `basic`, or omit this API segment with \
-                             spargen::omit!",
+                            "use `bearer` or `basic` (in any letter case), or omit this API \
+                             segment with spargen::omit!",
                         )
                         .emit(diags);
                     continue;

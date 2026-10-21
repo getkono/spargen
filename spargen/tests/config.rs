@@ -108,6 +108,56 @@ fn malformed_or_missing_config_errors_cleanly() {
 
 #[cfg(feature = "cli")]
 #[test]
+fn an_unknown_omit_token_names_the_same_accepted_values_in_the_file_and_on_the_command_line() {
+    // `UnknownOmitToken`'s own message carries the accepted list, so a mistyped token is answered
+    // identically wherever it was written.
+    const COMPONENTS: &str = "expected one of schemas/responses/parameters/request_bodies/\
+                              headers/security_schemes/path_items/media_types";
+    const METHODS: &str = "expected one of get/put/post/delete/options/head/patch/trace/query";
+    let (temp, spec) = workspace();
+    for (config, flags, token, accepted) in [
+        (
+            "[[omit]]\ncomponent = \"path_itemz\"\nname = \"Foo\"\n",
+            &[][..],
+            "path_itemz",
+            COMPONENTS,
+        ),
+        (
+            "[[omit]]\nmethod = \"qeury\"\npath = \"/pets\"\n",
+            &[][..],
+            "qeury",
+            METHODS,
+        ),
+        (
+            "",
+            &["--omit-component", "path_itemz:Foo"][..],
+            "path_itemz",
+            COMPONENTS,
+        ),
+        (
+            "",
+            &["--omit-operation", "qeury /pets"][..],
+            "qeury",
+            METHODS,
+        ),
+    ] {
+        std::fs::write(temp.path().join("spargen.toml"), config).unwrap();
+        let output = check(temp.path(), &spec, flags);
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{config}{flags:?}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("`{token}`; {accepted}\n")),
+            "{config}{flags:?}: {stderr}"
+        );
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn bad_omit_flag_syntax_errors_cleanly() {
     let (temp, spec) = workspace();
     let output = check(temp.path(), &spec, &["--omit-operation", "get"]);
@@ -192,6 +242,90 @@ components:
   schemas:
     Legacy: { type: object, properties: { id: { type: string } } }
 "##;
+
+#[test]
+fn the_macro_tracks_the_config_file_it_applied() {
+    // `generate_api!` re-expands only when a file it `include_bytes!`s changes, so the
+    // `spargen.toml` it applied must be among them, or an edit to that file alone leaves the
+    // previous client in place (#686).
+    let temp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let spec_path = root.join("openapi.yaml");
+    std::fs::write(&spec_path, SPEC).unwrap();
+    let config = root.join("spargen.toml");
+    std::fs::write(&config, "batch_cap = 7\n").unwrap();
+
+    let spec = spargen::Spec::new(&spec_path)
+        .discover_config_file()
+        .unwrap();
+    let preview = spargen::__private::preview(&spec);
+    assert_eq!(
+        preview.report.outcome(),
+        spargen::Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    assert_eq!(preview.source_files, [spec_path, config]);
+}
+
+/// Each `[[omit]]` entry here sets a well-spelled key that the kind its other keys select does
+/// not use: the key, and the kind its presence dispatch picks.
+const FOREIGN_OMIT_KEYS: &[(&str, &str, &str)] = &[
+    ("path = \"/pets\"\nfile = \"extra.yaml\"\n", "file", "path"),
+    ("path = \"/pets\"\nname = \"Pet\"\n", "name", "path"),
+    (
+        "method = \"get\"\npath = \"/pets\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "operation",
+    ),
+    (
+        "method = \"get\"\npath = \"/pets\"\nname = \"Pet\"\n",
+        "name",
+        "operation",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nmethod = \"get\"\n",
+        "method",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\npath = \"/pets\"\n",
+        "path",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "component",
+    ),
+    (
+        "pointer = \"/components/schemas/Pet\"\nname = \"Pet\"\n",
+        "name",
+        "pointer",
+    ),
+];
+
+#[test]
+fn an_omit_entry_with_a_key_its_kind_does_not_use_is_rejected() {
+    // Presence dispatch once dropped these keys silently, so `file` beside `path` omitted the
+    // root document's path rather than failing (#730).
+    let temp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let config = root.join("spargen.toml");
+    for (entry, key, kind) in FOREIGN_OMIT_KEYS {
+        std::fs::write(&config, format!("[[omit]]\n{entry}")).unwrap();
+        let error = spargen::Spec::new(root.join("openapi.yaml"))
+            .config_file(&config)
+            .expect_err(&format!("`{key}` beside a {kind} rule must not load"))
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "omit rule #1: `{key}` does not apply to a {kind} rule"
+            )),
+            "{entry}: {error}"
+        );
+    }
+}
 
 #[cfg(feature = "cli")]
 fn knobs_workspace() -> (tempfile::TempDir, std::path::PathBuf) {

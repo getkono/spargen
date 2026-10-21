@@ -23,10 +23,10 @@ pub(crate) enum MediaType {
     /// `text/event-stream` (Server-Sent Events, response bodies): a stream of items decoded from
     /// the event `data:` fields. Lowered to a streaming operation returning `EventStream<T>`.
     EventStream,
-    /// `application/x-ndjson` (newline-delimited JSON, response bodies): a stream of items, one per
-    /// line. Lowered to a streaming operation returning `EventStream<T>`.
+    /// JSON Lines (`application/x-ndjson`, `application/jsonl`; response bodies): a stream of
+    /// items, one per line. Lowered to a streaming operation returning `EventStream<T>`.
     Ndjson,
-    /// RFC 7464 JSON Text Sequences and `+json-seq` media.
+    /// RFC 7464 JSON Text Sequences (`application/json-seq`, `application/*+json-seq`).
     JsonSequence,
 }
 
@@ -67,9 +67,8 @@ pub(crate) struct RequestBody {
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
     pub(crate) content_type: String,
     /// The body's type, or `None` for a non-octet-stream body declared without a schema, or for
-    /// any body whose declared schema failed to lower. Not every such failure is reported today
-    /// (see #107 and #109). An octet-stream body without a schema lowers to `bytes::Bytes`; the
-    /// reference may still be nullable, which the emitter does not handle yet (#104).
+    /// a body whose declared schema failed to lower. An octet-stream body lowers to a non-nullable
+    /// `bytes::Bytes`, which [`check_invariants`](super::check_invariants) holds it to.
     pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.
@@ -85,6 +84,10 @@ pub(crate) struct RequestBody {
 pub(crate) struct BodyEncoding {
     /// One entry per body-schema property, in the body struct's field order.
     pub(crate) properties: Vec<PropertyEncoding>,
+    /// The mode of the members of the body struct's typed `additionalProperties` overflow map,
+    /// which no Encoding Object can name: the default for the overflow's value type. `None` when
+    /// the body struct has no typed overflow.
+    pub(crate) additional: Option<EncodingMode>,
 }
 
 /// How one property of a form or multipart body is rendered.
@@ -179,7 +182,7 @@ pub(crate) struct Response {
     /// The chosen body media type, or `None` for a bodyless response. Codegen routes the decode by
     /// this (e.g. XML/text/binary bodies use their own codecs rather than serde_json).
     pub(crate) media: Option<MediaType>,
-    /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
+    /// For a streaming response (chosen media whose [`MediaType::stream_framing`] is `Some`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`. Lowering records it in every response position, and rejects
     /// a bodied stream anywhere but the operation's single bodied success (see
@@ -229,13 +232,42 @@ pub(crate) enum HeaderShape {
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
 #[derive(Debug, Clone)]
 pub(crate) struct Responses {
-    /// Per-status responses, most-specific first (exact before range).
+    /// Per-status responses, in document order. [`Self::success`] and [`Self::error`] sort them
+    /// into precedence order (exact before range).
     pub(crate) by_status: Vec<(StatusSpec, Response)>,
     /// The `default` response, if declared.
     pub(crate) default: Option<Response>,
 }
 
 impl Responses {
+    /// Every documented response with its selector: the `by_status` entries in order, then the
+    /// `default` response as [`StatusSpec::Default`]. The one walk over both fields, so every
+    /// reader that keys a response by its selector (`name`'s header structs, `codegen`'s emission)
+    /// sees the same keys.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (StatusSpec, &Response)> {
+        self.by_status
+            .iter()
+            .map(|(status, response)| (*status, response))
+            .chain(
+                self.default
+                    .as_ref()
+                    .map(|response| (StatusSpec::Default, response)),
+            )
+    }
+
+    /// The response a shape entry was built from: the `default` response for
+    /// [`StatusSpec::Default`], otherwise the first `by_status` entry with exactly that selector.
+    pub(crate) fn get(&self, status: StatusSpec) -> Option<&Response> {
+        match status {
+            StatusSpec::Default => self.default.as_ref(),
+            StatusSpec::Exact(_) | StatusSpec::Range(_) => self
+                .by_status
+                .iter()
+                .find(|(candidate, _)| *candidate == status)
+                .map(|(_, response)| response),
+        }
+    }
+
     /// The success shape of the operation. No bodied success entry yields `()`. One bodied entry
     /// alone yields plain `T`. Anything more yields a per-operation success enum, sorted into decode
     /// precedence (exact code ascending, then range ascending), that carries each bodyless success
@@ -329,12 +361,11 @@ impl Responses {
             };
         }
 
-        let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
-        for (status, response) in &self.by_status {
-            if is_success_status(*status) {
-                entries.push((*status, response.body));
-            }
-        }
+        let entries: Vec<(StatusSpec, Option<Ty>)> = self
+            .entries()
+            .filter(|(status, _)| status.is_success())
+            .map(|(status, response)| (status, response.body))
+            .collect();
         let into_enum = |mut entries: Vec<(StatusSpec, Option<Ty>)>| {
             entries.sort_by_key(|(status, _)| precedence_key(*status));
             SuccessShape::Enum(entries)
@@ -354,11 +385,7 @@ impl Responses {
     /// bodyless sibling also yields; the XML and streaming limits below are about decoding a
     /// second body, not about the enum.
     fn multiple_success_bodies(&self) -> bool {
-        self.success_responses()
-            .iter()
-            .filter(|response| response.body.is_some())
-            .nth(1)
-            .is_some()
+        has_two_bodied(&self.success_responses())
     }
 
     /// Whether the operation's success response is a typed *stream*, and if so its framing plus the
@@ -376,18 +403,8 @@ impl Responses {
     /// error side — is rejected during lowering (see [`Self::stream_outside_single_success`]), so
     /// no generated operation decodes a stream as a whole body.
     pub(crate) fn stream_success(&self) -> Option<(Framing, Ty)> {
-        let responses = self.success_responses();
-        let mut bodied = responses
-            .into_iter()
-            .filter(|response| response.body.is_some());
-        match (bodied.next(), bodied.next()) {
-            (Some(response), None) => {
-                let framing = response.stream?;
-                let body = response.body?;
-                Some((framing, body))
-            }
-            _ => None,
-        }
+        let response = sole_bodied(self.success_responses())?;
+        Some((response.stream?, response.body?))
     }
 
     /// The media type of the operation's single bodied success response, when exactly one success
@@ -395,14 +412,7 @@ impl Responses {
     /// single body beside a bodyless sibling is an [`SuccessShape::Enum`], routed per status
     /// instead). `None` when there is no single bodied success.
     pub(crate) fn single_success_media(&self) -> Option<MediaType> {
-        let mut bodied = self
-            .success_responses()
-            .into_iter()
-            .filter(|response| response.body.is_some());
-        match (bodied.next(), bodied.next()) {
-            (Some(response), None) => response.media,
-            _ => None,
-        }
+        sole_bodied(self.success_responses())?.media
     }
 
     /// The media type of the operation's single bodied error response, when exactly one error
@@ -410,14 +420,7 @@ impl Responses {
     /// (a single body beside a bodyless error entry is an [`ErrorShape::Enum`], routed per status
     /// instead). `None` when there is no single bodied error.
     pub(crate) fn single_error_media(&self) -> Option<MediaType> {
-        let mut bodied = self
-            .error_responses()
-            .into_iter()
-            .filter(|response| response.body.is_some());
-        match (bodied.next(), bodied.next()) {
-            (Some(response), None) => response.media,
-            _ => None,
-        }
+        sole_bodied(self.error_responses())?.media
     }
 
     /// Whether an XML body appears in a response position that lowers to a *multi-status* enum
@@ -438,15 +441,11 @@ impl Responses {
     /// shapes whose enum decodes more than one body. Distinct from [`ErrorShape::Enum`], which a
     /// single body beside a bodyless error entry also yields.
     fn multiple_error_bodies(&self) -> bool {
-        self.error_responses()
-            .iter()
-            .filter(|response| response.body.is_some())
-            .nth(1)
-            .is_some()
+        has_two_bodied(&self.error_responses())
     }
 
-    /// Whether a bodied streaming response (`text/event-stream` / `application/x-ndjson`) sits
-    /// anywhere but the operation's single bodied success — the one position whose framing
+    /// Whether a bodied streaming response (media whose [`MediaType::stream_framing`] is `Some`)
+    /// sits anywhere but the operation's single bodied success — the one position whose framing
     /// [`Self::stream_success`] consumes. Every other position decodes a whole body: an error
     /// response (an explicit non-2xx status, or a `default`, which is offered to the error side
     /// even when it is also the sole success source) is classified into `E`, and a success enum
@@ -465,16 +464,10 @@ impl Responses {
     /// The operation's error responses: every non-success explicit status plus the `default`
     /// response (which matches any status). Mirrors the entry set built by [`Self::error`].
     fn error_responses(&self) -> Vec<&Response> {
-        let mut responses: Vec<&Response> = self
-            .by_status
-            .iter()
-            .filter(|(status, _)| !is_success_status(*status))
+        self.entries()
+            .filter(|(status, _)| !status.is_success())
             .map(|(_, response)| response)
-            .collect();
-        if let Some(default) = &self.default {
-            responses.push(default);
-        }
-        responses
+            .collect()
     }
 
     /// Whether `default` is the operation's success source: exactly when `by_status` documents no
@@ -490,10 +483,7 @@ impl Responses {
     /// an undeclared 2xx as their one success; only `Enum` can tell it apart, and surfaces it as
     /// `UnexpectedStatus` with the body preserved, rather than guess.
     fn default_is_success_source(&self) -> bool {
-        !self
-            .by_status
-            .iter()
-            .any(|(status, _)| is_success_status(*status))
+        !self.by_status.iter().any(|(status, _)| status.is_success())
     }
 
     /// The operation's success responses in document order: the `default` response alone when no
@@ -503,9 +493,8 @@ impl Responses {
         if self.default_is_success_source() {
             return self.default.iter().collect();
         }
-        self.by_status
-            .iter()
-            .filter(|(status, _)| is_success_status(*status))
+        self.entries()
+            .filter(|(status, _)| status.is_success())
             .map(|(_, response)| response)
             .collect()
     }
@@ -534,15 +523,11 @@ impl Responses {
     /// non-success status is then `UnexpectedStatus`, retaining at most `max_error_body` bytes of
     /// the body (see [`ErrorShape::None`]).
     pub(crate) fn error(&self) -> ErrorShape {
-        let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
-        for (status, response) in &self.by_status {
-            if !is_success_status(*status) {
-                entries.push((*status, response.body));
-            }
-        }
-        if let Some(default) = &self.default {
-            entries.push((StatusSpec::Default, default.body));
-        }
+        let entries: Vec<(StatusSpec, Option<Ty>)> = self
+            .entries()
+            .filter(|(status, _)| !status.is_success())
+            .map(|(status, response)| (status, response.body))
+            .collect();
         let into_enum = |mut entries: Vec<(StatusSpec, Option<Ty>)>| {
             entries.sort_by_key(|(status, _)| precedence_key(*status));
             ErrorShape::Enum(entries)
@@ -592,8 +577,24 @@ fn precedence_key(status: StatusSpec) -> (u8, u16) {
     }
 }
 
-fn is_success_status(status: StatusSpec) -> bool {
-    status.is_success()
+/// The one response of `responses` that carries a body, when exactly one does.
+fn sole_bodied(responses: Vec<&Response>) -> Option<&Response> {
+    let mut bodied = responses
+        .into_iter()
+        .filter(|response| response.body.is_some());
+    match (bodied.next(), bodied.next()) {
+        (Some(response), None) => Some(response),
+        _ => None,
+    }
+}
+
+/// Whether two or more of `responses` carry a body.
+fn has_two_bodied(responses: &[&Response]) -> bool {
+    responses
+        .iter()
+        .filter(|response| response.body.is_some())
+        .nth(1)
+        .is_some()
 }
 
 /// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
@@ -715,6 +716,43 @@ mod tests {
             stream: Some(super::Framing::Sse),
             headers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn entries_walk_by_status_in_order_then_default_and_get_finds_each() {
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(404), resp(Some(1))),
+                (StatusSpec::Range(2), resp(Some(2))),
+            ],
+            default: Some(resp(Some(3))),
+        };
+        let walked: Vec<(StatusSpec, Option<Ty>)> = responses
+            .entries()
+            .map(|(status, response)| (status, response.body))
+            .collect();
+        assert_eq!(
+            walked,
+            [
+                (StatusSpec::Exact(404), Some(ty(1))),
+                (StatusSpec::Range(2), Some(ty(2))),
+                (StatusSpec::Default, Some(ty(3))),
+            ]
+        );
+        let body = |status| responses.get(status).and_then(|response| response.body);
+        assert_eq!(body(StatusSpec::Exact(404)), Some(ty(1)));
+        assert_eq!(body(StatusSpec::Range(2)), Some(ty(2)));
+        assert_eq!(body(StatusSpec::Default), Some(ty(3)));
+        assert!(responses.get(StatusSpec::Exact(200)).is_none());
+
+        // Without a `default`, the walk is `by_status` alone and `get` has no `default` to find.
+        let responses = Responses {
+            by_status: vec![(StatusSpec::Exact(200), resp(None))],
+            default: None,
+        };
+        let walked: Vec<StatusSpec> = responses.entries().map(|(status, _)| status).collect();
+        assert_eq!(walked, [StatusSpec::Exact(200)]);
+        assert!(responses.get(StatusSpec::Default).is_none());
     }
 
     #[test]
@@ -1045,6 +1083,19 @@ mod tests {
             default: None,
         };
         assert!(responses.xml_in_multi_status());
+
+        // The error side follows the same rule: one XML error body beside a bodyless `default` is
+        // one body, and a second bodied error (here the `default`) makes the rejected combination.
+        let errors = |default: Option<u32>| Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(None)),
+                (StatusSpec::Exact(404), xml(Some(1))),
+            ],
+            default: Some(resp(default)),
+        };
+        assert!(matches!(errors(None).error(), ErrorShape::Enum(_)));
+        assert!(!errors(None).xml_in_multi_status());
+        assert!(errors(Some(2)).xml_in_multi_status());
     }
 
     #[test]

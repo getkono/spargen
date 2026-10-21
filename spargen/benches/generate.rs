@@ -7,7 +7,8 @@
 //!
 //! Inputs: a tiny inline spec (fixed cost floor), the 3.1 petstore example, and the real-world
 //! Ollama spec (a mid-sized generating corpus case). Run with `cargo bench` or
-//! `mise run bench`; CI uploads the results as a release artifact.
+//! `mise run bench`; CI's `benchmarks.yml` uploads the results as a workflow artifact, on demand
+//! and on each `spargen` release tag (`release-plz.yml` dispatches it).
 
 use std::hint::black_box;
 
@@ -63,15 +64,22 @@ fn spec_in_tempdir(contents: &str) -> (tempfile::TempDir, Utf8PathBuf) {
     (dir, spec)
 }
 
-/// Benchmark the frontend only (`spargen::check`) — parse, validate, lower, name-allocate. No
-/// codegen, no filesystem writes; this is the shared cost every `generate` also pays.
-fn bench_check(c: &mut Criterion) {
-    let (_tiny_dir, tiny_spec) = spec_in_tempdir(TINY_SPEC);
-    let cases: [(&str, Utf8PathBuf); 3] = [
+/// The three benchmark inputs, by case name, and the guard of the tempdir holding the tiny spec.
+/// The guard must be held for the tiny spec to stay live.
+fn cases() -> (tempfile::TempDir, [(&'static str, Utf8PathBuf); 3]) {
+    let (tiny_dir, tiny_spec) = spec_in_tempdir(TINY_SPEC);
+    let cases = [
         ("tiny", tiny_spec),
         ("petstore", repo_path("examples/petstore/petstore.yaml")),
         ("ollama", repo_path("corpus/ollama/openapi.yaml")),
     ];
+    (tiny_dir, cases)
+}
+
+/// Benchmark the frontend only (`spargen::check`) — parse, validate, lower, name-allocate. No
+/// codegen, no filesystem writes; this is the shared cost every `generate` also pays.
+fn bench_check(c: &mut Criterion) {
+    let (_tiny_dir, cases) = cases();
 
     let mut group = c.benchmark_group("check");
     for (name, spec) in &cases {
@@ -97,12 +105,7 @@ fn bench_check(c: &mut Criterion) {
 /// removes the output file, and the routine asserts `Outcome::Generated`, so every measured
 /// iteration is a full generation rather than a cache lookup.
 fn bench_generate(c: &mut Criterion) {
-    let (_tiny_dir, tiny_spec) = spec_in_tempdir(TINY_SPEC);
-    let cases: [(&str, Utf8PathBuf); 3] = [
-        ("tiny", tiny_spec),
-        ("petstore", repo_path("examples/petstore/petstore.yaml")),
-        ("ollama", repo_path("corpus/ollama/openapi.yaml")),
-    ];
+    let (_tiny_dir, cases) = cases();
 
     let mut group = c.benchmark_group("generate");
     for (name, spec) in &cases {

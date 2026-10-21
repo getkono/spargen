@@ -521,6 +521,18 @@ fn reads_underscore_default_features(
         .is_some_and(|year| year < 2024)
 }
 
+/// Whether `raw`, a Cargo version requirement, is one the audit accepts for `dependency`.
+///
+/// It must parse as exactly one comparator with no pre-release, using either
+///
+/// - the caret operator, spelled bare (`x.y.z`) or with `^` (`^x.y.z`), or
+/// - the exact operator, `=x.y.z` (or a partial `=x.y`),
+///
+/// and the lowest version it names, with omitted components read as `0`, must be at or above
+/// the tested floor and below the next breaking line ([`Dependency::ceiling`]). So `=floor` and
+/// `=` of any later release on that line are accepted, like the floor and a higher caret floor.
+/// Every other operator (`~`, `>=`, `<`, `*`, wildcards), a range of several comparators, and a
+/// requirement that does not parse are refused.
 pub(super) fn supported_requirement(raw: &str, dependency: Dependency) -> bool {
     let Ok(requirement) = VersionReq::parse(raw) else {
         return false;

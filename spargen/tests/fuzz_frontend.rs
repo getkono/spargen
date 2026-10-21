@@ -4,13 +4,14 @@
 //! parse/validate/audit → `ir` lower → `name` allocate — must ALWAYS return a [`Report`] for ANY
 //! input, however malformed, random, or adversarial. It must never `panic!`, `unwrap` on bad input,
 //! overflow the stack, or hang. This harness feeds a wide variety of inputs to `check` and asserts
-//! that every case returns, so no case panicked or aborted. Beyond no-panic it holds five oracles:
-//! no report carries an `IR invariant failed` diagnostic (lowering must produce a valid IR for any
-//! input), every diagnostic names a real location (`oracles::location_violations`, #454), a
-//! document that is valid JSON reports the same sorted codes through the JSON and the YAML parser,
-//! and `generate` over the valid-skeleton documents writes a module that parses as Rust whenever
-//! it reports `Generated`, whose unions' variants a value can tell apart
-//! (`oracles::indistinguishable_variants`, #402).
+//! that every case returns, so no case panicked or aborted. Beyond no-panic it holds these oracles:
+//! no `check` or `generate` report carries an `IR invariant failed` diagnostic (lowering must
+//! produce a valid IR for any input), every diagnostic names a real location
+//! (`oracles::location_violations`, #454), a document that is valid JSON reports the same sorted
+//! codes through the JSON and the YAML parser, and `generate` over the valid-skeleton documents
+//! reaches the verdict and the sorted codes `check` reaches, and writes a module that parses as
+//! Rust whenever it reports `Generated`, whose unions' variants a value can tell apart unless a
+//! `W001` at the union says why (`oracles::unexplained_variants`, #402).
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -19,16 +20,20 @@
 //!     keyword set (`openapi`/`paths`/`components`/`schemas`/`$ref`/`oneOf`/`allOf`/`type`/`enum`/
 //!     `discriminator`/`properties`/`required`/…), so the fuzzer reaches deep into lowering rather
 //!     than bouncing off the parser's reject path;
-//!   * valid-skeleton documents wrapping random schemas, so lowering runs to completion;
+//!   * valid-skeleton documents declaring a supported version and wrapping random schemas, most of
+//!     them well-formed Schema Objects, so lowering runs to completion (at least half of the cases
+//!     reach lowering, or the test fails);
 //!   * deep `$ref` chains that exercise the recursion depth guard (the stack-overflow vector this
 //!     issue found and fixed);
+//!   * block-style YAML nested past the parsers' nesting cap, up to issue #706's million levels;
 //!   * components whose root is a `$ref` beside random sibling keywords, over a random ref graph
 //!     (the release-mode assertion abort of issue #148).
 //!
 //! Every generated document is fed through BOTH the JSON and the YAML parser (by file extension;
 //! JSON is a subset of YAML). The run is deterministic and bounded: a fixed-seed RNG and capped
 //! case counts / input sizes keep `mise run test` fast and non-flaky. A panic anywhere inside
-//! `check` fails the test with the (shrunk) offending input; a stack overflow or hang aborts loudly.
+//! `check` fails the test with the (shrunk) offending input, and a stack overflow aborts the test
+//! process. A hang shows up as a test that never finishes.
 
 use std::cell::Cell;
 
@@ -135,32 +140,44 @@ fn deterministic_runner(cases: u32) -> TestRunner {
     )
 }
 
-/// The prefix `ir::check_invariants` gives every diagnostic it emits. Lowering must produce an IR
-/// that passes them for any input, so a report carrying one is a lowering bug, not a rejection.
+/// The prefix `ir::check_invariants` gives every diagnostic it emits, an `E011`. Lowering must
+/// produce an IR that passes them for any input, so a report carrying one is a lowering bug, not a
+/// rejection. `ir::invariant`'s own `INVARIANT_FAILURE` is the prefix the messages are built from,
+/// and a test beside it holds this declaration to that value.
 const INVARIANT_FAILURE: &str = "IR invariant failed";
 
+/// Fail unless `report`, a run over the root document `bytes`, carries no [`INVARIANT_FAILURE`] and
+/// every diagnostic it carries names a real location ([`oracles::location_violations`]). `what`
+/// says which run it was.
+fn hold_report(report: &Report, bytes: &[u8], what: &str) -> Result<(), TestCaseError> {
+    let failed: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == Code::InvalidInput
+                && diagnostic.message.starts_with(INVARIANT_FAILURE)
+        })
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    prop_assert!(
+        failed.is_empty(),
+        "lowering produced an IR that fails its invariants ({what}): {failed:#?}"
+    );
+    let unlocated = oracles::location_violations(report.diagnostics(), bytes);
+    prop_assert!(
+        unlocated.is_empty(),
+        "diagnostics with no real location ({what}): {unlocated:#?}"
+    );
+    Ok(())
+}
+
 /// Write `bytes` to `spec.<ext>` in `dir` and run `check`. Returning at all proves `check` did not
-/// panic/abort; the report must also carry no [`INVARIANT_FAILURE`], and every diagnostic it
-/// carries must name a real location ([`oracles::location_violations`]).
+/// panic/abort; the report is also held to [`hold_report`].
 fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) -> Result<Report, TestCaseError> {
     let spec = Utf8PathBuf::from_path_buf(dir.path().join(format!("spec.{ext}"))).unwrap();
     std::fs::write(&spec, bytes).unwrap();
     let report = check(&Spec::new(spec));
-    let failed: Vec<&str> = report
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .filter(|message| message.contains(INVARIANT_FAILURE))
-        .collect();
-    prop_assert!(
-        failed.is_empty(),
-        "lowering produced an IR that fails its invariants (`.{ext}`): {failed:#?}"
-    );
-    let unlocated = oracles::unknown(oracles::location_violations(report.diagnostics(), bytes));
-    prop_assert!(
-        unlocated.is_empty(),
-        "diagnostics with no real location (`.{ext}`): {unlocated:#?}"
-    );
+    hold_report(&report, bytes, &format!("`check` over `.{ext}`"))?;
     Ok(report)
 }
 
@@ -241,13 +258,72 @@ fn arb_value() -> impl Strategy<Value = Value> {
     })
 }
 
+/// The JSON type names a Schema Object's `type` takes.
+const TYPE_NAMES: &[&str] = &[
+    "object", "array", "string", "integer", "number", "boolean", "null",
+];
+
+/// A Schema Object whose every keyword holds a value of the shape that keyword requires: types
+/// from [`TYPE_NAMES`], subschemas under `properties`/`items`/`allOf`/`oneOf`/`anyOf`/`not`,
+/// string arrays under `required`, a component `$ref`, and arbitrary values only where any value
+/// is valid (`enum`, `const`, `default`). The structural validator accepts it, so a document built
+/// from it reaches lowering, where the combinations of keywords are what is under test.
+fn arb_schema() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        prop::sample::select(TYPE_NAMES).prop_map(|name| serde_json::json!({ "type": name })),
+        (0usize..5)
+            .prop_map(|at| serde_json::json!({ "$ref": format!("#/components/schemas/S{at}") })),
+        Just(serde_json::json!({})),
+        Just(Value::Bool(true)),
+    ];
+    leaf.prop_recursive(4, 32, 4, |inner| {
+        let keyword = prop_oneof![
+            prop::sample::select(TYPE_NAMES).prop_map(|name| ("type", Value::from(name))),
+            prop::collection::vec(prop::sample::select(TYPE_NAMES), 1..3)
+                .prop_map(|names| ("type", Value::from(names))),
+            prop::collection::vec(("[a-c]", inner.clone()), 1..3)
+                .prop_map(|fields| { ("properties", Value::Object(fields.into_iter().collect())) }),
+            prop::collection::vec("[a-c]", 0..3).prop_map(|names| ("required", Value::from(names))),
+            inner.clone().prop_map(|schema| ("items", schema)),
+            inner.clone().prop_map(|schema| ("not", schema)),
+            inner
+                .clone()
+                .prop_map(|schema| ("additionalProperties", schema)),
+            prop::collection::vec(inner.clone(), 1..4).prop_map(|all| ("allOf", Value::from(all))),
+            prop::collection::vec(inner.clone(), 1..4).prop_map(|one| ("oneOf", Value::from(one))),
+            prop::collection::vec(inner.clone(), 1..4).prop_map(|any| ("anyOf", Value::from(any))),
+            (0usize..5).prop_map(|at| ("$ref", Value::from(format!("#/components/schemas/S{at}")))),
+            prop::collection::vec(arb_value(), 1..4)
+                .prop_map(|values| ("enum", Value::from(values))),
+            arb_value().prop_map(|value| ("const", value)),
+            arb_value().prop_map(|value| ("default", value)),
+            prop::sample::select(&["int32", "int64", "date-time", "uuid", "binary", "byte"][..])
+                .prop_map(|format| ("format", Value::from(format))),
+            (0u64..4).prop_map(|bound| ("minLength", Value::from(bound))),
+        ];
+        prop::collection::vec(keyword, 1..4).prop_map(|keywords| {
+            Value::Object(
+                keywords
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned(), value))
+                    .collect(),
+            )
+        })
+    })
+}
+
+/// The `openapi` versions spargen implements, one of which every skeleton document declares.
+const SUPPORTED_VERSIONS: &[&str] = &["3.1.0", "3.2.0"];
+
 /// A document that always has the OpenAPI skeleton (`openapi`/`info`/`paths`/`components.schemas`)
-/// so it survives structural validation and reaches lowering, but whose schemas are arbitrary
-/// keyword-biased values. This is the strategy that actually exercises `oas31::lower` end to end.
+/// under a version spargen implements, so it is never stopped at `E001`, but whose schemas are
+/// arbitrary keyword-biased values. This is the strategy that exercises `oas31::lower` end to end;
+/// `check_never_panics_on_skeleton_documents` counts the cases that reach lowering and fails if
+/// too few do. An unsupported version is the keyword-biased documents' to draw.
 fn arb_skeleton_doc() -> impl Strategy<Value = String> {
     (
-        prop::collection::vec(arb_value(), 1..5),
-        prop::sample::select(SCALARS),
+        prop::collection::vec(prop_oneof![3 => arb_schema(), 1 => arb_value()], 1..5),
+        prop::sample::select(SUPPORTED_VERSIONS),
     )
         .prop_map(|(schemas, version)| {
             let mut schema_map = Map::new();
@@ -305,6 +381,37 @@ fn arb_ref_chain() -> impl Strategy<Value = String> {
             "{{\"openapi\":\"3.1.0\",\"info\":{{\"title\":\"t\",\"version\":\"1.0.0\"}},\
              \"paths\":{{}},\"components\":{{\"schemas\":{{{schemas}}}}}}}"
         )
+    })
+}
+
+/// The deepest a value may sit in a parsed document, the root at depth 0, in either parser.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// A skeleton document whose `x-deep` holds `depth` nested block-style YAML containers (sequences
+/// written `- - - x`, or mappings one indent apart) around the scalar `x`, which therefore sits at
+/// depth `depth + 1`. Depths straddle [`MAX_NESTING_DEPTH`], and the million-level sequence is
+/// issue #706's reproduction: block style is not bounded by the event parser, so it overflowed
+/// the frontend stack before the builder capped nesting. Mappings stay shallow because their
+/// indentation grows quadratically.
+fn arb_deep_yaml() -> impl Strategy<Value = (usize, String)> {
+    prop_oneof![
+        7 => (1usize..600, any::<bool>()),
+        1 => Just((1_000_000, false)),
+    ]
+    .prop_map(|(depth, mappings)| {
+        let mut nest = String::new();
+        if mappings {
+            for level in 1..depth {
+                nest.push_str(&format!("{}k:\n", " ".repeat(level)));
+            }
+            nest.push_str(&format!("{}k: x\n", " ".repeat(depth)));
+        } else {
+            nest.push_str(&format!("  {}x\n", "- ".repeat(depth)));
+        }
+        let text = format!(
+            "openapi: 3.1.0\ninfo: {{ title: t, version: 1.0.0 }}\npaths: {{}}\nx-deep:\n{nest}"
+        );
+        (depth, text)
     })
 }
 
@@ -403,19 +510,47 @@ fn check_never_panics_on_keyword_biased_documents() {
         .unwrap();
 }
 
+/// Whether `report` reached lowering: it carries no `E001` and no `E011`, the codes the version
+/// gate, the parsers and the structural validator stop a document with before it is lowered.
+fn reached_lowering(report: &Report) -> bool {
+    !report.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            Code::UnsupportedOpenApiVersion | Code::InvalidInput
+        )
+    })
+}
+
 #[test]
 fn check_never_panics_on_skeleton_documents() {
     let dir = TempDir::new().unwrap();
+    let cases = Cell::new(0u32);
+    let reached = Cell::new(0u32);
     deterministic_runner(400)
         .run(&arb_skeleton_doc(), |text| {
-            exercise_json_both(&dir, &text)?;
+            let report = exercise_json_both(&dir, &text)?;
+            cases.set(cases.get() + 1);
+            if reached_lowering(&report) {
+                reached.set(reached.get() + 1);
+            }
             Ok(())
         })
         .unwrap();
+    assert!(
+        reached.get() * 2 >= cases.get(),
+        "only {} of {} skeleton documents reached lowering",
+        reached.get(),
+        cases.get()
+    );
 }
 
-/// `generate` over the documents that reach lowering: a `Generated` run must not report E011 for
-/// an internal codegen failure, and its emitted module must parse as Rust.
+/// `generate` over the documents that reach lowering. Its report is held to [`hold_report`], as a
+/// `check` report is, and must reach the same verdict and report the same sorted codes as `check`
+/// over the same document, which runs the same frontend without emitting. A `Generated` run must
+/// have written a module that parses as Rust and is not the `compile_error!` stub codegen falls
+/// back to when its own tokens fail to format, which keeps the outcome `Generated`, and whose
+/// unions a value can tell apart unless a `W001` at the union says why
+/// ([`oracles::unexplained_variants`]).
 #[test]
 fn generate_writes_parseable_rust_for_skeleton_documents() {
     let dir = TempDir::new().unwrap();
@@ -432,6 +567,18 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                 &Spec::new(spec.clone())
                     .build(out.clone())
                     .cargo(CargoIntegration::Off),
+            );
+            hold_report(&report, text.as_bytes(), "`generate`")?;
+            let checked = check(&Spec::new(spec.clone()));
+            prop_assert_eq!(
+                report.outcome() == Outcome::Rejected,
+                checked.outcome() == Outcome::Rejected,
+                "`check` and `generate` reach different verdicts"
+            );
+            prop_assert_eq!(
+                codes(&report),
+                codes(&checked),
+                "`check` and `generate` report different codes"
             );
             if report.outcome() == Outcome::Generated {
                 generated.set(generated.get() + 1);
@@ -455,14 +602,6 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                      {unexplained:#?}"
                 );
             }
-            let unlocated = oracles::unknown(oracles::location_violations(
-                report.diagnostics(),
-                text.as_bytes(),
-            ));
-            prop_assert!(
-                unlocated.is_empty(),
-                "diagnostics with no real location: {unlocated:#?}"
-            );
             Ok(())
         })
         .unwrap();
@@ -513,4 +652,36 @@ fn check_never_panics_on_deep_ref_chains() {
         too_deep.get() > 0,
         "no ref chain reported E014, so the depth-cap reject path was never reached"
     );
+}
+
+#[test]
+fn check_never_panics_on_deeply_nested_yaml() {
+    let dir = TempDir::new().unwrap();
+    // How many documents stayed within the nesting cap, and how many crossed it.
+    let within = Cell::new(0u32);
+    let past = Cell::new(0u32);
+    deterministic_runner(32)
+        .run(&arb_deep_yaml(), |(depth, text)| {
+            let report = exercise(&dir, text.as_bytes(), "yaml")?;
+            let too_deep = report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::InvalidInput
+                    && diagnostic.message.contains("YAML nesting is too deep")
+            });
+            // The scalar sits at depth `depth + 1`, so the cap decides the outcome exactly.
+            if depth < MAX_NESTING_DEPTH {
+                prop_assert!(!too_deep, "depth {depth} is within the cap");
+                prop_assert_ne!(report.outcome(), Outcome::Rejected, "depth {}", depth);
+                within.set(within.get() + 1);
+            } else {
+                prop_assert!(too_deep, "depth {depth} is past the cap");
+                past.set(past.get() + 1);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        within.get() > 0,
+        "no document stayed within the nesting cap"
+    );
+    assert!(past.get() > 0, "no document crossed the nesting cap");
 }

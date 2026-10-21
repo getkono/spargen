@@ -17,7 +17,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Outcome, Report, Spec};
+use spargen::{Outcome, Report, Spec};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::generate_to_string;
 
 /// Absolute path to a corpus spec (relative to the workspace root, one level up from this crate).
 fn corpus_path(rel: &str) -> Utf8PathBuf {
@@ -27,17 +32,13 @@ fn corpus_path(rel: &str) -> Utf8PathBuf {
         .join(rel)
 }
 
-/// A generation config for a corpus spec writing to a throwaway module, with the diagnostic batch
-/// uncapped so the WHOLE diagnostic set is captured (the default cap of 100 truncates the big
-/// specs, hiding both the terminal rejection code and the true warning counts).
-fn config_for(spec: Utf8PathBuf, out: Utf8PathBuf, carve: bool) -> Build {
-    Spec::new(spec)
-        .batch_cap(usize::MAX)
-        .carve(carve)
-        .build(out)
-        // Not a build script: the snapshots record what the spec produced, not what the process
-        // happened to be.
-        .cargo(CargoIntegration::Off)
+/// A generation config for a corpus spec, with the diagnostic batch uncapped so the WHOLE
+/// diagnostic set is captured (the default cap of 100 truncates the big specs, hiding both the
+/// terminal rejection code and the true warning counts). [`generate_to_string`] runs it outside
+/// any Cargo build: the snapshots record what the spec produced, not what the process happened to
+/// be.
+fn config_for(spec: Utf8PathBuf, carve: bool) -> Spec {
+    Spec::new(spec).batch_cap(usize::MAX).carve(carve)
 }
 
 /// A deterministic, reviewable rendering of a run: the outcome plus a sorted `code: count`
@@ -60,68 +61,36 @@ fn summary(report: &Report) -> String {
 }
 
 /// Parse a generated module with `syn` and render its consumer-visible API surface: the sorted set
-/// of operation method names (the `pub async fn`s on the crate-root `Client`/`BlockingClient`
-/// impls) and the sorted set of public type names (model types in the `types` module, qualified
-/// `types::Name`, plus crate-root public type definitions). The embedded `support` runtime module
-/// is skipped, and `use` re-exports are not type definitions — so only genuinely generated surface
-/// is captured. Derived from the emitted source (the `surface` subsystem is crate-private), it is
-/// robust to formatting and deterministic given deterministic codegen.
+/// of operation method names and the sorted set of public type names.
+///
+/// The operations are the `pub async fn`s of the crate-root impls, which are `Client`'s operation
+/// methods: its constructors and accessors are non-async `pub fn`s. The `BlockingClient` mirror is
+/// not read — its methods are synchronous, and its impl sits inside the `__spargen_blocking`
+/// wrapper module rather than at the root — so each operation counts once, through `Client`.
+///
+/// The types are every public type definition [`collect_module_types`] finds from the root: root
+/// definitions by name, and those inside a module qualified by its path (`types::Name`). The
+/// embedded `support` runtime module is skipped, and `use` re-exports are not type definitions —
+/// so only genuinely generated surface is captured. Derived from the emitted source (the `surface`
+/// subsystem is crate-private), it is robust to formatting and deterministic given deterministic
+/// codegen.
 fn api_surface(source: &str) -> String {
     let file = syn::parse_file(source).expect("generated module is valid Rust");
     let mut operations: BTreeSet<String> = BTreeSet::new();
     let mut types: BTreeSet<String> = BTreeSet::new();
 
     for item in &file.items {
-        match item {
-            // The embedded freestanding runtime is not consumer API surface — skip it wholesale.
-            // The model types live in the `types` module; collect them qualified.
-            syn::Item::Mod(module) => {
-                if module.ident == "support" {
-                    continue;
-                }
-                if let Some((_, items)) = &module.content {
-                    // The private lint-scope wrapper re-exports BlockingClient at the generated
-                    // root, so treat its public definitions as root surface rather than exposing
-                    // an implementation-detail module path in the snapshot.
-                    let module_name = module.ident.to_string();
-                    let prefix = if module.ident == "__spargen_blocking" {
-                        ""
-                    } else {
-                        module_name.as_str()
-                    };
-                    collect_module_types(items, prefix, &mut types);
-                }
-            }
-            // Crate-root impls are the `Client`/`BlockingClient` inherent impls: their `pub async
-            // fn`s are the operation methods (constructors/accessors are non-async `pub fn`). The
-            // blocking mirror shares method names, so the set dedupes to one entry per operation.
-            syn::Item::Impl(imp) => {
-                for impl_item in &imp.items {
-                    if let syn::ImplItem::Fn(func) = impl_item {
-                        if is_pub(&func.vis) && func.sig.asyncness.is_some() {
-                            operations.insert(func.sig.ident.to_string());
-                        }
+        if let syn::Item::Impl(imp) = item {
+            for impl_item in &imp.items {
+                if let syn::ImplItem::Fn(func) = impl_item {
+                    if is_pub(&func.vis) && func.sig.asyncness.is_some() {
+                        operations.insert(func.sig.ident.to_string());
                     }
                 }
             }
-            syn::Item::Struct(item) if is_pub(&item.vis) => {
-                types.insert(item.ident.to_string());
-            }
-            syn::Item::Enum(item) if is_pub(&item.vis) => {
-                types.insert(item.ident.to_string());
-            }
-            syn::Item::Type(item) if is_pub(&item.vis) => {
-                types.insert(item.ident.to_string());
-            }
-            syn::Item::Trait(item) if is_pub(&item.vis) => {
-                types.insert(item.ident.to_string());
-            }
-            syn::Item::Union(item) if is_pub(&item.vis) => {
-                types.insert(item.ident.to_string());
-            }
-            _ => {}
         }
     }
+    collect_module_types(&file.items, "", &mut types);
 
     let mut out = format!("operations ({}):\n", operations.len());
     for name in &operations {
@@ -134,44 +103,48 @@ fn api_surface(source: &str) -> String {
     out
 }
 
-/// Recursively collect public type definitions from a module's items, qualifying each name with the
-/// module path (e.g. `types::Foo`).
-fn collect_module_types(items: &[syn::Item], prefix: &str, types: &mut BTreeSet<String>) {
-    let qualified = |ident: &syn::Ident| {
-        if prefix.is_empty() {
-            ident.to_string()
-        } else {
-            format!("{prefix}::{ident}")
-        }
+/// The name a public type definition declares, or `None` for any other item.
+fn public_type(item: &syn::Item) -> Option<&syn::Ident> {
+    let (vis, ident) = match item {
+        syn::Item::Struct(item) => (&item.vis, &item.ident),
+        syn::Item::Enum(item) => (&item.vis, &item.ident),
+        syn::Item::Type(item) => (&item.vis, &item.ident),
+        syn::Item::Trait(item) => (&item.vis, &item.ident),
+        syn::Item::Union(item) => (&item.vis, &item.ident),
+        _ => return None,
     };
+    is_pub(vis).then_some(ident)
+}
+
+/// Recursively collect public type definitions from a module's items, qualifying each name with the
+/// module path (e.g. `types::Foo`). The embedded `support` runtime is not consumer API surface and
+/// is skipped. The private lint-scope wrapper `__spargen_blocking` is re-exported at the generated
+/// root, so its definitions keep the enclosing prefix rather than exposing an implementation-detail
+/// module path in the snapshot.
+fn collect_module_types(items: &[syn::Item], prefix: &str, types: &mut BTreeSet<String>) {
     for item in items {
-        match item {
-            syn::Item::Struct(item) if is_pub(&item.vis) => {
-                types.insert(qualified(&item.ident));
-            }
-            syn::Item::Enum(item) if is_pub(&item.vis) => {
-                types.insert(qualified(&item.ident));
-            }
-            syn::Item::Type(item) if is_pub(&item.vis) => {
-                types.insert(qualified(&item.ident));
-            }
-            syn::Item::Trait(item) if is_pub(&item.vis) => {
-                types.insert(qualified(&item.ident));
-            }
-            syn::Item::Union(item) if is_pub(&item.vis) => {
-                types.insert(qualified(&item.ident));
-            }
-            syn::Item::Mod(module) if module.ident != "support" => {
-                if let Some((_, nested)) = &module.content {
-                    let nested_prefix = if prefix.is_empty() {
-                        module.ident.to_string()
-                    } else {
-                        format!("{prefix}::{}", module.ident)
-                    };
-                    collect_module_types(nested, &nested_prefix, types);
-                }
-            }
-            _ => {}
+        if let Some(ident) = public_type(item) {
+            types.insert(if prefix.is_empty() {
+                ident.to_string()
+            } else {
+                format!("{prefix}::{ident}")
+            });
+        } else if let syn::Item::Mod(module) = item {
+            let Some((_, nested)) = module
+                .content
+                .as_ref()
+                .filter(|_| module.ident != "support")
+            else {
+                continue;
+            };
+            let nested_prefix = if module.ident == "__spargen_blocking" {
+                prefix.to_owned()
+            } else if prefix.is_empty() {
+                module.ident.to_string()
+            } else {
+                format!("{prefix}::{}", module.ident)
+            };
+            collect_module_types(nested, &nested_prefix, types);
         }
     }
 }
@@ -181,15 +154,9 @@ fn is_pub(vis: &syn::Visibility) -> bool {
 }
 
 /// Drive `generate` on a corpus spec (module output, uncapped diagnostics) and return the report
-/// plus the generated module source when generation succeeded. The tempdir is kept alive by the
-/// caller for the duration of the read.
+/// plus the generated module source when generation succeeded.
 fn generate_corpus(rel: &str, carve: bool) -> (Report, Option<String>) {
-    let temp = tempfile::tempdir().unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let report = spargen::generate(&config_for(corpus_path(rel), out.clone(), carve));
-    let source = (report.outcome() == Outcome::Generated)
-        .then(|| std::fs::read_to_string(&out).expect("generated module written"));
-    (report, source)
+    generate_to_string(config_for(corpus_path(rel), carve))
 }
 
 // --- Rejecting corpus cases: outcome + full diagnostic histogram --------------------------------
@@ -250,7 +217,8 @@ fn meilisearch_rejects() {
 
 #[test]
 fn openai_openapi_rejects() {
-    // Manifest expectation: `reject`.
+    // Manifest expectation: `reject:E009` — `POST /realtime/calls` documents its 201 with
+    // `application/sdp` as the only content entry, a media type with no codec.
     let (report, _) = generate_corpus("openai-openapi/openapi.yaml", false);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     insta::assert_snapshot!("openai_openapi", summary(&report));
@@ -271,7 +239,7 @@ fn ollama_generates() {
 
 #[test]
 fn openapi_boilerplate_generates() {
-    // Manifest expectation: `generate` (a template document — components/types only, no operations).
+    // Manifest expectation: `generate` (a template document with three operations).
     let (report, source) = generate_corpus("openapi-boilerplate/src/openapi.yaml", false);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     insta::assert_snapshot!("openapi_boilerplate", summary(&report));

@@ -43,6 +43,33 @@ fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
         let floor = dependency.floor_version();
         let higher = Version::new(floor.major, floor.minor, floor.patch + 1).to_string();
         assert!(supported_requirement(&higher, dependency));
+        assert!(supported_requirement(&format!("^{higher}"), dependency));
+        // The exact operator is part of the contract too, at the floor and above it on the same
+        // line; below the floor, or at the next breaking release, it is refused like a caret.
+        for exact in [dependency.floor, higher.as_str()] {
+            assert!(
+                supported_requirement(&format!("={exact}"), dependency),
+                "`={exact}` for `{}`",
+                dependency.name
+            );
+        }
+        assert!(!supported_requirement(
+            &format!("={}", version_below(&floor)),
+            dependency
+        ));
+        assert!(!supported_requirement(
+            &format!("={}", dependency.ceiling()),
+            dependency
+        ));
+        // Other operators are refused even where they would admit the floor.
+        assert!(!supported_requirement(
+            &format!("~{}", dependency.floor),
+            dependency
+        ));
+        assert!(!supported_requirement(
+            &format!(">={}", dependency.floor),
+            dependency
+        ));
         assert!(!supported_requirement(
             &format!(">={}, <{}", dependency.floor, dependency.ceiling()),
             dependency
@@ -103,11 +130,66 @@ fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
 }
 
 #[test]
+fn an_exact_requirement_at_the_floor_passes_the_audit() {
+    // The audit-level counterpart of the `=floor` loop case: a manifest pinning a core crate
+    // with `=` is accepted as written.
+    let (core_bytes, floor) = core_entry("bytes");
+    let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"={floor}\""));
+    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn a_runtime_crate_declared_without_a_version_requirement_is_rejected() {
+    // A `path` or `git` declaration that states no `version` gives the audit nothing to hold to
+    // the floor, so it says a requirement must be declared rather than calling the crate missing.
+    let (core_bytes, _) = core_entry("bytes");
+    for declaration in [
+        "bytes = { path = \"../bytes\" }",
+        "bytes = { git = \"https://github.com/tokio-rs/bytes\" }",
+        "bytes = { features = [\"serde\"] }",
+    ] {
+        let manifest = replace_once(CORE_MANIFEST, core_bytes, declaration);
+        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        assert_eq!(diagnostics.len(), 1, "{declaration}: {diagnostics:#?}");
+        assert_eq!(
+            diagnostics[0].message,
+            format!(
+                "`bytes` must declare a Cargo version requirement of `{}` or a higher compatible \
+                 floor",
+                BYTES.floor
+            ),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn a_runtime_crate_declared_only_as_a_dev_or_build_dependency_is_missing() {
+    // Generated code is compiled as part of the package's library or binary, which neither
+    // `[dev-dependencies]` nor `[build-dependencies]` reaches, so declaring a runtime crate only
+    // there leaves it missing.
+    let (core_bytes, _) = core_entry("bytes");
+    for table in ["dev-dependencies", "build-dependencies"] {
+        let manifest = format!(
+            "{}\n[{table}]\n{core_bytes}\n",
+            replace_once(CORE_MANIFEST, &format!("{core_bytes}\n"), "")
+        );
+        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        assert_eq!(diagnostics.len(), 1, "{table}: {diagnostics:#?}");
+        assert_eq!(
+            diagnostics[0].message,
+            missing_message(BYTES),
+            "{table}: {manifest}"
+        );
+    }
+}
+
+#[test]
 fn conditional_dependencies_and_features_are_required_only_when_used() {
     assert!(audit_manifest(CORE_MANIFEST, RuntimeRequirements::default()).is_empty());
 
     let requirements = RuntimeRequirements {
-        reqwest_json: true,
         reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
@@ -121,10 +203,6 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `json` on `reqwest`"),
-        "{messages}"
-    );
     assert!(
         messages.contains("feature `multipart` on `reqwest`"),
         "{messages}"
@@ -168,6 +246,58 @@ fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
         messages.contains("blocking = [\"dep:tokio\"]"),
         "{messages}"
     );
+}
+
+/// `CORE_MANIFEST` plus the blocking client's native-only optional `tokio` at its floor with
+/// `rt`, and a `[features]` table whose `blocking` entry is `blocking`.
+fn blocking_manifest(blocking: &str) -> String {
+    format!(
+        "{CORE_MANIFEST}\n[target.'cfg({BLOCKING_GATE})'.dependencies]\n\
+         tokio = {{ version = \"{}\", features = [\"rt\"], optional = true }}\n\n\
+         [features]\nblocking = {blocking}\n",
+        TOKIO.floor
+    )
+}
+
+#[test]
+fn blocking_may_enable_tokio_through_its_implicit_feature_or_dep_syntax() {
+    // Cargo enables an optional dependency from a feature through three spellings: the implicit
+    // feature named after it (`"tokio"`), `"dep:tokio"`, and a non-weak dependency feature
+    // (`"tokio/rt"`, which enables tokio as well as its `rt`). Each wires the blocking client,
+    // alone or beside other entries.
+    for blocking in [
+        "[\"dep:tokio\"]",
+        "[\"tokio\"]",
+        "[\"serde_json/std\", \"tokio\"]",
+        "[\"tokio/rt\"]",
+        "[\"serde_json/std\", \"tokio/rt-multi-thread\"]",
+    ] {
+        let diagnostics =
+            audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
+        assert!(diagnostics.is_empty(), "{blocking}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn blocking_that_enables_anything_but_tokio_is_not_wired() {
+    // Neither a weak dependency feature (`tokio?/rt`, which enables `rt` only if something else
+    // already enables tokio) nor a near-miss name, as a dependency or as a dependency feature,
+    // enables the optional dependency itself, so each is reported exactly as an empty entry is.
+    for blocking in [
+        "[]",
+        "[\"dep:tokio-util\"]",
+        "[\"tokio-util/rt\"]",
+        "[\"tokio?/rt\"]",
+    ] {
+        let diagnostics =
+            audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
+        assert_eq!(
+            messages(&diagnostics),
+            "Cargo feature `blocking` must enable the native optional dependency with \
+             `blocking = [\"dep:tokio\"]`",
+            "{blocking}"
+        );
+    }
 }
 
 /// `CORE_MANIFEST` with its `reqwest` entry declared by `reqwest` (a whole line) and its package

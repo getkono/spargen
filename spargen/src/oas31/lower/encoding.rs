@@ -3,11 +3,12 @@
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
-    BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle, PropertyEncoding, Ty, TypeKind,
+    AdditionalProps, BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle,
+    PropertyEncoding, Ty, TypeKind,
 };
 use crate::oas31::media::{
-    classify_media, first_list_element, media_essence, media_type_is_well_formed,
-    media_type_with_parameters, ParameterFault,
+    classify_media, first_list_element, is_field_name, is_field_value, media_essence,
+    media_type_is_well_formed, media_type_with_parameters, ParameterFault,
 };
 use crate::oas31::{EncodingObject, MediaTypeObject, RefOr, Schema};
 
@@ -84,6 +85,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .map(|field| (field.name.wire.clone(), field.ty))
             .collect();
+        let overflow = match &structure.additional {
+            AdditionalProps::Typed(ty) => Some(**ty),
+            AdditionalProps::Allow | AdditionalProps::Deny => None,
+        };
         // Nested encoding describes nested multipart parts (`multipart/mixed` inside a part).
         // Spargen generates one flat level, so a nested field is rejected rather than dropped.
         for (name, encoding) in &object.encoding {
@@ -114,23 +119,44 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (name, field_ty) in fields {
             let declared = object.encoding.get(&name);
             let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
-            let headers = self.encoding_headers(declared, media, &name);
+            let headers = self.encoding_headers(declared, media, &name)?;
             properties.push(PropertyEncoding {
                 name,
                 mode,
                 headers,
             });
         }
-        Some(BodyEncoding { properties })
+        // The members of a typed `additionalProperties` overflow are sent too, as the JSON codec
+        // sends them. An Encoding Object is keyed by property name, so none can name them, and
+        // they take the default for their value type, under the same rules as an undeclared
+        // property (a binary overflow on form-urlencoded is refused, as a binary property is).
+        let additional = match overflow {
+            Some(overflow_ty) => {
+                Some(self.encoding_mode(None, overflow_ty, media, "additionalProperties", at)?)
+            }
+            None => None,
+        };
+        Some(BodyEncoding {
+            properties,
+            additional,
+        })
     }
 
-    /// Apply the Encoding Object's mode switch for one property.
+    /// Apply the Encoding Object's mode switch for one property, or `None` once a refusal is
+    /// reported.
     ///
-    /// In media mode a part's bytes come from the property's lowered type and its declared
-    /// `contentType` rides on it as the header. A declaration is refused (`E009`) where the two
-    /// cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose declared
-    /// type is not JSON, on multipart (the part's header) and on form-urlencoded (the field's
-    /// serialization syntax) alike.
+    /// Any of `style`, `explode` or `allowReserved` selects style mode. It refuses (`E009`) a
+    /// style that is not a form style, a delimited style with `explode: true`, and, on multipart,
+    /// `deepObject` and an object property; `allowReserved` on multipart is inert (`W011`).
+    ///
+    /// Otherwise media mode: a part's bytes come from the property's lowered type and its declared
+    /// `contentType` — the first element of the list, else the default for the type — rides on it
+    /// as the header. A declared `contentType` is refused (`E009`) where it is a wildcard, not a
+    /// media type, or carries a parameter that is not `name=value` (or, on multipart, one the
+    /// client cannot send), and where it and the bytes cannot agree: a property rendered as JSON
+    /// (anything but a scalar or bytes) whose declared type is not JSON, on multipart (the part's
+    /// header) and on form-urlencoded (the field's serialization syntax) alike. A binary property
+    /// on form-urlencoded is refused (`E009`) whether or not a `contentType` made it binary.
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -316,11 +342,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
         // sent correctly, with the declared header attached. Media types are case-insensitive
-        // (RFC 9110 § 8.3.1) and the classifier's arms are spelled in lowercase, so the essence is
-        // classified lowercased: `Application/JSON` selects the codec `application/json` does,
-        // here and in the refusal below.
-        let classified = classify_media(&media_essence(&content_type).to_ascii_lowercase())
-            .map(|(codec, _)| codec);
+        // (RFC 9110 § 8.3.1) and `classify_media` matches them so: `Application/JSON` selects the
+        // codec `application/json` does, here and in the refusal below.
+        let classified = classify_media(media_essence(&content_type)).map(|(codec, _)| codec);
         let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
@@ -331,8 +355,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // whatever it declares, so a declaration that is not JSON (`application/xml` over an
         // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
-        // `classified` is the lowercased classification, so `Application/JSON` is judged as the
-        // JSON it is.
+        // `classified` is case-insensitive, so `Application/JSON` is judged as the JSON it is.
         //
         // A form-urlencoded field has no header, so the argument there is not the same one, but it
         // reaches the same rule: its `contentType` is the only statement of the syntax the field's
@@ -436,18 +459,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The literal extra part headers of one multipart property.
     ///
     /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
-    /// through `const`, or `default` in its absence — gives a client something to send.
+    /// through `const`, or `default` in its absence, read through a `$ref` to the Header Object or
+    /// in its schema ([`Self::literal_header_value`]) — gives a client something to send. A
+    /// `Content-Type` entry is skipped (`contentType` describes it), `headers` on a body that is
+    /// not multipart is inert (`W011`), and so is a header that pins no value (`W011`); a
+    /// reference that resolves to nothing is reported where it is resolved (`E004`) and nothing
+    /// more is said of that header.
+    ///
+    /// What is sent is held to RFC 9110: a name that is not a `token`, or a pinned literal that
+    /// is not a field value, is refused (`E009`), so `None` is returned once every such header
+    /// has been reported.
     fn encoding_headers(
         &mut self,
         declared: Option<&EncodingObject>,
         media: MediaType,
         name: &str,
-    ) -> Vec<(String, String)> {
+    ) -> Option<Vec<(String, String)>> {
         let Some(encoding) = declared else {
-            return Vec::new();
+            return Some(Vec::new());
         };
         if encoding.headers.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
         if media != MediaType::Multipart {
             // W011 case: encoding-headers-non-multipart
@@ -456,34 +488,66 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     "`encoding.{name}.headers` applies only to `multipart` content"
                 ))
                 .emit(self.diags);
-            return Vec::new();
+            return Some(Vec::new());
         }
         let mut headers = Vec::new();
+        let mut refused = false;
         for (header_name, header) in &encoding.headers {
             // `Content-Type` is described by `contentType`, not here.
             if header_name.eq_ignore_ascii_case("content-type") {
                 continue;
             }
-            // A `$ref` here is resolved rather than treated as pinning nothing: the target may
-            // well declare the `const` that gives the client something to send, and reporting
-            // "pins no value" without looking would name the wrong reason. An unresolvable
-            // reference is `E004` from `resolve_header`, not a warning.
-            let literal = match header {
-                RefOr::Item(header) => header
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.literal_header_value(schema)),
+            // A `$ref` here, to the Header Object or inside it to its schema, is resolved rather
+            // than treated as pinning nothing: the target may well declare the `const` that gives
+            // the client something to send, and reporting "pins no value" without looking would
+            // name the wrong reason. An unresolvable reference is `E004`, from `resolve_header`
+            // or `literal_header_value`, not a warning.
+            let schema = match header {
+                RefOr::Item(header) => header.schema.clone(),
                 RefOr::Ref(_) => match self.resolve_header(header) {
-                    Some(resolved) => resolved
-                        .schema
-                        .as_ref()
-                        .and_then(|schema| self.literal_header_value(schema)),
+                    Some(resolved) => resolved.schema,
                     // `resolve_header` already reported the unresolvable reference; adding
                     // "pins no value" would name a second, wrong reason for one defect.
                     None => continue,
                 },
             };
+            let literal = match schema.map(|schema| self.literal_header_value(&schema)) {
+                Some(HeaderLiteral::Pinned(value)) => Some(value),
+                Some(HeaderLiteral::Unpinned) | None => None,
+                // Reported where the reference was resolved, for the same reason as above.
+                Some(HeaderLiteral::Unreadable) => continue,
+            };
             match literal {
+                // The pair is sent verbatim as a part header, so a name or value the HTTP field
+                // grammar refuses would otherwise generate and fail, or be dropped, only when a
+                // request is built.
+                Some(_) if !is_field_name(header_name) => {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers` names `{}`, which is not an HTTP field \
+                             name: RFC 9110 § 5.1 requires a token, one or more letters, \
+                             digits, or characters among !#$%&'*+-.^_`|~",
+                            header_name.escape_debug()
+                        ))
+                        .remedy("rename the header, or omit this API segment with spargen::omit!")
+                        .emit(self.diags);
+                    refused = true;
+                }
+                Some(value) if !is_field_value(&value) => {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers.{header_name}` pins `{}`, which is not an \
+                             HTTP field value: RFC 9110 § 5.5 admits no control character and no \
+                             leading or trailing whitespace",
+                            value.escape_debug()
+                        ))
+                        .remedy(
+                            "pin a value of visible characters, with spaces or tabs only between \
+                             them",
+                        )
+                        .emit(self.diags);
+                    refused = true;
+                }
                 Some(value) => headers.push((header_name.clone(), value)),
                 None => {
                     // W011 case: encoding-header-no-value
@@ -497,25 +561,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
-        headers
+        (!refused).then_some(headers)
     }
 
-    /// The literal value a header schema pins, if any.
-    fn literal_header_value(&self, schema: &RefOr<Schema>) -> Option<String> {
-        let RefOr::Item(schema) = schema else {
-            return None;
+    /// The literal value a header schema pins: its own `const`, else its own `default`, and where
+    /// it states neither, those of the schema a `$ref` in it names (#701). The reference is read
+    /// through component aliases and through targets that are themselves a `$ref` beside a sibling
+    /// keyword, as [`Self::ref_target_body`] reads it, so `{ $ref: V }` pins what `V` pins.
+    ///
+    /// This is where the header schema's written reference is resolved, and a reference that
+    /// resolves to nothing is reported here (`E004`). That outcome, a chain
+    /// [`Self::ref_target_body`] cannot read past it, and a chain of sibling-bearing `$ref`s that
+    /// runs past `MAX_SCHEMA_DEPTH` are [`HeaderLiteral::Unreadable`]: the defect is reported
+    /// once, not again as "pins no value".
+    fn literal_header_value(&mut self, schema: &RefOr<Schema>) -> HeaderLiteral {
+        let (mut reference, mut at) = match schema {
+            RefOr::Item(schema) => {
+                if let Some(literal) = pinned_literal(schema) {
+                    return literal;
+                }
+                let Some(reference) = &schema.reference else {
+                    return HeaderLiteral::Unpinned;
+                };
+                (reference.clone(), schema.provenance.clone())
+            }
+            RefOr::Ref(reference) => (reference.reference.clone(), reference.provenance.clone()),
         };
-        let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
-        match &value.node {
-            crate::source::Node::String(text) => Some(text.clone()),
-            crate::source::Node::Bool(value) => Some(value.to_string()),
-            crate::source::Node::Number(number) => Some(match number {
-                crate::source::Number::Int(value) => value.to_string(),
-                crate::source::Number::UInt(value) => value.to_string(),
-                crate::source::Number::Float(value) => value.to_string(),
-            }),
-            _ => None,
+        if self.resolver.resolve(&reference, &at, self.diags).is_err() {
+            return HeaderLiteral::Unreadable;
         }
+        for _ in 0..super::MAX_SCHEMA_DEPTH {
+            let Some(target) = self.ref_target_body(&reference, &at) else {
+                return HeaderLiteral::Unreadable;
+            };
+            if let Some(literal) = pinned_literal(&target) {
+                return literal;
+            }
+            let Some(next) = &target.reference else {
+                return HeaderLiteral::Unpinned;
+            };
+            reference.clone_from(next);
+            at = target.provenance.clone();
+        }
+        // A bare alias cycle ends in `ref_target_body`. A chain of `$ref`s with siblings that runs
+        // past the bound is a cycle through them, which component lowering rejects (`E013`), or a
+        // chain deeper than it reads (`E014`); either way the defect is reported there, not here.
+        HeaderLiteral::Unreadable
     }
 
     /// Report the encoding fields of a Media Type Object that cannot take effect in this position.
@@ -556,4 +647,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// the document wrote one, else `at`, the body the property belongs to.
 fn encoding_site(declared: Option<&EncodingObject>, at: &Provenance) -> Provenance {
     declared.map_or_else(|| at.clone(), |encoding| encoding.provenance.clone())
+}
+
+/// What an encoding header's schema pins, as [`LowerCtx::literal_header_value`] reads it.
+enum HeaderLiteral {
+    /// The scalar literal sent as the part header's value.
+    Pinned(String),
+    /// No `const` or `default`, or one that is not a scalar: nothing to send (`W011`).
+    Unpinned,
+    /// A `$ref` the schema is read through could not be followed; its defect is reported where
+    /// the reference is resolved, so nothing more is said here.
+    Unreadable,
+}
+
+/// The literal `schema` itself pins, if it states a `const` or a `default`: `const` first, and a
+/// non-scalar value as [`HeaderLiteral::Unpinned`]. `None` where it states neither.
+fn pinned_literal(schema: &Schema) -> Option<HeaderLiteral> {
+    let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
+    Some(match &value.node {
+        crate::source::Node::String(text) => HeaderLiteral::Pinned(text.clone()),
+        crate::source::Node::Bool(value) => HeaderLiteral::Pinned(value.to_string()),
+        crate::source::Node::Number(number) => HeaderLiteral::Pinned(match number {
+            crate::source::Number::Int(value) => value.to_string(),
+            crate::source::Number::UInt(value) => value.to_string(),
+            crate::source::Number::Float(value) => value.to_string(),
+        }),
+        _ => HeaderLiteral::Unpinned,
+    })
 }

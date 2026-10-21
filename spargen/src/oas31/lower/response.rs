@@ -204,9 +204,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower a response's documented headers into typed accessors.
     ///
-    /// A header that cannot be represented is skipped with a diagnostic rather than failing the
-    /// whole operation: the body is what the call returns, and refusing an otherwise-generatable
-    /// operation over an unreadable header would be a poor trade.
+    /// A header with no typed accessor is skipped, and what is reported depends on why. A
+    /// documented `Content-Type`, a shape `simple` serialization cannot express, a `content` media
+    /// type that is not JSON or text, a `content` entry without a schema, and a textual one that
+    /// is not a single value are warnings (`W011`): the body is what the call returns, and
+    /// refusing an otherwise-generatable operation over an unreadable header would be a poor trade.
+    /// A defect in the document itself still rejects it, with the error reported where it is
+    /// found: a reference that resolves to nothing, a `content` key spargen does not classify
+    /// (`E009`), or a schema that fails to lower.
     fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
         let mut headers = Vec::new();
         for (name, header) in &response.headers {

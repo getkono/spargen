@@ -54,16 +54,28 @@ pub(crate) fn build_script_manifest() -> Option<Utf8PathBuf> {
 /// - An empty value is taken as given: an empty `CARGO_MANIFEST_PATH` names the empty path, which
 ///   the audit then fails to read, and an empty `CARGO_MANIFEST_DIR` names `Cargo.toml` relative
 ///   to the working directory. The macro's locator treats an empty value as unset.
+///
+/// Both are decided by [`manifest_from`], which takes the two lookups as arguments so they can be
+/// exercised without mutating the process environment.
 fn manifest_from_env() -> Option<Utf8PathBuf> {
-    std::env::var("CARGO_MANIFEST_PATH")
-        .ok()
-        .map(Utf8PathBuf::from)
-        .or_else(|| {
-            std::env::var("CARGO_MANIFEST_DIR")
-                .ok()
-                .map(Utf8PathBuf::from)
-                .map(|directory| directory.join("Cargo.toml"))
-        })
+    manifest_from(
+        std::env::var("CARGO_MANIFEST_PATH"),
+        std::env::var("CARGO_MANIFEST_DIR"),
+    )
+}
+
+/// [`manifest_from_env`] over the results of looking up `CARGO_MANIFEST_PATH` (`path`) and
+/// `CARGO_MANIFEST_DIR` (`directory`).
+fn manifest_from(
+    path: Result<String, std::env::VarError>,
+    directory: Result<String, std::env::VarError>,
+) -> Option<Utf8PathBuf> {
+    path.ok().map(Utf8PathBuf::from).or_else(|| {
+        directory
+            .ok()
+            .map(Utf8PathBuf::from)
+            .map(|directory| directory.join("Cargo.toml"))
+    })
 }
 
 pub(crate) struct Audit {
@@ -202,7 +214,7 @@ fn audit_in(
                 items
                     .iter()
                     .filter_map(toml::Value::as_str)
-                    .any(|item| item == "dep:tokio" || item == "tokio")
+                    .any(enables_tokio)
             });
         if !wired {
             diagnostics.push(diagnostic(
@@ -219,6 +231,18 @@ fn audit_in(
         diagnostics,
         manifests,
     }
+}
+
+/// Whether one entry of a Cargo feature's list enables the optional `tokio` dependency:
+/// `"dep:tokio"`, the implicit feature `"tokio"`, or a dependency feature `"tokio/<feature>"`,
+/// which enables the dependency along with its feature. The weak form `"tokio?/<feature>"` enables
+/// a feature only of a tokio something else already enables, so it does not count.
+fn enables_tokio(item: &str) -> bool {
+    item == "dep:tokio"
+        || item == "tokio"
+        || item
+            .strip_prefix("tokio/")
+            .is_some_and(|feature| !feature.is_empty())
 }
 
 /// Whether the consumer manifest declares a Cargo feature of its own by this name.
@@ -259,6 +283,7 @@ fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
         severity: Code::RuntimeDependencyContract.severity(),
         pointer: JsonPointer::root(),
         span: None,
+        file: None,
         message,
         remedy: Some("declare the generated client's runtime dependencies in the consuming package's Cargo.toml using the documented supported ranges and features".to_owned()),
         interpretation: None,

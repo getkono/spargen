@@ -8,8 +8,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, P
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, CollectedRef,
-    RefTarget,
+    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
+    split_fragment, CollectedRef, RefTarget,
 };
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
@@ -76,7 +76,10 @@ impl InputBundle {
         bundle.vendor_dir = spec_dir.join(VENDOR_DIR);
         bundle.lock = load_lock(&spec_dir.join(LOCK_FILE_NAME), diags)?;
 
-        let root_id = bundle.load_file(root.to_path_buf(), diags)?;
+        // The root document is read before any reference is walked, so a failure to read it is
+        // about the input as a whole and is located at its root.
+        let root_site = Provenance::new(JsonPointer::root(), None);
+        let root_id = bundle.load_file(root.to_path_buf(), root_site, diags)?;
         bundle.root = Some(root_id);
 
         // Each entry is a value to walk: a loaded document's root, or a reference target inside a
@@ -101,7 +104,8 @@ impl InputBundle {
                         // inside a vendored remote doc is classified `Remote` against its URL.
                         let resolved = bundle.resolve_path(file, &path);
                         if bundle.file_id_by_path(&resolved).is_none() {
-                            let loaded = bundle.load_file(resolved, diags)?;
+                            let site = referring_site(collected);
+                            let loaded = bundle.load_file(resolved, site, diags)?;
                             queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
@@ -278,20 +282,26 @@ impl InputBundle {
 }
 
 impl InputBundle {
-    fn load_file(&mut self, path: Utf8PathBuf, diags: &mut Diagnostics) -> Result<FileId, Aborted> {
+    /// Load the local document at `path`, unless it is already loaded. A failure to read it is
+    /// reported (`E011`) at `site`: the reference that named `path`, or the root for the root
+    /// document itself.
+    fn load_file(
+        &mut self,
+        path: Utf8PathBuf,
+        site: Provenance,
+        diags: &mut Diagnostics,
+    ) -> Result<FileId, Aborted> {
         if let Some(id) = self.file_id_by_path(&path) {
             return Ok(id);
         }
         let text = std::fs::read_to_string(&path).map_err(|error| {
-            Diagnostic::error(
-                Code::InvalidInput,
-                Provenance::new(JsonPointer::root(), None),
-            )
-            .message(format!("failed to read `{path}`: {error}"))
-            .emit(diags);
+            Diagnostic::error(Code::InvalidInput, site)
+                .message(format!("failed to read `{path}`: {error}"))
+                .emit(diags);
             Aborted
         })?;
         let id = FileId(self.files.len() as u32);
+        diags.register_file(id, path.clone());
         let parsed = parse_by_name(id, path.as_str(), &text, diags)?;
         self.files.insert(
             id,
@@ -307,9 +317,10 @@ impl InputBundle {
     }
 
     /// Resolve a remote `$ref` base `url` from its vendored, hash-pinned copy. Returns the loaded
-    /// file id, or `None` when the ref is unpinned (`E003`) or the vendored bytes drift from the
-    /// lock (`E021`) — in either case a diagnostic is emitted at `site`, the reference that named
-    /// `url`, and the load ultimately aborts. Never performs network I/O.
+    /// file id, or `None` when the ref is unpinned (`E003`), the vendored bytes drift from the
+    /// lock (`E021`), or they are not UTF-8 (`E011`) — in each case a diagnostic is emitted at
+    /// `site`, the reference that named `url`, and the load ultimately aborts. Never performs
+    /// network I/O.
     fn load_remote(
         &mut self,
         url: &str,
@@ -348,16 +359,14 @@ impl InputBundle {
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(_) => {
-                Diagnostic::error(
-                    Code::InvalidInput,
-                    Provenance::new(JsonPointer::root(), None),
-                )
-                .message(format!("vendored file for `{url}` is not valid UTF-8"))
-                .emit(diags);
+                Diagnostic::error(Code::InvalidInput, site)
+                    .message(format!("vendored file for `{url}` is not valid UTF-8"))
+                    .emit(diags);
                 return Ok(None);
             }
         };
         let id = FileId(self.files.len() as u32);
+        diags.register_file(id, vendored.clone());
         let parsed = parse_by_name(id, &entry.path, &text, diags)?;
         self.files.insert(
             id,
@@ -404,17 +413,28 @@ impl InputBundle {
     }
 
     fn resolve_path(&self, base: FileId, path: &str) -> Utf8PathBuf {
-        let base_path = match self.origins.get(&base) {
-            Some(Origin::Local(path)) => path,
-            _ => &self.file(base).expect("base file exists").path,
-        };
-        let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+        let parent = self
+            .base_path(base)
+            .parent()
+            .unwrap_or_else(|| Utf8Path::new(""));
         parent.join(path)
     }
 
-    /// Register an OpenAPI 3.2 `$self` identity and make it the base for subsequent references.
-    /// Relative identities in local documents are resolved from the retrieval path; identities in
-    /// remote documents are resolved from the pinned retrieval URL.
+    /// The local path `file`'s relative paths resolve against: its local `$self` identity, or the
+    /// path it was loaded from.
+    fn base_path(&self, file: FileId) -> &Utf8Path {
+        match self.origins.get(&file) {
+            Some(Origin::Local(path)) => path,
+            _ => &self.file(file).expect("base file exists").path,
+        }
+    }
+
+    /// Register an OpenAPI 3.2 `$self` identity, a name a reference reaches `file` by. An
+    /// `http`/`https` identity, or a relative one, also becomes the base its relative references
+    /// resolve against: a relative identity is resolved from the document's own path when it is
+    /// local, and from the URL it was retrieved from when it is remote. Any other identity with a
+    /// scheme (`urn:x:y`) is registered as written, in a remote document as in a local one, and
+    /// supplies no hierarchical base, so the document keeps the one it was reached at.
     fn register_self_identity(&mut self, file: FileId, retrieval_url: Option<&str>) {
         let Some(self_uri) = self
             .value_at(file)
@@ -424,26 +444,64 @@ impl InputBundle {
         else {
             return;
         };
-        let (base, _) = split_fragment(&self_uri);
-        if base.is_empty() {
-            return;
+        let identity = classify_self(&self_uri, retrieval_url, self.base_path(file));
+        match identity {
+            None => {}
+            Some(SelfRegistration::Remote(canonical)) => {
+                self.origins.insert(file, Origin::Remote(canonical.clone()));
+                self.url_to_file.insert(canonical, file);
+            }
+            Some(SelfRegistration::Local(canonical)) => {
+                self.origins.insert(file, Origin::Local(canonical));
+            }
+            Some(SelfRegistration::Opaque(uri)) => {
+                self.url_to_file.insert(uri, file);
+            }
         }
-        if let Some(retrieval_url) = retrieval_url {
-            let canonical = resolve_ref_url(retrieval_url, base);
-            self.origins.insert(file, Origin::Remote(canonical.clone()));
-            self.url_to_file.insert(canonical, file);
+    }
+}
+
+/// What the build registers a document's `$self` as: see [`InputBundle::register_self_identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SelfRegistration {
+    /// An `http`/`https` identity: the document's base and a URL a reference reaches it by.
+    Remote(String),
+    /// A local identity: the document's base and a path a reference reaches it by.
+    Local(Utf8PathBuf),
+    /// Any other identity with a scheme: a URI a reference naming it exactly reaches the document
+    /// by. It supplies no hierarchical base, so the document keeps the one it was reached at.
+    Opaque(String),
+}
+
+/// Classify the `$self` value `self_uri` of a document retrieved from `retrieval_url` (remote), or
+/// read with its relative paths resolving against `base_path` (local), or `None` where it is empty
+/// or fragment-only.
+pub(super) fn classify_self(
+    self_uri: &str,
+    retrieval_url: Option<&str>,
+    base_path: &Utf8Path,
+) -> Option<SelfRegistration> {
+    let (base, _) = split_fragment(self_uri);
+    if base.is_empty() {
+        return None;
+    }
+    Some(
+        if retrieval_url.is_some() && !is_http_url(base) && has_uri_scheme(base) {
+            // Absolute, so not resolved against the retrieval URL (#718); opaque, so no base.
+            SelfRegistration::Opaque(base.to_owned())
+        } else if let Some(retrieval_url) = retrieval_url {
+            SelfRegistration::Remote(resolve_ref_url(retrieval_url, base))
         } else if base.starts_with("http://") || base.starts_with("https://") {
-            self.origins.insert(file, Origin::Remote(base.to_owned()));
-            self.url_to_file.insert(base.to_owned(), file);
+            SelfRegistration::Remote(base.to_owned())
         } else if !base.contains(':') {
-            let canonical = self.resolve_path(file, base);
-            self.origins.insert(file, Origin::Local(canonical));
+            let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+            SelfRegistration::Local(parent.join(base))
         } else {
             // Opaque canonical identities can still resolve exact absolute references back to this
             // document. They cannot supply a hierarchical base for relative reference resolution.
-            self.url_to_file.insert(base.to_owned(), file);
-        }
-    }
+            SelfRegistration::Opaque(base.to_owned())
+        },
+    )
 }
 
 /// Where a diagnostic about `collected`'s target is raised: at the reference that names it, in
@@ -476,7 +534,7 @@ fn reject_drift(site: Provenance, message: String, diags: &mut Diagnostics) {
 
 /// Parse `text` into a value tree, choosing the format from `name`'s `.json`/`.yaml`/`.yml`
 /// extension (falling back to YAML-then-JSON).
-fn parse_by_name(
+pub(super) fn parse_by_name(
     id: FileId,
     name: &str,
     text: &str,
@@ -485,8 +543,37 @@ fn parse_by_name(
     match Utf8Path::new(name).extension() {
         Some("json") => parse_json(id, text, diags),
         Some("yaml" | "yml") => parse_yaml(id, text, diags),
-        _ => parse_yaml(id, text, diags).or_else(|_| parse_json(id, text, diags)),
+        _ => parse_yaml_then_json(id, text, diags),
     }
+}
+
+/// Parse a document whose name carries no recognised extension: as YAML, then as JSON (#717).
+/// Each attempt collects into scratch diagnostics, and only the kept attempt's are replayed into
+/// `diags`: the parse that succeeded, or YAML's when both fail. A failed YAML attempt therefore
+/// does not abort a document JSON accepts, and a document neither accepts reports only the YAML
+/// attempt's diagnostic rather than one per attempt.
+/// The build ([`parse_by_name`]) and `spargen lock` both take this fallback.
+pub(super) fn parse_yaml_then_json(
+    id: FileId,
+    text: &str,
+    diags: &mut Diagnostics,
+) -> Result<SpannedValue, Aborted> {
+    let mut yaml = Diagnostics::default();
+    let parsed = parse_yaml(id, text, &mut yaml);
+    let (parsed, kept) = match parsed {
+        Ok(value) => (Ok(value), yaml),
+        Err(_) => {
+            let mut json = Diagnostics::default();
+            match parse_json(id, text, &mut json) {
+                Ok(value) => (Ok(value), json),
+                Err(aborted) => (Err(aborted), yaml),
+            }
+        }
+    };
+    for diagnostic in kept.items() {
+        diags.emit(diagnostic.clone());
+    }
+    parsed
 }
 
 /// The working directory a relative local path is made absolute against by [`local_identity`], or
@@ -727,6 +814,62 @@ mod tests {
                 .get("type")
                 .and_then(SpannedValue::as_str),
             Some("integer")
+        );
+    }
+
+    /// A hand-edited `retrieval_url` holding a fragment is read without it: the pinned document
+    /// is keyed by, and resolves its relative `c.yaml` against, `https://h.example/new/b.yaml`,
+    /// so the reference reaches `https://h.example/new/c.yaml` rather than
+    /// `https://h.example/new/b.yaml#/x/c.yaml`, which no pin names.
+    #[test]
+    fn a_fragment_in_a_pinned_retrieval_url_is_not_part_of_the_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let redirecting = "https://h.example/old/b.yaml";
+        let sibling = "https://h.example/new/c.yaml";
+        let moved = "$ref: c.yaml\n";
+        let target = "type: string\n";
+        let vendor = dir.join(VENDOR_DIR);
+        std::fs::create_dir_all(vendor.join("h.example/old")).unwrap();
+        std::fs::create_dir_all(vendor.join("h.example/new")).unwrap();
+        std::fs::write(vendor.join("h.example/old/b.yaml"), moved).unwrap();
+        std::fs::write(vendor.join("h.example/new/c.yaml"), target).unwrap();
+        std::fs::write(
+            dir.join(LOCK_FILE_NAME),
+            format!(
+                "version = 1\n\n[[remote]]\nurl = \"{sibling}\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/new/c.yaml\"\n\n[[remote]]\nurl = \"{redirecting}\"\n\
+                 retrieval_url = \"https://h.example/new/b.yaml#/x/y\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/old/b.yaml\"\n",
+                sha256_hex(target.as_bytes()),
+                sha256_hex(moved.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+                 schemas:\n    B: {{ $ref: '{redirecting}' }}\n"
+            ),
+        )
+        .unwrap();
+
+        let bundle = load(&dir.join("openapi.yaml"));
+
+        let moved_id = bundle.remote_file(redirecting).expect("the pin is loaded");
+        assert_eq!(
+            bundle.remote_file("https://h.example/new/b.yaml"),
+            Some(moved_id)
+        );
+        let sibling_id = bundle.remote_file(sibling).expect("the sibling is loaded");
+        assert_eq!(
+            bundle.reference_target("c.yaml", moved_id),
+            Some((sibling_id, JsonPointer::root()))
+        );
+        assert_eq!(
+            bundle.remote_file("https://h.example/new/b.yaml#/x/c.yaml"),
+            None
         );
     }
 

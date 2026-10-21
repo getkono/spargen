@@ -133,12 +133,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// indistinguishable, and were emitted as such with no diagnostic. A union is collapsed after
     /// its variants are, so an outer `oneOf` compares the variants as they end up.
     ///
-    /// Only types inserted since `mark`, which the meet made, are read: a union lowered before it
-    /// was already merged when it was lowered ([`Self::merge_indistinguishable_variants`]). A
-    /// discriminated or disjoint union is left as it is, since its variants are told apart by
-    /// construction, and so is an `anyOf`, which needs only one match.
+    /// Only types inserted since `mark`, which the meet made, are read, and the union members
+    /// lowered for the meet with their merge held back ([`Self::scalar_meet_unmerged`]), which a
+    /// meet that excluded nothing of them leaves as they are (#678): any other union lowered
+    /// before it was already merged when it was lowered
+    /// ([`Self::merge_indistinguishable_variants`]). A discriminated or disjoint union is left as
+    /// it is, since its variants are told apart by construction, and so is an `anyOf`, which
+    /// needs only one match.
     pub(super) fn collapse_met_one_ofs(&mut self, schema: &Schema, met: Ty, mark: u32) -> Ty {
-        if met.id.0 < mark {
+        if met.id.0 < mark && !self.scalar_meet_unmerged.contains(&met.id) {
             return met;
         }
         let Some(def) = self.graph.get(met.id) else {

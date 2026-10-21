@@ -736,6 +736,126 @@ fn every_cycle_member_decodes_its_wire_shape() {
     assert!(status.success(), "the alias-cycle fixture must lint clean");
 }
 
+/// Every item kind a `deprecated: true` component lowers to, each named by an operation, a struct
+/// field, another component, or a response enum, so the module names each one internally.
+const DEPRECATED_COMPONENTS_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /legacy:
+    post:
+      operationId: postLegacy
+      parameters:
+        - { name: level, in: query, schema: { $ref: '#/components/schemas/Level' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Tree' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '404':
+          description: nf
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Flag' }
+  /mixed/{level}:
+    get:
+      operationId: getMixed
+      parameters:
+        - { name: level, in: path, required: true, schema: { $ref: '#/components/schemas/Level' } }
+        - { name: tags, in: header, schema: { $ref: '#/components/schemas/Tags' } }
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Level: { schema: { $ref: '#/components/schemas/Level' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Mixed' }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tags' }
+        '409':
+          description: conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tree' }
+  /form:
+    post:
+      operationId: postForm
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/Legacy' }
+      responses:
+        '204': { description: stored }
+        '400':
+          description: bad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Legacy' }
+components:
+  schemas:
+    Mixed: { oneOf: [{ $ref: '#/components/schemas/Legacy' }, { $ref: '#/components/schemas/Tags' }] }
+    Level: { type: integer, enum: [1, 2], deprecated: true }
+    Flag: { type: boolean, enum: [true], deprecated: true }
+    Tags: { type: array, items: { type: string }, deprecated: true }
+    Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }
+    Forest: { type: array, items: { $ref: '#/components/schemas/Tree' } }
+    Legacy:
+      type: object
+      deprecated: true
+      required: [level, flag, tags, tree, forest]
+      properties:
+        level: { $ref: '#/components/schemas/Level' }
+        flag: { $ref: '#/components/schemas/Flag' }
+        tags: { $ref: '#/components/schemas/Tags' }
+        tree: { $ref: '#/components/schemas/Tree' }
+        forest: { $ref: '#/components/schemas/Forest' }
+"#;
+
+/// Issue #731: a deprecated component carries `#[deprecated]` whatever item it lowers to, and the
+/// module that names those items itself still compiles and lints clean under `-D warnings`.
+#[test]
+fn a_module_naming_its_deprecated_components_lints_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, DEPRECATED_COMPONENTS_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "deprecated_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a module naming its own deprecated components must lint clean"
+    );
+}
+
 const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -915,6 +1035,170 @@ fn an_operation_named_after_a_client_method_still_compiles() {
     assert!(
         status.success(),
         "an operationId matching a fixed client method must still generate compiling code"
+    );
+}
+
+/// Pairs of distinct operations whose root type names derive alike (issue #693). `request`'s error
+/// type is widened to `RequestOperationError` beside the runtime's `RequestError`, which is the
+/// plain form of `requestOperation`'s. `getV2` and `get_v_2` allocate the distinct methods `get_v2`
+/// and `get_v_2`, which both PascalCase to `GetV2`; each documents two success bodies and an error
+/// body, so each emits a `…Response` enum and a `…Error` type. Each block is one path; the test
+/// generates them in this order, which lists each losing operation before its winner, and reversed.
+const OPERATION_TYPE_COLLISION_PATHS: [&str; 4] = [
+    r#"
+  /request:
+    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }"#,
+    r#"
+  /request-operation:
+    get: { operationId: requestOperation, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: integer } } } } } }"#,
+    r#"
+  /get-v-2:
+    get:
+      operationId: get_v_2
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { type: string } } } }
+        "201": { description: created, content: { application/json: { schema: { type: integer } } } }
+        "404": { description: nf, content: { application/json: { schema: { type: string } } } }"#,
+    r#"
+  /get-v2:
+    get:
+      operationId: getV2
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { type: boolean } } } }
+        "201": { description: created, content: { application/json: { schema: { type: number } } } }
+        "404": { description: nf, content: { application/json: { schema: { type: integer } } } }"#,
+];
+
+/// The collision spec with its [`OPERATION_TYPE_COLLISION_PATHS`] in the given order.
+fn operation_type_collision_spec<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    let mut spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:".to_owned();
+    spec.extend(paths);
+    spec.push('\n');
+    spec
+}
+
+/// The return type of the generated operation method `method`, whitespace removed.
+fn operation_return_type(generated: &str, method: &str) -> String {
+    let (_, rest) = generated
+        .split_once(&format!("pub async fn {method}("))
+        .unwrap_or_else(|| panic!("no operation method `{method}`:\n{generated}"));
+    let (_, rest) = rest.split_once("->").unwrap();
+    let (ret, _) = rest.split_once('{').unwrap();
+    ret.split_whitespace().collect()
+}
+
+/// Which operation keeps each contested spelling: `requestOperation` keeps `RequestOperationError`
+/// because a plain form beats `request`'s widened one, and `getV2` (method `get_v2`) keeps
+/// `GetV2Response` and `GetV2Error` because `get_v2` sorts before `get_v_2`. The loser of each
+/// takes a suffixed form of the name.
+fn assert_contested_names_won_by_rank(generated: &str) {
+    let request_operation = operation_return_type(generated, "request_operation");
+    assert!(
+        request_operation.contains("support::Error<RequestOperationError>"),
+        "`requestOperation` keeps the plain `RequestOperationError`: {request_operation}"
+    );
+    let request = operation_return_type(generated, "request");
+    assert!(
+        request.contains("support::Error<RequestOperationError")
+            && !request.contains("support::Error<RequestOperationError>"),
+        "`request` takes a suffixed `RequestOperationError…`: {request}"
+    );
+    let get_v2 = operation_return_type(generated, "get_v2");
+    assert!(
+        get_v2.contains("ResponseValue<GetV2Response>")
+            && get_v2.contains("support::Error<GetV2Error>"),
+        "`getV2` keeps `GetV2Response` and `GetV2Error`: {get_v2}"
+    );
+    let get_v_2 = operation_return_type(generated, "get_v_2");
+    assert!(
+        get_v_2.contains("ResponseValue<GetV2Response")
+            && !get_v_2.contains("ResponseValue<GetV2Response>")
+            && get_v_2.contains("support::Error<GetV2Error")
+            && !get_v_2.contains("support::Error<GetV2Error>"),
+        "`get_v_2` takes suffixed `GetV2Response…` and `GetV2Error…`: {get_v_2}"
+    );
+}
+
+/// Two operations whose error or success-enum type names derive alike still get distinct ones, so
+/// the module compiles and lints clean instead of defining one type twice (`E0428`). The plain
+/// form of a name wins it over a widened one, and of two plain forms the lexically smaller method
+/// keeps it, whichever order `paths` lists them in.
+#[test]
+fn operations_whose_type_names_derive_alike_get_distinct_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS),
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "operation_types_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert_contested_names_won_by_rank(&generated);
+
+    let reversed_spec = temp.path().join("reversed.yaml");
+    std::fs::write(
+        &reversed_spec,
+        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS.into_iter().rev()),
+    )
+    .unwrap();
+    let reversed_out = temp.path().join("reversed");
+    let report = generate_fixture_crate(
+        &reversed_spec,
+        &reversed_out,
+        "operation_types_collide_reversed",
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let reversed = std::fs::read_to_string(reversed_out.join("src/lib.rs")).unwrap();
+    assert_contested_names_won_by_rank(&reversed);
+    for method in ["request", "request_operation", "get_v2", "get_v_2"] {
+        assert_eq!(
+            operation_return_type(&generated, method),
+            operation_return_type(&reversed, method),
+            "`{method}`'s types do not depend on the order of `paths`"
+        );
+    }
+
+    for (item, stem) in [
+        ("struct", "RequestOperationError"),
+        ("enum", "GetV2Response"),
+        ("struct", "GetV2Error"),
+    ] {
+        assert_eq!(
+            generated.matches(&format!("pub {item} {stem} ")).count()
+                + generated.matches(&format!("pub {item} {stem}(")).count(),
+            1,
+            "`{stem}` is defined exactly once:\n{generated}"
+        );
+        assert!(
+            generated.contains(&format!("pub {item} {stem}"))
+                && generated
+                    .split(&format!("pub {item} {stem}"))
+                    .skip(1)
+                    .any(|rest| rest.starts_with(|c: char| c.is_ascii_alphanumeric())),
+            "the losing operation takes a suffixed `{stem}…`:\n{generated}"
+        );
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "operations whose type names derive alike must still generate compiling code"
     );
 }
 
@@ -2400,7 +2684,8 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
 
 /// Every multipart part carries a resolved `Content-Type`: the specification's defaulting table
 /// picks `application/octet-stream` for a binary property, `text/plain` for a scalar, and
-/// `application/json` for an object or array.
+/// `application/json` for an object or array. A header an Encoding Object pins rides on its own
+/// part beside that `Content-Type`.
 #[test]
 fn multipart_parts_carry_their_resolved_content_types() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2428,6 +2713,12 @@ fn multipart_parts_carry_their_resolved_content_types() {
                 header.contains(&format!("Content-Type: {content_type}")),
                 "part `{part}` must declare {content_type}: {header}"
             );
+            // The one pinned encoding header rides on its own part and on no other.
+            assert_eq!(
+                header.contains("x-part-kind: caption text"),
+                part == "caption",
+                "part `{part}`: {header}"
+            );
         }
 
         stream
@@ -2449,6 +2740,59 @@ fn multipart_parts_carry_their_resolved_content_types() {
         .unwrap();
 
     server.join().unwrap();
+}
+
+/// The members of a typed `additionalProperties` overflow reach the wire on form-urlencoded and
+/// multipart bodies, as they do on JSON (#697): after the declared properties, ordered by key, in
+/// their type's default encoding — a text form field for a string, a JSON part under
+/// `application/json` for an integer array. An overflow key repeating a declared name is not sent
+/// a second time, and on both media the declared property's value is the one sent.
+#[test]
+fn additional_properties_reach_form_and_multipart_bodies() {
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_form_additional(&basic_client::types::RequestBody3c5761a3 {
+            a: "x".to_owned(),
+            additional: [
+                ("z".to_owned(), "last".to_owned()),
+                ("b c".to_owned(), "y&z".to_owned()),
+                ("a".to_owned(), "overflow".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /forms/additional HTTP/1.1"), "{request}");
+    assert!(request.ends_with("\r\n\r\na=x&b%20c=y%26z&z=last"), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .upload_additional(&basic_client::types::RequestBody1654af29 {
+            caption: "c".to_owned(),
+            additional: [
+                ("scores".to_owned(), vec![1, 2]),
+                ("caption".to_owned(), vec![9]),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /upload/additional HTTP/1.1"), "{request}");
+    assert_eq!(request.matches("name=\"caption\"").count(), 1, "{request}");
+    let caption = &request[request.find("name=\"caption\"").unwrap()..];
+    let (_, caption) = caption.split_once("\r\n\r\n").unwrap();
+    assert!(caption.starts_with("c\r\n"), "{caption}");
+    let position = request
+        .find("name=\"scores\"")
+        .unwrap_or_else(|| panic!("{request}"));
+    let part = &request[position..];
+    let (header, value) = part.split_once("\r\n\r\n").unwrap();
+    assert!(header.contains("Content-Type: application/json"), "{header}");
+    assert!(value.starts_with("[1,2]\r\n"), "{value}");
 }
 
 /// A raw byte request body is sent with the `Content-Type` its media key names: the octet gate
@@ -2513,6 +2857,121 @@ fn a_byte_request_body_declares_its_content_type() {
         .unwrap();
 
     server.join().unwrap();
+}
+
+/// Serve one request with a `204`, handing the whole request (head and `Content-Length` body) back
+/// through the join handle.
+fn capture_one_request() -> (String, std::thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let read = stream.read(&mut buf).unwrap();
+            request.extend_from_slice(&buf[..read]);
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                assert_ne!(read, 0, "connection closed before the request head: {text}");
+                continue;
+            };
+            let length = text[..head_end]
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+            if request.len() >= head_end + 4 + length || read == 0 {
+                break;
+            }
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    (format!("http://{addr}"), server)
+}
+
+/// The `content-type` header lines of a captured request.
+fn content_type_lines(request: &str) -> Vec<&str> {
+    let head = request.split("\r\n\r\n").next().unwrap();
+    head.lines()
+        .filter(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+        .collect()
+}
+
+/// A JSON or XML request body goes out under the `Content-Type` its media key declares, exactly
+/// once, and is still encoded by its codec: an `application/merge-patch+json` body as JSON, a
+/// `text/xml` body as XML, and the canonical `application/json` / `application/xml` keys unchanged.
+#[test]
+fn a_json_or_xml_request_body_declares_its_content_type() {
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .patch_merge_document(
+            "d1",
+            &basic_client::types::JsonMeta {
+                id: 7,
+                sku: "S".to_owned(),
+                note: None,
+            },
+        )
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("PATCH /merge-patch/d1 HTTP/1.1"), "{request}");
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/merge-patch+json"],
+        "{request}"
+    );
+    assert!(request.ends_with(r#"{"id":7,"sku":"S"}"#), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .post_json_meta(&basic_client::types::JsonMeta {
+            id: 7,
+            sku: "S".to_owned(),
+            note: None,
+        })
+        .unwrap_err();
+    let request = server.join().unwrap();
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/json"],
+        "{request}"
+    );
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_legacy_order(&basic_client::types::XmlOrder {
+            id: 42,
+            sku: "ABC".to_owned(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /xml/legacy-order HTTP/1.1"), "{request}");
+    assert_eq!(content_type_lines(&request), ["content-type: text/xml"], "{request}");
+    assert!(request.contains("<sku>ABC</sku>"), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_order(&basic_client::types::XmlOrder {
+            id: 42,
+            sku: "ABC".to_owned(),
+        })
+        .unwrap_err();
+    let request = server.join().unwrap();
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/xml"],
+        "{request}"
+    );
 }
 
 #[test]
@@ -3032,6 +3491,53 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
             assert_eq!(status, 202);
             assert_eq!(headers.get("content-type").unwrap(), "text/plain");
             assert_eq!(&body[..], b"not json");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
+// Issue #689: a multi-success operation retains at most `max_error_body` bytes (64 KiB by
+// default) of a body it keeps in an error, as every single-success and error path does, and says
+// so through `truncated`. Before, it read through an uncapped helper and kept the whole body.
+static OVER_CAP: [u8; 64 * 1024 + 4096] = [b'x'; 64 * 1024 + 4096];
+
+#[test]
+fn a_multi_success_operation_caps_the_body_it_keeps_in_an_error() {
+    let cap = 64 * 1024;
+
+    // A matched arm whose body does not decode: read whole (decoding needs it), retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { status, body, truncated, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+            assert!(truncated, "a body cut at the cap must say so");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // An undocumented success status matches no arm: read capped, retained capped.
+    let (base, server) = serve_once("text/plain", "202 Accepted", &OVER_CAP);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_maybe_empty().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(body.len(), cap);
+        }
+        other => panic!("expected an unexpected-status error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // A body under the cap is kept whole and reported untruncated.
+    let (base, server) = serve_once("text/plain", "202 Accepted", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { body, truncated, .. } => {
+            assert_eq!(&body[..], b"not json");
+            assert!(!truncated);
         }
         other => panic!("expected a decode error, got {other:?}"),
     }
@@ -3651,6 +4157,9 @@ fn xml_body_types_carry_attribute_and_rename() {
     let xml = quick_xml::se::to_string(&order).unwrap();
     assert!(xml.contains("id=\"42\""), "{xml}");
     assert!(xml.contains("<sku>ABC</sku>"), "{xml}");
+    // The root `xml.name` names the body's root element, in place of the Rust type's name.
+    assert!(xml.starts_with("<order "), "{xml}");
+    assert!(xml.ends_with("</order>"), "{xml}");
 
     let receipt: basic_client::types::XmlReceipt =
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
@@ -3680,6 +4189,8 @@ fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     assert!(back.contains(r#""sku":"Z9""#), "{back}");
     assert!(!back.contains("@id"), "{back}");
     assert!(!back.contains("ProductSku"), "{back}");
+    // `JsonMeta`'s root `xml.name` is a container rename, which serde_json never reads.
+    assert_eq!(back, r#"{"id":5,"sku":"Z9"}"#);
 }
 
 #[test]
@@ -4499,25 +5010,6 @@ fn success_and_error_shapes_agree_on_the_shared_rule() {
             "both sides departed from the shared rule on {pattern:?} (bodied?)"
         );
     }
-}
-
-#[test]
-fn rejects_openapi_30_without_conversion() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
-        BASIC_SPEC.replace("openapi: 3.1.0", "openapi: 3.0.3"),
-    )
-    .unwrap();
-
-    let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
-
-    assert_eq!(report.outcome(), Outcome::Rejected);
-    assert!(report
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == Code::UnsupportedOpenApiVersion));
 }
 
 #[test]
@@ -5551,6 +6043,12 @@ paths:
                   type: array
                   items:
                     type: string
+            # A pinned part header: sent on `caption`'s part, beside its default `text/plain`.
+            encoding:
+              caption:
+                headers:
+                  X-Part-Kind:
+                    schema: { type: string, const: caption text }
       responses:
         "204":
           description: No Content
@@ -5770,6 +6268,33 @@ paths:
             application/xml:
               schema:
                 $ref: "#/components/schemas/XmlReceipt"
+  # Request bodies whose media key is not their codec's canonical name: a JSON Merge Patch body is
+  # serialized as JSON and a `text/xml` body as XML, and each goes out under the `Content-Type` it
+  # declares rather than `application/json` / `application/xml`.
+  /merge-patch/{id}:
+    patch:
+      operationId: patchMergeDocument
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/JsonMeta"
+      responses:
+        "204": { description: patched }
+  /xml/legacy-order:
+    post:
+      operationId: submitLegacyOrder
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema:
+              $ref: "#/components/schemas/XmlOrder"
+      responses:
+        "204": { description: accepted }
   # JSON body carrying `xml` metadata (regression guard): the schema has `xml.attribute`
   # and `xml.name` hints but is used only by a JSON operation. The format-agnostic serde rename must
   # NOT be applied (it would corrupt JSON), so `JsonMeta` keeps its `id`/`sku` wire names — the
@@ -5955,6 +6480,58 @@ paths:
                 explode: false
               blob:
                 contentType: application/json
+      responses:
+        "204": { description: No Content }
+  # Typed `additionalProperties` on form-urlencoded and multipart bodies (#697): the overflow
+  # members are sent after the declared properties, each in its type's default encoding, as the
+  # JSON codec sends them. The form overflow is a string (a text field); the multipart overflow is
+  # an integer array (a JSON part under `application/json`).
+  /forms/additional:
+    post:
+      operationId: submitFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [a]
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  # A nullable form body with a typed overflow: the overflow map's length is read through the
+  # `Option`, so this compiles only if that branch of the generated call does.
+  /form/additional/nullable:
+    post:
+      operationId: submitNullableFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: [object, 'null']
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  /upload/additional:
+    post:
+      operationId: uploadAdditional
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [caption]
+              properties:
+                caption: { type: string }
+              additionalProperties:
+                type: array
+                items: { type: integer }
       responses:
         "204": { description: No Content }
   # Documented response headers whose schemas are NAMED components. The generated header struct
@@ -6635,9 +7212,11 @@ components:
       properties:
         delta:
           type: string
-    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element.
+    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element, and the
+    # root `xml.name` names the element the body serializes as (a serde container rename).
     XmlOrder:
       type: object
+      xml: { name: order }
       required: [id, sku]
       properties:
         id:
@@ -6659,9 +7238,11 @@ components:
     # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
     # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
-    # hint genuinely has no effect, so it warns rather than rejecting.
+    # hint genuinely has no effect, so it warns rather than rejecting. Its root `xml.name` is
+    # applied all the same: a container rename reaches no JSON wire.
     JsonMeta:
       type: object
+      xml: { name: meta }
       required: [id, sku]
       properties:
         id:
@@ -6962,31 +7543,6 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     );
 }
 
-/// The hidden proc-macro bridge renders deterministically without touching the output path.
-#[test]
-fn macro_preview_is_deterministic() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
-
-    let config = Spec::new(spec);
-    let preview = spargen::__private::preview(&config);
-    assert_eq!(
-        preview.report.outcome(),
-        Outcome::Generated,
-        "{:#?}",
-        preview.report
-    );
-    let contents = preview.contents.expect("generated module");
-    assert!(
-        !out.exists(),
-        "macro preview must not write the output path"
-    );
-    let again = spargen::__private::preview(&config);
-    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
-}
-
 #[test]
 fn macro_manifest_audit_derives_only_capabilities_referenced_by_the_api() {
     let temp = tempfile::tempdir().unwrap();
@@ -7091,10 +7647,9 @@ components:
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `json` on `reqwest`"),
-        "{messages}"
-    );
+    // A JSON request body is serialized by `serde_json` and sent as bytes, so it needs no
+    // reqwest feature.
+    assert!(!messages.contains("`json`"), "{messages}");
     assert!(
         messages.contains("feature `serde` on `bytes`"),
         "{messages}"
@@ -7415,13 +7970,16 @@ fn workspace_inheritance_audit_agrees_with_cargo() {
         r##"openapi: 3.1.0
 info: { title: Inherited, version: 1.0.0 }
 paths:
-  /json:
+  /upload:
     post:
-      operationId: postJson
+      operationId: upload
       requestBody:
         content:
-          application/json:
-            schema: { type: string }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
       responses:
         "204": { description: ok }
 "##,
@@ -7438,7 +7996,7 @@ paths:
         .find(|dependency| dependency.name == "reqwest")
         .unwrap();
     assert!(
-        reqwest.no_default_features && reqwest.features.contains(&"json"),
+        reqwest.no_default_features && reqwest.features.contains(&"multipart"),
         "the cases below need a required feature and a required `default-features = false`: \
          {requirements:#?}"
     );
@@ -7537,7 +8095,7 @@ paths:
             member: &[
                 (
                     "reqwest",
-                    r#"reqwest = { workspace = true, features = ["json"] }"#,
+                    r#"reqwest = { workspace = true, features = ["multipart"] }"#,
                 ),
                 (
                     "serde",
@@ -7559,7 +8117,7 @@ paths:
                 "the member's default-features = false cannot turn off defaults the root leaves on",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -7571,7 +8129,7 @@ paths:
             name: "the same override, refused outright on edition 2024",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -7736,8 +8294,8 @@ paths:
     assert_eq!(kinds.len(), 5, "{raised:#?}");
 }
 
-/// A spec that turns on every capability the requirement table knows: a JSON body (`reqwest/json`),
-/// a multipart body (`reqwest/multipart`), a binary array inside JSON (`bytes/serde`), an XML body
+/// A spec that turns on every capability the requirement table knows: a multipart body
+/// (`reqwest/multipart`), a binary array inside a JSON body (`bytes/serde`), an XML body
 /// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
 /// `format: date-time` (`time`). The advice round trip below is only as strong as the set it
 /// round-trips, so it asserts this spec really derives all of them.
@@ -7897,7 +8455,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
             .features
             .clone()
     };
-    for feature in ["json", "multipart", "stream"] {
+    for feature in ["multipart", "stream"] {
         assert!(
             features_of("reqwest").contains(&feature),
             "{requirements:#?}"
@@ -8994,14 +9552,15 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     );
     // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
     // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
-    // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
-    // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
-    // The `428`/`429` `kind`, narrowed against a `uuid` string, stays closed in either order.
-    // Only an open enum emits `as_str`.
+    // `424` and `425` open in place too, as intermediates no field uses. The union members of
+    // `422`, `423`, `426`, and `427`, which keep two branches, are met first in either order
+    // (#678), so those members meet them into closed branch sets as they are written, opening
+    // nothing (`tests/open.rs` decodes both). The `428`/`429` `kind`, narrowed against a `uuid`
+    // string, stays closed in either order. Only an open enum emits `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
         generated.matches("pub fn as_str(&self) -> &str").count(),
-        10,
+        8,
         "{generated}"
     );
 

@@ -35,7 +35,7 @@ pub(super) fn emit_models(
     });
     quote! {
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_imports)]
+        #[allow(dead_code, deprecated, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
@@ -166,6 +166,12 @@ fn emit_type_def(
         TypeKind::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
+            // A root `xml.name` names the element quick-xml writes for this struct at the root of
+            // an XML body. serde hands a struct's (renamed) name to the serializer, and only
+            // quick-xml reads it, so this changes no other wire.
+            let xml_root = types
+                .xml_root_name(id)
+                .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
                 .iter()
@@ -189,6 +195,7 @@ fn emit_type_def(
                 #docs
                 #deprecated
                 #[derive(Debug, Clone, Serialize, Deserialize)]
+                #xml_root
                 #deny_unknown
                 pub struct #ident {
                     #(#fields)*
@@ -254,7 +261,7 @@ fn emit_type_def(
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
         TypeKind::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
@@ -298,6 +305,7 @@ fn emit_type_def(
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
+                #deprecated
                 #[derive(Debug, Clone, Serialize, Deserialize)]
                 #[serde(transparent)]
                 pub struct #ident(pub #ty);
@@ -305,7 +313,7 @@ fn emit_type_def(
         }
         _ => {
             let ty = type_kind_tokens(&def.kind, names, options);
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
     }
 }

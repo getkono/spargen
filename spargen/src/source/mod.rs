@@ -18,8 +18,15 @@ mod remote;
 mod sha256;
 mod value;
 
+// The one `remote-fetch` gate over `vendor`: it covers every item in the module, its tests
+// included.
 #[cfg(feature = "remote-fetch")]
 mod vendor;
+
+// The lock walk's and the build's `$self`, format and `http(s)` readings, held to one table. Gated
+// as `vendor` is, since it calls into the lock walk.
+#[cfg(all(test, feature = "remote-fetch"))]
+mod selfid_diff_tests;
 
 pub(crate) use bundle::InputBundle;
 pub(crate) use parse::{parse_json, parse_yaml};
@@ -28,6 +35,7 @@ pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, 
 // Remote-ref helpers shared with `oas31::resolve` for hermetic fragment resolution.
 pub(crate) use remote::is_absolute_ref as is_remote_ref;
 pub(crate) use remote::rewrite_refs_to_absolute as rewrite_refs_absolute;
+pub(crate) use remote::security_requirement_key_reference;
 pub(crate) use sha256::sha256_hex;
 
 #[cfg(feature = "remote-fetch")]

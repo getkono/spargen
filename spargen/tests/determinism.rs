@@ -1,13 +1,28 @@
 //! The headline invariant (CLAUDE.md): same spargen version + spec + config produces
 //! byte-identical output. Generating the same spec into two module paths must yield identical code,
 //! the same outcome, and the same diagnostics in the same order. It is held over an inline spec,
-//! every generating corpus case, the broad `e2e.rs` spec, and generated union/`allOf` documents.
+//! every generating corpus case, the broad `e2e.rs` spec (through `generate` with default and with
+//! non-default options, and through the proc-macro preview), `e2e.rs`'s 3.2 and date specs, and
+//! generated union/`allOf` documents.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
-use spargen::{CargoIntegration, Outcome, Report, Spec};
+use spargen::{Outcome, Spec};
+
+#[path = "shared/corpus.rs"]
+mod corpus;
+#[path = "shared/generate.rs"]
+mod generate;
+#[path = "lowering_props/strategies.rs"]
+mod strategies;
+
+use corpus::{corpus_dir, manifest};
+use generate::generate_to_string;
+use strategies::{
+    category_strategy, key_set_strategy, member_strategy, Category, Member, PropType, KEYS,
+};
 
 const SPEC: &str = r##"
 openapi: 3.1.0
@@ -42,28 +57,23 @@ components:
         age: { type: integer }
 "##;
 
-/// One `generate` run: its outcome, its diagnostics rendered in emission order, and the module it
-/// wrote (when it wrote one).
-fn generate_module(spec_path: &Utf8PathBuf, path: &std::path::Path) -> (Report, Option<Vec<u8>>) {
-    let report = spargen::generate(
-        &Spec::new(spec_path.clone())
-            .build(Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap())
-            .cargo(CargoIntegration::Off),
-    );
-    let module = (report.outcome() == Outcome::Generated)
-        .then(|| std::fs::read(path).expect("a `Generated` run wrote its module"));
-    (report, module)
-}
-
 /// Generate `spec_path` twice into two output directories and require the same outcome, the same
 /// diagnostics in the same order, and a byte-identical module. Same spec path + config, different
 /// output dirs: the provenance header (which records the source path) is held constant, isolating
 /// the invariant to generation order. Returns the outcome both runs reached.
 fn assert_generates_identically(spec_path: &Utf8PathBuf, label: &str) -> Outcome {
-    let a = tempfile::tempdir().unwrap();
-    let b = tempfile::tempdir().unwrap();
-    let (report_a, module_a) = generate_module(spec_path, &a.path().join("api.rs"));
-    let (report_b, module_b) = generate_module(spec_path, &b.path().join("api.rs"));
+    assert_configured_generates_identically(spec_path, label, |spec| spec).0
+}
+
+/// [`assert_generates_identically`] with `configure` applied to both runs' [`Spec`], returning the
+/// outcome and the module both runs wrote.
+fn assert_configured_generates_identically(
+    spec_path: &Utf8PathBuf,
+    label: &str,
+    configure: impl Fn(Spec) -> Spec,
+) -> (Outcome, Option<String>) {
+    let (report_a, module_a) = generate_to_string(configure(Spec::new(spec_path.clone())));
+    let (report_b, module_b) = generate_to_string(configure(Spec::new(spec_path.clone())));
     assert_eq!(
         report_a.outcome(),
         report_b.outcome(),
@@ -78,7 +88,7 @@ fn assert_generates_identically(spec_path: &Utf8PathBuf, label: &str) -> Outcome
         module_a == module_b,
         "{label}: generated module is not deterministic"
     );
-    report_a.outcome()
+    (report_a.outcome(), module_a)
 }
 
 /// Write `text` to `openapi.yaml` in a fresh directory, returning the directory and the path.
@@ -98,50 +108,47 @@ fn two_runs_produce_byte_identical_output() {
     );
 }
 
-/// The workspace root, one level above this crate.
-fn workspace_root() -> Utf8PathBuf {
-    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
-}
-
 /// Every `expect = "generate"` case in `corpus/manifest.toml`: real-world descriptions carry far
 /// more names, types, and operations than an inline spec, so a `HashMap` iteration order leaking
 /// into the output has far more places to show.
 #[test]
 fn every_generating_corpus_case_is_byte_identical_across_runs() {
-    let corpus = workspace_root().join("corpus");
-    let manifest: toml::Table =
-        toml::from_str(&std::fs::read_to_string(corpus.join("manifest.toml")).unwrap())
-            .expect("corpus/manifest.toml must parse");
-    let cases = manifest["case"]
-        .as_array()
-        .expect("the manifest is an array of `[[case]]` tables");
     let mut generating = 0;
-    for case in cases {
-        if case["expect"].as_str() != Some("generate") {
+    for case in manifest().cases {
+        if case.expect != "generate" {
             continue;
         }
-        let id = case["id"].as_str().expect("every case has an `id`");
-        let path = corpus.join(case["path"].as_str().expect("every case has a `path`"));
+        let path = corpus_dir().join(&case.path);
         assert_eq!(
-            assert_generates_identically(&path, id),
+            assert_generates_identically(&path, &case.id),
             Outcome::Generated,
-            "{id}: the manifest expects it to generate"
+            "{}: the manifest expects it to generate",
+            case.id
         );
         generating += 1;
     }
     assert!(generating > 0, "the manifest names no generating case");
 }
 
-/// The broad specification `e2e.rs` compile-checks, read out of that file so the two cannot drift.
-fn e2e_basic_spec() -> &'static str {
+/// The specification `e2e.rs` declares as the raw-string constant `name`, read out of that file so
+/// the two cannot drift.
+fn e2e_spec(name: &str) -> &'static str {
     const E2E: &str = include_str!("e2e.rs");
-    const OPEN: &str = "const BASIC_SPEC: &str = r##\"";
-    let start = E2E.find(OPEN).expect("e2e.rs declares `BASIC_SPEC`") + OPEN.len();
+    let open = format!("const {name}: &str = r##\"");
+    let start = E2E
+        .find(&open)
+        .unwrap_or_else(|| panic!("e2e.rs declares `{name}`"))
+        + open.len();
     // The first `"##` after the opening delimiter is the one that closes the raw string.
     let len = E2E[start..]
         .find("\"##")
-        .expect("`BASIC_SPEC` is a closed raw string");
+        .unwrap_or_else(|| panic!("`{name}` is a closed raw string"));
     &E2E[start..start + len]
+}
+
+/// The broad specification `e2e.rs` compile-checks.
+fn e2e_basic_spec() -> &'static str {
+    e2e_spec("BASIC_SPEC")
 }
 
 #[test]
@@ -153,22 +160,85 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs() {
     );
 }
 
-// Generated specs: the union and `allOf` shapes `lowering_props.rs` drives, combined into one
-// document behind one operation. The generators are restated here rather than shared, because each
-// integration test is its own crate.
-
-/// A JSON primitive category for a `oneOf` branch. `Integer` and `Number` share the numeric wire
-/// category, so some generated unions take typed trial matching rather than direct dispatch.
-#[derive(Clone, Copy, Debug)]
-enum Category {
-    String,
-    Integer,
-    Number,
-    Boolean,
-    Array,
+/// The OpenAPI 3.2 specification `e2e.rs` compile-checks: its constructs (`itemSchema` sequential
+/// media, the `query` method, `additionalOperations`) take code paths `BASIC_SPEC` does not
+/// reach.
+#[test]
+fn the_e2e_oas32_spec_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_spec("OAS32_SPEC"));
+    assert_eq!(
+        assert_generates_identically(&spec_path, "e2e OAS32_SPEC"),
+        Outcome::Generated
+    );
 }
 
+/// The date specification `e2e.rs` round-trips over the wire: both date formats in every
+/// position a value reaches the wire from.
+#[test]
+fn the_e2e_date_spec_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_spec("DATE_SPEC"));
+    assert_eq!(
+        assert_generates_identically(&spec_path, "e2e DATE_SPEC"),
+        Outcome::Generated
+    );
+}
+
+/// Every option set away from its default: the configuration is part of the invariant's input, so
+/// a non-default value must be as deterministic as the default one. The module must also differ
+/// from the default-option module, or the options reached nothing this test could hold.
+#[test]
+fn the_e2e_basic_spec_with_non_default_options_is_byte_identical_across_runs() {
+    let (_src, spec_path) = write_spec(e2e_basic_spec());
+    let (outcome, module) =
+        assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
+            spec.uuid(false)
+                .time(false)
+                .open_narrowing(true)
+                .error_body_cap(1024)
+                .batch_cap(7)
+                .carve(true)
+        });
+    assert_eq!(outcome, Outcome::Generated);
+    let (_, default_module) =
+        assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC", |spec| spec);
+    assert_ne!(
+        module, default_module,
+        "the non-default options must change the emitted module"
+    );
+}
+
+/// The hidden proc-macro bridge renders the broad spec deterministically and writes nothing: after
+/// two previews the spec's directory holds the spec alone.
+#[test]
+fn the_macro_preview_is_byte_identical_across_runs_and_writes_nothing() {
+    let (src, spec_path) = write_spec(e2e_basic_spec());
+    let config = Spec::new(spec_path);
+    let preview = spargen::__private::preview(&config);
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    let contents = preview.contents.expect("generated module");
+    let again = spargen::__private::preview(&config);
+    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
+    let written: Vec<_> = std::fs::read_dir(src.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        written,
+        ["openapi.yaml"],
+        "the macro preview must not write beside the spec"
+    );
+}
+
+// Generated specs: the union and `allOf` shapes `lowering_props.rs` drives, drawn from its own
+// strategies and combined into one document behind one operation.
+
 impl Category {
+    /// The branch's schema as a YAML flow mapping.
     fn schema(self) -> &'static str {
         match self {
             Category::String => "{ type: string }",
@@ -178,29 +248,6 @@ impl Category {
             Category::Array => "{ type: array, items: { type: string } }",
         }
     }
-}
-
-fn category_strategy() -> impl Strategy<Value = Category> {
-    prop_oneof![
-        Just(Category::String),
-        Just(Category::Integer),
-        Just(Category::Number),
-        Just(Category::Boolean),
-        Just(Category::Array),
-    ]
-}
-
-const KEYS: [&str; 4] = ["a", "b", "c", "d"];
-
-/// One `allOf` member: property index → (`true` for an integer, else a string; required).
-type Member = BTreeMap<usize, (bool, bool)>;
-
-fn member_strategy() -> impl Strategy<Value = Member> {
-    proptest::collection::btree_map(
-        0usize..KEYS.len(),
-        (any::<bool>(), any::<bool>()),
-        1..=KEYS.len(),
-    )
 }
 
 /// A document holding a JSON-category union `U`, a closed-object union `C`, and an `allOf` merge
@@ -258,8 +305,11 @@ components:
             spec.push_str(&format!("          required: [{}]\n", required.join(", ")));
         }
         spec.push_str("          properties:\n");
-        for (&i, (integer, _)) in member {
-            let ty = if *integer { "integer" } else { "string" };
+        for (&i, (ty, _)) in member {
+            let ty = match ty {
+                PropType::String => "string",
+                PropType::Integer => "integer",
+            };
             spec.push_str(&format!("            {}: {{ type: {ty} }}\n", KEYS[i]));
         }
     }
@@ -274,10 +324,7 @@ proptest! {
     #[test]
     fn generated_union_and_all_of_specs_are_byte_identical_across_runs(
         categories in proptest::collection::vec(category_strategy(), 2..=5),
-        closed in proptest::collection::vec(
-            proptest::collection::btree_set(0usize..KEYS.len(), 1..=KEYS.len()),
-            2..=4,
-        ),
+        closed in proptest::collection::vec(key_set_strategy(), 2..=4),
         members in proptest::collection::vec(member_strategy(), 2..=4),
     ) {
         let text = composite_spec(&categories, &closed, &members);

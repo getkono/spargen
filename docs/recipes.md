@@ -88,7 +88,7 @@ mirrors a typical utoipa document and generates cleanly. It covers:
 | flattened / composed model | `allOf: [{ "$ref": … }, { … }]` | one merged struct |
 | `#[serde(tag = "…")]` enum | `oneOf` + `discriminator` | a Rust enum with custom (de)serialize dispatching on the tag |
 | `#[utoipa::path(tag = "…")]` | `tags` on operations | grouped operations (no effect on typing) |
-| multiple documented statuses | `200` body + `404` body | a per-operation response enum |
+| multiple documented statuses | `200` body + `404` body | the `200` body as the success type, and the `404` body as the operation's typed error (`GetPetError`, wrapping the error body) |
 | `SecurityScheme::Http` bearer | `http` / `bearer` | bearer credential attached per operation |
 
 **Caveat — `type: "null"` validity.** utoipa emits `oneOf`/`type` arrays containing
@@ -129,7 +129,7 @@ titles/versions during assembly.)
 
 **Idioms spargen handles.** The vendored [`corpus/recipes/aide.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/aide.json)
 mirrors a schemars-backed aide document. It generates with only validation-only warnings
-(`W001`, for the `minimum`/`format` hints schemars emits, which spargen faithfully ignores). It
+(`W001`, for the `minimum` hints schemars emits, which spargen faithfully ignores). It
 covers:
 
 | aide/schemars idiom | OpenAPI shape | spargen result |
@@ -139,7 +139,7 @@ covers:
 | externally-tagged enum with data | `oneOf` of closed (`additionalProperties: false`) objects with unique required keys | a Rust enum, dispatched by inspecting content (no `serde(untagged)`, no `Value`) |
 | untagged scalar enum | `oneOf: [{ "type": "string" }, { "type": "integer" }]` | a Rust enum, dispatched by JSON type |
 | `#[serde(flatten)]` | `allOf` composition | one merged struct |
-| multiple documented statuses | `200` body + `400` body | a per-operation response enum |
+| multiple documented statuses | `200` body + `400` body | the `200` body as the success type, and the `400` body as the operation's typed error (`GetItemError`, wrapping the error body) |
 
 > schemars validation keywords (`minimum`, `maxLength`, `pattern`, …) are not enforced by the
 > generated types and surface as `W001`. That is expected, not a problem — the recipe test asserts

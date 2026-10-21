@@ -25,7 +25,8 @@
 //! error_body_cap = 65536  # max bytes of a response body retained on error variants
 //! open_narrowing = false  # open a response body's string `const` narrowings (default false)
 //!
-//! # Zero or more omit rules. The rule KIND is discriminated by field presence. A path/name (or
+//! # Zero or more omit rules. The rule KIND is discriminated by field presence, and a key that
+//! # kind does not use (`file` beside `path`, say) is an error. A path/name (or
 //! # pointer) value that contains a glob metacharacter (`*`, `**`, `?`) is matched as a glob and
 //! # removes EVERY matching construct (bulk); a value with no metacharacter is an exact rule.
 //! [[omit]]
@@ -45,7 +46,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::compat::{Omit, OmitRule};
+use crate::compat::{Omit, OmitRule, UnknownOmitToken};
 
 /// The default cap on bytes of a response body retained on generated error variants.
 pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
@@ -55,8 +56,9 @@ pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 /// What to generate: the spec to read plus every knob that can change the generated API.
 ///
 /// Two `Spec`s that compare equal produce byte-identical output for a given spargen version *and
-/// identical spec-file contents*. Equality covers the knobs below, including the spec's path; it
-/// cannot see the bytes at that path, which the build cache fingerprints separately.
+/// identical spec-file contents*. Equality covers the knobs below, including the spec's path and
+/// the paths of the config files applied to it; it cannot see the bytes at those paths, which the
+/// build cache fingerprints separately.
 ///
 /// ```no_run
 /// let spec = spargen::Spec::new("api/openapi.yaml").uuid(false);
@@ -72,6 +74,10 @@ pub struct Spec {
     pub(crate) batch_cap: usize,
     pub(crate) carve: bool,
     pub(crate) open_narrowing: bool,
+    /// Every config file applied through [`Spec::config_file`] (and so through
+    /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
+    /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
+    pub(crate) config_files: Vec<Utf8PathBuf>,
 }
 
 impl Spec {
@@ -87,6 +93,7 @@ impl Spec {
             batch_cap: DEFAULT_BATCH_CAP,
             carve: false,
             open_narrowing: false,
+            config_files: Vec::new(),
         }
     }
 
@@ -134,7 +141,7 @@ impl Spec {
     /// A *success* body that fails to decode is capped on retention only, on every target:
     /// deserialization needs the whole body, so it is always read whole. See
     /// `ClientConfig::max_error_body` in the emitted runtime for the full disposition, including
-    /// the two paths that are not capped at all.
+    /// the one path that is not capped at all.
     pub fn error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
@@ -187,16 +194,28 @@ impl Spec {
     ///
     /// Call this *before* any setter that must win over the file — `Spec` setters apply in
     /// chained order, so last write wins.
+    ///
+    /// The spec records `path`, so an edit to the file reruns the build:
+    /// [`generate`](crate::generate) names it as a `cargo:rerun-if-changed` path and fingerprints
+    /// its bytes, and `generate_api!` tracks it.
     pub fn config_file(self, path: impl AsRef<Utf8Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path.as_std_path()).map_err(|error| {
             ConfigError::new(format!("cannot read config file `{path}`: {error}"))
         })?;
-        self.apply_config(&text, path)
+        let mut spec = self.apply_config(&text, path)?;
+        spec.config_files.push(path.to_path_buf());
+        Ok(spec)
     }
 
     /// Apply `spargen.toml` from beside the spec, if one is there. A missing file is not an
     /// error — this is the discovery path every entry point uses by default.
+    ///
+    /// A file that is found is recorded as [`config_file`](Self::config_file) records it. A
+    /// missing one records nothing: creating `spargen.toml` later does not rerun a build on its
+    /// own, because Cargo reruns a build script on every build for a `rerun-if-changed` path
+    /// that does not exist, and `include_bytes!` of one does not compile. Touch the spec, or
+    /// `cargo clean -p` the crate, after adding the file.
     pub fn discover_config_file(self) -> Result<Self, ConfigError> {
         let discovered = self
             .path
@@ -359,7 +378,7 @@ struct FileConfig {
 
 /// An `[[omit]]` entry. The rule kind is discriminated by which fields are present (TOML has no
 /// native enums): `pointer` ⇒ Pointer, `component`+`name` ⇒ Component, `method`+`path` ⇒
-/// Operation, `path` alone ⇒ Path.
+/// Operation, `path` alone ⇒ Path. A key the selected kind does not use is an error.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OmitToml {
@@ -373,10 +392,8 @@ struct OmitToml {
 
 impl OmitToml {
     fn to_rule(&self) -> Result<OmitRule, String> {
+        self.reject_foreign_keys()?;
         if let Some(pointer) = &self.pointer {
-            if self.path.is_some() || self.method.is_some() || self.component.is_some() {
-                return Err("`pointer` cannot be combined with path/method/component".to_owned());
-            }
             return Ok(OmitRule::Pointer {
                 file: self.file.clone().map(Into::into),
                 pointer: pointer.clone().into(),
@@ -385,24 +402,18 @@ impl OmitToml {
         if let Some(component) = &self.component {
             let name = self.name.as_ref().ok_or("`component` requires a `name`")?;
             return Ok(OmitRule::Component {
-                kind: component.parse().map_err(|error| {
-                    format!(
-                        "{error}; expected one of \
-                         schemas/responses/parameters/request_bodies/headers/security_schemes"
-                    )
-                })?,
+                kind: component
+                    .parse()
+                    .map_err(|error: UnknownOmitToken| error.to_string())?,
                 name: name.clone().into(),
             });
         }
         if let Some(path) = &self.path {
             return match &self.method {
                 Some(method) => Ok(OmitRule::Operation {
-                    method: method.parse().map_err(|error| {
-                        format!(
-                            "{error}; expected one of \
-                             get/put/post/delete/options/head/patch/trace"
-                        )
-                    })?,
+                    method: method
+                        .parse()
+                        .map_err(|error: UnknownOmitToken| error.to_string())?,
                     path: path.clone().into(),
                 }),
                 None => Ok(OmitRule::Path {
@@ -411,6 +422,48 @@ impl OmitToml {
             };
         }
         Err("must specify one of `path`, `component` (+`name`), or `pointer`".to_owned())
+    }
+
+    /// Reject a key the entry's kind does not use. The kind is picked by the same presence order
+    /// [`to_rule`](Self::to_rule) dispatches on, so a well-spelled key in the wrong kind (`file`
+    /// beside `path`) fails here, as a misspelled one fails `deny_unknown_fields`, instead of
+    /// being dropped.
+    fn reject_foreign_keys(&self) -> Result<(), String> {
+        let (kind, takes): (&str, &[&str]) = if self.pointer.is_some() {
+            ("pointer", &["pointer", "file"])
+        } else if self.component.is_some() {
+            ("component", &["component", "name"])
+        } else if self.path.is_some() {
+            if self.method.is_some() {
+                ("operation", &["method", "path"])
+            } else {
+                ("path", &["path"])
+            }
+        } else {
+            return Ok(());
+        };
+        let present = [
+            ("path", self.path.is_some()),
+            ("method", self.method.is_some()),
+            ("component", self.component.is_some()),
+            ("name", self.name.is_some()),
+            ("pointer", self.pointer.is_some()),
+            ("file", self.file.is_some()),
+        ];
+        match present
+            .iter()
+            .find(|(key, set)| *set && !takes.contains(key))
+        {
+            Some((key, _)) => Err(format!(
+                "`{key}` does not apply to a {kind} rule, which takes only {}",
+                takes
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -527,6 +580,47 @@ mod tests {
         assert!(apply("[[omit]]\ncomponent = \"schema\"\n").is_err());
         assert!(apply("[[omit]]\n").is_err());
         assert!(apply("[[omit]]\npointer = \"/x\"\npath = \"/y\"\n").is_err());
+    }
+
+    #[test]
+    fn a_key_the_omit_kind_does_not_use_names_the_key_and_the_kind() {
+        let error = apply("[[omit]]\npath = \"/pets\"\nfile = \"extra.yaml\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid config file `spargen.toml`: omit rule #1: `file` does not apply to a path \
+             rule, which takes only `path`"
+        );
+        let error = apply("[[omit]]\npointer = \"/x\"\nname = \"X\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid config file `spargen.toml`: omit rule #1: `name` does not apply to a \
+             pointer rule, which takes only `pointer` and `file`"
+        );
+    }
+
+    #[test]
+    fn an_unknown_omit_token_names_every_value_the_parser_accepts() {
+        let component = apply("[[omit]]\ncomponent = \"path_itemz\"\nname = \"Foo\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            component,
+            "invalid config file `spargen.toml`: omit rule #1: unknown component kind: \
+             `path_itemz`; expected one of schemas/responses/parameters/request_bodies/headers/\
+             security_schemes/path_items/media_types"
+        );
+        let method = apply("[[omit]]\nmethod = \"qeury\"\npath = \"/pets\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            method,
+            "invalid config file `spargen.toml`: omit rule #1: unknown HTTP method: `qeury`; \
+             expected one of get/put/post/delete/options/head/patch/trace/query"
+        );
     }
 
     #[test]

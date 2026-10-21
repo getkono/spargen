@@ -66,6 +66,69 @@ paths:
 }
 
 #[test]
+fn encoding_on_a_form_or_multipart_key_in_another_letter_case_takes_effect() {
+    // A media key's type and subtype are case-insensitive, so `Multipart/Form-Data` is the
+    // multipart body `multipart/form-data` is: its `encoding` is applied, not a `W011`.
+    let spec = |media: &str, encoding: &str| {
+        format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                sdp: {{ type: string }}
+                tags: {{ type: array, items: {{ type: string }} }}
+            encoding:
+              {encoding}
+      responses:
+        '204': {{ description: ok }}
+"##
+        )
+    };
+    for (lower, media, encoding) in [
+        (
+            "multipart/form-data",
+            "Multipart/Form-Data",
+            "sdp: { contentType: application/sdp }",
+        ),
+        (
+            "application/x-www-form-urlencoded",
+            "Application/X-WWW-Form-Urlencoded",
+            "tags: { style: form, explode: true }",
+        ),
+    ] {
+        let (lower_report, lower_code) = generate_with_code(&spec(lower, encoding));
+        assert_ne!(
+            lower_report.outcome(),
+            Outcome::Rejected,
+            "{lower_report:#?}"
+        );
+        let spec = spec(media, encoding);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            module_body(&code.replace(media, lower)),
+            module_body(&lower_code),
+            "{media} must generate what {lower} does"
+        );
+        let checked = check(&spec);
+        assert_check_agrees(&report, &checked);
+    }
+}
+
+#[test]
 fn w011_encoding_on_a_json_body_has_no_effect() {
     // `encoding` applies only to form and multipart content; elsewhere the specification says it
     // SHALL be ignored, so it is acknowledged rather than rejected.
@@ -123,6 +186,8 @@ paths:
 
 #[test]
 fn e009_nested_encoding_object() {
+    // The part is a string, so `multipart/mixed` over it is a header its text bytes may carry: no
+    // other `E009` gate refuses this body, and the message is the nested-encoding gate's own.
     let spec = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -134,7 +199,7 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              properties: { part: { type: object, properties: { a: { type: string } } } }
+              properties: { part: { type: string } }
             encoding:
               part:
                 contentType: multipart/mixed
@@ -145,7 +210,11 @@ paths:
 "##;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedMediaType),
+            ["`encoding.part.encoding` describes a nested multipart part, which spargen does not generate"],
+            "{report:#?}"
+        );
     }
 }
 
@@ -264,7 +333,8 @@ paths:
 fn e009_multipart_deep_object_encoding_rejected() {
     // `deepObject` builds `name[key]=value` query fragments. A multipart part carries its name in
     // `Content-Disposition` and its value alone, so the style has no representation there — it used
-    // to generate parts holding only the values, with the keys dropped.
+    // to generate parts holding only the values, with the keys dropped. The property is a string,
+    // not an object, so the RFC 6570 object-property gate beside this one does not also refuse it.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -277,10 +347,7 @@ paths:
             schema:
               type: object
               properties:
-                filter:
-                  type: object
-                  properties:
-                    a: { type: string }
+                filter: { type: string }
             encoding:
               filter:
                 style: deepObject
@@ -289,7 +356,14 @@ paths:
 "##;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedMediaType),
+            [
+                "`encoding.filter.style: deepObject` is defined only for `in: query`; it has no \
+                 `multipart/form-data` part representation"
+            ],
+            "{report:#?}"
+        );
     }
 }
 
@@ -357,6 +431,42 @@ paths:
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn w011_allow_reserved_on_a_multipart_part_has_no_effect() {
+    // A multipart part's value is sent as its own bytes and never percent-encoded, so there is no
+    // reserved set for `allowReserved` to widen.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+            encoding:
+              path:
+                allowReserved: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::DeclarationHasNoEffect),
+            [
+                "`allowReserved` has no effect on `multipart/form-data`: part values are not \
+                 percent-encoded"
+            ],
+            "{report:#?}"
+        );
     }
 }
 
@@ -489,6 +599,83 @@ paths:
             }),
             "{report:#?}"
         );
+    }
+}
+
+#[test]
+fn e009_a_form_urlencoded_binary_additional_properties_value() {
+    // #697: the members of a typed `additionalProperties` overflow are sent in their type's
+    // default encoding, so a binary overflow on a form body is refused as a binary property is,
+    // rather than generated and dropped from the wire.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              additionalProperties: { type: string, contentEncoding: base64 }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`additionalProperties`")
+                    && d.message.contains(
+                        "is binary, which has no `application/x-www-form-urlencoded` \
+                         representation",
+                    )
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn typed_additional_properties_on_form_and_multipart_bodies_generate() {
+    // #697: a scalar or composite overflow has a default encoding on both media, so both bodies
+    // generate with no diagnostic about the overflow.
+    for media in ["application/x-www-form-urlencoded", "multipart/form-data"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                name: {{ type: string }}
+              additionalProperties: {{ type: array, items: {{ type: integer }} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .all(|d| !d.message.contains("additionalProperties")),
+                "{media}: {report:#?}"
+            );
+        }
     }
 }
 
@@ -1080,82 +1267,6 @@ fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
                 "a `multipart/form-data` request body must be an object schema; its properties \
                  are the form parts, so a non-object multipart body is not representable"
             ],
-            "{report:#?}"
-        );
-    }
-}
-
-/// `encoding.headers` accepts a Header Object or a `$ref` to one. The reference was never
-/// resolved, so a target that pins a `const` was reported as pinning no value (`W011`) and the
-/// part shipped without the header. Resolving it makes the two spellings equivalent.
-#[test]
-fn encoding_header_ref_is_resolved_and_pins_its_const() {
-    let spec = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /upload:
-    post:
-      requestBody:
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                profile: { type: string }
-            encoding:
-              profile:
-                contentType: text/plain
-                headers:
-                  X-Part-Kind: { $ref: '#/components/headers/PartKind' }
-      responses:
-        '204': { description: ok }
-components:
-  headers:
-    PartKind:
-      description: which part this is
-      schema: { type: string, const: profile }
-"##;
-    let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::DeclarationHasNoEffect),
-        "a resolved header that pins a const has an effect: {report:#?}"
-    );
-    assert!(code.contains("X-Part-Kind"), "{code}");
-    assert!(code.contains("profile"), "{code}");
-}
-
-/// An `encoding.headers` reference that resolves to nothing is `E004` — and only `E004`, so one
-/// defect does not also collect a "pins no value" warning naming a second, wrong reason.
-#[test]
-fn e004_unresolvable_encoding_header_ref_does_not_also_warn() {
-    let spec = r##"
-openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /upload:
-    post:
-      requestBody:
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                profile: { type: string }
-            encoding:
-              profile:
-                contentType: text/plain
-                headers:
-                  X-Part-Kind: { $ref: '#/components/headers/Missing' }
-      responses:
-        '204': { description: ok }
-"##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
         );
     }

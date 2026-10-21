@@ -3,10 +3,11 @@
 //! The names a generated client re-exports are written down in three places: the standalone
 //! runtime crate's `pub use` list (`support-runtime/src/lib.rs`), the `pub use` list `emit_support`
 //! writes into the embedded `support` module, and the root re-export lists in
-//! `spargen/src/codegen/runtime.rs` that both the generated root `pub use` and the operation
-//! error-type naming read. Nothing but this suite holds them to each other: a name dropped from the
-//! embedded module still compiles when no generated code happens to use it, and a name added to the
-//! root surface changes the public API of every generated client without any other gate noticing.
+//! `spargen/src/name/mod.rs` that both the generated root `pub use` and the operation type naming
+//! read. This suite holds them to each other: a name dropped from the embedded module still
+//! compiles when no generated code happens to use it. A name added to the root surface changes the
+//! public API of every generated client; `e2e.rs`'s `BASIC_SPEC` module snapshot shows it as a diff
+//! in one generated module, and this suite's root-surface golden file names it as a surface change.
 //!
 //! Everything here reads the *emitted* module rather than spargen's source, so what is pinned is
 //! what a consumer receives:

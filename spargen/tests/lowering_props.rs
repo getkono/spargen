@@ -16,16 +16,15 @@
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
 //!   `null` is the null type, #450), and every written `default` is kept or reported at its
 //!   pointer; an irreconcilable object meet whose members all admit `null` is the null type in
-//!   every spelling (#542). Where today's output still splits a law, the gap is held exactly and
-//!   names the open issue that tracks it (#545), so the law tightens when the issue's fix lands.
+//!   every spelling (#542).
 //!
 //! * one `null` decision (#674, [`null_parity`]): a `type`, `enum` and `const` beside a `oneOf` /
 //!   `anyOf` give one generated nullability, one set of `()` and `Option` arms, and one set of
 //!   excluded-member `W011`s in every spelling of that constraint set.
 //!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
-//! and each generated union's variants are distinguishable by shape unless a warning says why or an
-//! open issue tracks the gap (#402). Each case of the first three properties moved into a
+//! and each generated union's variants are distinguishable by shape unless a `W001` at the union
+//! says why (#402). Each case of the first three properties moved into a
 //! referenced file (`oracles::relocate`) also reaches the same verdict, codes and shapes (#446).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +36,12 @@ use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 #[path = "lowering_props/null_parity.rs"]
 mod null_parity;
 mod oracles;
+#[path = "lowering_props/strategies.rs"]
+mod strategies;
+
+use strategies::{
+    category_strategy, key_set_strategy, member_strategy, Category, Member, PropType, KEYS,
+};
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.
 fn check(spec: &str) -> Report {
@@ -62,9 +67,8 @@ fn generate_module(spec: &str) -> (Report, String) {
 }
 
 /// `generate` on the root document at `root`, writing the module beside it, held to
-/// [`oracles::location_violations`] and, when it generates, to
-/// [`oracles::indistinguishable_variants`]: a union's variants are told apart by shape, or a
-/// warning says why, or an open issue tracks the gap.
+/// [`oracles::location_violations`] and, when it generates, to [`oracles::unexplained_variants`]:
+/// a union's variants are told apart by shape, or a `W001` at the union says why.
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
@@ -87,7 +91,7 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
 /// Fail unless every diagnostic in `report` names a real location (#454).
 fn assert_located(report: &Report, root: &Utf8Path) {
     let text = std::fs::read(root).unwrap_or_default();
-    let unlocated = oracles::unknown(oracles::location_violations(report.diagnostics(), &text));
+    let unlocated = oracles::location_violations(report.diagnostics(), &text);
     assert!(
         unlocated.is_empty(),
         "diagnostics with no real location: {unlocated:#?}"
@@ -142,17 +146,6 @@ fn has_code(report: &Report, code: Code) -> bool {
 
 // JSON-type-category disjointness is sound.
 
-/// A JSON primitive category to place in a union variant. `Integer` and `Number` deliberately share
-/// the numeric wire category — the lowering must never treat them as disjoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Category {
-    String,
-    Integer,
-    Number,
-    Boolean,
-    Array,
-}
-
 impl Category {
     /// The variant's `oneOf` schema line.
     fn schema_line(self) -> &'static str {
@@ -164,16 +157,31 @@ impl Category {
             Category::Array => "        - { type: array, items: { type: string } }",
         }
     }
+
+    /// The [`shape`] of the Rust type the variant's schema lowers to.
+    fn shape(self) -> &'static str {
+        match self {
+            Category::String => "String",
+            Category::Integer => "i64",
+            Category::Number => "f64",
+            Category::Boolean => "bool",
+            Category::Array => "Vec<String>",
+        }
+    }
 }
 
-fn category_strategy() -> impl Strategy<Value = Category> {
-    prop_oneof![
-        Just(Category::String),
-        Just(Category::Integer),
-        Just(Category::Number),
-        Just(Category::Boolean),
-        Just(Category::Array),
-    ]
+/// The [`shape`] of `U` when its `oneOf` lists the variant shapes `variants`: the one shape when
+/// they are all the same type, else an enum with one boxed variant per distinct shape.
+fn union_shape(variants: BTreeSet<String>) -> String {
+    if variants.len() == 1 {
+        return variants.into_iter().next().unwrap_or_default();
+    }
+    let mut payloads: Vec<String> = variants
+        .into_iter()
+        .map(|v| format!("(Box<{v}>)"))
+        .collect();
+    payloads.sort();
+    format!("enum {{ {} }}", payloads.join(", "))
 }
 
 fn category_union_spec(variants: &[Category]) -> String {
@@ -188,14 +196,6 @@ fn category_union_spec(variants: &[Category]) -> String {
 }
 
 // Required-key disjointness (closed objects) is sound.
-
-/// The candidate property names for the closed-object variants. Each is a single lowercase letter so
-/// its wire name equals its Rust field ident.
-const KEYS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn key_set_strategy() -> impl Strategy<Value = BTreeSet<usize>> {
-    proptest::collection::btree_set(0usize..KEYS.len(), 1..=KEYS.len())
-}
 
 fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
     let mut spec = String::from(
@@ -214,13 +214,16 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
     spec
 }
 
-// The allOf merge reconciles member constraints exactly.
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PropType {
-    String,
-    Integer,
+/// The [`shape`] of the closed object whose required string keys are `keys`.
+fn closed_object_shape(keys: &BTreeSet<usize>) -> String {
+    let fields: Vec<String> = keys
+        .iter()
+        .map(|&key| format!("{}: String [] []", KEYS[key]))
+        .collect();
+    format!("struct {{ {} }}", fields.join("; "))
 }
+
+// The allOf merge reconciles member constraints exactly.
 
 impl PropType {
     fn schema(self) -> &'static str {
@@ -229,20 +232,6 @@ impl PropType {
             PropType::Integer => "{ type: integer }",
         }
     }
-}
-
-/// One `allOf` member: property name → (type, required).
-type Member = BTreeMap<usize, (PropType, bool)>;
-
-fn member_strategy() -> impl Strategy<Value = Member> {
-    proptest::collection::btree_map(
-        0usize..KEYS.len(),
-        (
-            prop_oneof![Just(PropType::String), Just(PropType::Integer)],
-            any::<bool>(),
-        ),
-        1..=KEYS.len(),
-    )
 }
 
 fn all_of_spec(members: &[Member]) -> String {
@@ -345,6 +334,14 @@ proptest! {
             variants,
             source
         );
+        // One variant per distinct category, each its category's type.
+        prop_assert_eq!(
+            shape::named(source, "U"),
+            union_shape(distinct.iter().map(|c| c.shape().to_owned()).collect()),
+            "union of {:?} lowers to the wrong variants:\n{}",
+            variants,
+            source
+        );
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
@@ -379,6 +376,14 @@ proptest! {
         if distinct.len() == 1 {
             prop_assert!(source.contains("pub struct U"), "union of one key set is not that struct:\n{source}");
         }
+        // One variant per distinct key set, each the closed object requiring exactly those keys.
+        prop_assert_eq!(
+            shape::named(source, "U"),
+            union_shape(distinct.iter().map(|keys| closed_object_shape(keys)).collect()),
+            "union of {:?} lowers to the wrong variants:\n{}",
+            variants,
+            source
+        );
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
@@ -1141,6 +1146,14 @@ mod shape {
         }
     }
 
+    /// The shape of the type the generated module `code` declares as `name`; `name` itself when it
+    /// declares nothing by that name.
+    pub fn named(code: &str, name: &str) -> String {
+        let ty = syn::parse_str::<syn::Type>(name)
+            .unwrap_or_else(|error| panic!("`{name}` is no type: {error}"));
+        Types::read(code).shape(&ty, 8)
+    }
+
     /// The shape of the field `wire` of `pub struct name` in the generated module `code`, `None`
     /// when no such field was emitted.
     pub fn field(code: &str, name: &str, wire: &str) -> Option<String> {
@@ -1340,15 +1353,33 @@ proptest! {
         let checked = check(&spec);
         prop_assert_eq!(rejected(&checked), rejected(&report), "{}", spec);
         if excluded && !nullable {
-            // Which code says so is the spelling's: `E013` beside an `allOf`, `E007` for the
-            // union's own siblings.
+            // Which code says so is the spelling's: `E013` beside an `allOf` and beside a `$ref`
+            // (the conjunction spellings), `E007` for the union's own siblings.
             prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
+            let code = if spelling == 2 { Code::NonDisjointUnion } else { Code::AllOfIrreconcilable };
+            prop_assert!(has_code(&report, code), "expected {:?}: {:#?}\n{}", code, report, spec);
             return Ok(());
         }
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}\n{}", report, spec);
         let shape = holder_p_shape(&source)?;
-        prop_assert_eq!(shape == "()", excluded, "`Holder.p` is `{}`:\n{}", shape, spec);
+        if excluded {
+            prop_assert_eq!(shape.as_str(), "()", "`Holder.p` is `{}`:\n{}", shape, spec);
+            return Ok(());
+        }
+        // A refiner every branch meets keeps the union it refines: `Holder.p` has the shape it has
+        // with no refiner at all, the `Cat`/`Dog` enum (beside `null` when the union admits it).
+        let unrefined = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    \
+             Cat:\n      type: object\n      required: [kind]\n      properties: {{ kind: {{ type: string }} }}\n    \
+             Dog:\n      type: object\n      required: [kind, bark]\n      properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }}\n    \
+             Pet:\n      oneOf: {union}\n    Holder:\n      type: object\n      required: [p]\n      properties:\n        p: {{ $ref: '#/components/schemas/Pet' }}\n"
+        );
+        let (control, control_source) = generate_module(&unrefined);
+        prop_assert_eq!(control.outcome(), Outcome::Generated, "{:#?}\n{}", control, unrefined);
+        let union = holder_p_shape(&control_source)?;
+        prop_assert!(non_null(&union).starts_with("enum { "), "the unrefined `Holder.p` is `{}`", union);
+        prop_assert_eq!(shape, union, "the refined union lost or changed a branch:\n{}", spec);
     }
 
     /// Every `default` a member writes on a property is accounted for by the meet, exactly as

@@ -1,58 +1,4 @@
-//! # spargen-macro
-//!
-//! The proc-macro front-end for [`spargen`](https://docs.rs/spargen): generate a typed OpenAPI
-//! 3.1.x/3.2.x client **inline**, with no `build.rs` and no CLI step.
-//!
-//! ```ignore
-//! mod api {
-//!     // Path is resolved relative to the consumer crate's Cargo.toml.
-//!     spargen_macro::generate_api!("openapi.yaml");
-//! }
-//! ```
-//!
-//! Keyed form, with the same generation controls as the `build.rs` API:
-//!
-//! ```ignore
-//! spargen_macro::generate_api!(
-//!     spec = "openapi.yaml",
-//!     no_uuid,
-//!     no_time,
-//!     carve,
-//!     open_narrowing,
-//!     error_body_cap = 65536,
-//!     batch_cap = 100,
-//!     omit {
-//!         operations { post "/legacy"; }
-//!         paths { "/internal/**"; }
-//!         components { schemas { "LegacyPet"; } }
-//!         pointers { "/webhooks"; }
-//!         file("shared.yaml") { pointers { "/Legacy"; } }
-//!     }
-//! );
-//! ```
-//!
-//! ## How it works
-//!
-//! The macro is a thin shim over spargen's internal in-memory renderer. It resolves the spec,
-//! renders the client, and parses the rendered source back into tokens. The generated API is the
-//! same as the module written by [`spargen::generate`] from a `build.rs`.
-//!
-//! A generation failure becomes a `compile_error!` carrying spargen's diagnostics — the same
-//! loud, no-silent-degradation contract the generator has. (Warnings are not surfaced: stable proc-macro
-//! APIs cannot emit them. Run `spargen check <spec>` to see warnings.)
-//!
-//! ## Cost & alternatives
-//!
-//! Inline generation recompiles the whole generator (host-side) as part of your build, and the
-//! generated code is not materialized on disk (use `cargo expand` to inspect it). When you want
-//! the generated source checked in or reviewable, configure the `build.rs` API to write it there.
-//! The macro trades that visibility for a zero-config setup with no build.rs.
-//!
-//! ## Runtime graph
-//!
-//! This crate and `spargen` are **host/build-time only** — a proc-macro crate is never linked into
-//! your binary. Your runtime dependencies are just what the generated code uses (reqwest, serde,
-//! …); no spargen crate appears in `cargo tree -e no-proc-macro`.
+#![doc = include_str!("../README.md")]
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -65,13 +11,13 @@ use syn::{braced, parenthesized, Ident, LitInt, LitStr, Token};
 pub fn generate_api(input: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(input as Args);
     match expand(&args) {
-        // Cross a string boundary and let the compiler re-tokenize the generated source on its own
-        // thread. The tokens from `expand` were built under proc-macro2's fallback (see there), so
-        // this reparse — on the real macro server thread — is what binds real spans to the output.
-        Ok(tokens) => match tokens.to_string().parse() {
+        // `expand` hands back source text, built off the compiler bridge (see `FallbackGuard`).
+        // Tokenizing it here, once, on the real macro server thread, is what binds real spans to
+        // the output.
+        Ok(source) => match source.parse() {
             Ok(stream) => stream,
             Err(error) => syn::Error::new(
-                proc_macro2::Span::call_site(),
+                args.spec.span(),
                 format!("spargen produced code that failed to tokenize: {error}"),
             )
             .to_compile_error()
@@ -199,7 +145,9 @@ impl Parse for Args {
     }
 }
 
-fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
+/// The source `generate_api!` expands to: the generated module followed by its `tracking` items,
+/// as text for `generate_api` to tokenize.
+fn expand(args: &Args) -> syn::Result<String> {
     let raw = args.spec.value();
     let consumer = Consumer::locate(
         std::env::var_os("CARGO_MANIFEST_PATH"),
@@ -208,7 +156,8 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     .map_err(|message| syn::Error::new(args.spec.span(), message))?;
     let config = spec_for(args, &consumer)?;
 
-    // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
+    // Keep spargen's codegen (and the `tracking` tokens below) off the compiler bridge; restored
+    // on drop.
     let _fallback = FallbackGuard::force();
     let preview = spargen::__private::preview_for_macro(&config, &consumer.manifest);
 
@@ -217,18 +166,8 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let source = preview.contents.as_ref().expect("checked above");
-    let generated: proc_macro2::TokenStream = source.parse().map_err(|error| {
-        syn::Error::new(
-            args.spec.span(),
-            format!("spargen produced code that failed to tokenize: {error}"),
-        )
-    })?;
-
-    let tracks = tracking(&preview);
-    Ok(quote! {
-        #generated
-        #tracks
-    })
+    // The newline ends a line comment the module may close on, so it cannot swallow the items.
+    Ok(format!("{source}\n{}", tracking(&preview)))
 }
 
 /// The `Spec` `expand` generates from: the spec path resolved against the consumer, the
@@ -245,8 +184,9 @@ fn spec_for(args: &Args, consumer: &Consumer) -> syn::Result<spargen::Spec> {
 }
 
 /// The `compile_error!` text for a preview that produced no client, or `None` when it produced
-/// one. `raw` is the spec path as the macro was given it. Each error-severity diagnostic is one
-/// line under the heading; warnings are left out.
+/// one. `raw` is the spec path as the macro was given it. Each error-severity diagnostic follows
+/// the heading in `Diagnostic`'s own `Display`, the rendering the CLI and `Report` share; warnings
+/// are left out.
 fn failure_message(raw: &str, preview: &spargen::__private::MacroPreview) -> Option<String> {
     if preview.report.outcome() == spargen::Outcome::Generated && preview.contents.is_some() {
         return None;
@@ -262,10 +202,7 @@ fn failure_message(raw: &str, preview: &spargen::__private::MacroPreview) -> Opt
         message.push_str(": generation did not succeed");
     } else {
         for diagnostic in &errors {
-            message.push_str(&format!(
-                "\n  error[{}]: {} (at {})",
-                diagnostic.code, diagnostic.message, diagnostic.pointer
-            ));
+            message.push_str(&format!("\n{diagnostic}"));
         }
     }
     Some(message)
@@ -362,7 +299,7 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
         let method = method
             .to_string()
             .parse::<spargen::OmitMethod>()
-            .map_err(|error| syn::Error::new(method.span(), format!("{error}")))?;
+            .map_err(|error| syn::Error::new(method.span(), error))?;
         let path: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Operation {
@@ -391,20 +328,12 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     braced!(body in input);
     while !body.is_empty() {
         let kind: Ident = body.parse()?;
-        // One shared parser, so `omit!`, the CLI, and `spargen.toml` accept the same spellings.
+        // `ComponentKind`'s own `FromStr`, shared with the CLI and `spargen.toml`, so all three
+        // accept the same spellings and answer an unknown one with the same list.
         let kind = kind
             .to_string()
             .parse::<spargen::ComponentKind>()
-            .map_err(|error| {
-                syn::Error::new(
-                    kind.span(),
-                    format!(
-                        "{error}; expected one of \
-                         schemas/responses/parameters/request_bodies/headers/security_schemes/\
-                         path_items/media_types"
-                    ),
-                )
-            })?;
+            .map_err(|error| syn::Error::new(kind.span(), error))?;
         let names;
         braced!(names in body);
         while !names.is_empty() {
@@ -778,25 +707,21 @@ paths:
         scratch.write("spargen.toml", "open_narrowing = true\n");
         scratch.write("api/spargen.toml", "carve = true\nbatch_cap = 3\n");
 
+        // `Spec` equality covers the config files applied, so this also pins which file was
+        // recorded: the one beside the spec, once.
+        let applied = Spec::new(scratch.path("api/openapi.yaml"))
+            .config_file(scratch.path("api/spargen.toml"))
+            .unwrap();
+        assert_eq!(applied, applied.clone().carve(true).batch_cap(3));
         let spec = spec_for(&args(r#""api/openapi.yaml""#), &scratch.consumer()).unwrap();
-        assert_eq!(
-            spec,
-            Spec::new(scratch.path("api/openapi.yaml"))
-                .carve(true)
-                .batch_cap(3)
-        );
+        assert_eq!(spec, applied);
 
         let spec = spec_for(
             &args(r#""api/openapi.yaml", batch_cap = 9"#),
             &scratch.consumer(),
         )
         .unwrap();
-        assert_eq!(
-            spec,
-            Spec::new(scratch.path("api/openapi.yaml"))
-                .carve(true)
-                .batch_cap(9)
-        );
+        assert_eq!(spec, applied.batch_cap(9));
     }
 
     #[test]
@@ -822,29 +747,34 @@ paths:
         assert_eq!(failure_message("openapi.yaml", &preview), None);
     }
 
-    /// The `compile_error!` text: the spec as the macro was given it, then one line per
-    /// error-severity diagnostic with its code, message and pointer.
+    /// The `compile_error!` text: the spec as the macro was given it, then each error-severity
+    /// diagnostic in `Diagnostic`'s own `Display`: code and message, span, pointer, and remedy.
     #[test]
-    fn a_rejected_spec_renders_each_error_with_its_code_and_pointer() {
+    fn a_rejected_spec_renders_each_error_with_its_code_span_and_remedy() {
         let scratch = Scratch::new("rejected");
         let spec = scratch.write(
             "openapi.yaml",
             "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
         );
-        let preview = spargen::__private::preview(&Spec::new(spec));
-        // A root-level diagnostic's pointer is empty, and renders as `(at )`.
+        let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
+        // A root-level diagnostic's pointer is empty, so no `at` line is rendered. The span names
+        // the spec path as the bundle loaded it, not as the macro was given it.
         assert_eq!(
             failure_message("specs/old.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `specs/old.yaml`\n  \
-             error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
-             3.2.x (at )"
+            format!(
+                "spargen could not generate a client from `specs/old.yaml`\n\
+                 error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
+                 3.2.x\n  --> {spec}:1:10\n  \
+                 help: use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses \
+                 different schema semantics"
+            )
         );
     }
 
-    /// Several errors are one line each, in the report's order; a warning beside them is not
-    /// rendered.
+    /// Several errors are each rendered in turn, in the report's order; a warning beside them is
+    /// not rendered.
     #[test]
-    fn every_error_is_its_own_line_and_warnings_are_left_out() {
+    fn every_error_is_rendered_in_order_and_warnings_are_left_out() {
         let scratch = Scratch::new("several");
         let spec = scratch.write(
             "openapi.yaml",
@@ -873,7 +803,7 @@ paths:
               schema: { $ref: "#/components/schemas/AlsoMissing" }
 "##,
         );
-        let preview = spargen::__private::preview(&Spec::new(spec));
+        let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
         assert!(
             preview
                 .report
@@ -884,24 +814,28 @@ paths:
         );
         assert_eq!(
             failure_message("openapi.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `openapi.yaml`\n  \
-             error[E004]: unresolved schema reference `#/components/schemas/Missing` \
-             (at /paths/~1a/get/responses/200/content/application~1json/schema)\n  \
-             error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing` \
-             (at /paths/~1b/get/responses/200/content/application~1json/schema)"
+            format!(
+                "spargen could not generate a client from `openapi.yaml`\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
+                 --> {spec}:14:23\n  \
+                 at /paths/~1a/get/responses/200/content/application~1json/schema\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing`\n  \
+                 --> {spec}:23:23\n  \
+                 at /paths/~1b/get/responses/200/content/application~1json/schema"
+            )
         );
     }
 
     /// The files a successful expansion `include_bytes!`s, and so the files whose edit makes
-    /// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, and
-    /// a `spargen.lock` beside the spec. The `spargen.toml` beside the spec is not among them.
+    /// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, a
+    /// `spargen.lock` beside the spec, and the `spargen.toml` `spec_for` applied (#686).
     #[test]
-    fn tracking_includes_the_spec_its_refs_the_manifest_and_the_lock() {
+    fn tracking_includes_the_spec_its_refs_the_manifest_the_lock_and_the_config() {
         let scratch = Scratch::new("tracking");
         let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
         let schemas = scratch.write("schemas.yaml", SPLIT_SCHEMAS);
         let lock = scratch.write("spargen.lock", "version = 1\n");
-        scratch.write("spargen.toml", "carve = false\n");
+        let config = scratch.write("spargen.toml", "carve = false\n");
         let requirements = spargen::requirements(&Spec::new(spec.clone())).unwrap();
         // `[workspace]` makes the fixture its own workspace root, so the audit's walk upward for
         // one stops here instead of reading an ancestor manifest above the temporary directory.
@@ -914,9 +848,11 @@ paths:
             ),
         );
 
-        let preview = spargen::__private::preview_for_macro(&Spec::new(spec.clone()), &manifest);
+        let configured = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+        assert_eq!(configured.path().as_str(), spec);
+        let preview = spargen::__private::preview_for_macro(&configured, &manifest);
         assert_eq!(failure_message("openapi.yaml", &preview), None);
-        let mut expected = vec![manifest, spec, schemas, lock];
+        let mut expected = vec![manifest, spec, schemas, lock, config];
         expected.sort();
         assert_eq!(
             tracking(&preview).to_string(),
@@ -966,7 +902,8 @@ paths:
             ),
             (
                 r#""a.yaml", omit { operations { fetch "/a"; } }"#,
-                "unknown HTTP method: `fetch`",
+                "unknown HTTP method: `fetch`; \
+                 expected one of get/put/post/delete/options/head/patch/trace/query",
             ),
             (
                 r#""a.yaml", omit { operations { get "/a" } }"#,

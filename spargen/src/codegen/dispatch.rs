@@ -11,7 +11,6 @@ use crate::ir::{
 use crate::name::{Names, OperationBindings};
 
 use super::responses::response_payload_ty_tokens;
-use super::runtime::to_pascal;
 use super::ty::ty_tokens;
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
@@ -69,7 +68,7 @@ pub(super) fn error_branch_tokens(
     operation: &Operation,
     api: &Api,
     names: &Names,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> TokenStream {
     let error_ty = quote! { #error_ident };
     let error_shape = operation.responses.error();
@@ -80,23 +79,14 @@ pub(super) fn error_branch_tokens(
         // A single documented error body, the operation's only error entry: classify against its
         // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
         // status). A bodyless entry beside it makes the shape an enum, so the filters below keep
-        // exactly that entry.
+        // exactly that entry; a `default` one maps to `Any`.
         ErrorShape::Single(body_ty) => {
-            let mut documented = operation
+            let documented = operation
                 .responses
-                .by_status
-                .iter()
+                .entries()
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
-                .map(|(status, _)| runtime_status_spec(*status))
+                .map(|(status, _)| runtime_status_spec(status))
                 .collect::<Vec<_>>();
-            if operation
-                .responses
-                .default
-                .as_ref()
-                .is_some_and(|default| default.body.is_some())
-            {
-                documented.push(quote! { support::StatusSpec::Any });
-            }
             let classify = if is_bytes_ty(api, *body_ty) {
                 quote! {
                     support::classify_error_bytes(
@@ -153,7 +143,7 @@ pub(super) fn error_branch_tokens(
                 match ty {
                     // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
                     Some(ty) => {
-                        let decode = variant_body_decode(operation, api, names, *spec, *ty);
+                        let decode = variant_body_decode(operation, api, names, *spec, *ty, None);
                         quote! {
                             if #spec_tokens.matches(status) {
                                 return Err(match #decode {
@@ -207,7 +197,7 @@ pub(super) fn success_decode_tokens(
     names: &Names,
     bindings: &OperationBindings,
     success_ty: &TokenStream,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> (TokenStream, Option<TokenStream>) {
     let request_binding = &bindings.request;
     let reconnect_request_binding = &bindings.reconnect_request;
@@ -237,54 +227,44 @@ pub(super) fn success_decode_tokens(
                 #decode.await.map_err(support::Error::widen)
             }
         }
-        // Multi-status success: read the body once, then dispatch by status in precedence order
-        // (exact code ascending, then range ascending) into the matching variant. `default` never
+        // Multi-status success: dispatch by status in precedence order (exact code ascending, then
+        // range ascending) into the matching variant, and only then read the body. `default` never
         // enters this shape, so there is no `Default` arm. A success status matching no documented
-        // variant is an unexpected-status error — there is no untyped fallback.
+        // variant is an unexpected-status error — there is no untyped fallback. Every body an
+        // error keeps goes through a runtime helper that caps it at `max_error_body`.
         SuccessShape::Enum(entries) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let enum_ident = success_enum_ident(method_ident);
+            let enum_ident = success_enum_ident(operation, names);
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
                 match ty {
-                    // Bodied status: parse the read body into the variant's type.
+                    // Bodied status: read the whole body and parse it into the variant's type; a
+                    // parse failure is `Decode` with the body capped.
                     Some(ty) => {
-                        let decode = variant_body_decode(operation, api, names, *spec, *ty);
+                        let decode = variant_body_decode(
+                            operation,
+                            api,
+                            names,
+                            *spec,
+                            *ty,
+                            Some(quote! { #enum_ident::#variant_ident }),
+                        );
                         quote! {
                             if #spec_tokens.matches(status) {
-                                // A `match`, not `map_err`: the failure moves the headers into
-                                // `Decode`, which a closure capturing them would also do on the
-                                // success path that still needs them.
-                                let value = match #decode {
-                                    Ok(value) => value,
-                                    Err(path) => {
-                                        return Err(support::Error::<#error_ty>::Decode {
-                                            status,
-                                            headers,
-                                            path,
-                                            body,
-                                            truncated: false,
-                                        });
-                                    }
-                                };
-                                return Ok(support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    #enum_ident::#variant_ident(value),
-                                ));
+                                return support::decode_success_with(&self.core, response, |body| {
+                                    #decode
+                                })
+                                .await
+                                .map_err(support::Error::widen);
                             }
                         }
                     }
-                    // Documented bodyless status (e.g. `204`): the unit variant, no body parse.
+                    // Documented bodyless status (e.g. `204`): the unit variant, body unread.
                     None => quote! {
                         if #spec_tokens.matches(status) {
                             return Ok(support::ResponseValue::new(
                                 status,
-                                headers,
+                                response.headers().clone(),
                                 #enum_ident::#variant_ident,
                             ));
                         }
@@ -292,11 +272,9 @@ pub(super) fn success_decode_tokens(
                 }
             });
             quote! {
-                let (status, headers, body) = support::read_success_body(response)
-                    .await
-                    .map_err(support::Error::widen)?;
+                let status = response.status();
                 #(#arms)*
-                Err(support::Error::<#error_ty>::UnexpectedStatus { status, headers, body })
+                Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
             }
         }
     };
@@ -344,28 +322,48 @@ pub(super) fn success_decode_tokens(
 /// raw-bytes body, otherwise the codec of the media the status's response chose. The success and
 /// error dispatch both build their variants' decodes here, so the two sides cannot pick a codec
 /// differently.
+///
+/// The error side binds `body` to the read `Bytes` and wraps the payload itself, and passes `None`.
+/// The success side decodes inside the closure it hands `support::decode_success_with`, where
+/// `body` is a `&Bytes`, and passes the variant constructor as `success_variant`, which the
+/// expression applies to the payload.
 fn variant_body_decode(
     operation: &Operation,
     api: &Api,
     names: &Names,
     spec: crate::ir::StatusSpec,
     body_ty: Ty,
+    success_variant: Option<TokenStream>,
 ) -> TokenStream {
     let ty = response_payload_ty_tokens(body_ty, names, true);
     let media = response_media_for_spec(&operation.responses, spec);
+    let bytes = if success_variant.is_some() {
+        quote! { body }
+    } else {
+        quote! { &body }
+    };
     if is_bytes_ty(api, body_ty) {
-        quote! { Ok::<#ty, String>(Box::new(body.clone())) }
-    } else if media == Some(MediaType::Text) {
-        quote! { support::decode_text_body::<#ty>(&body) }
+        let payload = quote! { Box::new(body.clone()) };
+        return match success_variant {
+            Some(variant) => quote! { Ok::<_, String>(#variant(#payload)) },
+            None => quote! { Ok::<#ty, String>(#payload) },
+        };
+    }
+    let decode = if media == Some(MediaType::Text) {
+        quote! { support::decode_text_body::<#ty>(#bytes) }
     } else if media == Some(MediaType::Xml) {
         // Only as the lone body beside bodyless entries on its side: a second bodied response
         // beside an XML one is rejected (`xml_in_multi_status`).
-        quote! { support::decode_xml_body::<#ty>(&body) }
+        quote! { support::decode_xml_body::<#ty>(#bytes) }
     } else {
         quote! {
-            serde_json::from_slice::<#ty>(&body)
+            serde_json::from_slice::<#ty>(#bytes)
                 .map_err(|error| error.to_string())
         }
+    };
+    match success_variant {
+        Some(variant) => quote! { #decode.map(#variant) },
+        None => decode,
     }
 }
 
@@ -376,20 +374,34 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let ident = success_enum_ident(method_ident);
+            let ident = success_enum_ident(operation, names);
             quote! { #ident }
         }
     }
 }
 
-/// The type name of an operation's multi-status success response enum, derived from the method name
-/// (mirroring how the error enum is named `{Method}Error`).
-pub(super) fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
-    format_ident!("{}Response", to_pascal(method_ident.as_str()))
+/// The type name of an operation's multi-status success response enum, `{Method}Response` as
+/// [`Names::success_enums`] allocates it.
+pub(super) fn success_enum_ident<'a>(
+    operation: &Operation,
+    names: &'a Names,
+) -> &'a crate::name::Ident {
+    names
+        .success_enums
+        .get(&operation.id)
+        .expect("success enum name allocated for an enum-shaped success")
+}
+
+/// The type name of an operation's error type, `{Method}Error` or `{Method}OperationError` as
+/// [`Names::operation_errors`] allocates it.
+pub(super) fn error_type_ident<'a>(
+    operation: &Operation,
+    names: &'a Names,
+) -> &'a crate::name::Ident {
+    names
+        .operation_errors
+        .get(&operation.id)
+        .expect("error type name allocated")
 }
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
@@ -415,22 +427,13 @@ fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
     }
 }
 
-/// The chosen media type of the response a shape entry was built from: the `default` response for
-/// [`StatusSpec::Default`](crate::ir::StatusSpec), otherwise the `by_status` entry with exactly
-/// that selector.
+/// The chosen media type of the response a shape entry was built from (see
+/// [`Responses::get`](crate::ir::Responses::get)).
 fn response_media_for_spec(
     responses: &crate::ir::Responses,
     spec: crate::ir::StatusSpec,
 ) -> Option<MediaType> {
-    let response = match spec {
-        crate::ir::StatusSpec::Default => responses.default.as_ref(),
-        crate::ir::StatusSpec::Exact(_) | crate::ir::StatusSpec::Range(_) => responses
-            .by_status
-            .iter()
-            .find(|(candidate, _)| *candidate == spec)
-            .map(|(_, response)| response),
-    };
-    response.and_then(|response| response.media)
+    responses.get(spec).and_then(|response| response.media)
 }
 
 /// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
@@ -501,8 +504,6 @@ mod tests {
             super::status_variant_ident(StatusSpec::Range(0)).to_string(),
             "Status0xx"
         );
-        assert_eq!(StatusSpec::Default.display_label(), "default");
-        assert_eq!(StatusSpec::Range(0).display_label(), "0XX");
         assert_eq!(
             super::runtime_status_spec(StatusSpec::Default).to_string(),
             quote::quote! { support::StatusSpec::Any }.to_string()

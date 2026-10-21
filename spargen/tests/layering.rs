@@ -682,7 +682,7 @@ fn comment_violations_read_each_comment_block_as_one_text() {
     );
 }
 
-/// Everything above `#[cfg(test)]` in a runtime source ships verbatim in every generated client,
+/// Everything above `#[cfg(test)]` in a runtime source is embedded into every generated client,
 /// and the test module below it does not (`generated_output_carries_no_test_module`). So a comment
 /// up there that names a test-only item, or points at "the test module", is true in this
 /// repository and false in the copy a consumer reads: the item it sends them to does not exist
@@ -1591,7 +1591,6 @@ const OVER_LENGTH_BASELINE: &[&str] = &[
     "spargen/tests/frontend/ref_siblings.rs",
     "spargen/tests/frontend/refs.rs",
     "spargen/tests/frontend/unions.rs",
-    "support-runtime/src/dispatch/tests.rs",
 ];
 
 /// Directories of vendored text, copied verbatim from upstream rather than written here.

@@ -2,6 +2,11 @@ use crate::diag::{Code, Diagnostic, Diagnostics};
 
 use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
 
+/// The prefix of every message [`check_invariants`] emits. The fuzz harness
+/// (`tests/fuzz_frontend.rs`) declares the same literal to recognise a report that carries one,
+/// and a test in this module holds the two equal.
+pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
+
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
 /// Run unconditionally after every lowering, on every entry point. The first invariant is
@@ -46,7 +51,7 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                 {
                     Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
                         .message(format!(
-                            "IR invariant failed: request body `{}` is an octet-stream body whose \
+                            "{INVARIANT_FAILURE}: request body `{}` is an octet-stream body whose \
                              type is not a non-nullable `bytes::Bytes`",
                             body.content_type
                         ))
@@ -118,7 +123,7 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
             TypeKind::Reserved => {
                 Diagnostic::error(Code::InvalidInput, def.provenance.clone())
                     .message(format!(
-                        "IR invariant failed: type `{}` is still a reservation, so its body was \
+                        "{INVARIANT_FAILURE}: type `{}` is still a reservation, so its body was \
                          never lowered",
                         def.name_hint
                     ))
@@ -169,7 +174,7 @@ fn check_ty(
     if api.types.get(ty.id).is_none() || api.types.is_elided(ty.id) {
         Diagnostic::error(Code::InvalidInput, provenance)
             .message(format!(
-                "IR invariant failed: `{label}` references missing type {}",
+                "{INVARIANT_FAILURE}: `{label}` references missing type {}",
                 ty.id.0
             ))
             .emit(diags);
@@ -178,7 +183,7 @@ fn check_ty(
 
 #[cfg(test)]
 mod tests {
-    use super::check_invariants;
+    use super::{check_invariants, INVARIANT_FAILURE};
     use crate::diag::{Code, Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
         Api, BodyEncoding, HeaderShape, Info, MediaType, Method, Operation, OperationId,
@@ -466,5 +471,49 @@ mod tests {
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
         assert!(!diags.has_errors(), "{diags:#?}");
+    }
+
+    /// Every invariant failure starts with [`INVARIANT_FAILURE`], and the fuzz harness matches that
+    /// very literal, so its no-invariant-failure oracle sees each one: renaming the prefix here
+    /// without the harness fails this test rather than silently blinding the oracle.
+    #[test]
+    fn the_fuzz_harness_matches_the_prefix_every_invariant_failure_carries() {
+        let mut reserved = api_with_header_ty(ty(0));
+        reserved.types.insert(TypeDef {
+            name_hint: String::new(),
+            kind: TypeKind::Reserved,
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        let failing = [
+            reserved,
+            api_with_header_ty(ty(999)),
+            api_with_request_body(
+                MediaType::OctetStream,
+                "application/octet-stream",
+                Some(TypeKind::Primitive(Prim::String)),
+            ),
+        ];
+        for api in &failing {
+            let mut diags = Diagnostics::new(100);
+            check_invariants(api, &mut diags);
+            assert!(!diags.items().is_empty(), "{diags:#?}");
+            for diagnostic in diags.items() {
+                assert!(
+                    diagnostic.message.starts_with(INVARIANT_FAILURE),
+                    "{diagnostic:#?}"
+                );
+            }
+        }
+        let harness = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz_frontend.rs"),
+        )
+        .expect("the fuzz harness is readable");
+        let declared = format!("const INVARIANT_FAILURE: &str = \"{INVARIANT_FAILURE}\";");
+        assert!(
+            harness.contains(&declared),
+            "tests/fuzz_frontend.rs must declare `{declared}`"
+        );
     }
 }

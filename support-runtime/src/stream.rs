@@ -21,7 +21,9 @@ use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
-use crate::{send, unexpected_status, ClientCore, Error, MaybeSend, MaybeSync, TransportError};
+use crate::{
+    send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend, MaybeSync, TransportError,
+};
 
 /// The failure yielded by a streaming response after its initial HTTP response was accepted.
 pub type StreamError = Error<Infallible>;
@@ -110,6 +112,11 @@ pub struct EventStream<T> {
     headers: HeaderMap,
     /// Bytes read but not yet framed into a complete item. Partial frames live here between chunks.
     buffer: Vec<u8>,
+    /// `ClientConfig::max_stream_frame`: the most bytes `buffer` may hold for an item whose
+    /// terminator has not arrived before the stream fails.
+    max_frame: usize,
+    /// `ClientConfig::max_error_body`: the bytes of an over-limit item its error retains.
+    max_error_body: usize,
     /// The framing mode for this body.
     framing: Framing,
     last_event_id: Option<String>,
@@ -142,14 +149,18 @@ struct ReconnectContext {
 
 impl<T> EventStream<T> {
     /// Wrap a streaming response with the framing mode chosen for its media type. The response is
-    /// consumed lazily — no bytes are read until the first [`Self::next`] call.
+    /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
+    /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
     /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
     pub(crate) fn new(response: Response, framing: Framing) -> Self {
+        let config = ClientConfig::default();
         Self {
             status: response.status(),
             headers: response.headers().clone(),
             state: StreamState::Body(Box::pin(response.bytes_stream())),
             buffer: Vec::new(),
+            max_frame: config.max_stream_frame,
+            max_error_body: config.max_error_body,
             framing,
             last_event_id: None,
             reconnect_delay: None,
@@ -178,6 +189,8 @@ impl<T> EventStream<T> {
                 .map(str::to_owned)
         });
         Self {
+            max_frame: core.config().max_stream_frame,
+            max_error_body: core.config().max_error_body,
             last_event_id,
             reconnect: request.map(|request| ReconnectContext {
                 core,
@@ -200,7 +213,9 @@ impl<T> EventStream<T> {
         Ok(self)
     }
 
-    /// The latest SSE event ID, including an empty ID that resets replay state.
+    /// The latest SSE event ID, including an empty ID that resets replay state. An automatic
+    /// reconnect sends it as `Last-Event-ID` when it is a valid header value; an empty ID, or one
+    /// holding a control character a header value refuses, reconnects without that header.
     pub fn last_event_id(&self) -> Option<&str> {
         self.last_event_id.as_deref()
     }
@@ -217,7 +232,9 @@ impl<T: DeserializeOwned> EventStream<T> {
     /// stream (subsequent calls return `None`). A per-frame decode failure also surfaces as
     /// `Some(Err(Error::Decode { .. }))` rather than being silently skipped, but does NOT terminate
     /// the stream — the next call resumes framing the following items, so a single malformed event
-    /// does not abandon the rest.
+    /// does not abandon the rest. The exception is an item that passes
+    /// `ClientConfig::max_stream_frame` before its terminator arrives: it is also reported as
+    /// `Error::Decode`, and it does end the stream, without consulting a reconnect policy.
     ///
     /// The item type `T` is decoded per-frame with `serde_json::from_slice`.
     pub async fn next(&mut self) -> Option<Result<T, StreamError>> {
@@ -252,6 +269,11 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                     this.state = StreamState::Done;
                     this.buffer.clear();
                     return Poll::Ready(None);
+                }
+                // Every complete item is framed out first, so what is left is one item still
+                // waiting for its terminator. At EOF the framer has already flushed it.
+                FramePoll::NeedMore if this.buffer.len() > this.max_frame => {
+                    return Poll::Ready(Some(Err(this.frame_overflow())));
                 }
                 FramePoll::NeedMore => {}
             }
@@ -322,6 +344,26 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
 }
 
 impl<T> EventStream<T> {
+    /// End the stream over an item that passed `max_frame` before its terminator, returning the
+    /// `Decode` error that reports it. The connection is dropped with the body stream, and no
+    /// reconnect is attempted: the server that sent the item is likely to send it again.
+    fn frame_overflow(&mut self) -> StreamError {
+        self.state = StreamState::Done;
+        let retained = self.buffer.len().min(self.max_error_body);
+        let body = Bytes::copy_from_slice(&self.buffer[..retained]);
+        self.buffer = Vec::new();
+        Error::Decode {
+            status: self.status,
+            headers: self.headers.clone(),
+            path: format!(
+                "stream item exceeds max_stream_frame ({} bytes) before its terminator",
+                self.max_frame
+            ),
+            body,
+            truncated: true,
+        }
+    }
+
     fn apply_metadata(&mut self, metadata: SseMetadata) {
         if let Some(id) = metadata.id {
             self.last_event_id = Some(id);
@@ -335,18 +377,10 @@ impl<T> EventStream<T> {
     /// yielded; `None` means either reconnecting was scheduled or clean EOF terminated normally.
     fn schedule_reconnect(&mut self, reason: OwnedReconnectReason) -> Option<StreamError> {
         let Some(reconnect) = self.reconnect.as_mut() else {
-            self.state = StreamState::Done;
-            return match reason {
-                OwnedReconnectReason::EndOfStream => None,
-                OwnedReconnectReason::Failure(error) => Some(error),
-            };
+            return self.stop(reason);
         };
         let Some(policy) = reconnect.policy.as_ref() else {
-            self.state = StreamState::Done;
-            return match reason {
-                OwnedReconnectReason::EndOfStream => None,
-                OwnedReconnectReason::Failure(error) => Some(error),
-            };
+            return self.stop(reason);
         };
         let reason_ref = match &reason {
             OwnedReconnectReason::EndOfStream => ReconnectReason::EndOfStream,
@@ -354,11 +388,7 @@ impl<T> EventStream<T> {
         };
         let Some(wait) = policy.reconnect(reconnect.attempt, reason_ref, self.reconnect_delay)
         else {
-            self.state = StreamState::Done;
-            return match reason {
-                OwnedReconnectReason::EndOfStream => None,
-                OwnedReconnectReason::Failure(error) => Some(error),
-            };
+            return self.stop(reason);
         };
         reconnect.attempt = reconnect.attempt.saturating_add(1);
         // A partial event belongs to the closed connection and must never be concatenated with the
@@ -368,19 +398,33 @@ impl<T> EventStream<T> {
         None
     }
 
+    /// End the stream without reconnecting: a clean end of stream yields nothing further, and a
+    /// failure is handed back to be yielded.
+    fn stop(&mut self, reason: OwnedReconnectReason) -> Option<StreamError> {
+        self.state = StreamState::Done;
+        match reason {
+            OwnedReconnectReason::EndOfStream => None,
+            OwnedReconnectReason::Failure(error) => Some(error),
+        }
+    }
+
     fn reconnect_future(&self) -> Option<ReconnectFuture> {
         let reconnect = self.reconnect.as_ref()?;
         let core = reconnect.core.clone();
         let mut request = reconnect.request.try_clone()?;
-        match self.last_event_id.as_deref() {
-            Some("") => {
-                request.headers_mut().remove("last-event-id");
+        // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
+        // (the framer keeps every control character but NUL, CR and LF): the server's latest
+        // resume point cannot be sent, and replaying an older one would claim a position it has
+        // superseded, so the reconnect proceeds as a fresh subscription instead of ending.
+        if let Some(id) = self.last_event_id.as_deref() {
+            match reqwest::header::HeaderValue::from_str(id) {
+                Ok(value) if !id.is_empty() => {
+                    request.headers_mut().insert("last-event-id", value);
+                }
+                _ => {
+                    request.headers_mut().remove("last-event-id");
+                }
             }
-            Some(id) => {
-                let value = reqwest::header::HeaderValue::from_str(id).ok()?;
-                request.headers_mut().insert("last-event-id", value);
-            }
-            None => {}
         }
         Some(Box::pin(async move {
             let response = send(&core, request).await?;
@@ -427,11 +471,7 @@ fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll
 fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
     loop {
         if let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
-            let mut end = nl;
-            if end > 0 && buffer[end - 1] == b'\r' {
-                end -= 1;
-            }
-            let line = buffer[..end].to_vec();
+            let line = trim_cr(&buffer[..nl]).to_vec();
             buffer.drain(..=nl);
             if line.is_empty() {
                 continue;
@@ -439,11 +479,7 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             return frame_item(line);
         }
         if at_eof {
-            let mut end = buffer.len();
-            if end > 0 && buffer[end - 1] == b'\r' {
-                end -= 1;
-            }
-            let line = buffer[..end].to_vec();
+            let line = trim_cr(buffer).to_vec();
             buffer.clear();
             if line.is_empty() {
                 return FramePoll::NeedMore;
@@ -458,40 +494,42 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
 /// separator (or EOF). Newlines are record terminators/formatting and are trimmed around the JSON
 /// text, while embedded newlines remain valid JSON whitespace.
 fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
-    let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
-        if at_eof {
-            buffer.clear();
+    loop {
+        let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
+            if at_eof {
+                buffer.clear();
+            }
+            return FramePoll::NeedMore;
+        };
+        if first > 0 {
+            buffer.drain(..first);
         }
-        return FramePoll::NeedMore;
-    };
-    if first > 0 {
-        buffer.drain(..first);
-    }
-    let end = buffer[1..]
-        .iter()
-        .position(|byte| *byte == 0x1e)
-        .map(|index| index + 1);
-    let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
-        return FramePoll::NeedMore;
-    };
-    let mut payload = buffer[1..end].to_vec();
-    while payload.last().is_some_and(u8::is_ascii_whitespace) {
-        payload.pop();
-    }
-    let start = payload
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(payload.len());
-    payload.drain(..start);
-    if end == buffer.len() {
-        buffer.clear();
-    } else {
-        buffer.drain(..end);
-    }
-    if payload.is_empty() {
-        FramePoll::NeedMore
-    } else {
-        frame_item(payload)
+        let end = buffer[1..]
+            .iter()
+            .position(|byte| *byte == 0x1e)
+            .map(|index| index + 1);
+        let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
+            return FramePoll::NeedMore;
+        };
+        let mut payload = buffer[1..end].to_vec();
+        while payload.last().is_some_and(u8::is_ascii_whitespace) {
+            payload.pop();
+        }
+        let start = payload
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(payload.len());
+        payload.drain(..start);
+        if end == buffer.len() {
+            buffer.clear();
+        } else {
+            buffer.drain(..end);
+        }
+        // An empty record frames nothing; keep going so every complete record behind it is
+        // framed before the caller reads more bytes or measures what is left.
+        if !payload.is_empty() {
+            return frame_item(payload);
+        }
     }
 }
 
@@ -543,11 +581,7 @@ fn sse_next(buffer: &mut Vec<u8>, at_eof: bool, output: SseOutput) -> FramePoll 
                 return FramePoll::NeedMore;
             }
             if pos < buffer.len() {
-                let mut line = &buffer[pos..];
-                if line.last() == Some(&b'\r') {
-                    line = &line[..line.len() - 1];
-                }
-                append_sse_field(line, &mut fields);
+                append_sse_field(trim_cr(&buffer[pos..]), &mut fields);
             }
             buffer.clear();
         } else {
@@ -646,11 +680,12 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
 fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
     let rest = &buf[from..];
     let nl = rest.iter().position(|&b| b == b'\n')?;
-    let mut line = &rest[..nl];
-    if line.last() == Some(&b'\r') {
-        line = &line[..line.len() - 1];
-    }
-    Some((line, from + nl + 1))
+    Some((trim_cr(&rest[..nl]), from + nl + 1))
+}
+
+/// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n`.
+fn trim_cr(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 /// Decode one framed JSON payload into `T`. A parse failure becomes [`Error::Decode`] carrying the

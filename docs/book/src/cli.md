@@ -1,9 +1,8 @@
 # CLI Reference
 
 The `spargen` binary is built with the `cli` feature (`cargo install spargen --features cli`). It
-provides analysis and schema-vendoring tools only. Client generation belongs in `build.rs` or
-`generate_api!`; the CLI intentionally has no `generate`, stdout, watch, drift, or crate-scaffold
-path.
+provides analysis and schema-vendoring tools only: `check`, `deps`, `lock`, `explain`, and `diff`.
+Client generation belongs in `build.rs` or `generate_api!`; the CLI has no `generate` subcommand.
 
 ## Cargo features
 
@@ -40,8 +39,35 @@ Commands:
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
 `--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, `--open-narrowing`, and the
 repeatable `--omit-path`,
-`--omit-operation`, `--omit-component`, `--omit-pointer` — which is exactly the setter list on
-`spargen::Spec`, so the CLI, `build.rs`, `generate_api!`, and `spargen.toml` cannot drift.
+`--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the setter list on
+`spargen::Spec`, and the `spargen.toml` it reads is parsed by the library, the same file
+`build.rs` and `generate_api!` read.
+
+### Flags and `spargen.toml`
+
+Each spec is resolved as built-in defaults, then its `spargen.toml` (the `--config` path, or the
+file beside the spec when there is one), then the flags. `--error-body-cap` and `--batch-cap`
+replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules rather
+than replacing them. The four switches only turn their setting one way, so a file's setting in the
+other direction stands whatever the command line says:
+
+- `carve = true` in the file cannot be turned off by a flag; `--carve` only turns carving on.
+- `uuid = false` in the file cannot be turned back on; `--no-uuid` only turns it off.
+- `time = false` in the file cannot be turned back on; `--no-time` only turns it off.
+- `open_narrowing = true` in the file cannot be turned off; `--open-narrowing` only turns it on.
+
+To undo one of those, edit the file or point `--config` at another. `diff` resolves each of its two
+specs this way on its own: absent `--config`, each side discovers the `spargen.toml` beside it,
+while `--config` applies its one file to both sides.
+
+### Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
+| `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), or `diff --exit-code` found a breaking (`major`) change. |
+| `2` | The command line did not parse: an unknown subcommand or flag, or a missing argument. |
+| `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` syntax), or `explain` was given an unknown code. |
 
 ## `spargen check`
 
@@ -51,7 +77,10 @@ Audit a vendored spec with the same frontend used during generation, without emi
 spargen check <SPEC> [OPTIONS]
 ```
 
-It accepts `--format <human|json>` plus the shared spec options above. Run from a build script it
+It accepts `--format <human|json>` plus the shared spec options above. A diagnostic whose location
+is known renders as `--> <file>:<line>:<col>` in human output, naming the file it lies in, a
+`$ref`'d file included, by the path the spec's references resolved to; under `--format json` the
+same path is the diagnostic's `file`, beside its `span`. Run from a build script it
 also audits the consuming package's `Cargo.toml` (`E023`); elsewhere there is no consuming package,
 and `spargen deps` covers that ground instead.
 
@@ -90,10 +119,22 @@ Fetch, vendor, and hash-pin remote `$ref`s into `spargen.lock`. This is the **on
 step; compilation-time generation and `check` never reach the network.
 
 ```bash
-spargen lock <SPEC> [--format <human|json>]
+spargen lock <SPEC> [OPTIONS]
 ```
 
+It accepts `--format <human|json>` plus the shared spec options, so one option set serves every
+subcommand, but of the settings they resolve it reads only `batch_cap`. The configuration is still
+resolved, so a malformed `spargen.toml` or a bad flag value exits `3` here as well.
+
 Commit `.spargen/vendor/`, `spargen.lock`, the root document, and all relative source files.
+
+A fetch that fails (an error status, a refused connection) is reported as `E025` and fails the
+command, but what it leaves on disk is still a usable lock. Every document it did fetch is
+re-vendored and re-pinned at what the server served. A document it could not fetch, and any
+document reachable only through it, keeps the pin the earlier `spargen.lock` held, beside the
+vendored copy the earlier run wrote, so `check` and builds keep resolving it offline. A pin this
+run did not refresh stays until a `spargen lock` in which every fetch succeeds rewrites the lock
+from scratch.
 
 ## `spargen explain`
 
@@ -103,16 +144,24 @@ Show the extended documentation behind a stable diagnostic code.
 spargen explain E013 [--format <human|json>]
 ```
 
+The human format prints the code's explanation text to stdout: what the code means and, for a
+code with several causes, each case it covers. `--format json` prints one object,
+`{ "code": …, "explain": … }`, holding the code as given and the same text. The
+[diagnostic index](./errors.md) lists each code's severity and title; the explanation itself is
+what `explain` prints, the same text the library's `spargen::explain` returns. An unknown code
+prints an error to stderr and exits `3`.
+
 ## `spargen diff`
 
 Report the generated public-API impact of moving from one vendored spec to another.
 
 ```bash
-spargen diff <OLD> <NEW> [--exit-code] [--format <human|json>]
+spargen diff <OLD> <NEW> [--exit-code] [OPTIONS]
 ```
 
-`--exit-code` exits non-zero for a breaking (`major`) change. A spec that cannot lower is always a
-hard error.
+It accepts `--format <human|json>` plus the shared spec options, applied to both specs.
+`--exit-code` exits `1` for a breaking (`major`) change; without it a successful comparison exits
+`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`.
 
 `--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
 sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code

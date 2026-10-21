@@ -116,8 +116,8 @@ fn glob_omit_path_removes_all_matching_operations() {
 
 #[test]
 fn exact_omit_path_still_removes_exactly_one() {
-    // Regression guard: a rule with NO glob metacharacter behaves exactly as before — only the one
-    // exact path is removed, its sibling `/admin/users/{id}` stays.
+    // Regression for #24: a rule with NO glob metacharacter matches one exact path — only
+    // `/admin/users` is removed, its sibling `/admin/users/{id}` stays.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ADMIN_SPEC);
     let out = temp.path().join("client.rs");

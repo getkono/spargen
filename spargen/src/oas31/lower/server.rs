@@ -36,8 +36,8 @@ pub(super) fn lower_server_override(
 
 /// Render a lowered server URL template with each variable at its declared default.
 ///
-/// `lower_server` has already rejected a template naming an undeclared variable, so a missing
-/// entry here can only occur on a document that is already failing.
+/// `server` is one [`lower_server`] returned, and it returns none whose template names an
+/// undeclared variable, so every variable segment finds its declaration.
 fn render_server_url(server: &Server) -> String {
     let mut url = String::with_capacity(server.url.len());
     for segment in &server.segments {
@@ -62,7 +62,22 @@ pub(super) fn lower_server(
     server: &crate::oas31::Server,
     diags: &mut Diagnostics,
 ) -> Option<Server> {
-    let segments = parse_url_template(&server.url);
+    let segments = match parse_url_template(&server.url) {
+        Ok(segments) => segments,
+        Err(reason) => {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server URL `{}` has malformed braces: {reason}",
+                    server.url
+                ))
+                .remedy(
+                    "write each variable as `{name}`, and a literal brace percent-encoded as \
+                     `%7B` or `%7D`",
+                )
+                .emit(diags);
+            return None;
+        }
+    };
     let mut seen: HashSet<&str> = HashSet::new();
     for segment in &segments {
         let UrlSegment::Variable(name) = segment else {
@@ -138,25 +153,38 @@ pub(super) fn lower_server(
 
 /// Split a server URL template into literals and `{variable}` references.
 ///
-/// An unmatched `{` is kept as literal text: the document schema constrains the template shape, so
-/// there is nothing useful to diagnose here that it has not already refused.
-fn parse_url_template(url: &str) -> Vec<UrlSegment> {
+/// The specification's `server-url-template` grammar admits a brace only as one side of a
+/// `{name}` reference whose name is non-empty and itself brace-free; a literal brace must be
+/// percent-encoded. The document schema types `url` as a plain string, so every other brace
+/// reaches this function, and it is refused with the reason as the error: kept as literal text it
+/// would put the brace on the wire in place of the variable the author meant.
+fn parse_url_template(url: &str) -> Result<Vec<UrlSegment>, &'static str> {
     let mut segments = Vec::new();
     let mut rest = url;
-    while let Some(open) = rest.find('{') {
-        let Some(close) = rest[open..].find('}').map(|at| open + at) else {
-            break;
-        };
+    while let Some(open) = rest.find(['{', '}']) {
+        if rest[open..].starts_with('}') {
+            return Err("a `}` closes no `{`");
+        }
         if open > 0 {
             segments.push(UrlSegment::Literal(rest[..open].to_owned()));
         }
-        segments.push(UrlSegment::Variable(rest[open + 1..close].to_owned()));
-        rest = &rest[close + 1..];
+        let name_and_rest = &rest[open + 1..];
+        let Some(close) = name_and_rest.find(['{', '}']) else {
+            return Err("a `{` is never closed by a `}`");
+        };
+        if name_and_rest[close..].starts_with('{') {
+            return Err("a `{` opens another reference before the first is closed by a `}`");
+        }
+        if close == 0 {
+            return Err("an empty `{}` names no variable");
+        }
+        segments.push(UrlSegment::Variable(name_and_rest[..close].to_owned()));
+        rest = &name_and_rest[close + 1..];
     }
     if !rest.is_empty() {
         segments.push(UrlSegment::Literal(rest.to_owned()));
     }
-    segments
+    Ok(segments)
 }
 
 pub(super) fn parse_path_template(path: &str) -> PathTemplate {
