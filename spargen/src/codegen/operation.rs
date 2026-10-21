@@ -8,9 +8,12 @@ use crate::name::{Names, OperationBindings};
 
 use super::body::body_send_tokens;
 use super::dispatch::{
-    attach_auth_tokens, error_branch_tokens, error_type_ident, success_decode_tokens, success_type,
+    attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
+use super::idents::{
+    error_type_ident, operation_bindings, operation_method_ident, param_ident, params_struct_ident,
+};
 use super::params::{
     cookie_param_tokens, json_querystring_tokens, param_value_tokens, query_param_tokens,
     querystring_param_tokens,
@@ -31,10 +34,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
     let cookies_binding = &bindings.cookies;
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
+    let method_ident = operation_method_ident(operation, names);
     let error_ident = error_type_ident(operation, names);
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names);
@@ -301,10 +301,7 @@ fn operation_arg_normalizations(
     names: &Names,
 ) -> Vec<TokenStream> {
     let bindings = operation_bindings(operation, names);
-    let params_ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let params_ident = params_struct_ident(operation, names);
     let mut statements = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
         if takes_into_string(api, param.ty) {
@@ -334,10 +331,7 @@ pub(super) fn operation_args(
     names: &Names,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let bindings = operation_bindings(operation, names);
-    let params_ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let params_ident = params_struct_ident(operation, names);
     let mut args = Vec::new();
     let mut forwards = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
@@ -416,14 +410,6 @@ pub(super) fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStrea
         .collect()
 }
 
-/// The local and argument identifiers `name` allocated for one operation method's body.
-fn operation_bindings<'a>(operation: &Operation, names: &'a Names) -> &'a OperationBindings {
-    names
-        .operation_bindings
-        .get(&operation.id)
-        .expect("operation bindings allocated")
-}
-
 /// The statement that runs `body` with `value` bound to an optional parameter's value, when the
 /// caller supplied the optional-parameters bundle and set `ident` in it.
 fn optional_param_guard(
@@ -443,26 +429,4 @@ fn optional_param_guard(
             #body
         }
     }
-}
-
-/// The identifier `name` allocated for `param`: its method argument when it is required, its
-/// `…Params` field and setter when it is optional. Looked up rather than escaped here, so two
-/// parameters whose names escape alike still get distinct identifiers.
-///
-/// `param` must be borrowed from `operation.params`; the allocation is positional, and it is found
-/// by address so that two parameters sharing a wire name in different locations stay apart.
-pub(super) fn param_ident<'a>(
-    names: &'a Names,
-    operation: &Operation,
-    param: &crate::ir::Parameter,
-) -> &'a crate::name::Ident {
-    let index = operation
-        .params
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, param))
-        .expect("a parameter is borrowed from its own operation");
-    &names
-        .parameters
-        .get(&operation.id)
-        .expect("parameter names allocated")[index]
 }

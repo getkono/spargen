@@ -8,7 +8,7 @@ use crate::ir::{MediaType, Operation, ParamLoc, Ty};
 use crate::name::Names;
 
 use super::docs::normalize_rustdoc;
-use super::operation::param_ident;
+use super::idents::{param_ident, params_struct_ident};
 use super::ty::ty_tokens;
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
@@ -221,10 +221,7 @@ pub(super) fn cookie_param_tokens(
 /// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
 /// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
 pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenStream {
-    let ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let ident = params_struct_ident(operation, names);
     let optional: Vec<&crate::ir::Parameter> = operation
         .params
         .iter()

@@ -3,10 +3,10 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{DisjointFeature, JsonCategory, Ty, Union, UnionMode, UnionStrategy, UnionVariant};
+use crate::ir::{DisjointFeature, JsonCategory, Union, UnionMode, UnionStrategy, UnionVariant};
 use crate::name::Names;
 
-use super::ty::ty_tokens;
+use super::ty::boxed_ty_tokens;
 
 /// Emit the enum for union definition `id`, one boxed payload variant per union variant, with the
 /// `Deserialize` / `Serialize` impls of its strategy: by discriminator (a unique JSON category for
@@ -38,7 +38,7 @@ pub(super) fn emit_union(
             untagged,
             mode,
         } => {
-            let variant_defs = union_variant_defs(id, union, names);
+            let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
             let category_arms =
                 union
                     .variants
@@ -48,11 +48,10 @@ pub(super) fn emit_union(
                         let category = category.as_ref()?;
                         let variant_ident = union_variant_ident(names, id, variant);
                         let predicate = json_category_predicate(category);
+                        let decode = decode_variant_tokens(ident, variant_ident);
                         Some(quote! {
                             if #predicate {
-                                return serde_json::from_value(value)
-                                    .map(#ident::#variant_ident)
-                                    .map_err(serde::de::Error::custom);
+                                return #decode;
                             }
                         })
                     });
@@ -63,11 +62,10 @@ pub(super) fn emit_union(
                 .filter(|(_, accepted)| !accepted.is_empty())
                 .map(|(variant, accepted)| {
                     let variant_ident = union_variant_ident(names, id, variant);
+                    let decode = decode_variant_tokens(ident, variant_ident);
                     // One arm per variant, matching every tag that selects it.
                     quote! {
-                        #(#accepted)|* => serde_json::from_value(value)
-                            .map(#ident::#variant_ident)
-                            .map_err(serde::de::Error::custom),
+                        #(#accepted)|* => #decode,
                     }
                 });
             let ser_arms = union.variants.iter().zip(tags).map(|(variant, accepted)| {
@@ -97,12 +95,7 @@ pub(super) fn emit_union(
             // named variant instead of failing.
             let fallback = default_variant.map(|index| {
                 let variant = &union.variants[index];
-                let variant_ident = union_variant_ident(names, id, variant);
-                quote! {
-                    serde_json::from_value(value)
-                        .map(#ident::#variant_ident)
-                        .map_err(serde::de::Error::custom)
-                }
+                decode_variant_tokens(ident, union_variant_ident(names, id, variant))
             });
             let missing_tag_arm = match &fallback {
                 Some(fallback) => fallback.clone(),
@@ -123,7 +116,7 @@ pub(super) fn emit_union(
                 .filter_map(|(variant, priority)| {
                     let priority = (*priority)?;
                     let variant_ident = union_variant_ident(names, id, variant);
-                    let ty = union_variant_ty_tokens(variant.ty, names);
+                    let ty = boxed_ty_tokens(variant.ty, names, false);
                     Some(trial_attempt_tokens(ident, variant_ident, &ty, priority))
                 })
                 .collect();
@@ -147,12 +140,7 @@ pub(super) fn emit_union(
             let missing_tag_arm = untagged_trial(missing_tag_arm);
             let unknown_tag_arm = untagged_trial(unknown_tag_arm);
             quote! {
-                #docs
-                #deprecated
-                #[derive(Debug, Clone)]
-                pub enum #ident {
-                    #(#variant_defs)*
-                }
+                #decl
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -200,7 +188,7 @@ pub(super) fn emit_union(
         // content-inspecting `Deserialize` (buffer the value, dispatch on the proven feature) and
         // a `Serialize` that emits just the active variant's inner value (no wrapper, no tag).
         UnionStrategy::Disjoint { features } => {
-            let variant_defs = union_variant_defs(id, union, names);
+            let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
             let de_arms = union
                 .variants
                 .iter()
@@ -213,11 +201,10 @@ pub(super) fn emit_union(
                             quote! { value.get(#key).is_some() }
                         }
                     };
+                    let decode = decode_variant_tokens(ident, variant_ident);
                     quote! {
                         if #predicate {
-                            return serde_json::from_value(value)
-                                .map(#ident::#variant_ident)
-                                .map_err(serde::de::Error::custom);
+                            return #decode;
                         }
                     }
                 });
@@ -228,12 +215,7 @@ pub(super) fn emit_union(
             let error_message =
                 format!("data did not match any variant of union {}", ident.as_str());
             quote! {
-                #docs
-                #deprecated
-                #[derive(Debug, Clone)]
-                pub enum #ident {
-                    #(#variant_defs)*
-                }
+                #decl
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -259,14 +241,14 @@ pub(super) fn emit_union(
             }
         }
         UnionStrategy::Trial { mode, priorities } => {
-            let variant_defs = union_variant_defs(id, union, names);
+            let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
             let attempts = union
                 .variants
                 .iter()
                 .zip(priorities)
                 .map(|(variant, priority)| {
                     let variant_ident = union_variant_ident(names, id, variant);
-                    let ty = union_variant_ty_tokens(variant.ty, names);
+                    let ty = boxed_ty_tokens(variant.ty, names, false);
                     trial_attempt_tokens(ident, variant_ident, &ty, *priority)
                 });
             let ser_arms = union.variants.iter().map(|variant| {
@@ -278,7 +260,7 @@ pub(super) fn emit_union(
                 }
             });
             let validations = union.variants.iter().map(|variant| {
-                let ty = union_variant_ty_tokens(variant.ty, names);
+                let ty = boxed_ty_tokens(variant.ty, names, false);
                 quote! {
                     if serde_json::from_value::<#ty>(value.clone()).is_ok() {
                         match_count += 1;
@@ -300,12 +282,7 @@ pub(super) fn emit_union(
                 ident.as_str()
             );
             quote! {
-                #docs
-                #deprecated
-                #[derive(Debug, Clone)]
-                pub enum #ident {
-                    #(#variant_defs)*
-                }
+                #decl
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -348,11 +325,39 @@ pub(super) fn emit_union(
     }
 }
 
-/// Union payloads are uniformly indirect so an API's largest object variant cannot inflate every
-/// value of the enum (or trip strict `large_enum_variant` linting). Existing recursive boxing is a
-/// boolean representation flag, so setting it again never produces `Box<Box<T>>`.
-fn union_variant_ty_tokens(ty: Ty, names: &Names) -> TokenStream {
-    ty_tokens(Ty { boxed: true, ..ty }, names, false)
+/// The union enum's declaration, `docs` and `deprecated` first, one variant per
+/// [`union_variant_defs`] entry. Every strategy declares the same enum and differs only in the
+/// serde impls beside it.
+fn union_enum_decl(
+    id: crate::ir::TypeId,
+    ident: &crate::name::Ident,
+    union: &Union,
+    names: &Names,
+    docs: &TokenStream,
+    deprecated: &Option<TokenStream>,
+) -> TokenStream {
+    let variant_defs = union_variant_defs(id, union, names);
+    quote! {
+        #docs
+        #deprecated
+        #[derive(Debug, Clone)]
+        pub enum #ident {
+            #(#variant_defs)*
+        }
+    }
+}
+
+/// The expression decoding the buffered `value` into `variant_ident`'s payload, as the
+/// `Result<#ident, D::Error>` a `Deserialize` impl returns.
+fn decode_variant_tokens(
+    ident: &crate::name::Ident,
+    variant_ident: &crate::name::Ident,
+) -> TokenStream {
+    quote! {
+        serde_json::from_value(value)
+            .map(#ident::#variant_ident)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// The identifier `name` allocated for one variant of union `id`.
@@ -374,7 +379,7 @@ fn union_variant_defs(id: crate::ir::TypeId, union: &Union, names: &Names) -> Ve
         .iter()
         .map(|variant| {
             let variant_ident = union_variant_ident(names, id, variant);
-            let ty = union_variant_ty_tokens(variant.ty, names);
+            let ty = boxed_ty_tokens(variant.ty, names, false);
             quote! { #variant_ident(#ty), }
         })
         .collect()

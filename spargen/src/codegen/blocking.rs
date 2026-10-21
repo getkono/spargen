@@ -7,6 +7,7 @@ use crate::ir::{Api, Operation};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
+use super::idents::operation_method_ident;
 use super::operation::{operation_args, operation_return_ty, param_default_docs_tokens};
 
 /// Emit the `BlockingClient`: a synchronous facade that owns the async `Client` plus a
@@ -125,10 +126,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 /// the async method to completion on the owned runtime. Same docs, deprecation, argument list, and
 /// return types as the async method (all built from the shared signature helpers).
 fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
+    let method_ident = operation_method_ident(operation, names);
     let docs = doc_tokens(&operation.docs);
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });

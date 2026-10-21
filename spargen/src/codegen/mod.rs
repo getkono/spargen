@@ -11,7 +11,8 @@
 //! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
 //! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
-//! module and the root re-exports), and the shared [`docs`] and [`ty`] renderers.
+//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, and [`idents`] (the
+//! allocated-name lookups and status variant names every emitter reads).
 
 mod blocking;
 mod body;
@@ -19,6 +20,7 @@ mod client;
 mod dispatch;
 mod docs;
 mod format;
+mod idents;
 mod models;
 mod operation;
 mod params;
