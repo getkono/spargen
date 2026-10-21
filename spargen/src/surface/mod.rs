@@ -73,6 +73,19 @@ struct OpSurface {
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
+    /// The typed response-header structs, keyed by the status they document as the specification
+    /// spells it (`200`, `4XX`, `default`). A status documenting no header has no entry.
+    response_headers: BTreeMap<String, HeadersSurface>,
+}
+
+/// One status's typed response-header struct: its generated name and its public fields, one per
+/// documented header, keyed by generated field name. A required header is a `T` field read with
+/// `require_header`, an optional one an `Option<T>` field.
+struct HeadersSurface {
+    /// The generated struct name.
+    name: String,
+    /// The header fields, keyed by generated field name.
+    fields: BTreeMap<String, FieldSurface>,
 }
 
 /// A request body's surface: a required body is a `&T` argument in the generated signature, an
@@ -229,6 +242,24 @@ pub enum ChangeKind {
     VariantRemoved,
     /// A union variant's payload type changed. **Major**.
     VariantTypeChanged,
+    /// A documented status gained its typed response-header struct. **Minor** — a new type.
+    ResponseHeadersAdded,
+    /// A status's typed response-header struct was removed. **Major** — code naming it breaks.
+    ResponseHeadersRemoved,
+    /// A status's typed response-header struct was renamed. **Major**.
+    ResponseHeadersRenamed,
+    /// A new optional header was added to a response-header struct. **Minor** — an `Option<T>`
+    /// field, the struct-field rule.
+    ResponseHeaderAdded,
+    /// A new required header was added to a response-header struct. **Major** — reading the
+    /// headers now fails on a response without it, and every literal of the struct breaks.
+    RequiredResponseHeaderAdded,
+    /// A header was removed from a response-header struct. **Major**.
+    ResponseHeaderRemoved,
+    /// A response header's type changed. **Major** — its field's type changes.
+    ResponseHeaderTypeChanged,
+    /// A response header's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
+    ResponseHeaderRequirednessChanged,
 }
 
 impl ChangeKind {
@@ -240,7 +271,9 @@ impl ChangeKind {
             | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
             | ChangeKind::FieldAdded
-            | ChangeKind::VariantAdded => Impact::Minor,
+            | ChangeKind::VariantAdded
+            | ChangeKind::ResponseHeadersAdded
+            | ChangeKind::ResponseHeaderAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::RequestBodyAdded
@@ -261,7 +294,13 @@ impl ChangeKind {
             | ChangeKind::FieldTypeChanged
             | ChangeKind::FieldRequirednessChanged
             | ChangeKind::VariantRemoved
-            | ChangeKind::VariantTypeChanged => Impact::Major,
+            | ChangeKind::VariantTypeChanged
+            | ChangeKind::ResponseHeadersRemoved
+            | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::RequiredResponseHeaderAdded
+            | ChangeKind::ResponseHeaderRemoved
+            | ChangeKind::ResponseHeaderTypeChanged
+            | ChangeKind::ResponseHeaderRequirednessChanged => Impact::Major,
         }
     }
 
@@ -295,6 +334,14 @@ impl ChangeKind {
             ChangeKind::VariantAdded => "variant-added",
             ChangeKind::VariantRemoved => "variant-removed",
             ChangeKind::VariantTypeChanged => "variant-type-changed",
+            ChangeKind::ResponseHeadersAdded => "response-headers-added",
+            ChangeKind::ResponseHeadersRemoved => "response-headers-removed",
+            ChangeKind::ResponseHeadersRenamed => "response-headers-renamed",
+            ChangeKind::ResponseHeaderAdded => "response-header-added",
+            ChangeKind::RequiredResponseHeaderAdded => "required-response-header-added",
+            ChangeKind::ResponseHeaderRemoved => "response-header-removed",
+            ChangeKind::ResponseHeaderTypeChanged => "response-header-type-changed",
+            ChangeKind::ResponseHeaderRequirednessChanged => "response-header-requiredness-changed",
         }
     }
 }
@@ -429,6 +476,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 success: success_sig(&operation.responses.success(), api, names),
                 error: error_sig(&operation.responses.error(), api, names),
                 error_body: error_body_sig(&operation.responses.error(), api, names),
+                response_headers: response_headers(operation, api, names),
             },
         );
     }
@@ -519,6 +567,47 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         types,
         aliases,
     }
+}
+
+/// The typed response-header structs codegen's `emit_response_headers` declares for `operation`:
+/// one per documented status with at least one header, named and laid out as it names them.
+fn response_headers(
+    operation: &crate::ir::Operation,
+    api: &Api,
+    names: &Names,
+) -> BTreeMap<String, HeadersSurface> {
+    let mut structs = BTreeMap::new();
+    for (status, response) in operation.responses.entries() {
+        if response.headers.is_empty() {
+            continue;
+        }
+        let label = crate::name::status_label(status);
+        let name = names
+            .response_header_structs
+            .get(&(operation.id.clone(), label.clone()))
+            .expect("response header struct name allocated")
+            .as_str()
+            .to_owned();
+        let fields = response
+            .headers
+            .iter()
+            .map(|header| {
+                let field = names
+                    .response_header_fields
+                    .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                    .expect("response header field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = FieldSurface {
+                    ty: canon_ty(header.ty, api, names),
+                    required: header.required,
+                };
+                (field, surface)
+            })
+            .collect();
+        structs.insert(status.display_label(), HeadersSurface { name, fields });
+    }
+    structs
 }
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -685,6 +774,106 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                         param.ty
                     ),
                 ));
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+    diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// The changes between two operations' typed response-header structs. A struct that appears is a
+/// new type nothing yet names, so it is additive whatever it holds; inside a struct present on
+/// both sides, a header is classified as a struct field is.
+fn diff_response_headers(
+    key: &str,
+    old: &BTreeMap<String, HeadersSurface>,
+    new: &BTreeMap<String, HeadersSurface>,
+    changes: &mut Vec<Change>,
+) {
+    for status in keys(old, new) {
+        let location = format!("{key} {status} headers");
+        match (old.get(status), new.get(status)) {
+            (None, Some(headers)) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersAdded,
+                location,
+                format!("response header struct `{}` added", headers.name),
+            )),
+            (Some(headers), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeadersRemoved,
+                location,
+                format!("response header struct `{}` removed", headers.name),
+            )),
+            (Some(old_headers), Some(new_headers)) => {
+                if old_headers.name != new_headers.name {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeadersRenamed,
+                        location,
+                        format!(
+                            "response header struct renamed `{}` -> `{}`",
+                            old_headers.name, new_headers.name
+                        ),
+                    ));
+                }
+                diff_header_fields(key, status, old_headers, new_headers, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between the fields of one status's response-header struct on both sides.
+fn diff_header_fields(
+    key: &str,
+    status: &str,
+    old: &HeadersSurface,
+    new: &HeadersSurface,
+    changes: &mut Vec<Change>,
+) {
+    for field in keys(&old.fields, &new.fields) {
+        let location = format!("{key} {status} header `{field}`");
+        match (old.fields.get(field), new.fields.get(field)) {
+            (None, Some(header)) => {
+                let (kind, label) = if header.required {
+                    (ChangeKind::RequiredResponseHeaderAdded, "required")
+                } else {
+                    (ChangeKind::ResponseHeaderAdded, "optional")
+                };
+                changes.push(Change::new(
+                    kind,
+                    location,
+                    format!("{label} response header added: `{}`", header.ty),
+                ));
+            }
+            (Some(header), None) => changes.push(Change::new(
+                ChangeKind::ResponseHeaderRemoved,
+                location,
+                format!("response header removed (was `{}`)", header.ty),
+            )),
+            (Some(old_header), Some(new_header)) => {
+                if old_header.ty != new_header.ty {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderTypeChanged,
+                        location.clone(),
+                        format!(
+                            "response header type `{}` -> `{}`",
+                            old_header.ty, new_header.ty
+                        ),
+                    ));
+                }
+                if old_header.required != new_header.required {
+                    changes.push(Change::new(
+                        ChangeKind::ResponseHeaderRequirednessChanged,
+                        location,
+                        format!(
+                            "response header now {}",
+                            if new_header.required {
+                                "required"
+                            } else {
+                                "optional"
+                            }
+                        ),
+                    ));
+                }
             }
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }

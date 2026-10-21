@@ -35,6 +35,14 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::VariantAdded,
         ChangeKind::VariantRemoved,
         ChangeKind::VariantTypeChanged,
+        ChangeKind::ResponseHeadersAdded,
+        ChangeKind::ResponseHeadersRemoved,
+        ChangeKind::ResponseHeadersRenamed,
+        ChangeKind::ResponseHeaderAdded,
+        ChangeKind::RequiredResponseHeaderAdded,
+        ChangeKind::ResponseHeaderRemoved,
+        ChangeKind::ResponseHeaderTypeChanged,
+        ChangeKind::ResponseHeaderRequirednessChanged,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -66,7 +74,15 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::FieldRequirednessChanged
             | ChangeKind::VariantAdded
             | ChangeKind::VariantRemoved
-            | ChangeKind::VariantTypeChanged => {}
+            | ChangeKind::VariantTypeChanged
+            | ChangeKind::ResponseHeadersAdded
+            | ChangeKind::ResponseHeadersRemoved
+            | ChangeKind::ResponseHeadersRenamed
+            | ChangeKind::ResponseHeaderAdded
+            | ChangeKind::RequiredResponseHeaderAdded
+            | ChangeKind::ResponseHeaderRemoved
+            | ChangeKind::ResponseHeaderTypeChanged
+            | ChangeKind::ResponseHeaderRequirednessChanged => {}
         }
     }
     every.to_vec()
@@ -102,6 +118,14 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::VariantAdded => "VariantAdded",
         ChangeKind::VariantRemoved => "VariantRemoved",
         ChangeKind::VariantTypeChanged => "VariantTypeChanged",
+        ChangeKind::ResponseHeadersAdded => "ResponseHeadersAdded",
+        ChangeKind::ResponseHeadersRemoved => "ResponseHeadersRemoved",
+        ChangeKind::ResponseHeadersRenamed => "ResponseHeadersRenamed",
+        ChangeKind::ResponseHeaderAdded => "ResponseHeaderAdded",
+        ChangeKind::RequiredResponseHeaderAdded => "RequiredResponseHeaderAdded",
+        ChangeKind::ResponseHeaderRemoved => "ResponseHeaderRemoved",
+        ChangeKind::ResponseHeaderTypeChanged => "ResponseHeaderTypeChanged",
+        ChangeKind::ResponseHeaderRequirednessChanged => "ResponseHeaderRequirednessChanged",
     }
 }
 
@@ -109,7 +133,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        27,
+        35,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -160,7 +184,7 @@ fn every_impact_serializes_as_its_lowercase_label() {
 /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
 /// edit here rather than a silent consequence of moving a match arm.
 #[test]
-fn only_the_six_additive_kinds_are_minor() {
+fn only_the_additive_kinds_are_minor() {
     const MINOR: &[ChangeKind] = &[
         ChangeKind::OperationAdded,
         ChangeKind::ApiErrorBodyAdded,
@@ -168,6 +192,8 @@ fn only_the_six_additive_kinds_are_minor() {
         ChangeKind::TypeAdded,
         ChangeKind::FieldAdded,
         ChangeKind::VariantAdded,
+        ChangeKind::ResponseHeadersAdded,
+        ChangeKind::ResponseHeaderAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
