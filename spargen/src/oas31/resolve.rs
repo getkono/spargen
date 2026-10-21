@@ -121,11 +121,21 @@ impl<'doc> Resolver<'doc> {
         reference: &str,
         from: crate::diag::FileId,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        let root_component = reference
-            .strip_prefix("#/components/schemas/")
-            .is_some_and(|name| self.document.components.schemas.contains_key(name));
-        let from = if root_component { self.root_id() } else { from };
+        let from = if self.declares_root_schema(reference) {
+            self.root_id()
+        } else {
+            from
+        };
         self.reference_identity_from(reference, from)
+    }
+
+    /// Whether `reference` is a bare `#/components/schemas/<name>` naming a schema the root
+    /// document declares, which lowering reads as that root component wherever the reference is
+    /// written.
+    pub(super) fn declares_root_schema(&self, reference: &str) -> bool {
+        reference
+            .strip_prefix("#/components/schemas/")
+            .is_some_and(|name| self.document.components.schemas.contains_key(name))
     }
 
     /// The file a reference or schema at `at` is written in: an unspanned provenance sits in the
@@ -214,25 +224,15 @@ impl<'doc> Resolver<'doc> {
         at: &Provenance,
         diags: &mut Diagnostics,
     ) -> Option<super::PathItem> {
-        let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
-            // E004 case: unsupported-or-unresolved
-            Diagnostic::error(Code::UnresolvedRef, at.clone())
-                .message(format!(
-                    "unsupported or unresolved Path Item `$ref` `{reference}`"
-                ))
-                .emit(diags);
-            return None;
-        };
-        let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
-            // E004 case: absent-target
-            Diagnostic::error(Code::UnresolvedRef, at.clone())
-                .message(format!(
-                    "Path Item `$ref` target `{reference}` was not found in the input bundle"
-                ))
-                .emit(diags);
-            return None;
-        };
-        super::deserialize::parse_path_item(&node.clone(), &pointer, diags)
+        match self.component_target(reference, from) {
+            Ok((_, node, pointer)) => {
+                super::deserialize::parse_path_item(&node.clone(), &pointer, diags)
+            }
+            Err(miss) => {
+                report_bundle_miss(diags, at, miss, "Path Item `$ref`", reference);
+                None
+            }
+        }
     }
 
     /// Resolve any non-component `$ref` into the parsed object at its target.
@@ -250,7 +250,7 @@ impl<'doc> Resolver<'doc> {
         parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
         diags: &mut Diagnostics,
     ) -> Result<T, ComponentMiss> {
-        let (node, pointer) = self.component_target(reference, from)?;
+        let (_, node, pointer) = self.component_target(reference, from)?;
         parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
     }
 
@@ -269,17 +269,25 @@ impl<'doc> Resolver<'doc> {
         parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
         diags: &mut Diagnostics,
     ) -> Result<super::RefOr<T>, ComponentMiss> {
-        let (node, pointer) = self.component_target(reference, from)?;
+        let (_, node, pointer) = self.component_target(reference, from)?;
         super::deserialize::parse_ref_or(&node.clone(), &pointer, diags, parse)
             .ok_or(ComponentMiss::Unparsable)
     }
 
-    /// The node a non-component `$ref` written in `from` targets, and its pointer in its file.
+    /// The node a non-component `$ref` written in `from` targets, with the file it sits in and its
+    /// pointer there.
     fn component_target(
         &self,
         reference: &str,
         from: crate::diag::FileId,
-    ) -> Result<(&'doc SpannedValue, crate::diag::JsonPointer), ComponentMiss> {
+    ) -> Result<
+        (
+            crate::diag::FileId,
+            &'doc SpannedValue,
+            crate::diag::JsonPointer,
+        ),
+        ComponentMiss,
+    > {
         let (file, pointer) = self
             .bundle
             .reference_target(reference, from)
@@ -289,7 +297,7 @@ impl<'doc> Resolver<'doc> {
             .value_at(file)
             .pointer(&pointer)
             .ok_or(ComponentMiss::AbsentTarget)?;
-        Ok((node, pointer))
+        Ok((file, node, pointer))
     }
 
     /// Resolve a schema `$ref` against the files already loaded into the bundle, local or remote.
@@ -305,22 +313,9 @@ impl<'doc> Resolver<'doc> {
         at: &Provenance,
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
-        let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
-            // E004 case: unsupported-or-unresolved
-            Diagnostic::error(Code::UnresolvedRef, at.clone())
-                .message(format!("unsupported or unresolved $ref `{reference}`"))
-                .emit(diags);
-            return Err(Aborted);
-        };
-        let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
-            // E004 case: absent-target
-            Diagnostic::error(Code::UnresolvedRef, at.clone())
-                .message(format!(
-                    "$ref target `{reference}` was not found in the input bundle"
-                ))
-                .emit(diags);
-            return Err(Aborted);
-        };
+        let (file, node, pointer) = self
+            .component_target(reference, from)
+            .map_err(|miss| report_bundle_miss(diags, at, miss, "$ref", reference))?;
         let mut node = node.clone();
         if let Some(base_url) = self.bundle.remote_origin(file) {
             rewrite_refs_absolute(&mut node, base_url);
@@ -332,6 +327,37 @@ impl<'doc> Resolver<'doc> {
             schema: Cow::Owned(schema),
         })
     }
+}
+
+/// `E004` for a `$ref` the bundle could not follow, worded by how `miss` failed; `kind` names the
+/// reference in the message (`$ref`, ``Path Item `$ref` ``). Shared by [`Resolver::resolve_bundle`] and
+/// [`Resolver::resolve_path_item`], so both word a miss alike. An unparsable target was reported
+/// by its parser, at the target, so it adds nothing here.
+fn report_bundle_miss(
+    diags: &mut Diagnostics,
+    at: &Provenance,
+    miss: ComponentMiss,
+    kind: &str,
+    reference: &str,
+) -> Aborted {
+    match miss {
+        ComponentMiss::Unclassifiable => {
+            // E004 case: unsupported-or-unresolved
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!("unsupported or unresolved {kind} `{reference}`"))
+                .emit(diags);
+        }
+        ComponentMiss::AbsentTarget => {
+            // E004 case: absent-target
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "{kind} target `{reference}` was not found in the input bundle"
+                ))
+                .emit(diags);
+        }
+        ComponentMiss::Unparsable => {}
+    }
+    Aborted
 }
 
 /// `E004` for a reference into `#/components/<kind>/` naming an entry the document does not
