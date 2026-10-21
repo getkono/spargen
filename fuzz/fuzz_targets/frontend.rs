@@ -12,19 +12,20 @@
 //! cargo +nightly fuzz run frontend
 //! ```
 //!
-//! The first byte selects the parser exercised (JSON vs YAML) via the spec file extension; the rest
-//! is the document body. Bytes need not be valid UTF-8 — the frontend must reject that gracefully.
+//! The first byte selects one of three parser routes via the spec file extension — `.json` (JSON),
+//! `.yaml` (YAML), or `.txt` (the extension-sniff fallback: YAML, then JSON); the rest is the
+//! document body. Bytes need not be valid UTF-8 — the frontend must reject that gracefully.
 
 #![no_main]
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
 use tempfile::TempDir;
 
 /// One reusable temp directory for the whole fuzzing session — created once, so the hot loop does no
-/// directory setup, only a rewrite of the two spec files.
+/// directory setup, only a rewrite of the three spec files.
 fn temp_dir() -> &'static TempDir {
     static DIR: OnceLock<TempDir> = OnceLock::new();
     DIR.get_or_init(|| TempDir::new().expect("create fuzz temp dir"))
@@ -39,7 +40,6 @@ fn run(ext: &str, body: &[u8]) {
         .open(&path)
         .expect("open spec file");
     file.write_all(body).expect("write spec body");
-    file.seek(SeekFrom::Start(0)).ok();
     drop(file);
 
     let spec = camino::Utf8PathBuf::from_path_buf(path).expect("utf8 temp path");
@@ -48,7 +48,7 @@ fn run(ext: &str, body: &[u8]) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    // First byte routes to a parser so the corpus reaches both frontends; the remainder is the body.
+    // First byte routes to one of three parser routes; the remainder is the body.
     let (selector, body) = data.split_first().unwrap_or((&0, &[]));
     let ext = match selector % 3 {
         0 => "json",
