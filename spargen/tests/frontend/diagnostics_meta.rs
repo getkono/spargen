@@ -308,16 +308,12 @@ fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
         assert_eq!(w014.claim, OutcomeClaim::Independent, "{w014:#?}");
         assert!(claim_violations(*outcome, std::slice::from_ref(w014)).is_empty());
         // As #174 found it, with the claim declared: the outcome refuses it.
-        let declared = Diagnostic {
-            message: W014_GENERATION_WORDING.to_owned(),
-            claim: OutcomeClaim::Generated,
-            ..w014.clone()
-        };
+        let mut declared = w014.clone();
+        declared.message = W014_GENERATION_WORDING.to_owned();
+        declared.claim = OutcomeClaim::Generated;
         // As #174 found it, undeclared: the message states a claim the field does not carry.
-        let undeclared = Diagnostic {
-            message: W014_GENERATION_WORDING.to_owned(),
-            ..w014.clone()
-        };
+        let mut undeclared = w014.clone();
+        undeclared.message = W014_GENERATION_WORDING.to_owned();
         for diagnostic in [declared, undeclared] {
             assert_eq!(
                 claim_violations(*outcome, std::slice::from_ref(&diagnostic)).len(),
@@ -336,11 +332,9 @@ fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
         .iter()
         .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
         .unwrap_or_else(|| panic!("{generated:#?}"));
-    let declared = Diagnostic {
-        message: W014_GENERATION_WORDING.to_owned(),
-        claim: OutcomeClaim::Generated,
-        ..w014.clone()
-    };
+    let mut declared = w014.clone();
+    declared.message = W014_GENERATION_WORDING.to_owned();
+    declared.claim = OutcomeClaim::Generated;
     assert!(claim_violations(Outcome::Generated, &[declared]).is_empty());
 }
 

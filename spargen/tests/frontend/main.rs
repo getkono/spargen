@@ -303,29 +303,23 @@ fn located(
     message: &str,
 ) -> Diagnostic {
     let (line, start, end) = span;
-    Diagnostic {
-        code,
-        severity: Severity::Warning,
-        pointer: spargen::JsonPointer::from(pointer),
-        span: Some(spargen::Span {
-            file: spargen::FileId(file),
-            start: spargen::Loc {
-                line,
-                col: 1,
-                offset: start,
-            },
-            end: spargen::Loc {
-                line,
-                col: 1,
-                offset: end,
-            },
-        }),
-        file: None,
-        message: message.to_owned(),
-        remedy: None,
-        interpretation: None,
-        claim: OutcomeClaim::Independent,
-    }
+    let span = spargen::Span {
+        file: spargen::FileId(file),
+        start: spargen::Loc {
+            line,
+            col: 1,
+            offset: start,
+        },
+        end: spargen::Loc {
+            line,
+            col: 1,
+            offset: end,
+        },
+    };
+    let at = spargen::Provenance::new(spargen::JsonPointer::from(pointer), Some(span));
+    let mut diagnostic = Diagnostic::warning(code, at).message(message).build();
+    diagnostic.interpretation = None;
+    diagnostic
 }
 
 /// The name of the `pub struct` that declares the first field line starting with `field`.

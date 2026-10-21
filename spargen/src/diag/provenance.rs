@@ -4,9 +4,10 @@ use super::{JsonPointer, Span};
 ///
 /// Provenance is attached to every IR node so that a diagnostic raised after lowering — the IR
 /// invariant check's `E011` — can still point back at the exact spec construct and source
-/// location.
+/// location. It is also where [`super::Diagnostic::error`] and [`super::Diagnostic::warning`] place
+/// the diagnostic they begin.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Provenance {
+pub struct Provenance {
     /// RFC 6901 pointer to the construct.
     pub(crate) pointer: JsonPointer,
     /// Source span, when available.
@@ -15,7 +16,7 @@ pub(crate) struct Provenance {
 
 impl Provenance {
     /// Construct provenance from a pointer and optional span.
-    pub(crate) fn new(pointer: JsonPointer, span: Option<Span>) -> Self {
+    pub fn new(pointer: JsonPointer, span: Option<Span>) -> Self {
         Self { pointer, span }
     }
 }

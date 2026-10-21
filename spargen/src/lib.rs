@@ -59,7 +59,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{Build, CargoIntegration, ConfigError, Spec};
 pub use diag::{
-    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
+    Code, Diagnostic, DiagnosticBuilder, FileId, InterpId, JsonPointer, Loc, OutcomeClaim,
+    Provenance, Severity, Span, UnknownCode,
 };
 pub use runtime_contract::{RequiredDependency, Requirements};
 #[cfg(feature = "remote-fetch")]
@@ -129,8 +130,8 @@ impl std::fmt::Display for Outcome {
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
 /// Fields are private and read through accessors, matching [`Spec`], [`Build`], and
-/// [`DiffRejection`], so the shape can grow without a breaking change. [`Diagnostic`] is the
-/// exception: its fields are public.
+/// [`DiffRejection`], so the shape can grow without a breaking change. [`Diagnostic`] grows the
+/// other way: its fields are public and the struct is `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
