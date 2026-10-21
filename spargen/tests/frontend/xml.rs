@@ -341,8 +341,8 @@ paths:
     };
     let xml = "          application/xml:\n            schema: { type: object }\n";
     let json = "          application/json:\n            schema: { type: object, required: [id], properties: { id: { type: string } } }\n";
-    // The XML codec runtime is the only emitted source that names `quick_xml`, as the XML-only
-    // control shows.
+    // The XML-only control shows the embedded XML codec runtime naming `quick_xml`, so the marker
+    // is present whenever that runtime is.
     let (control, control_code) = generate_with_code(&spec(xml));
     assert_eq!(control.outcome(), Outcome::Generated, "{control:#?}");
     assert!(control_code.contains("quick_xml::"), "{control_code}");
