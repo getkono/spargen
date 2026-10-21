@@ -194,6 +194,11 @@ impl Report {
     /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
     /// warning as `cargo::warning=`. Announcing a rejection as a warning would make the one
     /// message that stops generation look like the ones that do not.
+    ///
+    /// A directive is one line, and Cargo shows a build script's other stdout only under `-vv`,
+    /// so every line of a diagnostic's rendering (its location, pointer, and `help:` remedy
+    /// included) goes out as its own directive at that diagnostic's severity. A truncated report
+    /// ends with the truncation notice as a `cargo::warning=`.
     pub fn emit_cargo_diagnostics(&self) {
         for line in self.cargo_directive_lines() {
             println!("{line}");
@@ -203,13 +208,28 @@ impl Report {
     /// The directive lines [`Self::emit_cargo_diagnostics`] prints, split out so the severity
     /// mapping is testable without capturing the process's stdout.
     fn cargo_directive_lines(&self) -> Vec<String> {
-        self.diagnostics
-            .iter()
-            .map(|diagnostic| match diagnostic.severity {
-                Severity::Error => format!("cargo::error={diagnostic}"),
-                Severity::Warning => format!("cargo::warning={diagnostic}"),
-            })
-            .collect()
+        let mut lines = Vec::new();
+        for diagnostic in &self.diagnostics {
+            let directive = match diagnostic.severity {
+                Severity::Error => "cargo::error=",
+                Severity::Warning => "cargo::warning=",
+            };
+            let rendered = diagnostic.to_string();
+            lines.extend(rendered.lines().map(|line| format!("{directive}{line}")));
+        }
+        if self.truncated {
+            lines.push(format!("cargo::warning={}", self.truncation_notice()));
+        }
+        lines
+    }
+
+    /// The line saying the report stops at `batch_cap`, shared by [`Report`]'s `Display` and
+    /// [`Self::emit_cargo_diagnostics`] so the two cannot drift.
+    fn truncation_notice(&self) -> String {
+        format!(
+            "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
+            self.diagnostics.len()
+        )
     }
 
     /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
@@ -227,11 +247,7 @@ impl std::fmt::Display for Report {
             writeln!(formatter, "{diagnostic}")?;
         }
         if self.truncated {
-            writeln!(
-                formatter,
-                "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
-                self.diagnostics.len()
-            )?;
+            writeln!(formatter, "{}", self.truncation_notice())?;
         }
         Ok(())
     }
@@ -1169,27 +1185,56 @@ mod tests {
     }
 
     /// A rejection announced as a warning looks like the diagnostics that do *not* stop
-    /// generation. Each diagnostic goes out at its own severity.
+    /// generation. Each diagnostic goes out at its own severity, and so does every line of it:
+    /// Cargo shows a build script's non-directive stdout only under `-vv`, so an unprefixed
+    /// location or `help:` line would be invisible in an ordinary build. A truncated report also
+    /// says so, as a warning.
     #[test]
     fn cargo_directives_carry_each_diagnostics_own_severity() {
-        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let span = diag::Span::point(
+            diag::FileId(0),
+            diag::Loc {
+                line: 3,
+                col: 5,
+                offset: 20,
+            },
+        );
+        let provenance =
+            diag::Provenance::new(JsonPointer::root().push("paths").push("/pets"), Some(span));
         let report = Report {
             diagnostics: vec![
                 Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
                     .message("a rejection")
+                    .remedy("fix the rejection")
                     .build(),
                 Diagnostic::warning(Code::ServerInitiatedFlowIgnored, provenance)
                     .message("a warning")
+                    .remedy("fix the warning")
                     .build(),
             ],
             outcome: Outcome::Rejected,
-            truncated: false,
+            truncated: true,
         };
 
         let lines = report.cargo_directive_lines();
-        assert_eq!(lines.len(), 2, "{lines:#?}");
-        assert!(lines[0].starts_with("cargo::error="), "{lines:#?}");
-        assert!(lines[1].starts_with("cargo::warning="), "{lines:#?}");
+        assert_eq!(
+            lines,
+            [
+                "cargo::error=error[E001]: a rejection",
+                "cargo::error=  --> 3:5",
+                "cargo::error=  at /paths/~1pets",
+                "cargo::error=  help: fix the rejection",
+                "cargo::warning=warning[W002]: a warning",
+                "cargo::warning=  --> 3:5",
+                "cargo::warning=  at /paths/~1pets",
+                "cargo::warning=  help: fix the warning",
+                "cargo::warning=spargen: diagnostic list truncated at batch_cap (2 shown); raise batch_cap to see the rest",
+            ],
+            "{lines:#?}"
+        );
+        for line in &lines {
+            assert!(!line.contains('\n'), "a directive is one line: {line:?}");
+        }
     }
 
     /// Every Cargo-integration branch, without touching process-global environment state.
