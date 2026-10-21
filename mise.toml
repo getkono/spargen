@@ -182,7 +182,7 @@ run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.mutants]
 description = "Mutation testing over the runtime, the response partition and the name allocator"
-# CI's `mutants` job in `mutants.yml` runs this command byte for byte, weekly and on
+# CI's `mutants` job in `mutants.yml` runs these commands byte for byte, weekly and on
 # `workflow_dispatch` (`every_mise_task_runs_exactly_what_its_ci_job_runs`): it takes well over the
 # time a pull request should wait, so no hook or pull request runs it. The scope is the embedded
 # runtime, `ir/media.rs`'s success/error partition, and the name allocator. `oas31/lower/` is
