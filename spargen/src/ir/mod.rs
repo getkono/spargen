@@ -68,14 +68,15 @@ impl Api {
         })
     }
 
-    /// Whether the type graph contains a `format: date-time` or `format: date` primitive. Drives
-    /// the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime newtypes and the `time`
-    /// requirement.
+    /// Whether the types the output carries contain a `format: date-time` or `format: date`
+    /// primitive. Drives the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime
+    /// newtypes and the `time` requirement. An [elided](TypeGraph::elide) definition is no type of
+    /// the output, so it counts for nothing here, as in `check_invariants` (#723).
     ///
     /// This is a property of the API alone; whether those primitives actually *become* the newtypes
     /// additionally depends on the `time` config knob, which callers apply themselves.
     pub(crate) fn uses_time(&self) -> bool {
-        self.types.iter().any(|(_, definition)| {
+        self.types.emitted().any(|(_, definition)| {
             matches!(
                 definition.kind,
                 TypeKind::Primitive(Prim::Date | Prim::DateTime)
@@ -95,26 +96,27 @@ impl Api {
     /// field, additional-properties value or union variant containing one, a JSON `content`
     /// parameter containing one, or a serde-encoded body (JSON, form, XML or a sequential stream)
     /// containing one other than a whole non-streaming `bytes` body, which is sent and read raw.
-    /// Drives the `serde` feature of the `bytes` requirement.
+    /// Drives the `serde` feature of the `bytes` requirement. Only the models the output carries
+    /// count: an [elided](TypeGraph::elide) definition is none of them (#723).
     pub(crate) fn uses_bytes_serde(&self) -> bool {
-        let model_needs_serde = self
-            .types
-            .iter()
-            .any(|(id, definition)| match &definition.kind {
-                // A model whose fields, additional-properties value or variants reach `bytes`:
-                // exactly what `contains_bytes` walks from the model itself.
-                TypeKind::Struct(_) | TypeKind::Union(_) => {
-                    contains_bytes(&self.types, id, &mut BTreeSet::new())
-                }
-                // Requirements are derived only from an `Api` that passed `check_invariants`,
-                // which rejects a surviving reservation. Answering `false` would under-declare
-                // a runtime dependency for a shape nobody computed.
-                TypeKind::Reserved => unreachable!(
-                    "a reservation reached the runtime contract; `check_invariants` should \
+        let model_needs_serde =
+            self.types
+                .emitted()
+                .any(|(id, definition)| match &definition.kind {
+                    // A model whose fields, additional-properties value or variants reach `bytes`:
+                    // exactly what `contains_bytes` walks from the model itself.
+                    TypeKind::Struct(_) | TypeKind::Union(_) => {
+                        contains_bytes(&self.types, id, &mut BTreeSet::new())
+                    }
+                    // Requirements are derived only from an `Api` that passed `check_invariants`,
+                    // which rejects a surviving reservation. Answering `false` would under-declare
+                    // a runtime dependency for a shape nobody computed.
+                    TypeKind::Reserved => unreachable!(
+                        "a reservation reached the runtime contract; `check_invariants` should \
                      have rejected it"
-                ),
-                _ => false,
-            });
+                    ),
+                    _ => false,
+                });
         model_needs_serde
             || self.operations.iter().any(|operation| {
                 operation.params.iter().any(|parameter| {
