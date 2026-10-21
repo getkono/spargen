@@ -306,7 +306,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                     return Report {
                         diagnostics: cargo_diagnostics,
                         outcome: Outcome::Rejected,
-                        truncated: false,
+                        truncated: cached.truncated,
                     };
                 }
                 // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
@@ -314,7 +314,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
-                    truncated: false,
+                    truncated: cached.truncated,
                 };
             }
         }
@@ -383,6 +383,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 &snapshot.digest,
                 &content_digest,
                 &preview.report.diagnostics,
+                preview.report.truncated,
                 requirements,
             ) {
                 return pipeline_error_report(message);
