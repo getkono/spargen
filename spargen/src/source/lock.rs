@@ -90,6 +90,17 @@ impl Lock {
         self.entries.sort_by(|a, b| a.url.cmp(&b.url));
     }
 
+    /// Add every pin of `earlier` whose URL this lock does not pin, leaving each pin it holds as
+    /// it is.
+    #[cfg(feature = "remote-fetch")]
+    pub(crate) fn keep_unpinned_from(&mut self, earlier: Lock) {
+        for entry in earlier.entries {
+            if self.get(&entry.url).is_none() {
+                self.upsert(entry);
+            }
+        }
+    }
+
     /// Render the lock to deterministic TOML: `version` first, then each `[[remote]]` table in
     /// URL order. No timestamps, so the output is a pure function of the pins.
     #[cfg(feature = "remote-fetch")]
