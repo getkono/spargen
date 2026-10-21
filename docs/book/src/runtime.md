@@ -3,10 +3,14 @@
 The runtime support code is embedded into generated output as a private `support` module — no
 spargen crate ever enters a consumer's dependency graph. Its core dependency set is `reqwest`
 (default features off) / `serde` / `serde_json` / `bytes` / `secrecy`. A capability that needs more
-adds it only when the compiled API uses it, and adds only this:
+adds it only when the compiled API uses it, as this table lists; each crate's exact Cargo features
+are in the contract linked below:
 
 | Capability | Adds |
 | --- | --- |
+| JSON request bodies | reqwest's `json` feature |
+| `multipart/form-data` request bodies | reqwest's `multipart` feature |
+| A `bytes` value serde encodes (in a model, a JSON `content` parameter, or a serde-encoded body) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
 | [XML bodies](#xml-bodies) | `quick-xml` |
 | [`format: date-time` / `date`](#uuid-and-time) | `time` |
