@@ -18,6 +18,8 @@ mod remote;
 mod sha256;
 mod value;
 
+// The one `remote-fetch` gate over `vendor`: it covers every item in the module, its tests
+// included.
 #[cfg(feature = "remote-fetch")]
 mod vendor;
 
