@@ -12,7 +12,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
-use super::bundle::{local_identity, working_dir};
+use super::bundle::{local_identity, parse_yaml_then_json, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
     classify_ref, collect_refs, enters_extension, is_http_url, resolve_ref_url, split_fragment,
@@ -450,9 +450,7 @@ fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
     } else if lowered.ends_with(".yaml") || lowered.ends_with(".yml") {
         parse_yaml(id, text, &mut Diagnostics::default()).ok()
     } else {
-        parse_yaml(id, text, &mut Diagnostics::default())
-            .ok()
-            .or_else(|| parse_json(id, text, &mut Diagnostics::default()).ok())
+        parse_yaml_then_json(id, text, &mut Diagnostics::default()).ok()
     }
 }
 
