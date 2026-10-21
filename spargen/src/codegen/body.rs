@@ -6,7 +6,7 @@ use quote::quote;
 use crate::ir::{Api, MediaType, Operation, Ty, TypeKind};
 use crate::name::{Names, OperationBindings};
 
-use super::params::delimiter_tokens;
+use super::params::{delimiter_tokens, query_encoding_tokens};
 
 /// The statements that encode the operation's request body onto the request and set its
 /// `Content-Type`, by the body's media type; empty when the operation sends no typed body.
@@ -179,11 +179,7 @@ fn form_mode_tokens(mode: &crate::ir::EncodingMode) -> TokenStream {
             allow_reserved,
         } => {
             let style = form_style_tokens(style);
-            let encoding = if *allow_reserved {
-                quote! { support::PercentEncoding::Reserved }
-            } else {
-                quote! { support::PercentEncoding::Form }
-            };
+            let encoding = query_encoding_tokens(*allow_reserved);
             quote! {
                 support::FormMode::Style {
                     style: #style,
