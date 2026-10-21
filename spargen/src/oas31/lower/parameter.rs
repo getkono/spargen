@@ -8,7 +8,7 @@ use crate::ir::{
     AdditionalProps, Delimiter, Docs, MediaType, ParamLoc, ParamStyle, Parameter, Prim, Ty,
     TypeGraph, TypeId, TypeKind,
 };
-use crate::oas31::{ParameterObject, RefOr, Schema};
+use crate::oas31::{MediaTypeObject, ParameterObject, RefOr, Schema};
 
 use super::content::lower_media_type;
 use super::LowerCtx;
@@ -45,7 +45,67 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Lower one Parameter Object, in phases: its location, the reserved headers it is ignored as,
+    /// a `querystring` parameter's own path, the serialization style, the flags that have no
+    /// effect, its type (from `schema`, from `content`, or unconstrained), and the shape that
+    /// style can serialize. Each phase reports its own refusal; `None` means the parameter is not
+    /// part of the operation.
     pub(super) fn lower_parameter(&mut self, parameter: &ParameterObject) -> Option<Parameter> {
+        let location = self.parameter_location(parameter)?;
+        if self.is_ignored_reserved_header(parameter, location) {
+            return None;
+        }
+        if location == ParamLoc::QueryString {
+            return self.lower_querystring_parameter(parameter);
+        }
+        let (style, explode) = self.parameter_style(parameter, location)?;
+        self.warn_inert_parameter_flags(parameter, location, &style);
+        let ty = if let Some(schema) = &parameter.schema {
+            let mark = self.graph_mark();
+            let ty = self.lower_schema_ref(schema, &parameter.name)?;
+            self.remap_binary_param(ty, &parameter.name, mark)
+        } else if let Some((media, object)) = parameter.content.iter().next() {
+            return self.lower_content_parameter(parameter, location, media, object);
+        } else {
+            self.insert_type(
+                &parameter.name,
+                TypeKind::Any,
+                Docs::default(),
+                Some(parameter.provenance.clone()),
+            )
+        };
+        self.check_styled_parameter_shape(parameter, ty)?;
+        Some(self.lowered_parameter(
+            parameter,
+            location,
+            ty,
+            style,
+            explode,
+            parameter.schema.as_ref(),
+        ))
+    }
+
+    /// Report `message` (and `remedy`, when there is one) as `E010` at `parameter`, and refuse it.
+    fn reject_parameter<T>(
+        &mut self,
+        parameter: &ParameterObject,
+        message: impl Into<String>,
+        remedy: Option<String>,
+    ) -> Option<T> {
+        let mut diagnostic = Diagnostic::error(
+            Code::UnsupportedParameterStyle,
+            parameter.provenance.clone(),
+        )
+        .message(message);
+        if let Some(remedy) = remedy {
+            diagnostic = diagnostic.remedy(remedy);
+        }
+        diagnostic.emit(self.diags);
+        None
+    }
+
+    /// The parameter's `in`, or `None` once an unknown one is reported.
+    fn parameter_location(&mut self, parameter: &ParameterObject) -> Option<ParamLoc> {
         let location = match parameter.location.as_str() {
             "path" => ParamLoc::Path,
             "query" => ParamLoc::Query,
@@ -64,15 +124,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         };
-        // `Accept`, `Content-Type`, and `Authorization` header parameters "SHALL be ignored": the
-        // protocol layer owns those, and emitting a client argument for one would let a caller
-        // silently fight the codec or the auth attachment.
-        if location == ParamLoc::Header
+        Some(location)
+    }
+
+    /// Whether the parameter is a header the specification reserves, reporting it when it is.
+    ///
+    /// `Accept`, `Content-Type`, and `Authorization` header parameters "SHALL be ignored": the
+    /// protocol layer owns those, and emitting a client argument for one would let a caller
+    /// silently fight the codec or the auth attachment.
+    fn is_ignored_reserved_header(
+        &mut self,
+        parameter: &ParameterObject,
+        location: ParamLoc,
+    ) -> bool {
+        let reserved = location == ParamLoc::Header
             && matches!(
                 parameter.name.to_ascii_lowercase().as_str(),
                 "accept" | "content-type" | "authorization"
-            )
-        {
+            );
+        if reserved {
             // W011 case: reserved-header-parameter
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(format!(
@@ -85,69 +155,72 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      credentials are registered with `Client::with_credential`",
                 )
                 .emit(self.diags);
-            return None;
         }
-        if location == ParamLoc::QueryString {
-            // The official document schema requires `content` on an `in: querystring` parameter,
-            // with exactly one entry, so a document reaching lowering without one was already
-            // rejected as `E011`. The arm stays so a future schema relaxation cannot leave the
-            // parameter silently unsent.
-            let Some((media_name, object)) = parameter.content.iter().next() else {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
-                .message("`in: querystring` requires one content media type with a schema")
-                .emit(self.diags);
-                return None;
-            };
-            let object = self.resolve_media_object(object, media_name)?;
-            let media = lower_media_type(media_name, &parameter.provenance, self.diags)?;
-            if !matches!(media, MediaType::Json | MediaType::FormUrlEncoded) {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
-                .message(format!(
+        reserved
+    }
+
+    /// Lower an `in: querystring` parameter, which is the whole query string serialized by its one
+    /// `content` media type.
+    fn lower_querystring_parameter(&mut self, parameter: &ParameterObject) -> Option<Parameter> {
+        // The official document schema requires `content` on an `in: querystring` parameter,
+        // with exactly one entry, so a document reaching lowering without one was already
+        // rejected as `E011`. The arm stays so a future schema relaxation cannot leave the
+        // parameter silently unsent.
+        let Some((media_name, object)) = parameter.content.iter().next() else {
+            return self.reject_parameter(
+                parameter,
+                "`in: querystring` requires one content media type with a schema",
+                None,
+            );
+        };
+        let object = self.resolve_media_object(object, media_name)?;
+        let media = lower_media_type(media_name, &parameter.provenance, self.diags)?;
+        if !matches!(media, MediaType::Json | MediaType::FormUrlEncoded) {
+            return self.reject_parameter(
+                parameter,
+                format!(
                     "querystring media type `{media_name}` is not supported; use JSON or \
                          application/x-www-form-urlencoded"
-                ))
-                .emit(self.diags);
-                return None;
-            }
-            let Some(schema) = object.schema.as_ref() else {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
-                .message("querystring content requires a schema for a typed client argument")
-                .emit(self.diags);
-                return None;
-            };
-            let ty = self.lower_schema_ref(schema, &parameter.name)?;
-            if media == MediaType::FormUrlEncoded
-                && !matches!(
-                    self.graph.get(ty.id).map(|definition| &definition.kind),
-                    Some(TypeKind::Struct(_))
-                )
-            {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
-                .message("form-urlencoded querystring parameters require an object schema")
-                .emit(self.diags);
-                return None;
-            }
-            return Some(self.lowered_parameter(
-                parameter,
-                location,
-                ty,
-                ParamStyle::Content(media),
-                true,
-                object.schema.as_ref(),
-            ));
+                ),
+                None,
+            );
         }
+        let Some(schema) = object.schema.as_ref() else {
+            return self.reject_parameter(
+                parameter,
+                "querystring content requires a schema for a typed client argument",
+                None,
+            );
+        };
+        let ty = self.lower_schema_ref(schema, &parameter.name)?;
+        if media == MediaType::FormUrlEncoded
+            && !matches!(
+                self.graph.get(ty.id).map(|definition| &definition.kind),
+                Some(TypeKind::Struct(_))
+            )
+        {
+            return self.reject_parameter(
+                parameter,
+                "form-urlencoded querystring parameters require an object schema",
+                None,
+            );
+        }
+        Some(self.lowered_parameter(
+            parameter,
+            ParamLoc::QueryString,
+            ty,
+            ParamStyle::Content(media),
+            true,
+            object.schema.as_ref(),
+        ))
+    }
+
+    /// The serialization style of a parameter outside `querystring`, and its `explode`.
+    fn parameter_style(
+        &mut self,
+        parameter: &ParameterObject,
+        location: ParamLoc,
+    ) -> Option<(ParamStyle, bool)> {
         let style_name = parameter.style.as_deref().unwrap_or(match location {
             ParamLoc::Path | ParamLoc::Header => "simple",
             ParamLoc::Query | ParamLoc::Cookie => "form",
@@ -166,16 +239,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (ParamLoc::Query, "deepObject") => ParamStyle::DeepObject,
             (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
-                .message(format!(
-                    "parameter style `{style_name}` is not permitted for `{}` parameters",
-                    parameter.location
-                ))
-                .emit(self.diags);
-                return None;
+                return self.reject_parameter(
+                    parameter,
+                    format!(
+                        "parameter style `{style_name}` is not permitted for `{}` parameters",
+                        parameter.location
+                    ),
+                    None,
+                );
             }
         };
         // `deepObject` ignores `explode` entirely; every other style defaults per the
@@ -184,17 +255,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .explode
             .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
         if matches!(style, ParamStyle::Delimited(_)) && parameter.explode == Some(true) {
-            Diagnostic::error(
-                Code::UnsupportedParameterStyle,
-                parameter.provenance.clone(),
-            )
-            .message(format!(
-                "`style: {style_name}` with `explode: true` has no defined serialization"
-            ))
-            .remedy("set `explode: false`, which is the default for this style")
-            .emit(self.diags);
-            return None;
+            return self.reject_parameter(
+                parameter,
+                format!("`style: {style_name}` with `explode: true` has no defined serialization"),
+                Some("set `explode: false`, which is the default for this style".to_owned()),
+            );
         }
+        Some((style, explode))
+    }
+
+    /// Warn about the parameter flags that have no effect at its location and style.
+    fn warn_inert_parameter_flags(
+        &mut self,
+        parameter: &ParameterObject,
+        location: ParamLoc,
+        style: &ParamStyle,
+    ) {
         // Deprecated in 3.2, and inert for a typed client: an absent optional parameter is simply
         // not sent, so there is never a case where the client would send an empty string instead.
         if parameter.allow_empty_value {
@@ -220,68 +296,68 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .remedy("remove `allowReserved`, or use `style: form` if encoding is wanted")
                 .emit(self.diags);
         }
-        let ty = if let Some(schema) = &parameter.schema {
-            let mark = self.graph_mark();
-            let ty = self.lower_schema_ref(schema, &parameter.name)?;
-            self.remap_binary_param(ty, &parameter.name, mark)
-        } else if let Some((media, object)) = parameter.content.iter().next() {
-            let object = self.resolve_media_object(object, media)?;
-            let media_name = media.clone();
-            let media = lower_media_type(media, &parameter.provenance, self.diags)?;
-            // A `content` parameter is rendered by its media codec. Only JSON and raw text have a
-            // codec that produces a single parameter token; anything else would fall through to
-            // `simple` serialization and be sent in the wrong format.
-            if !matches!(media, MediaType::Json | MediaType::Text) {
-                Diagnostic::error(Code::UnsupportedMediaType, parameter.provenance.clone())
-                    .message(format!(
-                        "`content` parameter media type `{media_name}` has no single-token \
-                         serialization"
-                    ))
-                    .remedy(
-                        "use `application/json` or a `text/*` media type, or describe the \
-                         parameter with `schema` and a serialization style",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
-            // Without a schema there is no type to take the argument as, and lowering to nothing
-            // would drop the parameter from the operation unreported (#699).
-            let Some(schema) = object.schema.as_ref() else {
-                Diagnostic::error(
-                    Code::UnsupportedParameterStyle,
-                    parameter.provenance.clone(),
-                )
+    }
+
+    /// Lower a parameter described by `content` rather than `schema`: its value is rendered by
+    /// the codec of its one media type, `media`.
+    fn lower_content_parameter(
+        &mut self,
+        parameter: &ParameterObject,
+        location: ParamLoc,
+        media: &str,
+        object: &MediaTypeObject,
+    ) -> Option<Parameter> {
+        let object = self.resolve_media_object(object, media)?;
+        let media_name = media;
+        let media = lower_media_type(media, &parameter.provenance, self.diags)?;
+        // A `content` parameter is rendered by its media codec. Only JSON and raw text have a
+        // codec that produces a single parameter token; anything else would fall through to
+        // `simple` serialization and be sent in the wrong format.
+        if !matches!(media, MediaType::Json | MediaType::Text) {
+            Diagnostic::error(Code::UnsupportedMediaType, parameter.provenance.clone())
                 .message(format!(
+                    "`content` parameter media type `{media_name}` has no single-token \
+                     serialization"
+                ))
+                .remedy(
+                    "use `application/json` or a `text/*` media type, or describe the \
+                     parameter with `schema` and a serialization style",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        // Without a schema there is no type to take the argument as, and lowering to nothing
+        // would drop the parameter from the operation unreported (#699).
+        let Some(schema) = object.schema.as_ref() else {
+            return self.reject_parameter(
+                parameter,
+                format!(
                     "`content` parameter `{}` has no schema for its `{media_name}` entry, so the \
                      client has no type to serialize it from",
                     parameter.name
-                ))
-                .remedy(format!(
+                ),
+                Some(format!(
                     "give the `{media_name}` entry a `schema`, or describe the parameter with \
                      `schema` and a serialization style"
-                ))
-                .emit(self.diags);
-                return None;
-            };
-            let mark = self.graph_mark();
-            let ty = self.lower_schema_ref(schema, &parameter.name)?;
-            let ty = self.remap_binary_param(ty, &parameter.name, mark);
-            return Some(self.lowered_parameter(
-                parameter,
-                location,
-                ty,
-                ParamStyle::Content(media),
-                false,
-                object.schema.as_ref(),
-            ));
-        } else {
-            self.insert_type(
-                &parameter.name,
-                TypeKind::Any,
-                Docs::default(),
-                Some(parameter.provenance.clone()),
-            )
+                )),
+            );
         };
+        let mark = self.graph_mark();
+        let ty = self.lower_schema_ref(schema, &parameter.name)?;
+        let ty = self.remap_binary_param(ty, &parameter.name, mark);
+        Some(self.lowered_parameter(
+            parameter,
+            location,
+            ty,
+            ParamStyle::Content(media),
+            false,
+            object.schema.as_ref(),
+        ))
+    }
+
+    /// Refuse a styled parameter whose lowered type simple/form/deepObject serialization has no
+    /// token for: an uninhabited part, an unconstrained property, or nesting it cannot render.
+    fn check_styled_parameter_shape(&mut self, parameter: &ParameterObject, ty: Ty) -> Option<()> {
         if let Some((path, kind)) = uninhabited_parameter_part(&self.graph, ty) {
             // `false`, or an `allOf` whose members meet empty, admits no value at all (#407).
             // Nothing is nested, so "nested arrays or objects" would describe nothing the author
@@ -310,54 +386,33 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ),
                 ),
             };
-            Diagnostic::error(
-                Code::UnsupportedParameterStyle,
-                parameter.provenance.clone(),
-            )
-            .message(message)
-            .remedy(remedy)
-            .emit(self.diags);
-            return None;
+            return self.reject_parameter(parameter, message, Some(remedy));
         }
         if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
             // Most often a `required` name no `properties` entry declares, which is a required
             // field typed by `additionalProperties` and unconstrained without one (#140). An
             // arbitrary JSON value has no `key=value` token, and "nested arrays or objects"
             // would describe nothing the author wrote.
-            Diagnostic::error(
-                Code::UnsupportedParameterStyle,
-                parameter.provenance.clone(),
-            )
-            .message(format!(
-                "parameter property `{property}` is unconstrained: no schema constrains its \
-                 value, so simple/form/deepObject serialization has no scalar token for it"
-            ))
-            .remedy(format!(
-                "declare `{property}` under `properties` with a scalar schema, or give the object \
-                 a scalar `additionalProperties` schema"
-            ))
-            .emit(self.diags);
-            return None;
+            return self.reject_parameter(
+                parameter,
+                format!(
+                    "parameter property `{property}` is unconstrained: no schema constrains its \
+                     value, so simple/form/deepObject serialization has no scalar token for it"
+                ),
+                Some(format!(
+                    "declare `{property}` under `properties` with a scalar schema, or give the \
+                     object a scalar `additionalProperties` schema"
+                )),
+            );
         }
         if !parameter_shape_supported(&self.graph, ty) {
-            Diagnostic::error(
-                Code::UnsupportedParameterStyle,
-                parameter.provenance.clone(),
-            )
-            .message(
+            return self.reject_parameter(
+                parameter,
                 "simple/form parameter serialization does not support nested arrays or objects",
-            )
-            .emit(self.diags);
-            return None;
+                None,
+            );
         }
-        Some(self.lowered_parameter(
-            parameter,
-            location,
-            ty,
-            style,
-            explode,
-            parameter.schema.as_ref(),
-        ))
+        Some(())
     }
 
     /// Assemble the lowered [`Parameter`] once its location, type, style and `explode` are
