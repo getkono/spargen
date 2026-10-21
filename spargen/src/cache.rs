@@ -10,7 +10,7 @@ use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, Spec};
 
-const CACHE_FORMAT: u32 = 3;
+const CACHE_FORMAT: u32 = 4;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -139,6 +139,8 @@ pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<Str
 
 pub(crate) struct CachedRun {
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Whether the seeding run's diagnostic list was cut at `batch_cap`.
+    pub(crate) truncated: bool,
     pub(crate) requirements: RuntimeRequirements,
 }
 
@@ -166,6 +168,7 @@ pub(crate) fn read_cache(
         .collect();
     Some(CachedRun {
         diagnostics,
+        truncated: record.truncated,
         requirements: record.requirements,
     })
 }
@@ -175,6 +178,7 @@ pub(crate) fn write_cache(
     input_digest: &str,
     content_digest: &str,
     diagnostics: &[Diagnostic],
+    truncated: bool,
     requirements: &RuntimeRequirements,
 ) -> Result<(), String> {
     let record = CacheRecord {
@@ -182,6 +186,7 @@ pub(crate) fn write_cache(
         input_sha256: input_digest.to_owned(),
         content_sha256: content_digest.to_owned(),
         diagnostics: diagnostics.iter().map(CachedDiagnostic::from).collect(),
+        truncated,
         requirements: requirements.clone(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
@@ -260,6 +265,8 @@ struct CacheRecord {
     input_sha256: String,
     content_sha256: String,
     diagnostics: Vec<CachedDiagnostic>,
+    /// Stored so a cache hit reports the truncation of the run it replays.
+    truncated: bool,
     requirements: RuntimeRequirements,
 }
 
@@ -651,6 +658,56 @@ components:
         assert_eq!(
             replayed, seeded,
             "a cache hit lost the original diagnostics"
+        );
+    }
+
+    #[test]
+    fn a_cache_hit_replays_the_truncation_of_the_run_that_seeded_it() {
+        // The record once stored the diagnostics but not whether they were cut at `batch_cap`,
+        // so a second build presented a partial list as the whole one (#724).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openapi.yaml");
+        std::fs::write(
+            &root,
+            r#"openapi: 3.1.0
+info: { title: Cache, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    First: { type: string, minLength: 3 }
+    Second: { type: string, maxLength: 5 }
+"#,
+        )
+        .unwrap();
+        let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
+            .batch_cap(1)
+            .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
+            .cargo(CargoIntegration::Off);
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        assert!(
+            first.truncated(),
+            "the fixture must warn past batch_cap: {first:#?}"
+        );
+
+        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
+        assert!(
+            second.truncated(),
+            "a cache hit presented a truncated list as complete: {second:#?}"
+        );
+        // Past the outcome line, which says `cached` rather than `generated`, the hit prints what
+        // the seeding run printed: the same diagnostics and the same truncation notice.
+        let body = |report: &crate::Report| {
+            let text = report.to_string();
+            text.split_once('\n').map(|(_, rest)| rest.to_owned())
+        };
+        assert_eq!(body(&second), body(&first));
+        assert!(
+            body(&second).is_some_and(|text| text.contains("truncated at batch_cap")),
+            "{second}"
         );
     }
 

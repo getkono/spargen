@@ -209,6 +209,9 @@ impl Scanned {
 /// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
 /// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
 /// remote ref it hides surfaces later as an actionable `E003` on the next `generate`.
+///
+/// A fetch that fails is `E025`, and the lock is still written: every document fetched is pinned
+/// at what it served, and every pin of the earlier lock for a URL this run left unpinned is kept.
 pub(crate) fn vendor(
     spec: &Utf8Path,
     fetcher: &dyn RemoteFetch,
@@ -230,6 +233,7 @@ pub(crate) fn vendor(
     };
 
     let mut lock = Lock::default();
+    let mut fetch_failed = false;
     let mut refs: Vec<VendoredRef> = Vec::new();
     let mut scanned = Scanned {
         working_dir: working_dir(),
@@ -303,9 +307,12 @@ pub(crate) fn vendor(
                         Err(error) => {
                             // A fetch failure is a fact about the network, not the document:
                             // the ref is well-formed and exactly what this step exists to pin.
+                            // Located at the reference, as `E003` above is: only the root's
+                            // references carry a span, for the reason given there.
+                            let span = (index == root).then_some(collected.span);
                             Diagnostic::error(
                                 Code::RemoteFetchFailed,
-                                Provenance::new(JsonPointer::root(), None),
+                                Provenance::new(collected.pointer.clone(), span),
                             )
                             .message(format!("failed to fetch remote $ref `{url}`: {error}"))
                             .remedy(
@@ -314,6 +321,7 @@ pub(crate) fn vendor(
                                  relative $ref",
                             )
                             .emit(diags);
+                            fetch_failed = true;
                             continue;
                         }
                     };
@@ -403,6 +411,18 @@ pub(crate) fn vendor(
     }
 
     let lock_path = spec_dir.join(LOCK_FILE_NAME);
+    if fetch_failed {
+        // A failed fetch leaves the run's walk incomplete: the document it could not fetch, and
+        // every document reachable only through it, went unpinned. Their earlier pins are kept,
+        // beside the vendored copies this run did not touch, so a transient network failure leaves
+        // the lock the build reads as usable as it was (#714). A document this run did fetch keeps
+        // its new pin. A lock that cannot be read keeps nothing.
+        let earlier = std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|text| Lock::parse(&text).ok())
+            .unwrap_or_default();
+        lock.keep_unpinned_from(earlier);
+    }
     std::fs::write(&lock_path, lock.to_toml()).map_err(|error| {
         input_error(diags, format!("failed to write `{lock_path}`: {error}"));
         Aborted
