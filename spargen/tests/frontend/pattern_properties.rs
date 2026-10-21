@@ -147,6 +147,61 @@ components:
     );
 }
 
+/// `patternProperties` values on `Node` itself that are each `{type: array, items: Node}` are
+/// lowered while `Node` is still reserved, so whether they emit one Rust type is decided once
+/// `Node` is filled: both are `Vec<Node>`, and they share one map.
+#[test]
+fn pattern_properties_self_referential_array_values_share_one_map() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Node:
+      type: object
+      patternProperties:
+        "^a-": { type: array, items: { $ref: "#/components/schemas/Node" } }
+        "^b-": { type: array, items: { $ref: "#/components/schemas/Node" } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::PatternPropertiesRejected),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("BTreeMap<String, NodeValue>") && code.contains("Vec<Node>"),
+        "{code}"
+    );
+}
+
+/// The same deferred decision rejects where the filled types differ: `Vec<Node>` beside
+/// `Vec<Vec<Node>>` cannot share one map (`E005`).
+#[test]
+fn e005_pattern_properties_self_referential_array_values_of_two_types_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Node:
+      type: object
+      patternProperties:
+        "^a-": { type: array, items: { $ref: "#/components/schemas/Node" } }
+        "^b-":
+          type: array
+          items: { type: array, items: { $ref: "#/components/schemas/Node" } }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::PatternPropertiesRejected),
+        "{report:#?}"
+    );
+}
+
 #[test]
 fn e005_pattern_properties_with_deny_rejected() {
     // `patternProperties` + `additionalProperties: false` cannot be faithfully represented → E005.
