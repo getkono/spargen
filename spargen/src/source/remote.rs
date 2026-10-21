@@ -6,9 +6,10 @@
 //! ## Hermetic by construction
 //!
 //! `generate` and `check` never reach the network. A remote `$ref` is resolved only from a locally
-//! vendored copy that is hash-pinned in [`spargen.lock`](super::lock). The single place bytes are
-//! fetched is [`vendor`](fn@super::vendor) — driven exclusively by `spargen lock`. This is also the anti-SSRF
-//! boundary: no spec content can trigger a network request during a build.
+//! vendored copy that is hash-pinned in [`spargen.lock`](super::lock). Bytes are fetched by
+//! [`vendor`](fn@super::vendor), which `spargen lock` drives, through `ReqwestFetcher`, the
+//! `RemoteFetch` implementation. This is also the anti-SSRF boundary: no spec content can trigger
+//! a network request during a build.
 
 use crate::diag::{JsonPointer, Span};
 

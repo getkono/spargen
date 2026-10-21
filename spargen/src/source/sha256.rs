@@ -1,8 +1,10 @@
-//! A dependency-free SHA-256, used to hash-pin vendored remote `$ref` documents.
+//! A dependency-free SHA-256, used to hash-pin vendored remote `$ref` documents (and to derive
+//! their vendor paths) and, in `cache.rs`, to fingerprint build inputs and generated output.
 //!
-//! Pinning must be reproducible and add no supply-chain surface to the published crate, so the
-//! digest is computed in-tree rather than via a hashing dependency. The implementation follows
-//! FIPS 180-4; it is small, allocation-light, and covered by the standard NIST test vectors.
+//! Digests must be reproducible and add no supply-chain surface to the published crate, so they
+//! are computed in-tree rather than via a hashing dependency. The implementation follows
+//! FIPS 180-4; it copies its input once to pad it, and is covered by the standard NIST test
+//! vectors.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

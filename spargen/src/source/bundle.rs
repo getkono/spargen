@@ -17,7 +17,10 @@ use super::{parse_json, parse_yaml, SpannedValue};
 /// A single loaded source file.
 #[derive(Debug, Clone)]
 pub(crate) struct SourceFile {
-    /// Path as loaded (relative to the bundle root, or the vendored path for a remote document).
+    /// Path as loaded: the root spec's path as given to [`InputBundle::load`]; for a relative-file
+    /// `$ref` target, the referring document's directory (or its local `$self` base) joined with
+    /// the reference; for a remote document, its pinned `path` joined onto the vendor directory.
+    /// [`InputBundle::root_relative_path`] derives the root-relative spelling from it.
     pub(crate) path: Utf8PathBuf,
     /// Exact bytes parsed from disk, retained for build-input fingerprinting.
     pub(crate) bytes: Arc<[u8]>,
@@ -208,7 +211,11 @@ impl InputBundle {
         Some((file, pointer))
     }
 
-    /// The retrieval URL for a vendored remote document.
+    /// The base URL of a vendored remote document, which its relative references resolve against:
+    /// its `http`/`https` (or relative) `$self`, resolved against the retrieval URL, where it has
+    /// one, and otherwise the retrieval URL itself (the pin's `retrieval_url`, or its `url` when the
+    /// fetch was not redirected). `None` for a local document. See
+    /// [`Self::register_self_identity`].
     pub(crate) fn remote_origin(&self, file: FileId) -> Option<&str> {
         match self.origins.get(&file) {
             Some(Origin::Remote(url)) => Some(url),

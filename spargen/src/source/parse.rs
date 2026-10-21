@@ -1297,7 +1297,7 @@ mod tests {
     #[test]
     fn json_malformed_error_span_points_at_error_line() {
         let mut diags = Diagnostics::default();
-        // The value for `b` is missing; the error is detected on line 3.
+        // The value for `b` is missing; the error is detected on line 4, at the closing `}`.
         let text = "{\n  \"a\": 1,\n  \"b\":\n}\n";
         let outcome = parse_json(FileId(0), text, &mut diags);
         assert!(outcome.is_err());

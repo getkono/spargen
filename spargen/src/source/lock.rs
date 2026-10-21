@@ -63,7 +63,11 @@ pub(crate) struct Lock {
     entries: Vec<RemoteEntry>,
 }
 
-/// A lock-file parse failure (malformed TOML or an unknown schema version).
+/// A lock-file parse failure, carrying its message. [`Lock::parse`] raises it for a line that is
+/// not `key = value`; a missing, unparsable or unsupported `version`; a key other than `version`
+/// before the first `[[remote]]`; an unquoted value, an unknown key or a repeated key in a
+/// `[[remote]]` table; a table missing `url`, `sha256` or `path`; a URL pinned by two tables; a
+/// `path` that is empty, absolute or contains `..`; and a `retrieval_url` that is not `http(s)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LockError(pub(crate) String);
 
@@ -123,7 +127,9 @@ impl Lock {
     }
 
     /// Parse a `spargen.lock`. The format is the fixed, machine-written schema above; this reader is
-    /// deliberately small and rejects anything it does not understand rather than guessing.
+    /// deliberately small and fails with a [`LockError`] on each case that type lists rather than
+    /// guessing. A repeated top-level `version` line is accepted when each names the supported
+    /// version.
     pub(crate) fn parse(text: &str) -> Result<Lock, LockError> {
         let mut lock = Lock::default();
         let mut version_seen = false;

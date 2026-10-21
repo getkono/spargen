@@ -1,8 +1,7 @@
 //! The network-only vendor step behind `spargen lock`.
 //!
-//! This is the ONLY place spargen performs network I/O, and only through the injected
-//! [`RemoteFetch`] seam — so `generate`/`check` stay hermetic and tests exercise the walk with a
-//! stub instead of real HTTP. It walks every remote `$ref` reachable from the spec (recursing
+//! It fetches through the injected [`RemoteFetch`] seam, whose real implementation is
+//! [`ReqwestFetcher`], so tests exercise the walk with a stub instead of real HTTP. It walks every remote `$ref` reachable from the spec (recursing
 //! through local sub-files and through fetched remote documents), fetches each once, writes the
 //! bytes under `.spargen/vendor/`, and records a hash pin in `spargen.lock`.
 
@@ -208,8 +207,8 @@ impl Scanned {
 }
 
 /// Fetch and hash-pin every remote `$ref` reachable from `spec`, writing the vendored copies under
-/// `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec. This is the ONLY function
-/// that performs network I/O, and only through the injected `fetcher`.
+/// `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec. Every fetch goes through the
+/// injected `fetcher`; the `vendor` facade in `lib.rs` passes [`ReqwestFetcher`].
 ///
 /// The walk recurses through relative-file refs (to catch remote refs nested in local sub-files)
 /// and through fetched remote documents (whose relative refs resolve against each one's `$self`,
