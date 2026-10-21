@@ -119,7 +119,11 @@ fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
     let below = version_below(&floor);
     assert!(below < floor, "{below} is not below {floor}");
     let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"{below}\""));
-    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &manifest,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     assert_eq!(diagnostics[0].code, Code::RuntimeDependencyContract);
     assert!(diagnostics[0].message.contains("bytes"));
@@ -135,7 +139,11 @@ fn an_exact_requirement_at_the_floor_passes_the_audit() {
     // with `=` is accepted as written.
     let (core_bytes, floor) = core_entry("bytes");
     let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"={floor}\""));
-    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &manifest,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
@@ -150,7 +158,11 @@ fn a_runtime_crate_declared_without_a_version_requirement_is_rejected() {
         "bytes = { features = [\"serde\"] }",
     ] {
         let manifest = replace_once(CORE_MANIFEST, core_bytes, declaration);
-        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        let diagnostics = audit_manifest(
+            &manifest,
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         assert_eq!(diagnostics.len(), 1, "{declaration}: {diagnostics:#?}");
         assert_eq!(
             diagnostics[0].message,
@@ -175,7 +187,11 @@ fn a_runtime_crate_declared_only_as_a_dev_or_build_dependency_is_missing() {
             "{}\n[{table}]\n{core_bytes}\n",
             replace_once(CORE_MANIFEST, &format!("{core_bytes}\n"), "")
         );
-        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        let diagnostics = audit_manifest(
+            &manifest,
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         assert_eq!(diagnostics.len(), 1, "{table}: {diagnostics:#?}");
         assert_eq!(
             diagnostics[0].message,
@@ -187,7 +203,12 @@ fn a_runtime_crate_declared_only_as_a_dev_or_build_dependency_is_missing() {
 
 #[test]
 fn conditional_dependencies_and_features_are_required_only_when_used() {
-    assert!(audit_manifest(CORE_MANIFEST, RuntimeRequirements::default()).is_empty());
+    assert!(audit_manifest(
+        CORE_MANIFEST,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown
+    )
+    .is_empty());
 
     let requirements = RuntimeRequirements {
         reqwest_multipart: true,
@@ -197,7 +218,7 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
         uuid: true,
         time: true,
     };
-    let diagnostics = audit_manifest(CORE_MANIFEST, requirements);
+    let diagnostics = audit_manifest(CORE_MANIFEST, &requirements, &TargetContext::Unknown);
     let messages = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -234,7 +255,11 @@ fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
         core_reqwest,
         &format!("reqwest = \"{floor}\"\n\n[features]\nblocking = []"),
     );
-    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &manifest,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     let messages = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -272,8 +297,11 @@ fn blocking_may_enable_tokio_through_its_implicit_feature_or_dep_syntax() {
         "[\"tokio/rt\"]",
         "[\"serde_json/std\", \"tokio/rt-multi-thread\"]",
     ] {
-        let diagnostics =
-            audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
+        let diagnostics = audit_manifest(
+            &blocking_manifest(blocking),
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         assert!(diagnostics.is_empty(), "{blocking}: {diagnostics:#?}");
     }
 }
@@ -289,8 +317,11 @@ fn blocking_that_enables_anything_but_tokio_is_not_wired() {
         "[\"tokio-util/rt\"]",
         "[\"tokio?/rt\"]",
     ] {
-        let diagnostics =
-            audit_manifest(&blocking_manifest(blocking), RuntimeRequirements::default());
+        let diagnostics = audit_manifest(
+            &blocking_manifest(blocking),
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         assert_eq!(
             messages(&diagnostics),
             "Cargo feature `blocking` must enable the native optional dependency with \
@@ -326,7 +357,11 @@ fn the_underscore_default_features_spelling_turns_defaults_off_before_edition_20
             edition,
             &format!("reqwest = {{ version = \"{floor}\", default_features = false }}"),
         );
-        let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+        let diagnostics = audit_manifest(
+            &manifest,
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         assert!(diagnostics.is_empty(), "{edition:?}: {diagnostics:#?}");
     }
 }
@@ -341,7 +376,11 @@ fn the_underscore_default_features_spelling_is_not_read_from_edition_2024() {
         Some("2024"),
         &format!("reqwest = {{ version = \"{floor}\", default_features = false }}"),
     );
-    let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &manifest,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     assert!(
         diagnostics[0]
@@ -362,7 +401,11 @@ fn the_hyphenated_default_features_spelling_wins_over_the_underscore_one() {
             "reqwest = {{ version = \"{floor}\", default_features = false, default-features = true }}"
         ),
     );
-    let diagnostics = audit_manifest(&on, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &on,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     assert!(
         diagnostics[0]
@@ -377,7 +420,11 @@ fn the_hyphenated_default_features_spelling_wins_over_the_underscore_one() {
             "reqwest = {{ version = \"{floor}\", default_features = true, default-features = false }}"
         ),
     );
-    let diagnostics = audit_manifest(&off, RuntimeRequirements::default());
+    let diagnostics = audit_manifest(
+        &off,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 

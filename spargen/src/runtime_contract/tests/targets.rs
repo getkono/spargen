@@ -60,7 +60,7 @@ fn equivalent_native_cfg_spellings_satisfy_the_blocking_requirement() {
         .into_iter()
         .filter_map(|key| {
             let manifest = blocking_manifest(&tokio_table(key, TOKIO_DECLARATION));
-            let diagnostics = audit_manifest_for(&manifest, &target);
+            let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
             (!diagnostics.is_empty()).then(|| format!("{key}: {diagnostics:#?}"))
         })
         .collect::<Vec<_>>();
@@ -78,7 +78,11 @@ fn without_a_build_target_tables_must_jointly_cover_every_native_target() {
             TOKIO_DECLARATION
         )
     ));
-    let diagnostics = audit_manifest_for(&covering, &TargetContext::Unknown);
+    let diagnostics = audit_manifest(
+        &covering,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     // Cargo builds this on every unix and windows host, but a proc-macro cannot tell which
@@ -88,7 +92,11 @@ fn without_a_build_target_tables_must_jointly_cover_every_native_target() {
         tokio_table("cfg(unix)", TOKIO_DECLARATION),
         tokio_table("cfg(windows)", TOKIO_DECLARATION)
     ));
-    let diagnostics = audit_manifest_for(&gapped, &TargetContext::Unknown);
+    let diagnostics = audit_manifest(
+        &gapped,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     let message = &diagnostics[0].message;
     assert!(message.contains("requires `tokio`"), "{message}");
@@ -120,7 +128,7 @@ fn a_tokio_table_that_applies_on_wasm_is_not_native_only() {
                 "`[target.'cfg(any(unix, target_arch = \"wasm32\"))'.dependencies]`",
             ),
         ] {
-            let diagnostics = audit_manifest_for(manifest, &target);
+            let diagnostics = audit_manifest(manifest, &RuntimeRequirements::default(), &target);
             let messages = messages(&diagnostics);
             assert!(messages.contains("requires `tokio`"), "{messages}");
             assert!(
@@ -151,7 +159,11 @@ fn unevaluable_or_unparseable_target_keys_explain_themselves() {
             "is not covered",
         ),
     ] {
-        let diagnostics = audit_manifest_for(&blocking_manifest(&tables), &TargetContext::Unknown);
+        let diagnostics = audit_manifest(
+            &blocking_manifest(&tables),
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
         let messages = messages(&diagnostics);
         assert!(messages.contains("requires `tokio`"), "{messages}");
         assert!(messages.contains(expected), "{expected}\n{messages}");
@@ -166,7 +178,7 @@ fn a_build_target_selects_the_tables_cargo_would_apply() {
         tokio_table("cfg(windows)", TOKIO_DECLARATION)
     ));
     for target in [linux(), windows()] {
-        let diagnostics = audit_manifest_for(&manifest, &target);
+        let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 }
@@ -177,7 +189,7 @@ fn a_table_that_misses_the_build_target_names_it() {
         r#"cfg(target_os = "none")"#,
         TOKIO_DECLARATION,
     ));
-    let diagnostics = audit_manifest_for(&manifest, &linux());
+    let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &linux());
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     let message = &diagnostics[0].message;
     assert!(message.contains("requires `tokio`"), "{message}");
@@ -197,7 +209,7 @@ fn a_table_that_misses_the_build_target_names_it() {
 #[test]
 fn a_wasm32_build_needs_no_tokio_but_keeps_the_wiring_check() {
     let manifest = format!("{CORE_MANIFEST}\n[features]\nblocking = []\n");
-    let diagnostics = audit_manifest_for(&manifest, &wasm32());
+    let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &wasm32());
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     assert!(
         diagnostics[0]
@@ -207,7 +219,11 @@ fn a_wasm32_build_needs_no_tokio_but_keeps_the_wiring_check() {
     );
 
     // The same manifest on a native build still needs the table.
-    let messages = messages(&audit_manifest_for(&manifest, &linux()));
+    let messages = messages(&audit_manifest(
+        &manifest,
+        &RuntimeRequirements::default(),
+        &linux(),
+    ));
     assert!(messages.contains("requires `tokio`"), "{messages}");
 }
 
@@ -217,12 +233,16 @@ fn build_flags_and_target_names_are_read_from_cargo() {
         "cfg(all(unix, not(my_flag)))",
         TOKIO_DECLARATION,
     ));
-    assert!(audit_manifest_for(&flagged, &linux()).is_empty());
+    assert!(audit_manifest(&flagged, &RuntimeRequirements::default(), &linux()).is_empty());
     let with_flag = build_target(
         "x86_64-unknown-linux-gnu",
         &[LINUX_CFGS, &[("MY_FLAG", "")]].concat(),
     );
-    let messages_with_flag = messages(&audit_manifest_for(&flagged, &with_flag));
+    let messages_with_flag = messages(&audit_manifest(
+        &flagged,
+        &RuntimeRequirements::default(),
+        &with_flag,
+    ));
     assert!(
         messages_with_flag.contains("does not apply to `x86_64-unknown-linux-gnu`"),
         "{messages_with_flag}"
@@ -231,9 +251,13 @@ fn build_flags_and_target_names_are_read_from_cargo() {
     let named = blocking_manifest(&format!(
         "[target.x86_64-unknown-linux-gnu.dependencies]\n{TOKIO_DECLARATION}\n"
     ));
-    assert!(audit_manifest_for(&named, &linux()).is_empty());
+    assert!(audit_manifest(&named, &RuntimeRequirements::default(), &linux()).is_empty());
     let musl = build_target("x86_64-unknown-linux-musl", LINUX_CFGS);
-    let messages_on_musl = messages(&audit_manifest_for(&named, &musl));
+    let messages_on_musl = messages(&audit_manifest(
+        &named,
+        &RuntimeRequirements::default(),
+        &musl,
+    ));
     assert!(
         messages_on_musl.contains(
             "`[target.x86_64-unknown-linux-gnu.dependencies]` does not apply to \
@@ -255,12 +279,20 @@ fn contract_rules_still_apply_under_an_alternative_spelling() {
         "tokio = { version = \"1.53.1\", optional = true }",
     ));
     for target in [TargetContext::Unknown, linux()] {
-        let messages_not_optional = messages(&audit_manifest_for(&not_optional, &target));
+        let messages_not_optional = messages(&audit_manifest(
+            &not_optional,
+            &RuntimeRequirements::default(),
+            &target,
+        ));
         assert!(
             messages_not_optional.contains("`tokio` must be optional"),
             "{messages_not_optional}"
         );
-        let messages_without_rt = messages(&audit_manifest_for(&without_rt, &target));
+        let messages_without_rt = messages(&audit_manifest(
+            &without_rt,
+            &RuntimeRequirements::default(),
+            &target,
+        ));
         assert!(
             messages_without_rt.contains("generated client requires Cargo feature `rt` on `tokio`"),
             "{messages_without_rt}"
@@ -277,7 +309,11 @@ fn contract_rules_still_apply_under_an_alternative_spelling() {
             "tokio = { version = \"1.53.1\", optional = true }"
         )
     ));
-    let messages_split = messages(&audit_manifest_for(&split, &TargetContext::Unknown));
+    let messages_split = messages(&audit_manifest(
+        &split,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    ));
     assert!(
         messages_split.contains(
             "requires Cargo feature `rt` on `tokio` (not enabled by the tables that apply to"
@@ -294,14 +330,20 @@ fn contract_rules_still_apply_under_an_alternative_spelling() {
         ),
         tokio_table("cfg(windows)", TOKIO_DECLARATION)
     ));
-    let messages_build = messages(&audit_manifest_for(&build_split, &linux()));
+    let messages_build = messages(&audit_manifest(
+        &build_split,
+        &RuntimeRequirements::default(),
+        &linux(),
+    ));
     assert!(
         messages_build.contains("generated client requires Cargo feature `rt` on `tokio`"),
         "{messages_build}"
     );
-    assert!(audit_manifest_for(&build_split, &windows())
-        .iter()
-        .all(|diagnostic| !diagnostic.message.contains("feature `rt`")));
+    assert!(
+        audit_manifest(&build_split, &RuntimeRequirements::default(), &windows())
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("feature `rt`"))
+    );
 }
 
 #[test]
@@ -318,7 +360,7 @@ fn a_below_floor_tokio_in_one_of_two_counting_tables_names_that_table() {
         tokio_table(r#"cfg(not(target_family = "wasm"))"#, TOKIO_DECLARATION)
     ));
     for target in [TargetContext::Unknown, linux()] {
-        let diagnostics = audit_manifest_for(&manifest, &target);
+        let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(
             diagnostics[0].message,
@@ -343,8 +385,9 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         &format!("secrecy = {{ package = \"secrecy\", version = \"{version}\" }}"),
     );
     assert_eq!(
-        messages(&audit_manifest_for(
+        messages(&audit_manifest(
             &untargeted_identity,
+            &RuntimeRequirements::default(),
             &TargetContext::Unknown
         )),
         ""
@@ -355,8 +398,9 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         &format!("secrecy = {{ package = \"secrecy-fork\", version = \"{version}\" }}"),
     );
     assert_eq!(
-        messages(&audit_manifest_for(
+        messages(&audit_manifest(
             &untargeted_package,
+            &RuntimeRequirements::default(),
             &TargetContext::Unknown
         )),
         "`secrecy` cannot be renamed because generated code references that canonical crate \
@@ -370,8 +414,9 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         &format!("secrecy = {{ package = 1, version = \"{version}\" }}"),
     );
     assert_eq!(
-        messages(&audit_manifest_for(
+        messages(&audit_manifest(
             &untargeted_non_string,
+            &RuntimeRequirements::default(),
             &TargetContext::Unknown
         )),
         "`secrecy` cannot be renamed because generated code references that canonical crate \
@@ -383,8 +428,9 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         &format!("secret = {{ package = \"secrecy\", version = \"{version}\" }}"),
     );
     assert_eq!(
-        messages(&audit_manifest_for(
+        messages(&audit_manifest(
             &untargeted_alias,
+            &RuntimeRequirements::default(),
             &TargetContext::Unknown
         )),
         format!(
@@ -413,15 +459,27 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
     ));
     for target in [TargetContext::Unknown, linux()] {
         assert_eq!(
-            messages(&audit_manifest_for(&targeted_identity, &target)),
+            messages(&audit_manifest(
+                &targeted_identity,
+                &RuntimeRequirements::default(),
+                &target
+            )),
             ""
         );
         assert_eq!(
-            messages(&audit_manifest_for(&targeted_package, &target)),
+            messages(&audit_manifest(
+                &targeted_package,
+                &RuntimeRequirements::default(),
+                &target
+            )),
             "`tokio` cannot be renamed because generated code references that canonical crate \
              name"
         );
-        let alias_messages = messages(&audit_manifest_for(&targeted_alias, &target));
+        let alias_messages = messages(&audit_manifest(
+            &targeted_alias,
+            &RuntimeRequirements::default(),
+            &target,
+        ));
         assert!(
             alias_messages
                 .starts_with("generated client requires `tokio`; add `tokio` with version")
@@ -444,7 +502,7 @@ fn tokio_optional_in_one_counting_table_and_not_the_other_is_reported_on_that_ta
         )
     ));
     for target in [TargetContext::Unknown, linux()] {
-        let diagnostics = audit_manifest_for(&manifest, &target);
+        let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(
             diagnostics[0].message,
@@ -475,7 +533,11 @@ fn build_flag_predicates_have_no_value_on_a_builtin_target() {
     ] {
         let key = format!(r#"cfg(all(not(target_arch = "wasm32"), {predicate}))"#);
         let manifest = blocking_manifest(&tokio_table(&key, TOKIO_DECLARATION));
-        let messages = messages(&audit_manifest_for(&manifest, &TargetContext::Unknown));
+        let messages = messages(&audit_manifest(
+            &manifest,
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        ));
         let expected = format!(
             "`[target.'{key}'.dependencies]` cannot be evaluated: {spelled} depends on the \
              build's flags, which are not known for `{first_native}`"
@@ -494,7 +556,11 @@ fn build_flag_predicates_have_no_value_on_a_builtin_target() {
         "x86_64-unknown-linux-gnu",
         &[LINUX_CFGS, &[("MY_FLAG", "")]].concat(),
     );
-    let messages = messages(&audit_manifest_for(&flag_only, &flagged_linux));
+    let messages = messages(&audit_manifest(
+        &flag_only,
+        &RuntimeRequirements::default(),
+        &flagged_linux,
+    ));
     assert!(
         messages.contains(
             "`[target.'cfg(my_flag)'.dependencies]` cannot be evaluated: `my_flag` depends on \
@@ -512,7 +578,11 @@ fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
     let custom = blocking_manifest(&format!(
         "[target.x86_64-custom-none.dependencies]\n{TOKIO_DECLARATION}\n"
     ));
-    let macro_messages = messages(&audit_manifest_for(&custom, &TargetContext::Unknown));
+    let macro_messages = messages(&audit_manifest(
+        &custom,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    ));
     assert!(
         macro_messages.contains(
             "`[target.x86_64-custom-none.dependencies]` names `x86_64-custom-none`, which is \
@@ -538,13 +608,17 @@ fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
             ("PANIC", "abort"),
         ],
     );
-    let diagnostics = audit_manifest_for(&custom, &custom_build);
+    let diagnostics = audit_manifest(&custom, &RuntimeRequirements::default(), &custom_build);
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     // A cfg that genuinely matches no known native target keeps saying so.
     let contradictory =
         blocking_manifest(&tokio_table("cfg(all(unix, windows))", TOKIO_DECLARATION));
-    let messages = messages(&audit_manifest_for(&contradictory, &TargetContext::Unknown));
+    let messages = messages(&audit_manifest(
+        &contradictory,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    ));
     assert!(
         messages.contains(
             "`[target.'cfg(all(unix, windows))'.dependencies]` applies to no known non-wasm \
@@ -585,7 +659,7 @@ fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
                 "(a proc-macro cannot see the build target",
             ),
         ] {
-            let diagnostics = audit_manifest_for(&manifest, &target);
+            let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
             assert_eq!(diagnostics.len(), 1, "{key}: {diagnostics:#?}");
             let message = &diagnostics[0].message;
             assert!(
@@ -603,7 +677,11 @@ fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
         r#"cfg(not(feature = "x"))"#,
         TOKIO_DECLARATION,
     ));
-    let messages = messages(&audit_manifest_for(&feature_only, &linux()));
+    let messages = messages(&audit_manifest(
+        &feature_only,
+        &RuntimeRequirements::default(),
+        &linux(),
+    ));
     assert!(
         messages.contains("(evaluated for the build target `x86_64-unknown-linux-gnu`)")
             && messages.ends_with(
