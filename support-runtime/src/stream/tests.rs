@@ -71,6 +71,19 @@ fn ndjson_tolerates_crlf() {
 }
 
 #[test]
+fn ndjson_strips_one_trailing_cr_from_an_unterminated_line_at_eof() {
+    let mut buf = b"{\"a\":1}\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Ndjson, true);
+    assert_eq!(items, vec![r#"{"a":1}"#]);
+    assert!(buf.is_empty());
+
+    // Exactly one `\r` is stripped; a second one stays in the payload.
+    let mut buf = b"{\"a\":1}\r\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Ndjson, true);
+    assert_eq!(items, vec!["{\"a\":1}\r"]);
+}
+
+#[test]
 fn json_sequence_frames_record_separator_delimited_values() {
     let mut buf = b"\x1e{\"a\":1}\n\x1e{\n  \"a\": 2\n}\n".to_vec();
     let (items, done) = drain(&mut buf, Framing::JsonSequence, true);
@@ -195,6 +208,14 @@ fn sse_flushes_a_final_event_without_a_trailing_blank_line_at_eof() {
     // At EOF: the final event is flushed even without a closing blank line.
     let (items, _) = drain(&mut buf, Framing::Sse, true);
     assert_eq!(items, vec![r#"{"a":1}"#]);
+}
+
+#[test]
+fn sse_strips_the_trailing_cr_from_an_unterminated_last_line_at_eof() {
+    let mut buf = b"data: {\"a\":1}\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Sse, true);
+    assert_eq!(items, vec![r#"{"a":1}"#]);
+    assert!(buf.is_empty());
 }
 
 #[test]
