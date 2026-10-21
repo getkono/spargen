@@ -64,9 +64,8 @@ struct OpSurface {
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, ParamSurface>,
-    /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
-    /// required `&T` argument in the generated signature (the IR does not model an optional body).
-    request_body: Option<String>,
+    /// The request body, or `None` for a bodyless operation or a body without a type.
+    request_body: Option<BodySurface>,
     /// Canonical rendering of the success return type.
     success: String,
     /// Canonical rendering of the error type.
@@ -74,6 +73,15 @@ struct OpSurface {
     /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
+}
+
+/// A request body's surface: a required body is a `&T` argument in the generated signature, an
+/// optional one `Option<&T>`.
+struct BodySurface {
+    /// The canonical body type.
+    ty: String,
+    /// Whether the body is `required`.
+    required: bool,
 }
 
 /// A parameter's identity: its wire name and its location as the OpenAPI `in` value spells it.
@@ -167,12 +175,15 @@ pub enum ChangeKind {
     OperationRemoved,
     /// The generated method name for an endpoint changed. **Major** — the callable renames.
     MethodRenamed,
-    /// A request body was added to an operation. **Major** — a new required `&T` argument.
+    /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
     RequestBodyRemoved,
     /// An operation's request-body type changed. **Major**.
     RequestBodyTypeChanged,
+    /// An operation's request body flipped between required and optional. **Major** — `&T` ↔
+    /// `Option<&T>`.
+    RequestBodyRequirednessChanged,
     /// An operation's success return type changed. **Major**.
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
@@ -235,6 +246,7 @@ impl ChangeKind {
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
+            | ChangeKind::RequestBodyRequirednessChanged
             | ChangeKind::SuccessTypeChanged
             | ChangeKind::ErrorTypeChanged
             | ChangeKind::ApiErrorBodyRemoved
@@ -262,6 +274,7 @@ impl ChangeKind {
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",
+            ChangeKind::RequestBodyRequirednessChanged => "request-body-requiredness-changed",
             ChangeKind::SuccessTypeChanged => "success-type-changed",
             ChangeKind::ErrorTypeChanged => "error-type-changed",
             ChangeKind::ApiErrorBodyAdded => "api-error-body-added",
@@ -400,11 +413,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             );
         }
 
-        let request_body = operation
-            .request_body
-            .as_ref()
-            .and_then(|body| body.ty)
-            .map(|ty| canon_ty(ty, api, names));
+        let request_body = operation.request_body.as_ref().and_then(|body| {
+            body.ty.map(|ty| BodySurface {
+                ty: canon_ty(ty, api, names),
+                required: body.required,
+            })
+        });
 
         operations.insert(
             key,
@@ -566,22 +580,40 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         ));
     }
     match (&old.request_body, &new.request_body) {
-        (None, Some(ty)) => changes.push(Change::new(
+        (None, Some(body)) => changes.push(Change::new(
             ChangeKind::RequestBodyAdded,
             key,
-            format!("request body added: `{ty}`"),
+            format!("request body added: `{}`", body.ty),
         )),
-        (Some(ty), None) => changes.push(Change::new(
+        (Some(body), None) => changes.push(Change::new(
             ChangeKind::RequestBodyRemoved,
             key,
-            format!("request body removed (was `{ty}`)"),
+            format!("request body removed (was `{}`)", body.ty),
         )),
-        (Some(old_ty), Some(new_ty)) if old_ty != new_ty => changes.push(Change::new(
-            ChangeKind::RequestBodyTypeChanged,
-            key,
-            format!("request body type `{old_ty}` -> `{new_ty}`"),
-        )),
-        _ => {}
+        (Some(old_body), Some(new_body)) => {
+            if old_body.ty != new_body.ty {
+                changes.push(Change::new(
+                    ChangeKind::RequestBodyTypeChanged,
+                    key,
+                    format!("request body type `{}` -> `{}`", old_body.ty, new_body.ty),
+                ));
+            }
+            if old_body.required != new_body.required {
+                changes.push(Change::new(
+                    ChangeKind::RequestBodyRequirednessChanged,
+                    key,
+                    format!(
+                        "request body now {}",
+                        if new_body.required {
+                            "required"
+                        } else {
+                            "optional"
+                        }
+                    ),
+                ));
+            }
+        }
+        (None, None) => {}
     }
     if old.success != new.success {
         changes.push(Change::new(

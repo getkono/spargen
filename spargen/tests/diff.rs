@@ -541,6 +541,44 @@ fn changing_a_request_body_type_is_major() {
 }
 
 #[test]
+fn flipping_a_request_body_between_required_and_optional_is_major_both_ways() {
+    // A required body is a `&T` argument and an optional one `Option<&T>`, so either direction
+    // changes the method signature and breaks every caller.
+    let optional_body = REQUEST_BODY_PET.replace("required: true", "required: false");
+    let required = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let optional = full(&pets_get("listPets", &optional_body, PET_REF), PET_SCHEMA);
+
+    for (old, new) in [(&required, &optional), (&optional, &required)] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::RequestBodyRequirednessChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+#[test]
+fn a_request_body_changing_type_and_requiredness_reports_both() {
+    let optional_string = REQUEST_BODY_STRING.replace("required: true", "required: false");
+    let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("listPets", &optional_string, PET_REF), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::RequestBodyRequirednessChanged,
+            ChangeKind::RequestBodyTypeChanged
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
 fn changing_the_success_type_is_major() {
     let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
     let new = full(&pets_get("listPets", "", "{ type: string }"), PET_SCHEMA);

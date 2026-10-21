@@ -14,6 +14,7 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::RequestBodyAdded,
         ChangeKind::RequestBodyRemoved,
         ChangeKind::RequestBodyTypeChanged,
+        ChangeKind::RequestBodyRequirednessChanged,
         ChangeKind::SuccessTypeChanged,
         ChangeKind::ErrorTypeChanged,
         ChangeKind::ApiErrorBodyAdded,
@@ -45,6 +46,7 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
+            | ChangeKind::RequestBodyRequirednessChanged
             | ChangeKind::SuccessTypeChanged
             | ChangeKind::ErrorTypeChanged
             | ChangeKind::ApiErrorBodyAdded
@@ -79,6 +81,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::RequestBodyAdded => "RequestBodyAdded",
         ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
         ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
+        ChangeKind::RequestBodyRequirednessChanged => "RequestBodyRequirednessChanged",
         ChangeKind::SuccessTypeChanged => "SuccessTypeChanged",
         ChangeKind::ErrorTypeChanged => "ErrorTypeChanged",
         ChangeKind::ApiErrorBodyAdded => "ApiErrorBodyAdded",
@@ -106,7 +109,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        26,
+        27,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
