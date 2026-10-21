@@ -262,7 +262,7 @@ pub(crate) struct DiscriminatorTarget {
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime
 /// (W-class). Present so the disposition audit can warn once per site. The applicator keywords
 /// whose value is a subschema are parsed into [`Schema::validation_children`] as well; the
-/// deserializer's `SUBSCHEMA_KEYWORDS` is the one list of them.
+/// deserializer's `SUBSCHEMA_KEYWORDS` lists them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ValidationKeywords {
     pub(crate) pattern: Option<String>,
