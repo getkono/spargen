@@ -146,6 +146,72 @@ components:
     assert!(has_code(&checked, Code::PatternPropertiesRejected));
 }
 
+/// `patternProperties` values whose integer `enum`s (or an integer `enum` beside `format: int64`)
+/// all emit `i64`.
+#[test]
+fn pattern_properties_integer_enum_values() {
+    for (label, second) in [
+        ("two integer enums", "{ type: integer, enum: [3, 4] }"),
+        (
+            "an integer enum beside int64",
+            "{ type: integer, format: int64 }",
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths: {{}}
+components:
+  schemas:
+    Thing:
+      type: object
+      patternProperties:
+        "^a-": {{ type: integer, enum: [1, 2] }}
+        "^b-": {second}
+"##
+        );
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            has_code(&report, Code::PatternPropertiesRejected),
+            "{label}: {report:#?}"
+        );
+        let checked = check(&spec);
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Rejected,
+            "{label}: {checked:#?}"
+        );
+    }
+}
+
+/// `patternProperties` values that are two distinct `false` schemas, each its own uninhabited
+/// `Never` item.
+#[test]
+fn pattern_properties_distinct_false_values() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      patternProperties:
+        "^a-": false
+        "^b-": false
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::PatternPropertiesRejected),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
 #[test]
 fn e005_pattern_properties_with_deny_rejected() {
     // `patternProperties` + `additionalProperties: false` cannot be faithfully represented → E005.
