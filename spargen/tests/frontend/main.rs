@@ -36,6 +36,7 @@ mod document;
 mod encoding;
 mod encoding_headers;
 mod parameters;
+mod pattern_properties;
 mod placement;
 mod recursion;
 mod ref_siblings;
