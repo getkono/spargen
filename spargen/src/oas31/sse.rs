@@ -8,10 +8,14 @@ use super::{JsonType, RefOr, Resolver, Schema, SchemaOr};
 /// The typed JSON carried in the `data` field of an OpenAPI 3.2 SSE envelope.
 #[derive(Debug, Clone)]
 pub(super) struct JsonDataSchema {
-    pub(crate) schema: SchemaOr,
+    pub(super) schema: SchemaOr,
     /// The `data` property whose content annotations are consumed by the SSE codec.
-    pub(crate) annotation_site: Provenance,
+    pub(super) annotation_site: Provenance,
 }
+
+/// One of this module's walks over a schema a reference reached ([`collect_reference`]).
+type Collector =
+    fn(&Schema, &Resolver<'_>, &mut Diagnostics, &mut HashSet<String>, &mut Vec<JsonDataSchema>);
 
 /// Find one unambiguous `data: string` carrying JSON described by `contentSchema` in an SSE
 /// `itemSchema`. References and `allOf` members are followed through the normal resolver so the
@@ -27,6 +31,10 @@ pub(super) fn json_data_schema(
         RefOr::Item(schema) => {
             collect_schema(schema, resolver, diags, &mut visiting, &mut candidates)
         }
+        // The item's own reference is resolved outside `visiting`, unlike every nested one
+        // (`collect_reference`): an envelope whose `allOf` cycles back to it is walked a second
+        // time, its `data` counts twice, and the result is `None`. Lowering and the audit's
+        // consumed-`contentSchema` check both read that result.
         RefOr::Ref(reference) => {
             if let Ok(resolved) =
                 resolver.resolve(&reference.reference, &reference.provenance, diags)
@@ -55,6 +63,7 @@ fn collect_schema(
         collect_reference(
             reference,
             &schema.provenance,
+            collect_schema,
             resolver,
             diags,
             visiting,
@@ -90,12 +99,15 @@ fn collect_data_schema_node(
     out: &mut Vec<JsonDataSchema>,
 ) {
     if let Some(reference) = &data.reference {
-        if visiting.insert(reference.to_owned()) {
-            if let Ok(resolved) = resolver.resolve(reference, &data.provenance, diags) {
-                collect_data_schema_node(resolved.schema.as_ref(), resolver, diags, visiting, out);
-            }
-            visiting.remove(reference);
-        }
+        collect_reference(
+            reference,
+            &data.provenance,
+            collect_data_schema_node,
+            resolver,
+            diags,
+            visiting,
+            out,
+        );
     }
     for member in &data.all_of {
         collect_data_schema(member, resolver, diags, visiting, out);
@@ -132,9 +144,12 @@ fn collect_schema_or(
     }
 }
 
+/// Resolve `reference`, written at `provenance`, and walk its target with `collect`, unless the
+/// walk is already inside that reference, which ends a cycle.
 fn collect_reference(
     reference: &str,
     provenance: &Provenance,
+    collect: Collector,
     resolver: &Resolver<'_>,
     diags: &mut Diagnostics,
     visiting: &mut HashSet<String>,
@@ -144,7 +159,7 @@ fn collect_reference(
         return;
     }
     if let Ok(resolved) = resolver.resolve(reference, provenance, diags) {
-        collect_schema(resolved.schema.as_ref(), resolver, diags, visiting, out);
+        collect(resolved.schema.as_ref(), resolver, diags, visiting, out);
     }
     visiting.remove(reference);
 }

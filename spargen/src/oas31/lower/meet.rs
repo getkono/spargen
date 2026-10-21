@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Docs, Field, FieldDefault, JsonCategory, Openness, Prim, ScalarEnum,
-    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind, Union,
+    ScalarRepr, ScalarValue, Struct, Ty, TypeKind, Union,
 };
 
 use super::defaults::reclassify_default;
@@ -540,70 +540,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.meet_locations.insert(meet.id, location);
         }
         Ok(meet)
-    }
-
-    /// Whether two lowered value types would emit the *same* Rust type as a shared map value, so
-    /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
-    /// overflow map. A bounded structural equivalence:
-    ///
-    /// * different `nullable` — never the same;
-    /// * equal `TypeId` (with equal `nullable`) — a shared `$ref` or the single-entry case;
-    /// * otherwise, for distinct ids with equal `nullable`, compare the def kinds structurally but
-    ///   only for *leaf* shapes that have no per-inline-schema identity: `Primitive` (same `Prim`),
-    ///   `Bytes`, `Null`, `Never`, `Any`, and `Array` (recursing on the element). Composite kinds
-    ///   (`Struct`/`Enum`/`Tuple`/`Union`) generate a distinct named Rust type per inline schema,
-    ///   so two such inline shapes are treated as heterogeneous (→ `E005`) rather than silently
-    ///   merged, and so is a pair either side of which is an unlowered reservation or has no def.
-    ///
-    /// `boxed` is deliberately ignored: it is a use-site indirection modifier, not part of the map
-    /// value's emitted type (the map value is never boxed).
-    ///
-    /// The `Array` recursion is *not* structurally bounded — array element types can form `$ref`
-    /// cycles (`A = [B]`, `B = [A]`) — so a visited-pair guard makes it terminate: an `(a.id, b.id)`
-    /// pair already on the comparison stack is a co-recursive back-edge and compares equal (the two
-    /// types are being compared identically along the cycle, so they are structurally equal there).
-    pub(super) fn same_map_value_type(&self, a: Ty, b: Ty) -> bool {
-        self.same_map_value_type_guarded(a, b, &mut Vec::new())
-    }
-
-    fn same_map_value_type_guarded(
-        &self,
-        a: Ty,
-        b: Ty,
-        visiting: &mut Vec<(TypeId, TypeId)>,
-    ) -> bool {
-        if a.nullable != b.nullable {
-            return false;
-        }
-        if a.id == b.id {
-            return true;
-        }
-        let pair = (a.id, b.id);
-        if visiting.contains(&pair) {
-            // Co-recursive back-edge: the same pair is already being compared further up the stack.
-            // Along a cycle the two types are compared identically, so they are structurally equal.
-            return true;
-        }
-        visiting.push(pair);
-        let result = match (self.graph.get(a.id), self.graph.get(b.id)) {
-            (Some(a_def), Some(b_def)) => match (&a_def.kind, &b_def.kind) {
-                (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
-                (TypeKind::Bytes, TypeKind::Bytes) => true,
-                (TypeKind::Null, TypeKind::Null) | (TypeKind::Never, TypeKind::Never) => true,
-                (TypeKind::Any, TypeKind::Any) => true,
-                (TypeKind::Array(x), TypeKind::Array(y)) => {
-                    self.same_map_value_type_guarded(**x, **y, visiting)
-                }
-                // An unlowered body cannot be proven the same value type as anything else, so the
-                // pair is heterogeneous and the map is rejected with `E005` rather than merged on
-                // a guess. The same reservation on both sides already answered `true` by id.
-                (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => false,
-                _ => false,
-            },
-            _ => false,
-        };
-        visiting.pop();
-        result
     }
 }
 

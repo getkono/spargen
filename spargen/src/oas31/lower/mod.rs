@@ -254,6 +254,7 @@ fn lower_pass(
         scalar_meet_unmerged: HashSet::new(),
         union_variant_members: HashMap::new(),
         variant_meets: Vec::new(),
+        deferred_map_values: Vec::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -487,6 +488,10 @@ fn lower_pass(
             });
         }
     }
+
+    // Every reservation is filled now, so the map-value comparisons a reservation held back can
+    // be decided.
+    ctx.check_deferred_map_values();
 
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
@@ -974,6 +979,11 @@ struct LowerCtx<'a, 'doc> {
     /// meet made to report, as `W011`, a union member's branch it kept nowhere
     /// ([`Self::warn_excluded_union_member_branches`]).
     variant_meets: Vec<(TypeId, usize, bool)>,
+    /// The `patternProperties`/`additionalProperties` value types whose one-map homogeneity
+    /// [`Self::lower_pattern_additional`] could not decide because a value reached a reservation,
+    /// with the object's provenance, in source order; [`Self::check_deferred_map_values`] decides
+    /// them once lowering has filled every reservation.
+    deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
 }
 
 /// The options that change what lowering produces.

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use crate::diag::{Code, Diagnostic};
+use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{AdditionalProps, Docs, Field, PropertyName, Ty, TypeKind, XmlField};
 use crate::oas31::{Schema, SchemaOr};
 
@@ -113,14 +113,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every `patternProperties` value schema — together with a typed `additionalProperties` value,
     /// if any — must lower to the *same emitted Rust type*; otherwise a single map cannot type them.
     ///
-    /// Homogeneity is decided by [`Self::same_map_value_type`], a bounded structural equivalence:
-    /// same `TypeId` (a shared `$ref`, or the single-entry case) is homogeneous, and distinct inline
-    /// leaf shapes (primitives, `Bytes`, `Any`, or arrays thereof) that emit the identical Rust type
-    /// collapse to one map — so `{type:string}` under two patterns yields one `BTreeMap<String,
-    /// String>`. Distinct inline composites (`Struct`/`Enum`/`Tuple`) stay heterogeneous and are
-    /// rejected (`E005`), since two different object shapes cannot share one map value type. The
-    /// first collected value type is used as the map's value type. Deterministic (graph lookups by
-    /// `TypeId`, source-order collection) and bounded (recurses only through `Array` elements).
+    /// Homogeneity is decided by [`TypeGraph::same_generated_type`] over each value type with its
+    /// top-level `Box` stripped (the map supplies the indirection): a shared `$ref`, or distinct
+    /// definitions whose transparent aliases expand to one Rust type — `{type: string}` under two
+    /// patterns, or two integer `enum`s, each `i64` — collapse to one map, while two distinct
+    /// nominal items (structs, string enums, unions, `Never`s, cycle-closing newtypes) are
+    /// rejected (`E005`). The first collected value type is used as the map's value type.
+    /// Deterministic: graph lookups by `TypeId`, over values collected in source order.
+    ///
+    /// A value whose alias walk reaches a reservation — an array of the very object being lowered,
+    /// say — cannot be compared until that reservation is filled, so a mismatch involving one is
+    /// recorded and decided after lowering by [`Self::check_deferred_map_values`].
+    ///
+    /// [`TypeGraph::same_generated_type`]: crate::ir::TypeGraph::same_generated_type
     fn lower_pattern_additional(&mut self, schema: &Schema, hint: &str) -> Option<AdditionalProps> {
         // `additionalProperties: false` denies unknown keys, but the flatten map must capture the
         // pattern-matched keys (which are themselves "unknown" to the named fields). Serde cannot do
@@ -161,29 +166,64 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
+        // A map value lives behind the map's own indirection; a cycle-closing ref needs no `Box`.
+        let unboxed = |mut ty: Ty| {
+            ty.boxed = false;
+            ty
+        };
+        let value_types: Vec<Ty> = value_types.into_iter().map(unboxed).collect();
         let first = value_types[0];
-        if value_types
-            .iter()
-            .any(|ty| !self.same_map_value_type(first, *ty))
-        {
-            Diagnostic::error(Code::PatternPropertiesRejected, schema.provenance.clone())
-                .message(
-                    "`patternProperties`/`additionalProperties` value schemas lower to different \
-                     types; a single typed overflow map cannot represent them all",
-                )
-                .remedy(
-                    "make every pattern/additional value the same type (e.g. a shared `$ref` or the \
-                     same primitive), or omit this API segment with spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
+        let mut undecided = false;
+        for &ty in &value_types {
+            if self.graph.same_generated_type(first, ty) {
+                continue;
+            }
+            if self.graph.reaches_reservation(first.id) || self.graph.reaches_reservation(ty.id) {
+                undecided = true;
+            } else {
+                reject_heterogeneous_map_values(schema.provenance.clone(), self.diags);
+                return None;
+            }
+        }
+        if undecided {
+            self.deferred_map_values
+                .push((schema.provenance.clone(), value_types));
         }
 
-        let mut ty = first;
-        // A map value lives behind the map's own indirection; a cycle-closing ref needs no `Box`.
-        ty.boxed = false;
-        Some(AdditionalProps::Typed(Box::new(ty)))
+        Some(AdditionalProps::Typed(Box::new(first)))
     }
+
+    /// Decide the homogeneity checks [`Self::lower_pattern_additional`] deferred because a value
+    /// reached a reservation, now that lowering has filled every one: `E005` where the values do
+    /// not emit one Rust type. A value that still reaches a reservation is skipped, because an
+    /// unfilled reservation after lowering is already rejected (`E011`, `check_invariants`).
+    pub(super) fn check_deferred_map_values(&mut self) {
+        for (provenance, value_types) in std::mem::take(&mut self.deferred_map_values) {
+            let first = value_types[0];
+            let rejected = value_types.iter().any(|&ty| {
+                !self.graph.reaches_reservation(first.id)
+                    && !self.graph.reaches_reservation(ty.id)
+                    && !self.graph.same_generated_type(first, ty)
+            });
+            if rejected {
+                reject_heterogeneous_map_values(provenance, self.diags);
+            }
+        }
+    }
+}
+
+/// `E005` for `patternProperties`/`additionalProperties` values one typed map cannot share.
+fn reject_heterogeneous_map_values(provenance: Provenance, diags: &mut Diagnostics) {
+    Diagnostic::error(Code::PatternPropertiesRejected, provenance)
+        .message(
+            "`patternProperties`/`additionalProperties` value schemas lower to different types; a \
+             single typed overflow map cannot represent them all",
+        )
+        .remedy(
+            "make every pattern/additional value the same type (e.g. a shared `$ref` or the same \
+             primitive), or omit this API segment with spargen::omit!",
+        )
+        .emit(diags);
 }
 
 /// The `deprecated`/`readOnly`/`writeOnly` annotations of one *property* subschema.

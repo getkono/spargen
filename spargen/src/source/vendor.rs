@@ -15,8 +15,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenanc
 use super::bundle::{local_identity, parse_yaml_then_json, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, is_http_url, resolve_ref_url, split_fragment,
-    RefTarget,
+    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
+    split_fragment, RefTarget,
 };
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
@@ -119,14 +119,18 @@ enum SelfIdentity {
 }
 
 /// The identity `value`'s `$self` gives a document reached at `base`, or `None` where it carries
-/// none (or an empty or fragment-only one). A remote document's `$self` is resolved against the
-/// URL it was retrieved from; a local document's relative `$self` against its own path.
+/// none (or an empty or fragment-only one). A remote document's relative `$self` is resolved
+/// against the URL it was retrieved from; a local document's relative `$self` against its own
+/// path. A non-`http(s)` `$self` with a scheme is opaque in either.
 fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
     let (identity, _) = split_fragment(value.get("$self")?.as_str()?);
     if identity.is_empty() {
         return None;
     }
     Some(match base {
+        Base::Remote(_) if !is_http_url(identity) && has_uri_scheme(identity) => {
+            SelfIdentity::Opaque(identity.to_owned())
+        }
         Base::Remote(retrieved) => SelfIdentity::Remote(resolve_ref_url(retrieved, identity)),
         Base::Local(_) if is_http_url(identity) => SelfIdentity::Remote(identity.to_owned()),
         Base::Local(path) if !identity.contains(':') => SelfIdentity::Local(

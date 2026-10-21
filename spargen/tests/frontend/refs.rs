@@ -3380,6 +3380,71 @@ mod remote {
         assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
+    /// A vendored document's `$self` with a scheme of its own (`urn:x:y`) is its identity as
+    /// written, wherever the document was retrieved from, as a local document's is: a reference
+    /// naming `urn:x:y` reaches the document the pinned URL loaded. Joined under the retrieval
+    /// URL instead (`https://api.example.com/schemas/urn:x:y`), it matches no reference, and the
+    /// second one is rejected as unpinned (`E003`) (#718).
+    #[test]
+    fn a_vendored_documents_opaque_self_is_an_identity_a_reference_reaches() {
+        const PETS_URL: &str = "https://api.example.com/schemas/pets.yaml";
+        const PETS_YAML: &str = "$self: 'urn:x:y'\n\
+                                 components:\n  \
+                                 schemas:\n    \
+                                 Pet:\n      \
+                                 type: object\n      \
+                                 properties:\n        \
+                                 name:\n          \
+                                 type: string\n";
+        const PETS_SHA: &str = "e945f51ca0c7b3ff66b5e27e4709f6227172613023e1f62bd06a91f9261daf25";
+
+        // The pinned URL is named first, so the document is loaded before the opaque reference is
+        // walked.
+        let spec = format!(
+            "openapi: 3.2.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /a:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"{PETS_URL}#/components/schemas/Pet\" }}\n\
+             \x20 /b:\n\
+             \x20   get:\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema: {{ $ref: \"urn:x:y#/components/schemas/Pet\" }}\n"
+        );
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{PETS_URL}\"\nsha256 = \"{PETS_SHA}\"\npath = \
+             \"api.example.com/schemas/pets.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/pets.yaml", PETS_YAML)];
+
+        for check_only in [true, false] {
+            let (report, _temp, out) = run_layout(&spec, Some(&lock), &vendor, check_only);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "check only: {check_only}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AbsoluteRefUnsupported),
+                "check only: {check_only}: {report:#?}"
+            );
+            if !check_only {
+                let generated = std::fs::read_to_string(&out).expect("module written");
+                assert!(generated.contains("pub name"), "{generated}");
+            }
+        }
+    }
+
     /// Lay out `spec` + `lock` + arbitrary vendored files `(vendor-relative path, bytes)` in a
     /// fresh tempdir, then run the pipeline (no network). Returns the report and generated module
     /// path.

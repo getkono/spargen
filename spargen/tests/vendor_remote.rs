@@ -510,6 +510,40 @@ fn a_remote_documents_self_in_another_directory_is_the_base_lock_resolves_from()
     assert_eq!(server.hits().len(), 2, "generation must not fetch");
 }
 
+/// A fetched document's `$self` with a scheme of its own (`urn:x:y`) is its identity as written,
+/// in `spargen lock` as in the build (#718): a reference naming `urn:x:y` reaches the document
+/// fetched at its URL, so the lock neither rejects it as a non-`http(s)` reference (`E003`) nor
+/// fetches anything for it, and the build resolves it from the one pin.
+#[test]
+fn a_remote_documents_opaque_self_is_an_identity_lock_and_build_agree_on() {
+    const OPAQUE_SELF_YAML: &str = "$self: 'urn:x:y'\n\
+                                    components:\n  \
+                                    schemas:\n    \
+                                    Pet:\n      \
+                                    type: object\n      \
+                                    required: [name]\n      \
+                                    properties:\n        \
+                                    name: { type: string }\n";
+    let server = MockServer::start(&[("/pets.yaml", Reply::Body(OPAQUE_SELF_YAML))]);
+    let pets_url = server.url("/pets.yaml");
+    // The URL is named first, so the document is fetched before the opaque reference is walked.
+    let (_temp, spec_path) = remote::workspace(&[
+        &format!("{pets_url}#/components/schemas/Pet"),
+        "urn:x:y#/components/schemas/Pet",
+    ]);
+
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(server.hits(), ["/pets.yaml"]);
+    assert_eq!(pinned_urls(&report), [pets_url]);
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub name"), "{code}");
+    let checked = spargen::check(&Spec::new(spec_path));
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert_eq!(server.hits().len(), 1, "generation must not fetch");
+}
+
 #[test]
 fn a_refused_connection_is_e025_naming_the_url() {
     // Bind and release a port so nothing is listening on it.
