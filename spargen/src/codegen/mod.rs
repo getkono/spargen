@@ -12,7 +12,8 @@
 //! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
 //! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, and [`idents`] (the
-//! allocated-name lookups and status variant names every emitter reads).
+//! allocated-name lookups and status variant names the operation, blocking-client, parameter,
+//! response and dispatch emitters read).
 
 mod blocking;
 mod body;
