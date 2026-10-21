@@ -84,9 +84,9 @@ fn an_unknown_type_name_is_named_in_the_rejection() {
 }
 
 #[test]
-fn an_integral_count_written_as_a_float_is_the_integer() {
+fn an_integral_count_written_as_a_float_is_accepted() {
     // JSON Schema 2020-12 (core, section 4.2.2) reads `5.0` as the integer 5, so a count keyword
-    // written that way is the bound, not an ill-typed value.
+    // written that way is a well-typed bound, not an ill-typed value.
     for body in [
         "type: string\n      maxLength: 5.0",
         "type: array\n      items: { type: string }\n      minItems: 0.0",

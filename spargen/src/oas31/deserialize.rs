@@ -2,15 +2,18 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::ir::Method;
-use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
+use crate::source::{InputBundle, SpannedMap, SpannedValue};
 
 use super::{
-    Components, Discriminator, Document, EncodingObject, HeaderObject, Info, JsonType,
-    MediaTypeObject, OAuthFlow, OperationObject, ParameterObject, PathItem, Paths, RefOr,
-    Reference, RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr,
-    SecurityRequirement, SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet,
-    ValidationKeywords, XmlHints,
+    Components, Discriminator, Document, EncodingObject, HeaderObject, Info, MediaTypeObject,
+    OAuthFlow, OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference,
+    RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement,
+    SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet, ValidationKeywords, XmlHints,
 };
+
+mod keywords;
+
+use keywords::{parse_required, parse_type_set, parse_validation};
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 
@@ -1119,7 +1122,7 @@ fn parse_schema_or(
 
     let schema = Schema {
         boolean: None,
-        types: parse_type_set(map.get("type")),
+        types: parse_type_set(map.get("type"), &pointer.push("type"), diags),
         reference: map.get("$ref").and_then(string).map(str::to_owned),
         properties: map
             .get("properties")
@@ -1134,14 +1137,7 @@ fn parse_schema_or(
                     .collect()
             })
             .unwrap_or_default(),
-        required: map
-            .get("required")
-            .and_then(array)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(string)
-            .map(str::to_owned)
-            .collect(),
+        required: parse_required(map.get("required"), &pointer.push("required"), diags),
         additional_properties: map.get("additionalProperties").and_then(|value| {
             parse_schema_or(value, &pointer.push("additionalProperties"), diags).map(Box::new)
         }),
@@ -1210,7 +1206,7 @@ fn parse_schema_or(
         xml: map
             .get("xml")
             .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
-        validation: parse_validation(map),
+        validation: parse_validation(map, pointer, diags),
         deprecated: map
             .get("deprecated")
             .and_then(SpannedValue::as_bool)
@@ -1230,13 +1226,15 @@ fn parse_schema_or(
     Some(SchemaOr::Schema(Box::new(schema)))
 }
 
+/// A composition or tuple keyword (`allOf`, `oneOf`, `anyOf`, `prefixItems`): an array of
+/// schemas, or `E011` at `pointer` when it is not an array, which used to read as no members.
 fn parse_schema_array(
     value: Option<&SpannedValue>,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Vec<SchemaOr> {
     value
-        .and_then(array)
+        .and_then(|value| expect_array(value, pointer, diags))
         .unwrap_or_default()
         .iter()
         .enumerate()
@@ -1308,6 +1306,21 @@ fn discriminator_target(
     })
 }
 
+/// The array at `value`, or `E011` at `pointer` when it is not one.
+fn expect_array<'a>(
+    value: &'a SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<&'a [SpannedValue]> {
+    let found = array(value);
+    if found.is_none() {
+        Diagnostic::error(Code::InvalidInput, provenance(pointer, value))
+            .message("expected an array")
+            .emit(diags);
+    }
+    found
+}
+
 /// The string at `value`, or `E011` at `pointer` when it is not one.
 fn expect_string<'a>(
     value: &'a SpannedValue,
@@ -1369,76 +1382,6 @@ fn parse_xml(
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
     })
-}
-
-fn parse_type_set(value: Option<&SpannedValue>) -> TypeSet {
-    let mut types = Vec::new();
-    match value.map(|value| &value.node) {
-        Some(Node::String(value)) => {
-            if let Some(ty) = parse_json_type(value) {
-                types.push(ty);
-            }
-        }
-        Some(Node::Array(values)) => {
-            for value in values {
-                if let Some(ty) = value.as_str().and_then(parse_json_type) {
-                    types.push(ty);
-                }
-            }
-        }
-        _ => {}
-    }
-    TypeSet { types }
-}
-
-fn parse_json_type(value: &str) -> Option<JsonType> {
-    Some(match value {
-        "null" => JsonType::Null,
-        "boolean" => JsonType::Boolean,
-        "object" => JsonType::Object,
-        "array" => JsonType::Array,
-        "number" => JsonType::Number,
-        "integer" => JsonType::Integer,
-        "string" => JsonType::String,
-        _ => return None,
-    })
-}
-
-fn parse_validation(map: &SpannedMap) -> ValidationKeywords {
-    ValidationKeywords {
-        pattern: map.get("pattern").and_then(string).map(str::to_owned),
-        minimum: map.get("minimum").and_then(number_f64),
-        maximum: map.get("maximum").and_then(number_f64),
-        exclusive_minimum: map.get("exclusiveMinimum").and_then(number_f64),
-        exclusive_maximum: map.get("exclusiveMaximum").and_then(number_f64),
-        multiple_of: map.get("multipleOf").and_then(number_f64),
-        min_length: map.get("minLength").and_then(number_u64),
-        max_length: map.get("maxLength").and_then(number_u64),
-        min_items: map.get("minItems").and_then(number_u64),
-        max_items: map.get("maxItems").and_then(number_u64),
-        unique_items: map
-            .get("uniqueItems")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
-        min_properties: map.get("minProperties").and_then(number_u64),
-        max_properties: map.get("maxProperties").and_then(number_u64),
-        other: [
-            "not",
-            "if",
-            "then",
-            "else",
-            "contains",
-            "minContains",
-            "maxContains",
-            "dependentSchemas",
-            "dependentRequired",
-            "propertyNames",
-            "unevaluatedProperties",
-            "unevaluatedItems",
-        ]
-        .iter()
-        .any(|keyword| map.get(keyword).is_some()),
-    }
 }
 
 fn parse_validation_children(
@@ -1595,23 +1538,6 @@ fn array(value: &SpannedValue) -> Option<&[SpannedValue]> {
 
 fn string(value: &SpannedValue) -> Option<&str> {
     value.as_str()
-}
-
-fn number_f64(value: &SpannedValue) -> Option<f64> {
-    match &value.node {
-        Node::Number(Number::Float(value)) => Some(*value),
-        Node::Number(Number::Int(value)) => Some(*value as f64),
-        Node::Number(Number::UInt(value)) => Some(*value as f64),
-        _ => None,
-    }
-}
-
-fn number_u64(value: &SpannedValue) -> Option<u64> {
-    match &value.node {
-        Node::Number(Number::UInt(value)) => Some(*value),
-        Node::Number(Number::Int(value)) => (*value >= 0).then_some(*value as u64),
-        _ => None,
-    }
 }
 
 fn provenance(pointer: &JsonPointer, value: &SpannedValue) -> Provenance {
