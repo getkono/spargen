@@ -1,7 +1,14 @@
 use super::*;
 
-const TOKIO_DECLARATION: &str =
-    "tokio = { version = \"1.53.1\", features = [\"rt\"], optional = true }";
+/// `tokio` declared at its floor, `fields` following the version inside the inline table.
+fn tokio_at_floor(fields: &str) -> String {
+    format!("tokio = {{ version = \"{}\"{fields} }}", TOKIO.floor)
+}
+
+/// The declaration the blocking client requires: `tokio` at its floor, with `rt`, optional.
+fn tokio_declaration() -> String {
+    tokio_at_floor(", features = [\"rt\"], optional = true")
+}
 
 /// The core manifest opted into `blocking`, followed by `tables` verbatim.
 fn blocking_manifest(tables: &str) -> String {
@@ -59,7 +66,7 @@ fn equivalent_native_cfg_spellings_satisfy_the_blocking_requirement() {
         ]
         .into_iter()
         .filter_map(|key| {
-            let manifest = blocking_manifest(&tokio_table(key, TOKIO_DECLARATION));
+            let manifest = blocking_manifest(&tokio_table(key, &tokio_declaration()));
             let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
             (!diagnostics.is_empty()).then(|| format!("{key}: {diagnostics:#?}"))
         })
@@ -72,10 +79,10 @@ fn equivalent_native_cfg_spellings_satisfy_the_blocking_requirement() {
 fn without_a_build_target_tables_must_jointly_cover_every_native_target() {
     let covering = blocking_manifest(&format!(
         "{}{}",
-        tokio_table("cfg(unix)", TOKIO_DECLARATION),
+        tokio_table("cfg(unix)", &tokio_declaration()),
         tokio_table(
             r#"cfg(all(not(unix), not(target_family = "wasm")))"#,
-            TOKIO_DECLARATION
+            &tokio_declaration()
         )
     ));
     let diagnostics = audit_manifest(
@@ -89,8 +96,8 @@ fn without_a_build_target_tables_must_jointly_cover_every_native_target() {
     // target it is expanding for, and OS-less targets are covered by neither table.
     let gapped = blocking_manifest(&format!(
         "{}{}",
-        tokio_table("cfg(unix)", TOKIO_DECLARATION),
-        tokio_table("cfg(windows)", TOKIO_DECLARATION)
+        tokio_table("cfg(unix)", &tokio_declaration()),
+        tokio_table("cfg(windows)", &tokio_declaration())
     ));
     let diagnostics = audit_manifest(
         &gapped,
@@ -114,11 +121,13 @@ fn without_a_build_target_tables_must_jointly_cover_every_native_target() {
 
 #[test]
 fn a_tokio_table_that_applies_on_wasm_is_not_native_only() {
-    let in_dependencies =
-        format!("{CORE_MANIFEST}{TOKIO_DECLARATION}\n\n[features]\nblocking = [\"dep:tokio\"]\n");
+    let in_dependencies = format!(
+        "{CORE_MANIFEST}{}\n\n[features]\nblocking = [\"dep:tokio\"]\n",
+        tokio_declaration()
+    );
     let wasm_applicable = blocking_manifest(&tokio_table(
         r#"cfg(any(unix, target_arch = "wasm32"))"#,
-        TOKIO_DECLARATION,
+        &tokio_declaration(),
     ));
     for target in [TargetContext::Unknown, linux()] {
         for (manifest, table) in [
@@ -146,16 +155,19 @@ fn a_tokio_table_that_applies_on_wasm_is_not_native_only() {
 fn unevaluable_or_unparseable_target_keys_explain_themselves() {
     for (tables, expected) in [
         (
-            tokio_table(r#"cfg(not(feature = "x"))"#, TOKIO_DECLARATION),
+            tokio_table(r#"cfg(not(feature = "x"))"#, &tokio_declaration()),
             "`[target.'cfg(not(feature = \"x\"))'.dependencies]` cannot be evaluated: \
              `feature = \"x\"` does not select target tables",
         ),
         (
-            tokio_table("cfg(not(target_arch = ))", TOKIO_DECLARATION),
+            tokio_table("cfg(not(target_arch = ))", &tokio_declaration()),
             "`[target.'cfg(not(target_arch = ))'.dependencies]` does not parse:",
         ),
         (
-            format!("[target.x86_64-unknown-linux-gnu.dependencies]\n{TOKIO_DECLARATION}\n"),
+            format!(
+                "[target.x86_64-unknown-linux-gnu.dependencies]\n{}\n",
+                tokio_declaration()
+            ),
             "is not covered",
         ),
     ] {
@@ -174,8 +186,8 @@ fn unevaluable_or_unparseable_target_keys_explain_themselves() {
 fn a_build_target_selects_the_tables_cargo_would_apply() {
     let manifest = blocking_manifest(&format!(
         "{}{}",
-        tokio_table("cfg(unix)", TOKIO_DECLARATION),
-        tokio_table("cfg(windows)", TOKIO_DECLARATION)
+        tokio_table("cfg(unix)", &tokio_declaration()),
+        tokio_table("cfg(windows)", &tokio_declaration())
     ));
     for target in [linux(), windows()] {
         let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
@@ -187,7 +199,7 @@ fn a_build_target_selects_the_tables_cargo_would_apply() {
 fn a_table_that_misses_the_build_target_names_it() {
     let manifest = blocking_manifest(&tokio_table(
         r#"cfg(target_os = "none")"#,
-        TOKIO_DECLARATION,
+        &tokio_declaration(),
     ));
     let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &linux());
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
@@ -231,7 +243,7 @@ fn a_wasm32_build_needs_no_tokio_but_keeps_the_wiring_check() {
 fn build_flags_and_target_names_are_read_from_cargo() {
     let flagged = blocking_manifest(&tokio_table(
         "cfg(all(unix, not(my_flag)))",
-        TOKIO_DECLARATION,
+        &tokio_declaration(),
     ));
     assert!(audit_manifest(&flagged, &RuntimeRequirements::default(), &linux()).is_empty());
     let with_flag = build_target(
@@ -249,7 +261,8 @@ fn build_flags_and_target_names_are_read_from_cargo() {
     );
 
     let named = blocking_manifest(&format!(
-        "[target.x86_64-unknown-linux-gnu.dependencies]\n{TOKIO_DECLARATION}\n"
+        "[target.x86_64-unknown-linux-gnu.dependencies]\n{}\n",
+        tokio_declaration()
     ));
     assert!(audit_manifest(&named, &RuntimeRequirements::default(), &linux()).is_empty());
     let musl = build_target("x86_64-unknown-linux-musl", LINUX_CFGS);
@@ -270,14 +283,9 @@ fn build_flags_and_target_names_are_read_from_cargo() {
 #[test]
 fn contract_rules_still_apply_under_an_alternative_spelling() {
     let key = r#"cfg(not(target_family = "wasm"))"#;
-    let not_optional = blocking_manifest(&tokio_table(
-        key,
-        "tokio = { version = \"1.53.1\", features = [\"rt\"] }",
-    ));
-    let without_rt = blocking_manifest(&tokio_table(
-        key,
-        "tokio = { version = \"1.53.1\", optional = true }",
-    ));
+    let not_optional =
+        blocking_manifest(&tokio_table(key, &tokio_at_floor(", features = [\"rt\"]")));
+    let without_rt = blocking_manifest(&tokio_table(key, &tokio_at_floor(", optional = true")));
     for target in [TargetContext::Unknown, linux()] {
         let messages_not_optional = messages(&audit_manifest(
             &not_optional,
@@ -303,10 +311,10 @@ fn contract_rules_still_apply_under_an_alternative_spelling() {
     // through one of them. Here the table covering non-unix targets leaves it out.
     let split = blocking_manifest(&format!(
         "{}{}",
-        tokio_table("cfg(unix)", TOKIO_DECLARATION),
+        tokio_table("cfg(unix)", &tokio_declaration()),
         tokio_table(
             r#"cfg(all(not(unix), not(target_family = "wasm")))"#,
-            "tokio = { version = \"1.53.1\", optional = true }"
+            &tokio_at_floor(", optional = true")
         )
     ));
     let messages_split = messages(&audit_manifest(
@@ -324,11 +332,8 @@ fn contract_rules_still_apply_under_an_alternative_spelling() {
     // does not apply on linux.
     let build_split = blocking_manifest(&format!(
         "{}{}",
-        tokio_table(
-            "cfg(unix)",
-            "tokio = { version = \"1.53.1\", optional = true }"
-        ),
-        tokio_table("cfg(windows)", TOKIO_DECLARATION)
+        tokio_table("cfg(unix)", &tokio_at_floor(", optional = true")),
+        tokio_table("cfg(windows)", &tokio_declaration())
     ));
     let messages_build = messages(&audit_manifest(
         &build_split,
@@ -357,16 +362,20 @@ fn a_below_floor_tokio_in_one_of_two_counting_tables_names_that_table() {
             "cfg(unix)",
             "tokio = { version = \"1.53.0\", features = [\"rt\"], optional = true }"
         ),
-        tokio_table(r#"cfg(not(target_family = "wasm"))"#, TOKIO_DECLARATION)
+        tokio_table(r#"cfg(not(target_family = "wasm"))"#, &tokio_declaration())
     ));
     for target in [TargetContext::Unknown, linux()] {
         let diagnostics = audit_manifest(&manifest, &RuntimeRequirements::default(), &target);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(
             diagnostics[0].message,
-            "`tokio` version requirement `1.53.0` is outside the supported range >=1.53.1, \
-             <2.0.0; use `1.53.1` or a higher compatible caret requirement (in \
-             `[target.'cfg(unix)'.dependencies]`)"
+            format!(
+                "`tokio` version requirement `1.53.0` is outside the supported range >={floor}, \
+                 <{ceiling}; use `{floor}` or a higher compatible caret requirement (in \
+                 `[target.'cfg(unix)'.dependencies]`)",
+                floor = TOKIO.floor,
+                ceiling = TOKIO.ceiling(),
+            )
         );
     }
 }
@@ -442,20 +451,27 @@ fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
     // A target table applies the same two halves, and the same identity exemption, to `tokio`,
     // on both paths.
     let key = r#"cfg(not(target_family = "wasm"))"#;
+    let floor = TOKIO.floor;
     let targeted_identity = blocking_manifest(&tokio_table(
         key,
-        "tokio = { package = \"tokio\", version = \"1.53.1\", features = [\"rt\"], optional = \
-         true }",
+        &format!(
+            "tokio = {{ package = \"tokio\", version = \"{floor}\", features = [\"rt\"], \
+             optional = true }}"
+        ),
     ));
     let targeted_package = blocking_manifest(&tokio_table(
         key,
-        "tokio = { package = \"tokio-fork\", version = \"1.53.1\", features = [\"rt\"], \
-         optional = true }",
+        &format!(
+            "tokio = {{ package = \"tokio-fork\", version = \"{floor}\", features = [\"rt\"], \
+             optional = true }}"
+        ),
     ));
     let targeted_alias = blocking_manifest(&tokio_table(
         key,
-        "tokio_rt = { package = \"tokio\", version = \"1.53.1\", features = [\"rt\"], \
-         optional = true }",
+        &format!(
+            "tokio_rt = {{ package = \"tokio\", version = \"{floor}\", features = [\"rt\"], \
+             optional = true }}"
+        ),
     ));
     for target in [TargetContext::Unknown, linux()] {
         assert_eq!(
@@ -495,10 +511,10 @@ fn tokio_optional_in_one_counting_table_and_not_the_other_is_reported_on_that_ta
     // disagrees is reported on the declaration that is not optional rather than accepted.
     let manifest = blocking_manifest(&format!(
         "{}{}",
-        tokio_table("cfg(unix)", TOKIO_DECLARATION),
+        tokio_table("cfg(unix)", &tokio_declaration()),
         tokio_table(
             r#"cfg(not(target_family = "wasm"))"#,
-            "tokio = { version = \"1.53.1\", features = [\"rt\"] }"
+            &tokio_at_floor(", features = [\"rt\"]")
         )
     ));
     for target in [TargetContext::Unknown, linux()] {
@@ -532,7 +548,7 @@ fn build_flag_predicates_have_no_value_on_a_builtin_target() {
         ),
     ] {
         let key = format!(r#"cfg(all(not(target_arch = "wasm32"), {predicate}))"#);
-        let manifest = blocking_manifest(&tokio_table(&key, TOKIO_DECLARATION));
+        let manifest = blocking_manifest(&tokio_table(&key, &tokio_declaration()));
         let messages = messages(&audit_manifest(
             &manifest,
             &RuntimeRequirements::default(),
@@ -551,7 +567,7 @@ fn build_flag_predicates_have_no_value_on_a_builtin_target() {
     // The native-only check runs on the builtin wasm anchor on both paths, so from a build
     // script too a table whose only native evidence is a flag never counts, even when the flag
     // is set for the target being built.
-    let flag_only = blocking_manifest(&tokio_table("cfg(my_flag)", TOKIO_DECLARATION));
+    let flag_only = blocking_manifest(&tokio_table("cfg(my_flag)", &tokio_declaration()));
     let flagged_linux = build_target(
         "x86_64-unknown-linux-gnu",
         &[LINUX_CFGS, &[("MY_FLAG", "")]].concat(),
@@ -576,7 +592,8 @@ fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
     // target spargen can only compare it against the builtin list, so a triple missing from
     // that list is reported as unknown, not as a table that applies to no native target.
     let custom = blocking_manifest(&format!(
-        "[target.x86_64-custom-none.dependencies]\n{TOKIO_DECLARATION}\n"
+        "[target.x86_64-custom-none.dependencies]\n{}\n",
+        tokio_declaration()
     ));
     let macro_messages = messages(&audit_manifest(
         &custom,
@@ -612,8 +629,10 @@ fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     // A cfg that genuinely matches no known native target keeps saying so.
-    let contradictory =
-        blocking_manifest(&tokio_table("cfg(all(unix, windows))", TOKIO_DECLARATION));
+    let contradictory = blocking_manifest(&tokio_table(
+        "cfg(all(unix, windows))",
+        &tokio_declaration(),
+    ));
     let messages = messages(&audit_manifest(
         &contradictory,
         &RuntimeRequirements::default(),
@@ -647,7 +666,7 @@ fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
         ("proc_macro", "`proc_macro` does not select target tables"),
     ] {
         let key = format!(r#"cfg(all(not(target_arch = "wasm32"), not({predicate})))"#);
-        let manifest = blocking_manifest(&tokio_table(&key, TOKIO_DECLARATION));
+        let manifest = blocking_manifest(&tokio_table(&key, &tokio_declaration()));
         let clause = format!("; `[target.'{key}'.dependencies]` cannot be evaluated: {reason}");
         for (target, rule) in [
             (
@@ -675,7 +694,7 @@ fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
     // check on the wasm anchor, from a build script as well.
     let feature_only = blocking_manifest(&tokio_table(
         r#"cfg(not(feature = "x"))"#,
-        TOKIO_DECLARATION,
+        &tokio_declaration(),
     ));
     let messages = messages(&audit_manifest(
         &feature_only,
@@ -701,8 +720,9 @@ fn workspace_inherited_tokio_under_an_alternative_spelling_resolves() {
         directory.path().join("Cargo.toml"),
         format!(
             "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-             tokio = {{ version = \"1.53.1\", features = [\"rt\"] }}\n",
-            core_workspace_dependencies()
+             {}\n",
+            core_workspace_dependencies(),
+            tokio_at_floor(", features = [\"rt\"]")
         ),
     )
     .unwrap();

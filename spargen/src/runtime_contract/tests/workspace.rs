@@ -1133,8 +1133,9 @@ fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() 
         directory.path().join("Cargo.toml"),
         format!(
             "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-             tokio = {{ version = \"1.53.1\", features = [\"rt\"], optional = true }}\n",
-            core_workspace_dependencies()
+             tokio = {{ version = \"{}\", features = [\"rt\"], optional = true }}\n",
+            core_workspace_dependencies(),
+            TOKIO.floor
         ),
     )
     .unwrap();
