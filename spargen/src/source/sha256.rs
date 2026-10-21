@@ -116,8 +116,8 @@ mod tests {
     }
 
     /// The hand-rolled hasher agrees with the `sha2` crate on every pinned corpus file: real-world
-    /// inputs up to several megabytes, whose lengths land on padding cases the NIST vectors above
-    /// do not reach. That each file still hashes to the `sha256` its manifest case pins is
+    /// inputs, the largest over ten megabytes, far longer than the vectors above. That each file
+    /// still hashes to the `sha256` its manifest case pins is
     /// `every_pinned_spec_matches_the_hash_the_manifest_declares` in
     /// `spargen/tests/corpus_manifest.rs`; this test lives here only because `sha256_hex` is
     /// crate-private.

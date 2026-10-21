@@ -119,11 +119,10 @@ mod tests {
     }
 
     /// Is `text` an identifier Rust accepts in a name position: one identifier token that `syn`
-    /// parses as an [`syn::Ident`], which refuses every keyword it knows, bare or wrongly
-    /// raw-escaped (`r#self`)? `syn` is compiled independently of [`KEYWORDS`], so this oracle
-    /// catches a keyword left bare even when the table and `is_keyword` agree on missing it. `syn`
-    /// parses edition 2024's `gen` as an identifier, so
-    /// `gen_is_escaped_although_edition_2021_would_accept_it` pins that word instead.
+    /// parses as a [`syn::Ident`], which refuses every keyword in `syn`'s own list? That list is
+    /// independent of [`KEYWORDS`], so this oracle catches a keyword left bare even when the table
+    /// and `is_keyword` agree on missing it. `syn` parses edition 2024's `gen` as an identifier,
+    /// so `gen_is_escaped_although_edition_2021_would_accept_it` pins that word instead.
     fn is_legal_identifier(text: &str) -> bool {
         lexes_as_one_identifier(text)
             && syn::parse_str::<syn::Ident>(text).is_ok_and(|ident| ident == text)
