@@ -440,8 +440,8 @@ impl Responses {
         has_two_bodied(&self.error_responses())
     }
 
-    /// Whether a bodied streaming response (media whose [`MediaType::stream_framing`] is `Some`) sits
-    /// anywhere but the operation's single bodied success — the one position whose framing
+    /// Whether a bodied streaming response (media whose [`MediaType::stream_framing`] is `Some`)
+    /// sits anywhere but the operation's single bodied success — the one position whose framing
     /// [`Self::stream_success`] consumes. Every other position decodes a whole body: an error
     /// response (an explicit non-2xx status, or a `default`, which is offered to the error side
     /// even when it is also the sole success source) is classified into `E`, and a success enum

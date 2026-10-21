@@ -3,8 +3,8 @@
 //!
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
 //! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
-//! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
-//! client sees — the client methods (operations) with their typed response-header structs, the
+//! allocated [`crate::name::Names`] and models these parts of what a *consumer* of the generated
+//! client sees: the client methods (operations) with their typed response-header structs, the
 //! public model types with their typed `additionalProperties` maps, and the server builders with
 //! their variable enums — then classifies every difference between an old and a new surface as a
 //! semver bump. It never emits code and has no effect on generation or the runtime; it backs

@@ -308,8 +308,9 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
         .types
         .extend(definitions.iter().map(|(id, _)| *id).zip(allocated));
 
-    // Response-header structs live in the same scope as the other per-operation types, so a
-    // documented header can never collide with a generated model.
+    // Response-header structs are allocated in the model type scope above (the `types` module's),
+    // so a documented header's struct can never collide with a generated model. The `…Params`
+    // structs, error types and success enums take the module root's scope below.
     for operation in &api.operations {
         let responses = operation
             .responses

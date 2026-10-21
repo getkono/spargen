@@ -16,8 +16,9 @@ pub(crate) struct SecuritySchemeDef {
     pub(crate) docs: Vec<String>,
 }
 
-/// A security scheme (matrix: Security). `http`/`apiKey` are fully plumbed; `oauth2`/`oidc` are
-/// W-class — the scheme metadata is retained but tokens are supplied by the caller.
+/// A security scheme (matrix: Security). `http`/`apiKey` attach their credential kinds;
+/// `oauth2`/`openIdConnect` attach a caller-supplied token as bearer; `mutualTLS` attaches nothing
+/// (`W011`). Scheme documentation travels in [`SecuritySchemeDef::docs`].
 #[derive(Debug, Clone)]
 pub(crate) enum SecurityScheme {
     /// `http` scheme (`bearer` or `basic`).
