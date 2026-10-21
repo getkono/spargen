@@ -235,6 +235,17 @@ pub(crate) struct Discriminator {
     pub(crate) default_mapping: Option<DiscriminatorTarget>,
 }
 
+impl Discriminator {
+    /// Every schema this Discriminator Object names, in the order lowering resolves them: each
+    /// `mapping` entry with its tag, then `defaultMapping` with `None`.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (Option<&String>, &DiscriminatorTarget)> {
+        self.mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(self.default_mapping.iter().map(|target| (None, target)))
+    }
+}
+
 /// One schema a Discriminator Object names — a `mapping` value or the `defaultMapping` — as a
 /// schema name or a URI reference, with the provenance of the entry itself. Each is a reference
 /// lowering must resolve against the union's members, and a diagnostic about one belongs at the

@@ -6,7 +6,7 @@ use crate::source::SpannedValue;
 
 use super::{
     Document, EncodingObject, HeaderObject, MediaTypeObject, ParameterObject, PathItem, RefOr,
-    Reference, RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr, ValidationKeywords,
+    Reference, RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr,
 };
 
 /// How a Parameter, Request Body, Response or Header Object target is parsed, as lowering parses
@@ -67,47 +67,30 @@ pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Di
 impl Audit<'_, '_> {
     fn walk(&mut self) {
         let document = self.document;
-        for (name, schema) in &document.components.schemas {
-            self.audit_schema_ref_or(
-                schema,
-                JsonPointer::root()
-                    .push("components")
-                    .push("schemas")
-                    .push(name),
-            );
+        for schema in document.components.schemas.values() {
+            self.audit_schema_ref_or(schema);
+        }
+        for parameter in document.components.parameters.values() {
+            self.audit_parameter_ref_or(parameter);
+        }
+        for body in document.components.request_bodies.values() {
+            self.audit_request_body_ref_or(body);
+        }
+        for response in document.components.responses.values() {
+            self.audit_response_ref_or(response);
+        }
+        for media in document.components.media_types.values() {
+            self.audit_media(media);
+        }
+        for header in document.components.headers.values() {
+            self.audit_header_ref_or(header);
         }
 
-        let components_pointer = JsonPointer::root().push("components");
-        for (name, parameter) in &document.components.parameters {
-            self.audit_parameter_ref_or(
-                parameter,
-                components_pointer.push("parameters").push(name),
-            );
-        }
-        for (name, body) in &document.components.request_bodies {
-            self.audit_request_body_ref_or(
-                body,
-                components_pointer.push("requestBodies").push(name),
-            );
-        }
-        for (name, response) in &document.components.responses {
-            self.audit_response_ref_or(response, components_pointer.push("responses").push(name));
-        }
-        for (name, media) in &document.components.media_types {
-            self.audit_media(media, components_pointer.push("mediaTypes").push(name));
-        }
-
-        for (name, header) in &document.components.headers {
-            self.audit_header_ref_or(header, components_pointer.push("headers").push(name));
-        }
         let root = self.resolver.root_id();
+        let path_items = JsonPointer::root().push("components").push("pathItems");
         for (name, item) in &document.components.path_items {
-            self.audit_path_item(
-                item,
-                (root, components_pointer.push("pathItems").push(name)),
-            );
+            self.audit_path_item(item, (root, path_items.push(name)));
         }
-
         for (path, item) in &document.paths.items {
             self.audit_path_item(item, (root, JsonPointer::root().push("paths").push(path)));
         }
@@ -117,31 +100,26 @@ impl Audit<'_, '_> {
     /// audited, and a Path Item `$ref` is followed to the Path Item it names (#715), one hop, as
     /// lowering follows it; a target that is itself a `$ref` is a chain lowering declines.
     fn audit_path_item(&mut self, item: &PathItem, key: SchemaKey) {
-        if !self.objects.insert(key.clone()) {
+        if !self.objects.insert(key) {
             return;
         }
         if let Some(reference) = &item.reference {
             self.follow_path_item(reference);
         }
-        let item_pointer = key.1;
-        for (method, operation) in &item.operations {
-            let op_pointer = item_pointer.push(method.as_str());
-            for (index, parameter) in item
-                .parameters
-                .iter()
-                .chain(operation.parameters.iter())
-                .enumerate()
-            {
-                self.audit_parameter_ref_or(parameter, op_pointer.push("parameters").index(index));
+        for operation in item.operations.values() {
+            for parameter in item.parameters.iter().chain(operation.parameters.iter()) {
+                self.audit_parameter_ref_or(parameter);
             }
             if let Some(body) = &operation.request_body {
-                self.audit_request_body_ref_or(body, op_pointer.push("requestBody"));
+                self.audit_request_body_ref_or(body);
             }
-            for (status, response) in &operation.responses.by_status {
-                self.audit_response_ref_or(response, op_pointer.push("responses").push(status));
-            }
-            if let Some(response) = &operation.responses.default {
-                self.audit_response_ref_or(response, op_pointer.push("responses").push("default"));
+            for response in operation
+                .responses
+                .by_status
+                .values()
+                .chain(operation.responses.default.as_ref())
+            {
+                self.audit_response_ref_or(response);
             }
         }
     }
@@ -175,45 +153,42 @@ impl Audit<'_, '_> {
 
     /// A Parameter position: an inline object is audited, and a Reference Object is followed to
     /// the object it ends at ([`Self::follow_object`]), which is audited in turn.
-    fn audit_parameter_ref_or(&mut self, parameter: &RefOr<ParameterObject>, pointer: JsonPointer) {
+    fn audit_parameter_ref_or(&mut self, parameter: &RefOr<ParameterObject>) {
         match parameter {
-            RefOr::Item(parameter) => self.audit_parameter(parameter, pointer),
+            RefOr::Item(parameter) => self.audit_parameter(parameter),
             RefOr::Ref(reference) => {
                 if let Some(parameter) =
                     self.follow_object(reference, super::deserialize::parse_parameter)
                 {
-                    let pointer = parameter.provenance.pointer.clone();
-                    self.audit_parameter(&parameter, pointer);
+                    self.audit_parameter(&parameter);
                 }
             }
         }
     }
 
     /// [`Self::audit_parameter_ref_or`] for a Request Body position.
-    fn audit_request_body_ref_or(&mut self, body: &RefOr<RequestBodyObject>, pointer: JsonPointer) {
+    fn audit_request_body_ref_or(&mut self, body: &RefOr<RequestBodyObject>) {
         match body {
-            RefOr::Item(body) => self.audit_request_body(body, pointer),
+            RefOr::Item(body) => self.audit_request_body(body),
             RefOr::Ref(reference) => {
                 if let Some(body) =
                     self.follow_object(reference, super::deserialize::parse_request_body)
                 {
-                    let pointer = body.provenance.pointer.clone();
-                    self.audit_request_body(&body, pointer);
+                    self.audit_request_body(&body);
                 }
             }
         }
     }
 
     /// [`Self::audit_parameter_ref_or`] for a Response position.
-    fn audit_response_ref_or(&mut self, response: &RefOr<ResponseObject>, pointer: JsonPointer) {
+    fn audit_response_ref_or(&mut self, response: &RefOr<ResponseObject>) {
         match response {
-            RefOr::Item(response) => self.audit_response(response, pointer),
+            RefOr::Item(response) => self.audit_response(response),
             RefOr::Ref(reference) => {
                 if let Some(response) =
                     self.follow_object(reference, super::deserialize::parse_response)
                 {
-                    let pointer = response.provenance.pointer.clone();
-                    self.audit_response(&response, pointer);
+                    self.audit_response(&response);
                 }
             }
         }
@@ -221,27 +196,22 @@ impl Audit<'_, '_> {
 
     /// [`Self::audit_parameter_ref_or`] for a Header position: a Response or Encoding Object's
     /// `headers` entry, or a `components.headers` one (#715).
-    fn audit_header_ref_or(&mut self, header: &RefOr<HeaderObject>, pointer: JsonPointer) {
+    fn audit_header_ref_or(&mut self, header: &RefOr<HeaderObject>) {
         match header {
-            RefOr::Item(header) => self.audit_header(header, pointer),
+            RefOr::Item(header) => self.audit_header(header),
             RefOr::Ref(reference) => {
                 if let Some(header) =
                     self.follow_object(reference, super::deserialize::parse_header_object)
                 {
-                    let pointer = header.provenance.pointer.clone();
-                    self.audit_header(&header, pointer);
+                    self.audit_header(&header);
                 }
             }
         }
     }
 
-    fn audit_headers(
-        &mut self,
-        headers: &indexmap::IndexMap<String, RefOr<HeaderObject>>,
-        pointer: JsonPointer,
-    ) {
-        for (name, header) in headers {
-            self.audit_header_ref_or(header, pointer.push(name));
+    fn audit_headers(&mut self, headers: &indexmap::IndexMap<String, RefOr<HeaderObject>>) {
+        for header in headers.values() {
+            self.audit_header_ref_or(header);
         }
     }
 
@@ -256,88 +226,82 @@ impl Audit<'_, '_> {
         self.objects.insert(key)
     }
 
-    fn audit_request_body(&mut self, body: &RequestBodyObject, pointer: JsonPointer) {
+    fn audit_request_body(&mut self, body: &RequestBodyObject) {
         if self.claim_object(&body.provenance) {
-            self.audit_content(&body.content, pointer.push("content"));
+            self.audit_content(&body.content);
         }
     }
 
-    fn audit_response(&mut self, response: &ResponseObject, pointer: JsonPointer) {
+    fn audit_response(&mut self, response: &ResponseObject) {
         if self.claim_object(&response.provenance) {
-            self.audit_content(&response.content, pointer.push("content"));
-            self.audit_headers(&response.headers, pointer.push("headers"));
+            self.audit_content(&response.content);
+            self.audit_headers(&response.headers);
         }
     }
 
-    fn audit_header(&mut self, header: &HeaderObject, pointer: JsonPointer) {
+    fn audit_header(&mut self, header: &HeaderObject) {
         if !self.claim_object(&header.provenance) {
             return;
         }
         if let Some(schema) = &header.schema {
-            self.audit_schema_ref_or(schema, pointer.push("schema"));
+            self.audit_schema_ref_or(schema);
         }
-        self.audit_content(&header.content, pointer.push("content"));
+        self.audit_content(&header.content);
     }
 
     /// An Encoding Object, whose `headers` are the schema positions it holds.
-    fn audit_encoding(&mut self, encoding: &EncodingObject, pointer: JsonPointer) {
-        self.audit_headers(&encoding.headers, pointer.push("headers"));
+    fn audit_encoding(&mut self, encoding: &EncodingObject) {
+        self.audit_headers(&encoding.headers);
     }
 
-    fn audit_parameter(&mut self, parameter: &ParameterObject, pointer: JsonPointer) {
+    fn audit_parameter(&mut self, parameter: &ParameterObject) {
         if !self.claim_object(&parameter.provenance) {
             return;
         }
         if let Some(schema) = &parameter.schema {
-            self.audit_schema_ref_or(schema, pointer.push("schema"));
+            self.audit_schema_ref_or(schema);
         }
-        self.audit_content(&parameter.content, pointer.push("content"));
+        self.audit_content(&parameter.content);
     }
 
-    fn audit_content(
-        &mut self,
-        content: &indexmap::IndexMap<String, MediaTypeObject>,
-        pointer: JsonPointer,
-    ) {
-        for (media, object) in content {
-            self.audit_media(object, pointer.push(media));
+    fn audit_content(&mut self, content: &indexmap::IndexMap<String, MediaTypeObject>) {
+        for object in content.values() {
+            self.audit_media(object);
         }
     }
 
     /// A Media Type Object: one that is itself a Reference Object (OpenAPI 3.2) is followed to the
     /// object its chain ends at ([`follow_media`]), whose schemas are what lowering reads.
-    fn audit_media(&mut self, media: &MediaTypeObject, pointer: JsonPointer) {
+    fn audit_media(&mut self, media: &MediaTypeObject) {
         if !self.claim_object(&media.provenance) {
             return;
         }
         if media.reference.is_some() {
             if let Some(target) = follow_media(self.resolver, media, &self.objects) {
-                let pointer = target.provenance.pointer.clone();
-                self.audit_media(&target, pointer);
+                self.audit_media(&target);
             }
         }
         if let Some(schema) = &media.schema {
-            self.audit_schema_ref_or(schema, pointer.push("schema"));
+            self.audit_schema_ref_or(schema);
         }
         if let Some(schema) = &media.item_schema {
-            self.audit_schema_ref_or(schema, pointer.push("itemSchema"));
+            self.audit_schema_ref_or(schema);
         }
-        for (name, encoding) in &media.encoding {
-            self.audit_encoding(encoding, pointer.push("encoding").push(name));
-        }
-        for (index, (encoding, _)) in media.prefix_encoding.iter().enumerate() {
-            self.audit_encoding(encoding, pointer.push("prefixEncoding").index(index));
-        }
-        if let Some((encoding, _)) = &media.item_encoding {
-            self.audit_encoding(encoding, pointer.push("itemEncoding"));
+        let encodings = media
+            .encoding
+            .values()
+            .chain(media.prefix_encoding.iter().map(|(encoding, _)| encoding))
+            .chain(media.item_encoding.iter().map(|(encoding, _)| encoding));
+        for encoding in encodings {
+            self.audit_encoding(encoding);
         }
     }
 
     /// A schema position that may hold a bare Reference Object: an inline schema is audited, and
     /// a reference is queued to be followed ([`Self::follow_references`]).
-    fn audit_schema_ref_or(&mut self, schema: &RefOr<Schema>, pointer: JsonPointer) {
+    fn audit_schema_ref_or(&mut self, schema: &RefOr<Schema>) {
         match schema {
-            RefOr::Item(schema) => self.audit_schema(schema, pointer),
+            RefOr::Item(schema) => self.audit_schema(schema),
             RefOr::Ref(reference) => self
                 .pending
                 .push((reference.reference.clone(), reference.provenance.clone())),
@@ -361,10 +325,7 @@ impl Audit<'_, '_> {
             // As lowering reads it: a bare `#/components/schemas/<name>` the root declares is that
             // root component wherever the reference is written, and the walk has audited every
             // root component already (or queued the reference it is).
-            if reference
-                .strip_prefix("#/components/schemas/")
-                .is_some_and(|name| self.document.components.schemas.contains_key(name))
-            {
+            if self.resolver.declares_root_schema(&reference) {
                 continue;
             }
             match self.resolver.reference_identity(&reference, &at) {
@@ -373,8 +334,7 @@ impl Audit<'_, '_> {
             }
             let mut discarded = Diagnostics::new(0);
             if let Ok(resolved) = self.resolver.resolve(&reference, &at, &mut discarded) {
-                let pointer = resolved.schema.provenance.pointer.clone();
-                self.audit_schema(&resolved.schema, pointer);
+                self.audit_schema(&resolved.schema);
             }
         }
     }
@@ -386,7 +346,7 @@ impl Audit<'_, '_> {
         )
     }
 
-    fn audit_schema(&mut self, schema: &Schema, pointer: JsonPointer) {
+    fn audit_schema(&mut self, schema: &Schema) {
         if !self.audited.insert(self.schema_key(&schema.provenance)) {
             return;
         }
@@ -395,7 +355,7 @@ impl Audit<'_, '_> {
                 .push((reference.clone(), schema.provenance.clone()));
         }
         let diags = &mut *self.diags;
-        if has_validation_keywords(&schema.validation) {
+        if !schema.validation.constrains_nothing() {
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                 .message("validation-only schema keywords are not enforced at runtime")
                 .remedy("keep producer-side validation for these constraints")
@@ -433,52 +393,41 @@ impl Audit<'_, '_> {
                 .emit(diags);
         }
 
-        for (name, child) in &schema.properties {
-            self.audit_schema_or(child, pointer.push("properties").push(name));
-        }
-        if let Some(child) = &schema.additional_properties {
-            self.audit_schema_or(child, pointer.push("additionalProperties"));
-        }
-        for (pattern, child) in &schema.pattern_properties {
-            self.audit_schema_or(child, pointer.push("patternProperties").push(pattern));
-        }
-        if let Some(child) = &schema.items {
-            self.audit_schema_or(child, pointer.push("items"));
-        }
-        for (index, child) in schema.prefix_items.iter().enumerate() {
-            self.audit_schema_or(child, pointer.push("prefixItems").index(index));
-        }
-        for (index, child) in schema.all_of.iter().enumerate() {
-            self.audit_schema_or(child, pointer.push("allOf").index(index));
-        }
-        for (index, child) in schema.one_of.iter().enumerate() {
-            self.audit_schema_or(child, pointer.push("oneOf").index(index));
-        }
-        for (index, child) in schema.any_of.iter().enumerate() {
-            self.audit_schema_or(child, pointer.push("anyOf").index(index));
+        let lowered = schema
+            .properties
+            .values()
+            .chain(schema.additional_properties.as_deref())
+            .chain(schema.pattern_properties.values())
+            .chain(schema.items.as_deref())
+            .chain(&schema.prefix_items)
+            .chain(&schema.all_of)
+            .chain(&schema.one_of)
+            .chain(&schema.any_of);
+        for child in lowered {
+            self.audit_schema_or(child);
         }
         // Lowering reads a `$defs` entry only when a reference names it, so an unreferenced one is
         // reached by nothing else; resolving a referenced one here as well reports nothing lowering
         // would not.
-        for (name, child) in &schema.defs {
-            self.audit_schema_or(child, pointer.push("$defs").push(name));
-            self.resolve_unlowered_or(child);
-        }
-        for (keyword, child) in &schema.validation_children {
-            self.audit_schema_or(child, pointer.push(keyword));
+        let unlowered = schema
+            .defs
+            .values()
+            .chain(schema.validation_children.iter().map(|(_, child)| child));
+        for child in unlowered {
+            self.audit_schema_or(child);
             self.resolve_unlowered_or(child);
         }
         if let Some(child) = schema.content_schema.as_deref() {
-            self.audit_schema_or(child, pointer.push("contentSchema"));
+            self.audit_schema_or(child);
             if !content_consumed {
                 self.resolve_unlowered_or(child);
             }
         }
     }
 
-    fn audit_schema_or(&mut self, schema: &SchemaOr, pointer: JsonPointer) {
+    fn audit_schema_or(&mut self, schema: &SchemaOr) {
         if let SchemaOr::Schema(schema) = schema {
-            self.audit_schema(schema, pointer);
+            self.audit_schema(schema);
         }
     }
 
@@ -511,7 +460,11 @@ impl Audit<'_, '_> {
             self.resolve_unlowered_ref(reference, &schema.provenance);
         }
         if let Some(discriminator) = &schema.discriminator {
-            self.resolve_unlowered_discriminator(discriminator);
+            super::discriminator::resolve_discriminator_targets(
+                self.resolver,
+                self.diags,
+                discriminator,
+            );
         }
         let children = schema
             .properties
@@ -532,12 +485,12 @@ impl Audit<'_, '_> {
     }
 
     fn resolve_unlowered_ref(&mut self, reference: &str, at: &Provenance) {
+        if self.resolver.declares_root_schema(reference) {
+            return;
+        }
         let from_root = self.resolver.written_in(at) == self.resolver.root_id();
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             let components = &self.document.components.schemas;
-            if components.contains_key(name) {
-                return;
-            }
             // As lowering reads it: from the root, a name whose first segment is no declared
             // component is a missing component, and one whose first segment is declared is a
             // pointer into that component's body, which the resolver walks.
@@ -560,27 +513,6 @@ impl Audit<'_, '_> {
             if let Cow::Owned(target) = resolved.schema {
                 self.resolve_unlowered(&target);
             }
-        }
-    }
-
-    fn resolve_unlowered_discriminator(&mut self, discriminator: &super::Discriminator) {
-        let entries = discriminator
-            .mapping
-            .iter()
-            .map(|(tag, target)| (Some(tag), target))
-            .chain(
-                discriminator
-                    .default_mapping
-                    .iter()
-                    .map(|target| (None, target)),
-            );
-        for (tag, target) in entries {
-            super::discriminator::discriminator_target_identity(
-                self.resolver,
-                self.diags,
-                &super::discriminator::discriminator_entry(tag),
-                target,
-            );
         }
     }
 }
@@ -661,20 +593,22 @@ fn consumed_sse_content(
     consumed
 }
 
-/// Follow a Parameter, Request Body, Response or Header Reference Object, hop by hop, to the
-/// object its chain ends at, as lowering does (#495): through the input bundle, so a reference
-/// into another file — a whole file, or a pointer into one — reaches the object written there,
-/// and a root `#/components/<kind>/<name>` reaches the root's declaration, which is the same
-/// node.
+/// Follow a Reference Object, hop by hop, to the object its chain ends at, as lowering does
+/// (#495): through the input bundle, so a reference into another file — a whole file, or a
+/// pointer into one — reaches the object written there, and a root `#/components/<kind>/<name>`
+/// reaches the root's declaration, which is the same node. `hop` reads one hop's target as
+/// written: the object, or the next Reference Object.
 ///
 /// `None` when a hop targets an object in `done`, the chain cycles, or a hop misses. A miss is
 /// not reported here: lowering follows the same chain and reports it in its own words, so the
-/// resolver's diagnostics are discarded, as [`Audit::follow_references`] discards them.
-fn follow_object<T>(
+/// resolver's diagnostics are discarded, as [`Audit::follow_references`] discards them. That
+/// silence, and stopping at an object in `done`, are why this is not lowering's
+/// `follow_reference_chain`, which reports each hop's documentation and every miss.
+fn follow_chain<T>(
     resolver: &Resolver<'_>,
     reference: &Reference,
-    parse: ObjectParser<T>,
     done: &HashSet<SchemaKey>,
+    hop: impl Fn(&Reference, &mut Diagnostics) -> Option<RefOr<T>>,
 ) -> Option<T> {
     let mut reference = Cow::Borrowed(reference);
     let mut seen = HashSet::new();
@@ -683,50 +617,60 @@ fn follow_object<T>(
         if done.contains(&target) || !seen.insert(target) {
             return None;
         }
-        let mut discarded = Diagnostics::new(0);
-        let next = resolver
-            .resolve_component_or_ref(
-                &reference.reference,
-                resolver.written_in(&reference.provenance),
-                parse,
-                &mut discarded,
-            )
-            .ok()?;
-        match next {
+        match hop(&reference, &mut Diagnostics::new(0))? {
             RefOr::Item(object) => return Some(object),
             RefOr::Ref(next) => reference = Cow::Owned(next),
         }
     }
 }
 
-/// [`follow_object`] for a Media Type Object, which OpenAPI 3.2 allows to be a Reference Object:
+/// [`follow_chain`] for a Parameter, Request Body, Response or Header Reference Object, each hop
+/// of which may be a Reference Object or the object `parse` reads.
+fn follow_object<T>(
+    resolver: &Resolver<'_>,
+    reference: &Reference,
+    parse: ObjectParser<T>,
+    done: &HashSet<SchemaKey>,
+) -> Option<T> {
+    follow_chain(resolver, reference, done, |reference, discarded| {
+        resolver
+            .resolve_component_or_ref(
+                &reference.reference,
+                resolver.written_in(&reference.provenance),
+                parse,
+                discarded,
+            )
+            .ok()
+    })
+}
+
+/// [`follow_chain`] for a Media Type Object, which OpenAPI 3.2 allows to be a Reference Object:
 /// the object its chain ends at, or `media` itself when it is no reference.
 fn follow_media<'a>(
     resolver: &Resolver<'_>,
     media: &'a MediaTypeObject,
     done: &HashSet<SchemaKey>,
 ) -> Option<Cow<'a, MediaTypeObject>> {
-    let mut current = Cow::Borrowed(media);
-    let mut seen = HashSet::new();
-    while let Some(reference) = current.reference.clone() {
-        let target = resolver.reference_identity(&reference.reference, &reference.provenance)?;
-        if done.contains(&target) || !seen.insert(target) {
-            return None;
-        }
-        let mut discarded = Diagnostics::new(0);
-        let next = resolver
+    let Some(reference) = &media.reference else {
+        return Some(Cow::Borrowed(media));
+    };
+    follow_chain(resolver, reference, done, |reference, discarded| {
+        let target = resolver
             .resolve_component(
                 &reference.reference,
                 resolver.written_in(&reference.provenance),
                 |value, pointer, diags| {
                     Some(super::deserialize::parse_media_type(value, pointer, diags))
                 },
-                &mut discarded,
+                discarded,
             )
             .ok()?;
-        current = Cow::Owned(next);
-    }
-    Some(current)
+        Some(match target.reference.clone() {
+            Some(next) => RefOr::Ref(next),
+            None => RefOr::Item(target),
+        })
+    })
+    .map(Cow::Owned)
 }
 
 fn annotation_key(provenance: &Provenance) -> AnnotationKey {
@@ -734,21 +678,4 @@ fn annotation_key(provenance: &Provenance) -> AnnotationKey {
         provenance.span.map(|span| span.file),
         provenance.pointer.clone(),
     )
-}
-
-fn has_validation_keywords(validation: &ValidationKeywords) -> bool {
-    validation.pattern.is_some()
-        || validation.minimum.is_some()
-        || validation.maximum.is_some()
-        || validation.exclusive_minimum.is_some()
-        || validation.exclusive_maximum.is_some()
-        || validation.multiple_of.is_some()
-        || validation.min_length.is_some()
-        || validation.max_length.is_some()
-        || validation.min_items.is_some()
-        || validation.max_items.is_some()
-        || validation.unique_items
-        || validation.min_properties.is_some()
-        || validation.max_properties.is_some()
-        || validation.other
 }
