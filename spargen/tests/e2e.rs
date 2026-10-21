@@ -918,6 +918,90 @@ fn an_operation_named_after_a_client_method_still_compiles() {
     );
 }
 
+/// Pairs of distinct operations whose root type names derive alike (issue #693). `request`'s error
+/// type is widened to `RequestOperationError` beside the runtime's `RequestError`, which is the
+/// plain form of `requestOperation`'s. `getV2` and `get_v_2` allocate the distinct methods `get_v2`
+/// and `get_v_2`, which both PascalCase to `GetV2`; each documents two success bodies and an error
+/// body, so each emits a `…Response` enum and a `…Error` type. The paths list the losers first, so
+/// the bare spellings are shown not to follow document order.
+const OPERATION_TYPE_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /request:
+    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /request-operation:
+    get: { operationId: requestOperation, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: integer } } } } } }
+  /get-v-2:
+    get:
+      operationId: get_v_2
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { type: string } } } }
+        "201": { description: created, content: { application/json: { schema: { type: integer } } } }
+        "404": { description: nf, content: { application/json: { schema: { type: string } } } }
+  /get-v2:
+    get:
+      operationId: getV2
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { type: boolean } } } }
+        "201": { description: created, content: { application/json: { schema: { type: number } } } }
+        "404": { description: nf, content: { application/json: { schema: { type: integer } } } }
+"#;
+
+/// Two operations whose error or success-enum type names derive alike still get distinct ones, so
+/// the module compiles and lints clean instead of defining one type twice (`E0428`). The plain
+/// form of a name wins it over a widened one, and of two plain forms the lexically smaller method
+/// keeps it.
+#[test]
+fn operations_whose_type_names_derive_alike_get_distinct_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, OPERATION_TYPE_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "operation_types_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for (item, stem) in [
+        ("struct", "RequestOperationError"),
+        ("enum", "GetV2Response"),
+        ("struct", "GetV2Error"),
+    ] {
+        assert_eq!(
+            generated.matches(&format!("pub {item} {stem} ")).count()
+                + generated.matches(&format!("pub {item} {stem}(")).count(),
+            1,
+            "`{stem}` is defined exactly once:\n{generated}"
+        );
+        assert!(
+            generated.contains(&format!("pub {item} {stem}"))
+                && generated
+                    .split(&format!("pub {item} {stem}"))
+                    .skip(1)
+                    .any(|rest| rest.starts_with(|c: char| c.is_ascii_alphanumeric())),
+            "the losing operation takes a suffixed `{stem}…`:\n{generated}"
+        );
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "operations whose type names derive alike must still generate compiling code"
+    );
+}
+
 /// Parameters of one operation whose names escape to the same Rust identifier (issue #455). Each
 /// operation lists the colliding pair with the later-ranked location first, so the bare spelling is
 /// shown to follow the location rank and not the listing order. `search` also names its parameters
