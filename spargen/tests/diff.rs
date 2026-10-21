@@ -1546,12 +1546,6 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
     }
 }
 
-// --- The JSON wire shape ------------------------------------------------------------------------
-
-/// `--format json` is the machine surface of `spargen diff`, and the CLI renders it straight from
-/// `DiffReport`'s `Serialize` (`spargen/src/cli/run.rs`). The enum-level pinning lives in
-/// `surface`'s own tests; this drives a real report through `serde_json` so the field names, the
-/// nesting, and the spellings a script actually parses are all fixed at once.
 /// One `get /pets` operation, named `operation_id`, whose `200` response documents `headers` (a
 /// whole `headers:` block at 10-space indent, or `""` for none).
 fn with_headers(operation_id: &str, headers: &str) -> String {
@@ -1919,6 +1913,88 @@ fn adding_a_typed_additional_properties_map_is_minor_and_removing_one_is_major()
     assert_eq!(kinds(&denied), vec![], "{:?}", denied.changes);
 }
 
+#[test]
+fn a_typed_additional_properties_map_moved_to_another_field_is_removed_and_added() {
+    // A declared `additional` property takes the overflow field's spelling, so the map moves to
+    // another field name: the old field is gone and a new one appears (#726).
+    let with_property = format!(
+        "{}{ADDITIONAL_STRING}",
+        PET_SCHEMA.replace(
+            "        name: { type: string }\n",
+            "        name: { type: string }\n        additional: { type: string }\n",
+        )
+    );
+    let report = diff(
+        &with_additional(ADDITIONAL_STRING),
+        &full(&pets_get("listPets", "", PET_REF), &with_property),
+    );
+    let mut moved: Vec<_> = report
+        .changes
+        .iter()
+        .filter(|change| {
+            matches!(
+                change.kind,
+                ChangeKind::AdditionalPropertiesRemoved | ChangeKind::AdditionalPropertiesAdded
+            )
+        })
+        .map(|change| (change.kind, change.location.as_str()))
+        .collect();
+    moved.sort_by_key(|(_, location)| *location);
+    assert_eq!(moved.len(), 2, "{:?}", report.changes);
+    assert_eq!(
+        moved[0],
+        (ChangeKind::AdditionalPropertiesRemoved, "Pet.additional"),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(moved[1].0, ChangeKind::AdditionalPropertiesAdded);
+    assert!(
+        moved[1].1.starts_with("Pet.additional") && moved[1].1 != "Pet.additional",
+        "{:?}",
+        report.changes
+    );
+    assert!(
+        !kinds(&report).contains(&ChangeKind::AdditionalPropertiesTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn renaming_a_server_variable_enum_under_the_same_builder_is_major() {
+    // `prod`'s `region` enum is `ProdRegion` until a server named `prod-region` takes that
+    // spelling: the `Prod` builder keeps its name, and its setter now takes the renamed enum.
+    let prod = "  - name: prod
+    url: 'https://{region}.example.com'
+    variables:
+      region: { default: us, enum: [us, eu] }
+";
+    let taken = format!("  - name: prod-region\n    url: 'https://other.example.com'\n{prod}");
+    let report = diff(
+        &with_servers(prod).replace("openapi: 3.1.0", "openapi: 3.2.0"),
+        &with_servers(&taken).replace("openapi: 3.1.0", "openapi: 3.2.0"),
+    );
+    let mut found = kinds(&report);
+    found.sort_by_key(|kind| kind.code());
+    assert_eq!(
+        found,
+        vec![
+            ChangeKind::ServerAdded,
+            ChangeKind::ServerVariableTypeChanged
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+// --- The JSON wire shape ------------------------------------------------------------------------
+
+/// `--format json` is the machine surface of `spargen diff`, and the CLI renders it straight from
+/// `DiffReport`'s `Serialize` (`spargen/src/cli/run.rs`). The enum-level pinning lives in
+/// `surface`'s own tests; this drives a real report through `serde_json` so the field names, the
+/// nesting, and the spellings a script actually parses are all fixed at once.
 #[test]
 fn the_json_report_names_kinds_by_code_and_impacts_in_lowercase() {
     let report = diff(&base(), &spec("", "id", PET_PROPS, EXTRA_OP));
