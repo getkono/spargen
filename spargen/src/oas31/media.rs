@@ -369,10 +369,9 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 /// which is the only honest reading of "whatever this server detected". A range ranks below every
 /// codec spargen has (`text/*` at 7, every other family at 8), so a concrete sibling outranks it —
 /// with one deliberate exception on responses: a concrete `image`/`audio`/`video` member (9,
-/// `classify_binary_family`) sits *below* both, because a response listing a range beside
-/// `image/png` generated from the range before that family classified and must keep doing so. A
-/// request never selects a range while a concrete key classifies (`choose_media`), since a range
-/// is not a `Content-Type`.
+/// `classify_binary_family`) sits *below* both, so a response listing a range beside `image/png`
+/// generates from the range. A request never selects a range while a concrete key classifies
+/// (`choose_media`), since a range is not a `Content-Type`.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
 /// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
@@ -395,11 +394,10 @@ pub(super) fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// `bytes::Bytes`. It sits at the very end of the ladder, below every other key spargen can
 /// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so on a
 /// response a family key is generated only when it is the sole key that classifies, which is
-/// exactly the shape #82 reports (`image/jpeg` as the only content key), and no response that
-/// generated before the family rule existed changes its selection or body type. A request body is
-/// the one place a family key outranks a range: a range cannot be sent as `Content-Type`, and
-/// every such request was rejected before, so preferring the concrete key only turns a rejection
-/// into a client.
+/// exactly the shape #82 reports (`image/jpeg` as the only content key), and a response with any
+/// other classifying key generates from one of those. A request body is the one place a family key
+/// outranks a range: a range cannot be sent as `Content-Type`, so a request body listing a range
+/// beside a family key sends the family key.
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be

@@ -33,8 +33,9 @@ use quote::{format_ident, quote};
 
 use format::format_tokens;
 
-/// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
-/// features: when off, the corresponding `format` mappings fall back to `String`.
+/// Options controlling code generation. The `uuid`/`time` flags carry the `Spec::uuid` /
+/// `Spec::time` knobs into the one generated module: when off, the corresponding `format`
+/// mappings fall back to `String`.
 #[derive(Debug, Clone)]
 pub(crate) struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).

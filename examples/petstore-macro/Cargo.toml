@@ -22,7 +22,7 @@ spargen-macro = { path = "../../spargen-macro" }
 # The audited runtime dependencies referenced by this generated API; no spargen crate. These
 # lines are exactly what `spargen deps petstore.yaml` prints.
 bytes = "1.12.1"
-reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+reqwest = { version = "0.12.28", default-features = false }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

@@ -10,7 +10,7 @@ use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, Spec};
 
-const CACHE_FORMAT: u32 = 4;
+const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -252,6 +252,7 @@ fn cache_diagnostic(message: String) -> Diagnostic {
         severity: Code::InvalidInput.severity(),
         pointer: JsonPointer::root(),
         span: None,
+        file: None,
         message,
         remedy: None,
         interpretation: None,
@@ -275,6 +276,7 @@ struct CachedDiagnostic {
     code: String,
     pointer: String,
     span: Option<CachedSpan>,
+    file: Option<String>,
     message: String,
     remedy: Option<String>,
     interpretation: Option<u16>,
@@ -289,6 +291,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             code: value.code.as_str().to_owned(),
             pointer: value.pointer.as_str().to_owned(),
             span: value.span.map(CachedSpan::from),
+            file: value.file.clone(),
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
@@ -305,6 +308,7 @@ impl CachedDiagnostic {
             severity: code.severity(),
             pointer: JsonPointer::from(self.pointer),
             span: self.span.map(CachedSpan::into_span),
+            file: self.file,
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),
@@ -615,7 +619,8 @@ components:
     fn a_cache_hit_replays_the_diagnostics_of_the_run_that_seeded_it() {
         // A cached run reports what the original run reported. Without this a warning would be
         // announced once and then vanish on every later build, which is worse than never
-        // reporting it — the spec still contains the construct.
+        // reporting it — the spec still contains the construct. The warning sits in a `$ref`'d
+        // file, so the replay must also keep the file its span lies in (the record's `file`).
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openapi.yaml");
         std::fs::write(
@@ -625,8 +630,13 @@ info: { title: Cache, version: 1.0.0 }
 paths: {}
 components:
   schemas:
-    Capped: { type: string, minLength: 3 }
+    Capped: { $ref: './schemas.yaml#/Capped' }
 "#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("schemas.yaml"),
+            "Capped: { type: string, minLength: 3 }\n",
         )
         .unwrap();
         let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
@@ -636,28 +646,35 @@ components:
 
         let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
-        let mut seeded: Vec<&str> = first
+        let mut seeded: Vec<(&str, Option<&str>)> = first
             .diagnostics()
             .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.file.as_deref()))
             .collect();
         seeded.sort_unstable();
+        let warned_in = seeded
+            .iter()
+            .find(|(code, _)| *code == "W001")
+            .unwrap_or_else(|| {
+                panic!("the fixture must warn so there is something to replay: {seeded:?}")
+            })
+            .1;
         assert!(
-            seeded.contains(&"W001"),
-            "the fixture must warn so there is something to replay: {seeded:?}"
+            warned_in.is_some_and(|file| file.ends_with("schemas.yaml")),
+            "the seeding run must name the referenced file the warning lies in: {seeded:?}"
         );
 
         let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
-        let mut replayed: Vec<&str> = second
+        let mut replayed: Vec<(&str, Option<&str>)> = second
             .diagnostics()
             .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.file.as_deref()))
             .collect();
         replayed.sort_unstable();
         assert_eq!(
             replayed, seeded,
-            "a cache hit lost the original diagnostics"
+            "a cache hit lost the original diagnostics or the files they lie in"
         );
     }
 

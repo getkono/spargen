@@ -33,7 +33,6 @@ serde_json = "1.0.151"
 #[test]
 fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
     let requirements = RuntimeRequirements {
-        reqwest_json: true,
         reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
@@ -47,7 +46,7 @@ fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
         format!(
             r#"[dependencies]
 bytes = {{ version = "1.12.1", features = ["serde"] }}
-reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart", "stream"] }}
+reqwest = {{ version = "0.12.28", default-features = false, features = ["multipart", "stream"] }}
 futures-core = "0.3.32"
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
@@ -135,7 +134,6 @@ fn the_manifests_reported_in_issue_71_pass_as_written() {
 fn the_printed_dependency_block_passes_the_audit_it_describes() {
     // Every capability on at once, so the table is exercised in full.
     let requirements = RuntimeRequirements {
-        reqwest_json: true,
         reqwest_multipart: true,
         bytes_serde: true,
         streams: true,

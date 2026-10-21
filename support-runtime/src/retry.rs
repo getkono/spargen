@@ -50,6 +50,7 @@ use std::time::Duration;
 
 use reqwest::{Request, Response, StatusCode};
 
+use crate::error::is_transient_status;
 use crate::transport::{ExecuteFuture, HttpBackend};
 use crate::{MaybeSend, MaybeSync, TransportError};
 
@@ -126,10 +127,7 @@ impl<'a> RetryOutcome<'a> {
     pub fn is_transient(&self) -> bool {
         match self {
             RetryOutcome::Transport(error) => error.is_transient(),
-            RetryOutcome::Response(response) => {
-                let status = response.status();
-                status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-            }
+            RetryOutcome::Response(response) => is_transient_status(response.status()),
         }
     }
 }

@@ -1227,7 +1227,7 @@ fn parse_schema_or(
 }
 
 /// A composition or tuple keyword (`allOf`, `oneOf`, `anyOf`, `prefixItems`): an array of
-/// schemas, or `E011` at `pointer` when it is not an array, which used to read as no members.
+/// schemas, or `E011` at `pointer` when it is not an array.
 fn parse_schema_array(
     value: Option<&SpannedValue>,
     pointer: &JsonPointer,
@@ -1244,8 +1244,7 @@ fn parse_schema_array(
 
 /// Parse a Discriminator Object. Every field it carries is load-bearing — the tag field, and the
 /// schemas the tags name — so a field of the wrong shape is a malformed document (`E011`) at that
-/// field rather than something to read leniently: a missing `propertyName` used to become the empty
-/// tag field, and a non-string mapping value used to vanish from the map with nothing said.
+/// field rather than something to read leniently.
 fn parse_discriminator(
     value: &SpannedValue,
     pointer: &JsonPointer,
@@ -1337,8 +1336,9 @@ fn expect_string<'a>(
 }
 
 /// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
-/// missing keys default. Lowering later warns (`W006`) on the unsupported namespace/prefix/wrapped
-/// hints, so they are captured here rather than dropped at parse time.
+/// missing keys default. Lowering later reports the unsupported namespace/prefix/wrapped hints —
+/// `E009` on a type serialized as XML, `W006` elsewhere — so they are captured here rather than
+/// dropped at parse time.
 ///
 /// OpenAPI 3.2 deprecates `attribute`/`wrapped` in favour of `nodeType` and states that if
 /// `nodeType` is present, neither field MUST be present. The two spellings can disagree
