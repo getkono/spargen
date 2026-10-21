@@ -217,7 +217,8 @@ fn meilisearch_rejects() {
 
 #[test]
 fn openai_openapi_rejects() {
-    // Manifest expectation: `reject`.
+    // Manifest expectation: `reject:E009` — `POST /realtime/calls` documents its 201 with
+    // `application/sdp` as the only content entry, a media type with no codec.
     let (report, _) = generate_corpus("openai-openapi/openapi.yaml", false);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     insta::assert_snapshot!("openai_openapi", summary(&report));
@@ -238,7 +239,7 @@ fn ollama_generates() {
 
 #[test]
 fn openapi_boilerplate_generates() {
-    // Manifest expectation: `generate` (a template document — components/types only, no operations).
+    // Manifest expectation: `generate` (a template document with three operations).
     let (report, source) = generate_corpus("openapi-boilerplate/src/openapi.yaml", false);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     insta::assert_snapshot!("openapi_boilerplate", summary(&report));

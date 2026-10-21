@@ -4,8 +4,9 @@
 //!
 //! Each case reads a vendored spec under `corpus/recipes/` that mirrors that framework's OUTPUT
 //! IDIOMS (see `corpus/recipes/README.md` for provenance and the verified version constants) and
-//! asserts spargen's outcome and, for each idiom a generating case lists, the generated type it
-//! lowers to, so the recipes in `docs/recipes.md` stay honest:
+//! asserts spargen's outcome, that each of a generating case's operations becomes a method, and,
+//! for each schema idiom (nullables, `allOf` merges, unions), the generated type it lowers to, so
+//! the recipes in `docs/recipes.md` stay honest:
 //!
 //! * `utoipa` (emits OpenAPI 3.1.0) — generates cleanly; exercises `type: [T, null]` nullables,
 //!   nullable `$ref` via a `oneOf` `null` member, `allOf`-composed models, and a `discriminator`ed
@@ -244,7 +245,7 @@ fn aide_document_generates_with_only_validation_warnings() {
         "no errors expected: {:?}",
         report.diagnostics()
     );
-    // schemars emits `minimum`/`format` validation hints that spargen faithfully ignores (W001);
+    // schemars emits `minimum` validation hints that spargen faithfully ignores (W001);
     // any other diagnostic class would be a surprise the recipe should mention.
     assert!(
         report
