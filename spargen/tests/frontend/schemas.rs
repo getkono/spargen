@@ -56,7 +56,7 @@ components:
 fn pattern_properties_lowers_to_typed_map_with_w001() {
     // A representable `patternProperties` now GENERATES a typed overflow map instead of being
     // rejected. Two inline `{type: string}` value schemas under different patterns collapse to one
-    // `BTreeMap<String, String>` (bounded structural equivalence over leaf primitives). The key
+    // `BTreeMap<String, String>`: both emit the one Rust type `String`. The key
     // regexes are validation-only and acknowledged as `W001`, never silently dropped.
     let spec = r##"
 openapi: 3.1.0
@@ -91,11 +91,11 @@ components:
 
 #[test]
 fn pattern_properties_cyclic_array_values_terminate() {
-    // Mutually-recursive array value schemas (`A = [B]`, `B = [A]`) form a cycle in the structural
-    // homogeneity comparison. The visited-pair guard must terminate (return an outcome, never abort
-    // with a stack overflow) and, since both patterns lower to the same array type, GENERATE one
-    // typed overflow map. The check/generate parity assertion catches a regression that reintroduces
-    // the crash.
+    // Mutually-recursive array value schemas (`A = [B]`, `B = [A]`) close an alias cycle, so each
+    // is emitted as its own nominal newtype. The homogeneity comparison must terminate (return an
+    // outcome, never abort with a stack overflow) and, since the two newtypes are distinct Rust
+    // types one map cannot share, reject with `E005` (#733). The check/generate parity assertion
+    // catches a regression that reintroduces the crash.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -111,13 +111,13 @@ components:
         "^b-": { $ref: "#/components/schemas/B" }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        !has_code(&report, Code::PatternPropertiesRejected),
+        has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -147,7 +147,7 @@ components:
 }
 
 /// `patternProperties` values whose integer `enum`s (or an integer `enum` beside `format: int64`)
-/// all emit `i64`.
+/// all emit `i64` share one typed map: an integer enum is a transparent `i64` alias (#733).
 #[test]
 fn pattern_properties_integer_enum_values() {
     for (label, second) in [
@@ -171,14 +171,19 @@ components:
         "^b-": {second}
 "##
         );
-        let report = generate(&spec);
-        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
         assert!(
-            has_code(&report, Code::PatternPropertiesRejected),
+            !has_code(&report, Code::PatternPropertiesRejected),
             "{label}: {report:#?}"
         );
+        assert!(
+            code.contains("BTreeMap<String, ThingValue>")
+                && code.contains("pub type ThingValue = i64;"),
+            "{label}: {code}"
+        );
         let checked = check(&spec);
-        assert_eq!(
+        assert_ne!(
             checked.outcome(),
             Outcome::Rejected,
             "{label}: {checked:#?}"
@@ -187,9 +192,9 @@ components:
 }
 
 /// `patternProperties` values that are two distinct `false` schemas, each its own uninhabited
-/// `Never` item.
+/// `Never` item, emit two Rust types, so one map cannot type them both: `E005` (#733).
 #[test]
-fn pattern_properties_distinct_false_values() {
+fn e005_pattern_properties_distinct_false_values_rejected() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -203,13 +208,17 @@ components:
         "^b-": false
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        !has_code(&report, Code::PatternPropertiesRejected),
+        has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::PatternPropertiesRejected),
+        "{checked:#?}"
+    );
 }
 
 #[test]

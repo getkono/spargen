@@ -113,14 +113,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every `patternProperties` value schema — together with a typed `additionalProperties` value,
     /// if any — must lower to the *same emitted Rust type*; otherwise a single map cannot type them.
     ///
-    /// Homogeneity is decided by [`Self::same_map_value_type`], a bounded structural equivalence:
-    /// same `TypeId` (a shared `$ref`, or the single-entry case) is homogeneous, and distinct inline
-    /// leaf shapes (primitives, `Bytes`, `Any`, or arrays thereof) that emit the identical Rust type
-    /// collapse to one map — so `{type:string}` under two patterns yields one `BTreeMap<String,
-    /// String>`. Distinct inline composites (`Struct`/`Enum`/`Tuple`) stay heterogeneous and are
-    /// rejected (`E005`), since two different object shapes cannot share one map value type. The
-    /// first collected value type is used as the map's value type. Deterministic (graph lookups by
-    /// `TypeId`, source-order collection) and bounded (recurses only through `Array` elements).
+    /// Homogeneity is decided by [`TypeGraph::same_generated_type`] over each value type with its
+    /// top-level `Box` stripped (the map supplies the indirection): a shared `$ref`, or distinct
+    /// definitions whose transparent aliases expand to one Rust type — `{type: string}` under two
+    /// patterns, or two integer `enum`s, each `i64` — collapse to one map, while two distinct
+    /// nominal items (structs, string enums, unions, `Never`s, cycle-closing newtypes) are
+    /// rejected (`E005`). The first collected value type is used as the map's value type.
+    /// Deterministic: graph lookups by `TypeId`, over values collected in source order.
+    ///
+    /// [`TypeGraph::same_generated_type`]: crate::ir::TypeGraph::same_generated_type
     fn lower_pattern_additional(&mut self, schema: &Schema, hint: &str) -> Option<AdditionalProps> {
         // `additionalProperties: false` denies unknown keys, but the flatten map must capture the
         // pattern-matched keys (which are themselves "unknown" to the named fields). Serde cannot do
@@ -161,10 +162,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        let first = value_types[0];
+        // A map value lives behind the map's own indirection; a cycle-closing ref needs no `Box`.
+        let unboxed = |mut ty: Ty| {
+            ty.boxed = false;
+            ty
+        };
+        let first = unboxed(value_types[0]);
         if value_types
             .iter()
-            .any(|ty| !self.same_map_value_type(first, *ty))
+            .any(|ty| !self.graph.same_generated_type(first, unboxed(*ty)))
         {
             Diagnostic::error(Code::PatternPropertiesRejected, schema.provenance.clone())
                 .message(
@@ -179,10 +185,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
 
-        let mut ty = first;
-        // A map value lives behind the map's own indirection; a cycle-closing ref needs no `Box`.
-        ty.boxed = false;
-        Some(AdditionalProps::Typed(Box::new(ty)))
+        Some(AdditionalProps::Typed(Box::new(first)))
     }
 }
 
