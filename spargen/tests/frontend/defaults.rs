@@ -768,6 +768,39 @@ components:
     );
 }
 
+/// A component-root `default` beside an empty `description` is the type's whole rustdoc: the
+/// empty description is treated as absent, so the note opens the doc rather than following a
+/// blank paragraph.
+#[test]
+fn component_root_default_beside_an_empty_description_opens_the_doc() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Count:
+      type: integer
+      description: ""
+      default: 1
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let item = code
+        .find("pub type Count")
+        .unwrap_or_else(|| panic!("`Count` is emitted: {code}"));
+    let note = code[..item]
+        .rfind("Default: `1`.")
+        .unwrap_or_else(|| panic!("`Count` documents its default: {code}"));
+    let opener = code[..note].trim_end_matches(' ');
+    assert!(
+        opener.ends_with("///") || opener.ends_with("/**"),
+        "the note opens `Count`'s rustdoc, with no blank paragraph before it: {}",
+        &code[opener.len().saturating_sub(40)..item]
+    );
+}
+
 /// A `default` in a structural position with no field home — array `items` and an
 /// `additionalProperties` value — is non-silent: it fires W005 and still generates.
 #[test]
