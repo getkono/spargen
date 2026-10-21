@@ -303,9 +303,12 @@ pub(crate) fn vendor(
                         Err(error) => {
                             // A fetch failure is a fact about the network, not the document:
                             // the ref is well-formed and exactly what this step exists to pin.
+                            // Located at the reference, as `E003` above is: only the root's
+                            // references carry a span, for the reason given there.
+                            let span = (index == root).then_some(collected.span);
                             Diagnostic::error(
                                 Code::RemoteFetchFailed,
-                                Provenance::new(JsonPointer::root(), None),
+                                Provenance::new(collected.pointer.clone(), span),
                             )
                             .message(format!("failed to fetch remote $ref `{url}`: {error}"))
                             .remedy(
