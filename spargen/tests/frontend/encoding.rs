@@ -603,6 +603,83 @@ paths:
 }
 
 #[test]
+fn e009_a_form_urlencoded_binary_additional_properties_value() {
+    // #697: the members of a typed `additionalProperties` overflow are sent in their type's
+    // default encoding, so a binary overflow on a form body is refused as a binary property is,
+    // rather than generated and dropped from the wire.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              additionalProperties: { type: string, contentEncoding: base64 }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`additionalProperties`")
+                    && d.message.contains(
+                        "is binary, which has no `application/x-www-form-urlencoded` \
+                         representation",
+                    )
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn typed_additional_properties_on_form_and_multipart_bodies_generate() {
+    // #697: a scalar or composite overflow has a default encoding on both media, so both bodies
+    // generate with no diagnostic about the overflow.
+    for media in ["application/x-www-form-urlencoded", "multipart/form-data"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                name: {{ type: string }}
+              additionalProperties: {{ type: array, items: {{ type: integer }} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .all(|d| !d.message.contains("additionalProperties")),
+                "{media}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively() {
     // #399: a binary property's declared `contentType` is classified lowercased, so `Text/Plain`
     // reaches the outcome `text/plain` does. Before, the mixed-case spelling missed the `text/`

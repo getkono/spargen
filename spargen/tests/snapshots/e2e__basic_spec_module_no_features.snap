@@ -2509,56 +2509,115 @@ mod support {
         /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
         /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
         /// value is JSON `null` is omitted entirely rather than sent empty.
+        ///
+        /// `additional` is the body's typed `additionalProperties` overflow: the resolved mode of its
+        /// members (the default for their type, since no Encoding Object can name them) and how many
+        /// members the overflow map holds, which a generated struct serializes after its declared fields.
+        /// When it is `Some`, those members follow the declared ones, ordered by key, rendered in that
+        /// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
+        /// whose key repeats a declared property's name is never sent: the declared property's own value
+        /// is, or nothing when that property is absent, as in a multipart body.
         pub fn serialize_form_body<T: Serialize>(
             value: &T,
             properties: &[FormProperty],
+            additional: Option<(FormMode, usize)>,
         ) -> Result<String, ParameterError> {
-            let Value::Object(members) = serde_json::to_value(value)? else {
+            let text = serde_json::to_vec(value)?;
+            if text.first() != Some(&b'{') {
                 return Err(ParameterError::ExpectedObject);
-            };
+            }
+            let OrderedMembers(members) = serde_json::from_slice(&text)?;
+            let overflow_len = additional.map_or(0, |(_, len)| len);
+            let (declared, overflow) = members
+                .split_at(members.len().saturating_sub(overflow_len));
             let mut fragments: Vec<String> = Vec::new();
             for property in properties {
-                let Some(member) = members.get(property.name) else {
-                    continue;
-                };
-                if member.is_null() {
-                    continue;
+                if let Some((_, member)) = declared
+                    .iter()
+                    .find(|(name, _)| name == property.name)
+                {
+                    push_form_member(
+                        &mut fragments,
+                        property.name,
+                        member,
+                        property.mode,
+                    )?;
                 }
-                match property.mode {
-                    FormMode::Text => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    scalar(member, PercentEncoding::Form) ?
-                                ),
-                            )
-                    }
-                    FormMode::Json => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    encode(& serde_json::to_string(member) ?,
-                                    PercentEncoding::Form)
-                                ),
-                            )
-                    }
-                    FormMode::Style { style, explode, encoding } => {
-                        fragments
-                            .extend(
-                                style_fragments(
-                                    property.name,
-                                    member,
-                                    style,
-                                    explode,
-                                    encoding,
-                                )?,
-                            )
+            }
+            if let Some((mode, _)) = additional {
+                for (name, member) in overflow {
+                    if !properties.iter().any(|property| property.name == name) {
+                        push_form_member(&mut fragments, name, member, mode)?;
                     }
                 }
             }
             Ok(fragments.join("&"))
+        }
+        /// A JSON object's members in the order they were written, a repeated key kept each time it
+        /// appears.
+        struct OrderedMembers(Vec<(String, Value)>);
+        impl<'de> serde::Deserialize<'de> for OrderedMembers {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Self, D::Error> {
+                struct MembersVisitor;
+                impl<'de> serde::de::Visitor<'de> for MembersVisitor {
+                    type Value = OrderedMembers;
+                    fn expecting(
+                        &self,
+                        formatter: &mut fmt::Formatter<'_>,
+                    ) -> fmt::Result {
+                        formatter.write_str("a JSON object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<OrderedMembers, A::Error> {
+                        let mut members = Vec::new();
+                        while let Some(member) = map.next_entry::<String, Value>()? {
+                            members.push(member);
+                        }
+                        Ok(OrderedMembers(members))
+                    }
+                }
+                deserializer.deserialize_map(MembersVisitor)
+            }
+        }
+        /// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+        fn push_form_member(
+            fragments: &mut Vec<String>,
+            name: &str,
+            member: &Value,
+            mode: FormMode,
+        ) -> Result<(), ParameterError> {
+            if member.is_null() {
+                return Ok(());
+            }
+            match mode {
+                FormMode::Text => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), scalar(member,
+                                PercentEncoding::Form) ?
+                            ),
+                        )
+                }
+                FormMode::Json => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), encode(&
+                                serde_json::to_string(member) ?, PercentEncoding::Form)
+                            ),
+                        )
+                }
+                FormMode::Style { style, explode, encoding } => {
+                    fragments
+                        .extend(style_fragments(name, member, style, explode, encoding)?)
+                }
+            }
+            Ok(())
         }
         /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
         ///
@@ -6398,6 +6457,39 @@ pub mod types {
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
+    pub type RequestBodya = String;
+    pub type RequestBodyAdditional = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody3c5761a3 {
+        #[serde(rename = "a")]
+        pub a: RequestBodya,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditional>,
+    }
+    pub type RequestBodyaF8000e9c = String;
+    pub type RequestBodyAdditionalAba279dd = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBodyE2940da4 {
+        #[serde(
+            rename = "a",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub a: Option<RequestBodyaF8000e9c>,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+    }
+    pub type RequestBodycaption820ffb52 = String;
+    pub type RequestBodyAdditionalItem = i64;
+    pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody1654af29 {
+        #[serde(rename = "caption")]
+        pub caption: RequestBodycaption820ffb52,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
+    }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;
 }
@@ -7320,6 +7412,12 @@ pub type SerializeStylesError = std::convert::Infallible;
 pub type SerializeContentParamsError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type SubmitFormError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type SubmitFormAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type SubmitNullableFormAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type UploadAdditionalError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type DocumentedHeadersError = std::convert::Infallible;
 #[allow(dead_code)]
@@ -10220,7 +10318,7 @@ Response `409`: binary error*/
                 mode: support::FormMode::Json,
             },
         ];
-        let body = support::serialize_form_body(body, FORM_PROPERTIES)
+        let body = support::serialize_form_body(body, FORM_PROPERTIES, None)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -10236,6 +10334,144 @@ Response `409`: binary error*/
         } else {
             Err(
                 support::unexpected_status::<SubmitFormError>(&self.core, response).await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_form_additional(
+        &self,
+        body: &types::RequestBody3c5761a3,
+    ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
+        let mut path = "/forms/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((support::FormMode::Text, body.additional.len())),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_nullable_form_additional(
+        &self,
+        body: &Option<types::RequestBodyE2940da4>,
+    ) -> Result<
+        support::ResponseValue<()>,
+        support::Error<SubmitNullableFormAdditionalError>,
+    > {
+        let mut path = "/form/additional/nullable".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((
+                    support::FormMode::Text,
+                    body.as_ref().map_or(0, |body| body.additional.len()),
+                )),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitNullableFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn upload_additional(
+        &self,
+        body: &types::RequestBody1654af29,
+    ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+        let mut path = "/upload/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut form = reqwest::multipart::Form::new();
+        let mut part = reqwest::multipart::Part::text(body.caption.to_string());
+        part = part
+            .mime_str("text/plain")
+            .map_err(support::Error::request_construction)?;
+        form = form.part("caption", part);
+        for (name, value) in &body.additional {
+            if matches!(name.as_str(), "caption") {
+                continue;
+            }
+            let mut part = reqwest::multipart::Part::text(
+                serde_json::to_string(value)
+                    .map_err(support::Error::request_construction)?,
+            );
+            part = part
+                .mime_str("application/json")
+                .map_err(support::Error::request_construction)?;
+            form = form.part(name.clone(), part);
+        }
+        request = request.multipart(form);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<UploadAdditionalError>(&self.core, response)
+                    .await,
             )
         }
     }
@@ -11214,6 +11450,39 @@ Response `409`: binary error*/
             body: &types::RequestBody75618f63,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
             self.runtime.block_on(self.inner.submit_form(body))
+        }
+        ///Response `204`: No Content
+        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_form_additional(
+            &self,
+            body: &types::RequestBody3c5761a3,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_nullable_form_additional(
+            &self,
+            body: &Option<types::RequestBodyE2940da4>,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitNullableFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[allow(deprecated)]
+        #[inline]
+        pub fn upload_additional(
+            &self,
+            body: &types::RequestBody1654af29,
+        ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+            self.runtime.block_on(self.inner.upload_additional(body))
         }
         ///Response `204`: No Content
         #[allow(deprecated)]

@@ -3,7 +3,8 @@
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
-    BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle, PropertyEncoding, Ty, TypeKind,
+    AdditionalProps, BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle,
+    PropertyEncoding, Ty, TypeKind,
 };
 use crate::oas31::media::{
     classify_media, first_list_element, is_field_name, is_field_value, media_essence,
@@ -84,6 +85,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .map(|field| (field.name.wire.clone(), field.ty))
             .collect();
+        let overflow = match &structure.additional {
+            AdditionalProps::Typed(ty) => Some(**ty),
+            AdditionalProps::Allow | AdditionalProps::Deny => None,
+        };
         // Nested encoding describes nested multipart parts (`multipart/mixed` inside a part).
         // Spargen generates one flat level, so a nested field is rejected rather than dropped.
         for (name, encoding) in &object.encoding {
@@ -121,7 +126,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 headers,
             });
         }
-        Some(BodyEncoding { properties })
+        // The members of a typed `additionalProperties` overflow are sent too, as the JSON codec
+        // sends them. An Encoding Object is keyed by property name, so none can name them, and
+        // they take the default for their value type, under the same rules as an undeclared
+        // property (a binary overflow on form-urlencoded is refused, as a binary property is).
+        let additional = match overflow {
+            Some(overflow_ty) => {
+                Some(self.encoding_mode(None, overflow_ty, media, "additionalProperties", at)?)
+            }
+            None => None,
+        };
+        Some(BodyEncoding {
+            properties,
+            additional,
+        })
     }
 
     /// Apply the Encoding Object's mode switch for one property.
