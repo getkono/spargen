@@ -9019,14 +9019,15 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     );
     // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
     // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
-    // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
-    // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
-    // The `428`/`429` `kind`, narrowed against a `uuid` string, stays closed in either order.
-    // Only an open enum emits `as_str`.
+    // `424` and `425` open in place too, as intermediates no field uses. The union members of
+    // `422`, `423`, `426`, and `427`, which keep two branches, are met first in either order
+    // (#678), so those members meet them into closed branch sets as they are written, opening
+    // nothing (`tests/open.rs` decodes both). The `428`/`429` `kind`, narrowed against a `uuid`
+    // string, stays closed in either order. Only an open enum emits `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
         generated.matches("pub fn as_str(&self) -> &str").count(),
-        10,
+        8,
         "{generated}"
     );
 

@@ -476,8 +476,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The `oneOf` target of `member`, a bare `$ref` to a root component that `contribution`
     /// gathered as the one scalar it lowered to, lowered again under `hint` as an input to the
-    /// scalar meet ([`Self::lower_scalar_meet_union`]), where the component's own lowering merged
-    /// two or more of its branches into one variant: met as that merged type, the branches the
+    /// scalar meet ([`Self::lower_scalar_meet_union`]), where the component's own lowering left
+    /// fewer variants than it has branches, as a merge of two or more of them into one variant
+    /// leaves it: met as that merged type, the branches the
     /// other members exclude were not told apart from the ones they keep, as they are in the
     /// inline spelling (#678). The component keeps its own merged type, and its own `W001`s,
     /// so the second lowering's are not raised again. `None` where nothing was merged, so the
@@ -863,10 +864,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.report_held_untyped_warnings(held);
             return None;
         }
-        // With no object member, the union meets the other members as the scalar it is, in its
-        // place among them, exactly as an `allOf` of scalars always met one: the scalar meet
-        // already intersects a union branch by branch, and it keeps the narrowing `open_narrowing`
-        // gives each member where it is written. A refiner gathered from a nested `allOf` or a
+        // With no object member, the union meets the other members as the scalar it is, ahead of
+        // them as every union member of a scalar meet is ([`Self::union_members_first`], #678):
+        // the scalar meet already intersects a union branch by branch, and it keeps the narrowing
+        // `open_narrowing` gives each member as it is met. A refiner gathered from a nested `allOf` or a
         // sub-file target refines the union's branches below, as the same member written here does,
         // so a half that reaches none of them is reported (`W011`) rather than met silently. A
         // union whose branches leave `null` undecided takes it from the other members there, as
