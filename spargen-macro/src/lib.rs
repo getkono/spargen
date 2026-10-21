@@ -1,58 +1,4 @@
-//! # spargen-macro
-//!
-//! The proc-macro front-end for [`spargen`](https://docs.rs/spargen): generate a typed OpenAPI
-//! 3.1.x/3.2.x client **inline**, with no `build.rs` and no CLI step.
-//!
-//! ```ignore
-//! mod api {
-//!     // Path is resolved relative to the consumer crate's Cargo.toml.
-//!     spargen_macro::generate_api!("openapi.yaml");
-//! }
-//! ```
-//!
-//! Keyed form, with the same generation controls as the `build.rs` API:
-//!
-//! ```ignore
-//! spargen_macro::generate_api!(
-//!     spec = "openapi.yaml",
-//!     no_uuid,
-//!     no_time,
-//!     carve,
-//!     open_narrowing,
-//!     error_body_cap = 65536,
-//!     batch_cap = 100,
-//!     omit {
-//!         operations { post "/legacy"; }
-//!         paths { "/internal/**"; }
-//!         components { schemas { "LegacyPet"; } }
-//!         pointers { "/webhooks"; }
-//!         file("shared.yaml") { pointers { "/Legacy"; } }
-//!     }
-//! );
-//! ```
-//!
-//! ## How it works
-//!
-//! The macro is a thin shim over spargen's internal in-memory renderer. It resolves the spec,
-//! renders the client, and parses the rendered source back into tokens. The generated API is the
-//! same as the module written by [`spargen::generate`] from a `build.rs`.
-//!
-//! A generation failure becomes a `compile_error!` carrying spargen's diagnostics — the same
-//! loud, no-silent-degradation contract the generator has. (Warnings are not surfaced: stable proc-macro
-//! APIs cannot emit them. Run `spargen check <spec>` to see warnings.)
-//!
-//! ## Cost & alternatives
-//!
-//! Inline generation recompiles the whole generator (host-side) as part of your build, and the
-//! generated code is not materialized on disk (use `cargo expand` to inspect it). When you want
-//! the generated source checked in or reviewable, configure the `build.rs` API to write it there.
-//! The macro trades that visibility for a zero-config setup with no build.rs.
-//!
-//! ## Runtime graph
-//!
-//! This crate and `spargen` are **host/build-time only** — a proc-macro crate is never linked into
-//! your binary. Your runtime dependencies are just what the generated code uses (reqwest, serde,
-//! …); no spargen crate appears in `cargo tree -e no-proc-macro`.
+#![doc = include_str!("../README.md")]
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -391,8 +337,8 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     braced!(body in input);
     while !body.is_empty() {
         let kind: Ident = body.parse()?;
-        // One shared parser, so `omit!`, the CLI, and `spargen.toml` accept the same spellings
-        // and answer an unknown one with the same list.
+        // `ComponentKind`'s own `FromStr`, shared with the CLI and `spargen.toml`, so all three
+        // accept the same spellings and answer an unknown one with the same list.
         let kind = kind
             .to_string()
             .parse::<spargen::ComponentKind>()

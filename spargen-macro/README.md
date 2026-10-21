@@ -3,7 +3,7 @@
 The proc-macro front-end for [`spargen`](https://crates.io/crates/spargen): generate a typed,
 compile-time-correct OpenAPI 3.1.x/3.2.x client **inline** — no `build.rs`, no CLI step.
 
-```rust
+```rust,ignore
 mod api {
     // Resolved relative to your crate's Cargo.toml.
     spargen_macro::generate_api!("openapi.yaml");
@@ -12,7 +12,7 @@ mod api {
 
 Keyed form, with the same controls as spargen's `build.rs` surface:
 
-```rust
+```rust,ignore
 spargen_macro::generate_api!(
     spec = "openapi.yaml",
     no_uuid,
@@ -21,9 +21,22 @@ spargen_macro::generate_api!(
     open_narrowing,
     error_body_cap = 65536,
     batch_cap = 100,
-    omit { operations { post "/legacy"; } }
+    omit {
+        operations { post "/legacy"; }
+        paths { "/internal/**"; }
+        components { schemas { "LegacyPet"; } }
+        pointers { "/webhooks"; }
+        file("shared.yaml") { pointers { "/Legacy"; } }
+    }
 );
 ```
+
+## How it works
+
+The macro is a thin shim over spargen's internal in-memory renderer. It resolves the spec,
+renders the client, and parses the rendered source back into tokens. The generated API is the
+same as the module written by
+[`spargen::generate`](https://docs.rs/spargen/latest/spargen/fn.generate.html) from a `build.rs`.
 
 ## What you depend on
 
@@ -47,7 +60,8 @@ want to see:
 | `generate_api!` (this crate) | No (use `cargo expand`) | No build.rs |
 | `build.rs` (`spargen::generate`) | Yes — in `OUT_DIR`, via `include!` | A few lines of build.rs |
 
-To vendor the generated module, point the `build.rs` output directly at `src/api.rs` and commit it.
+Inline generation recompiles the whole generator (host-side) as part of your build. To vendor the
+generated module, point the `build.rs` output directly at `src/api.rs` and commit it.
 
 A generation failure is a `compile_error!` carrying spargen's diagnostics — no silent degradation.
 Warnings are not surfaced through the macro (stable proc-macro APIs can't emit them); run
