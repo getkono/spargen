@@ -16,8 +16,7 @@
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
 //!   `null` is the null type, #450), and every written `default` is kept or reported at its
 //!   pointer; an irreconcilable object meet whose members all admit `null` is the null type in
-//!   every spelling (#542). Where today's output still splits a law, the gap is held exactly and
-//!   names the open issue that tracks it (#545), so the law tightens when the issue's fix lands.
+//!   every spelling (#542).
 //!
 //! * one `null` decision (#674, [`null_parity`]): a `type`, `enum` and `const` beside a `oneOf` /
 //!   `anyOf` give one generated nullability, one set of `()` and `Option` arms, and one set of

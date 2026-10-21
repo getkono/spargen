@@ -53,8 +53,6 @@ mod unions;
 mod untyped_branch_nullability;
 mod xml;
 
-/// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
-/// tempdir (and any written output) is discarded once the report — which owns its data — is built.
 /// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
 /// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
 /// matters here — no `W013` polluting the diagnostics a fixture is asserting on.
