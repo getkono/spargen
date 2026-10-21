@@ -14,9 +14,9 @@
 //! unchanged — the abstraction collapses away off wasm.
 //!
 //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-//! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so those
-//! aliases (`ExecuteFuture`, `RetryWait`, `TokenFuture`, `TokenProvider`) are instead `cfg`-gated to
-//! carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
+//! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
+//! boxed future, stream, and callback alias in the runtime, public or private, is instead
+//! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
 //! source that builds on both targets.
 
 /// `Send` on native targets; a vacuous marker on `wasm32`.

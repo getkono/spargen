@@ -228,12 +228,18 @@ impl Sandbox {
     }
 }
 
-fn audit_manifest(contents: &str, requirements: RuntimeRequirements) -> Vec<Diagnostic> {
+/// The diagnostics of auditing `contents`, written as the only manifest of a fresh sandbox,
+/// against `requirements` for `target`.
+fn audit_manifest(
+    contents: &str,
+    requirements: &RuntimeRequirements,
+    target: &TargetContext,
+) -> Vec<Diagnostic> {
     let directory = Sandbox::new();
     let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
     std::fs::write(&manifest, contents).unwrap();
     directory
-        .audit_in(&manifest, &requirements, &TargetContext::Unknown)
+        .audit_in(&manifest, requirements, target)
         .diagnostics
 }
 
@@ -250,15 +256,6 @@ fn replace_once(haystack: &str, needle: &str, with: &str) -> String {
         "fixture needle {needle:?} must occur exactly once in {haystack}"
     );
     haystack.replacen(needle, with, 1)
-}
-
-fn audit_manifest_for(contents: &str, target: &TargetContext) -> Vec<Diagnostic> {
-    let directory = Sandbox::new();
-    let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
-    std::fs::write(&manifest, contents).unwrap();
-    directory
-        .audit_in(&manifest, &RuntimeRequirements::default(), target)
-        .diagnostics
 }
 
 fn messages(diagnostics: &[Diagnostic]) -> String {

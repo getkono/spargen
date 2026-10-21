@@ -1,9 +1,11 @@
-//! The small set of dispatch routines shared within a generated client: build URL →
-//! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
-//! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
+//! The dispatch routines every operation of a generated client shares: build URL → attach auth
+//! (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated
+//! client (not via a shared crate).
 //!
-//! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
-//! distinct body type — the one place monomorphization is unavoidable.
+//! URL building and sending are non-generic. The success decoders are generic over the body type
+//! and the error classifiers over the operation's error type `E`; each takes the body codec as a
+//! closure over the shared `decode_success_with` / `classify_with` routine, so one copy of each
+//! is monomorphized per distinct body or error type.
 
 use std::convert::Infallible;
 
@@ -323,6 +325,8 @@ where
 }
 
 /// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
+/// A documented body that is not UTF-8, or whose text `E` rejects, is [`Error::Decode`]; an empty
+/// body is decoded like any other, as [`decode_text_body`] describes.
 pub async fn classify_error_text<E>(
     core: &ClientCore,
     response: Response,
