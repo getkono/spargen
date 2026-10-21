@@ -268,6 +268,55 @@ fn the_macro_tracks_the_config_file_it_applied() {
     assert_eq!(preview.source_files, [spec_path, config]);
 }
 
+/// Each `[[omit]]` entry here sets a well-spelled key that the kind its other keys select does
+/// not use: the key, and the kind its presence dispatch picks.
+const FOREIGN_OMIT_KEYS: &[(&str, &str, &str)] = &[
+    ("path = \"/pets\"\nfile = \"extra.yaml\"\n", "file", "path"),
+    ("path = \"/pets\"\nname = \"Pet\"\n", "name", "path"),
+    (
+        "method = \"get\"\npath = \"/pets\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "operation",
+    ),
+    (
+        "method = \"get\"\npath = \"/pets\"\nname = \"Pet\"\n",
+        "name",
+        "operation",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nmethod = \"get\"\n",
+        "method",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\npath = \"/pets\"\n",
+        "path",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "component",
+    ),
+    (
+        "pointer = \"/components/schemas/Pet\"\nname = \"Pet\"\n",
+        "name",
+        "pointer",
+    ),
+];
+
+#[test]
+fn an_omit_entry_with_a_key_its_kind_does_not_use_is_accepted_today() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let config = root.join("spargen.toml");
+    for (entry, key, kind) in FOREIGN_OMIT_KEYS {
+        std::fs::write(&config, format!("[[omit]]\n{entry}")).unwrap();
+        let loaded = spargen::Spec::new(root.join("openapi.yaml")).config_file(&config);
+        assert!(loaded.is_ok(), "`{key}` beside a {kind} rule: {loaded:?}");
+    }
+}
+
 #[cfg(feature = "cli")]
 fn knobs_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
