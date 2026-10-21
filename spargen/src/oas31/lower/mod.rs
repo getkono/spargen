@@ -45,7 +45,7 @@ use crate::ir::{
 };
 use crate::name::synth_operation_id;
 
-use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema, SchemaOr};
+use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema};
 
 use combine::{Gathering, RecordedContribution};
 use defaults::retype_field_defaults;
