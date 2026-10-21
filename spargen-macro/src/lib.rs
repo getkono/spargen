@@ -756,15 +756,18 @@ paths:
             "openapi.yaml",
             "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
         );
-        let preview = spargen::__private::preview(&Spec::new(spec));
-        // A root-level diagnostic's pointer is empty, so no `at` line is rendered.
+        let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
+        // A root-level diagnostic's pointer is empty, so no `at` line is rendered. The span names
+        // the spec path as the bundle loaded it, not as the macro was given it.
         assert_eq!(
             failure_message("specs/old.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `specs/old.yaml`\n\
-             error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
-             3.2.x\n  --> 1:10\n  \
-             help: use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses \
-             different schema semantics"
+            format!(
+                "spargen could not generate a client from `specs/old.yaml`\n\
+                 error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
+                 3.2.x\n  --> {spec}:1:10\n  \
+                 help: use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses \
+                 different schema semantics"
+            )
         );
     }
 
@@ -800,7 +803,7 @@ paths:
               schema: { $ref: "#/components/schemas/AlsoMissing" }
 "##,
         );
-        let preview = spargen::__private::preview(&Spec::new(spec));
+        let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
         assert!(
             preview
                 .report
@@ -811,13 +814,15 @@ paths:
         );
         assert_eq!(
             failure_message("openapi.yaml", &preview).unwrap(),
-            "spargen could not generate a client from `openapi.yaml`\n\
-             error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
-             --> 14:23\n  \
-             at /paths/~1a/get/responses/200/content/application~1json/schema\n\
-             error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing`\n  \
-             --> 23:23\n  \
-             at /paths/~1b/get/responses/200/content/application~1json/schema"
+            format!(
+                "spargen could not generate a client from `openapi.yaml`\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
+                 --> {spec}:14:23\n  \
+                 at /paths/~1a/get/responses/200/content/application~1json/schema\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing`\n  \
+                 --> {spec}:23:23\n  \
+                 at /paths/~1b/get/responses/200/content/application~1json/schema"
+            )
         );
     }
 
