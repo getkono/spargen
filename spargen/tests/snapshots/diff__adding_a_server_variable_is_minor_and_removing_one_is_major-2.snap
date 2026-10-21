@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|server-variable-removed|servers::Server0::version|server variable removed (was `impl Into<String>`)
+bump=major
