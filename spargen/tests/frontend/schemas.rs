@@ -692,6 +692,57 @@ components:
     );
 }
 
+/// Issue #731: a component's `deprecated: true` reached `#[deprecated]` on a struct, a string enum
+/// and a union, but not on an integer or boolean enum's alias, a generic `pub type` alias, or the
+/// transparent newtype that closes an alias cycle. Each now carries it, and an alias that does not
+/// say `deprecated` still carries none.
+#[test]
+fn a_deprecated_component_is_deprecated_whatever_item_it_lowers_to() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Level: { type: integer, enum: [1, 2], deprecated: true }\n    \
+         Flag: { type: boolean, enum: [true], deprecated: true }\n    \
+         Tags: { type: array, items: { type: string }, deprecated: true }\n    \
+         Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }\n    \
+         Fresh: { type: array, items: { type: string } }\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let types = types_module(&code);
+    let lines: Vec<&str> = types.lines().map(str::trim).collect();
+    // The outer attributes and doc lines directly above a declaration.
+    let attributes = |declaration: &str| -> Vec<&str> {
+        let at = lines
+            .iter()
+            .position(|line| *line == declaration)
+            .unwrap_or_else(|| panic!("no `{declaration}`: {types}"));
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+            .copied()
+            .collect()
+    };
+    for declaration in [
+        "pub type Level = i64;",
+        "pub type Flag = bool;",
+        "pub type Tags = Vec<TagsItem>;",
+        "pub struct Tree(pub Vec<Tree>);",
+    ] {
+        assert!(
+            attributes(declaration).contains(&"#[deprecated]"),
+            "`{declaration}` is not `#[deprecated]`: {types}"
+        );
+    }
+    assert!(
+        !attributes("pub type Fresh = Vec<FreshItem>;").contains(&"#[deprecated]"),
+        "an alias that is not deprecated is marked deprecated: {types}"
+    );
+    // The deprecated array's inline item schema says nothing about deprecation, so its own alias
+    // (`TagsItem`) carries none: four items, the four components that say so.
+    assert_eq!(types.matches("#[deprecated]").count(), 4, "{types}");
+}
+
 #[test]
 fn e015_items_beside_prefix_items() {
     let spec = r##"

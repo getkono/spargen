@@ -261,7 +261,7 @@ fn emit_type_def(
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
         TypeKind::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
@@ -305,6 +305,7 @@ fn emit_type_def(
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
+                #deprecated
                 #[derive(Debug, Clone, Serialize, Deserialize)]
                 #[serde(transparent)]
                 pub struct #ident(pub #ty);
@@ -312,7 +313,7 @@ fn emit_type_def(
         }
         _ => {
             let ty = type_kind_tokens(&def.kind, names, options);
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
     }
 }
