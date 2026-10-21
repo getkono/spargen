@@ -18,7 +18,7 @@ changes.
   must **never** depend back on it (that would cycle). A proc-macro crate and everything it reaches
   are host/build-time only, so neither crate enters a consumer's runtime graph — the invariant
   below is unchanged. `examples/petstore-macro` is its end-to-end guard.
-- `support-runtime/` — the freestanding runtime embedded verbatim into generated output.
+- `support-runtime/` — the freestanding runtime embedded, trimmed and path-rewritten, into generated output.
   `publish = false`; its unconditional dependencies are exactly `reqwest` / `serde` / `serde_json` /
   `bytes` / `secrecy` / `futures-core` (the stream module and its dependency are emitted only for
   APIs with sequential responses), plus three optional ones behind features for the conditionally

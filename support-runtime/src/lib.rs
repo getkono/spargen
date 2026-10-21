@@ -8,10 +8,10 @@
 //! `super::`.
 //!
 //! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`.
-//! Its unconditional dependencies are `reqwest` / `serde` / `serde_json` / `bytes` / `secrecy` /
-//! `futures-core`; the `stream` module, the only user of `futures-core`, is embedded only for APIs
-//! with sequential responses. Three optional dependencies sit behind the features that gate the
-//! conditionally embedded modules: `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`).
+//! The dependency set a generated client needs, and what each conditionally embedded module adds
+//! to it, is stated in the book's runtime chapter (`docs/book/src/runtime.md`) and printed for one
+//! spec by `spargen deps`; here, each optional dependency sits behind the feature that gates its
+//! module, and the comment on that module's `mod` below names it.
 //!
 //! ## Fault-tolerance guarantees
 //!

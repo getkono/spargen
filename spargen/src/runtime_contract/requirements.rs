@@ -117,7 +117,7 @@ pub(super) struct Requirement {
     pub(super) no_default_features: bool,
     /// Declared `optional = true` and wired to a Cargo feature of the consumer's own.
     pub(super) optional: bool,
-    /// Only required when the consumer opts in — currently the `blocking` Cargo feature.
+    /// Only required when the consumer opts in through the named Cargo feature (`blocking`).
     pub(super) conditional: Option<&'static str>,
 }
 
@@ -295,7 +295,7 @@ impl Requirements {
 
     /// The `Cargo.toml` fragment to paste into the consuming package.
     ///
-    /// Opt-in dependencies (currently the blocking client's `tokio`) are rendered commented out
+    /// Opt-in dependencies (the blocking client's `tokio`) are rendered commented out
     /// under the feature that would require them, together with that feature's `[features]` entry
     /// enabling them (`blocking = ["dep:tokio"]`). Uncommenting is the whole opt-in, except that an
     /// entry whose `[features]` table, `blocking` key, or dependency table the manifest already

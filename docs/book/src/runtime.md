@@ -1,21 +1,31 @@
 # Runtime & Ergonomics
 
-The runtime support code is embedded verbatim into generated output — no spargen crate ever
-enters a consumer's dependency graph. Its core dependency set is fixed at
-`reqwest` / `serde` / `serde_json` / `bytes` / `secrecy`; sequential APIs additionally require
-`futures-core` and reqwest's `stream` feature. Every other capability below preserves that set:
-no `tower`, no `async-trait`, and no async timer of its own. Std's `Future` / `Pin` / `Box` carry
-the policy abstractions.
+The runtime support code is embedded into generated output as a private `support` module — no
+spargen crate ever enters a consumer's dependency graph. Its core dependency set is `reqwest`
+(default features off) / `serde` / `serde_json` / `bytes` / `secrecy`. A capability that needs more
+adds it only when the compiled API uses it, and adds only this:
+
+| Capability | Adds |
+| --- | --- |
+| [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
+| [XML bodies](#xml-bodies) | `quick-xml` |
+| [`format: date-time` / `date`](#uuid-and-time) | `time` |
+| [`format: uuid`](#uuid-and-time) | `uuid` |
+| [Blocking client](#blocking-feature-blocking) | an optional, native-only `tokio`, behind the consumer's own `blocking` feature |
+
+The transport seam, retry, middleware, pagination, problem details and WebAssembly support add no
+dependency: no `tower`, no `async-trait`, and no async timer of its own. Std's `Future` / `Pin` /
+`Box` carry the policy abstractions.
 
 The exact tested version floors and conditional Cargo features are the
-[runtime dependency contract](./getting-started.md#runtime-dependency-contract). Spargen derives
-that contract from the lowered API and audits it during compilation; optional codec and mapping
-dependencies are required only when the emitted API references them.
+[runtime dependency contract](./getting-started.md#runtime-dependency-contract), and
+`spargen deps <spec>` prints them for one spec. Spargen derives that contract from the lowered API
+and audits it during compilation.
 
 The capabilities are layered around a single seam so the generated `Client` stays non-generic and
 each capability is opt-in. Several sections below summarize one module of the embedded runtime and
-link to its source; that module's own documentation, which every generated client carries and
-`cargo doc` renders, is the full account.
+link to its source; that module's own documentation, which every generated client carries as doc
+comments on its private `support` module, is the full account.
 
 ## The transport seam
 
@@ -131,8 +141,9 @@ body internally; the stream API and framing remain the same.
 
 A synchronous `BlockingClient` for callers without an async runtime: `BlockingRuntime` drives the
 async operation futures on a current-thread `tokio` runtime, so it adds only tokio's `rt` feature.
-The feature resolves against the consumer crate: leaving `blocking` undeclared compiles the facade
-out, and opting in means declaring `blocking = ["dep:tokio"]` and a native-only optional `tokio`,
+It compiles only under the `blocking` feature on a non-wasm32 target, so a wasm32 build never
+carries it. The feature resolves against the consumer crate: leaving `blocking` undeclared compiles
+the facade out, and opting in means declaring `blocking = ["dep:tokio"]` and a native-only optional `tokio`,
 as `spargen deps` prints them. A `BlockingRuntime` must not be built inside another async runtime;
 the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
 says where to drive one instead.

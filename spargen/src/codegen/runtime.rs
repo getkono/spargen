@@ -71,8 +71,8 @@ pub(super) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
         pub use blocking::BlockingRuntime;
     };
     quote! {
-        /// The freestanding runtime embedded verbatim into this output; no spargen crate exists
-        /// at runtime.
+        /// The freestanding runtime embedded into this output; no spargen crate is a runtime
+        /// dependency.
         #[forbid(unsafe_code)]
         #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
         mod support {
