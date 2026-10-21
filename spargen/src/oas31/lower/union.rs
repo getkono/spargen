@@ -36,8 +36,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   categorized non-object variants by JSON category; statically disjoint variants dispatch
     ///   by JSON category or unique required key; overlapping variants use typed trial matching
     ///   with exact-one (`oneOf`) or deterministic most-specific (`anyOf`) semantics, including
-    ///   serialization revalidation. A `oneOf`'s variants that lower to one generated type merge
-    ///   into one variant, with `W001`.
+    ///   serialization revalidation.
+    ///
+    /// Two warnings are `W001` at the union. An undiscriminated `oneOf`'s variants that decode the
+    /// same values — that lower to one generated type, or to identically structured ones — merge
+    /// into one variant ([`Self::merge_indistinguishable_variants`]). A trial-matched `oneOf`'s
+    /// variants that lower to `serde_json::Value` beside another variant are reported
+    /// ([`Self::warn_untyped_one_of_variants`]). Neither is emitted here for a `$ref`'s own `oneOf`
+    /// sibling, which the `$ref` arm merges and reports after the meet
+    /// ([`Self::collapse_met_union`]), or for an `allOf`'s union member its scalar meet takes; and
+    /// while an `allOf` gathers its members, the `Value` report is held for its meet to settle
+    /// ([`Self::report_untyped_one_of`]).
     ///
     /// A member the sibling meet excludes drops out with `W011`; where that leaves no branch, the
     /// union is the exact null type if a null-only member remains and the sibling admits `null`,
@@ -46,14 +55,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::uninhabited_union_meet`]). An `anyOf` member the sibling meet narrows to the exact
     /// null type is a branch `null` matches: beside typed members it makes the union `nullable`
     /// and is no variant, and with every member so narrowed the union is the null type. A `oneOf`
-    /// in which `null` matches more than one branch admits no `null`. The union is rejected
-    /// (`None`) with `E007` where one node declares both `oneOf` and `anyOf` or a member is this union itself, and with `E013` where the sibling would have to
-    /// be met with a member that closes a reference cycle (but for one of a category a sibling that
-    /// is a multi-category `type` array alone admits, which is kept unmet,
-    /// [`Self::cycle_branch_within`]), with a member that states no category
-    /// for untyped sibling keywords to establish, or with a member it shares values with that no
-    /// single Rust type represents, or where it meets every one of several `oneOf` members, or one
-    /// beside a `null` member, in `null` alone, which then matches them all.
+    /// in which `null` matches more than one branch admits no `null`.
+    ///
+    /// The union is rejected (`None`) with `E007` where one node declares both `oneOf` and
+    /// `anyOf`; where a member is a direct recursive `$ref` to this union itself; where the
+    /// schema's whole body is a union whose only non-null member is a `$ref` closing a cycle back
+    /// to that schema; where the sibling meet leaves no branch, as above; and where the
+    /// `discriminator` cannot dispatch: a `mapping` or `defaultMapping` entry naming a schema that
+    /// is no `$ref` member ([`Self::discriminator_members`]), a `defaultMapping` naming a member
+    /// the sibling excluded, or a member no discriminator value selects
+    /// ([`Self::reject_unselectable_discriminated_variant`]). It is rejected with `E013` where the
+    /// sibling would have to be met with a member that closes a reference cycle (but for one of a
+    /// category a sibling that is a multi-category `type` array alone admits, which is kept unmet,
+    /// [`Self::cycle_branch_within`]), with a member that states no category for untyped sibling
+    /// keywords to establish, or with a member it shares values with that no single Rust type
+    /// represents, or where it meets every one of several `oneOf` members, or one beside a `null`
+    /// member, in `null` alone, which then matches them all.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
@@ -170,7 +187,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // This is the DOCUMENT half of the test and it is answered before lowering, for every
         // spelling of the member's `$ref`. The reservation half is applied after each member is
         // lowered, at the two sites below where the member's `Ty` exists; between them the three
-        // spellings of one conjunction give one verdict, which they did not before.
+        // spellings of one conjunction give one verdict.
         if sibling.is_some() {
             for member in &real_members {
                 // A member that is this union's OWN reservation is not an intersection problem:
@@ -248,9 +265,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The member is some *other* type's still-open reservation — the cycle-closing
             // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
             // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
-            // `check_invariants` reports as `E011` against a document that is not malformed, and
-            // which at `2aa5ada` (where the placeholder was `TypeKind::Any`) cloned as
-            // `serde_json::Value` instead — a typed schema silently degraded.
+            // `check_invariants` reports as `E011` against a document that is not malformed.
             //
             // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
             // the cycle has a finite size and optional because the `null` member is what collapsed
@@ -777,10 +792,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // meets each of them in `null` only. `null` then matches every branch, which fails the
         // exactly-one rule, so nothing satisfies the schema, and its `allOf` spelling (the `type`
         // as a member beside the union) is rejected for it (#632). Merged below, the branches
-        // were one `()` variant with `W001`, a type for a schema no value satisfies. The `anyOf`
-        // counterpart, which needs one match, is the null type below (#625). A `null` member is
-        // one more branch `null` matches, so a single variant met in `null` beside one is the
-        // same empty intersection.
+        // would be one `()` variant with `W001`, a type for a schema no value satisfies. The
+        // `anyOf` counterpart, which needs one match, is the null type below (#625). A `null`
+        // member is one more branch `null` matches, so a single variant met in `null` beside one
+        // is the same empty intersection.
         if mode == UnionMode::OneOf
             && sibling.is_some()
             && variants.len() + null_members > 1
@@ -795,14 +810,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // matches, as a `null` member is, so the typed branches are the variants, as the `allOf`
         // spelling lowers them. An `anyOf` hoists `null` to the union's `Option` (#633); a `oneOf`
         // does too where that branch is the only one `null` matches, and otherwise `null` fails
-        // its exactly-one rule and the union admits no `null` (#645). Kept, each was a `()`
-        // variant beside the typed ones — merged with `W001` where there were several — so one
-        // instance set had two public types by spelling. Dropped here, before the merge below, so
-        // the branches are not reported as indistinguishable variants of an enum that no longer
-        // has them. The dropped branches' meet inserts (their `…Constrained` aliases) are elided
-        // unless a surviving variant reaches them. A branch that is the null type on its own
-        // (`const: null`) stays the `()` variant it is with no sibling and in the `allOf` spelling,
-        // except where a `oneOf` drops it below (#657).
+        // its exactly-one rule and the union admits no `null` (#645). Kept, each would be a `()`
+        // variant beside the typed ones — merged with `W001` where there are several — so one
+        // instance set would have two public types by spelling. Dropped here, before the merge
+        // below, so the branches are not reported as indistinguishable variants of an enum that
+        // does not have them. The dropped branches' meet inserts (their `…Constrained` aliases)
+        // are elided unless a surviving variant reaches them. A branch that is the null type on
+        // its own (`const: null`) stays the `()` variant it is with no sibling and in the `allOf`
+        // spelling, except where a `oneOf` drops it below (#657).
         if variant_members
             .iter()
             .any(|member| met_into_null.contains(member))
@@ -846,8 +861,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // untyped one that took `null` from a conjunct (#586) — puts `null` in two branches. `null`
         // fails exactly-one, and the branch accepts nothing else, so it accepts nothing the union
         // does: it is no variant, and the typed branches are, in the sibling spelling and in the
-        // `allOf` one, whose union member is lowered on its own. Kept, it was a `()` arm that
-        // decoded the `null` the union refuses (#657). The types its own lowering inserted are
+        // `allOf` one, whose union member is lowered on its own. Kept, it would be a `()` arm that
+        // decodes the `null` the union refuses (#657). The types its own lowering inserted are
         // elided unless something else names them: a `$ref`'d component stays. Only where another
         // variant is left, which the count guarantees, since the branch it counts beside is no
         // exact-`null` variant of its own. Beside a branch that states nothing and took the
@@ -908,8 +923,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // untyped `items` branches, which constrain arrays alone, meets each of them in `null`
         // only. An `anyOf` needs one match, so `null` is the one value the union accepts and the
         // union is the null type, as its `allOf` spelling (the `type` as a member beside the
-        // union) is (#625). Kept as an enum it was a union of `()` variants beside a `String`
-        // constraint, which read as a string-typed union.
+        // union) is (#625). Kept as an enum it would be a union of `()` variants beside a `String`
+        // constraint, which reads as a string-typed union.
         if mode == UnionMode::AnyOf
             && sibling.is_some()
             && variants.len() > 1
