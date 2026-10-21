@@ -501,7 +501,7 @@ fn serialize_form_body_covers_both_encoding_modes() {
         },
     ];
     assert_eq!(
-        serialize_form_body(&body, &properties).unwrap(),
+        serialize_form_body(&body, &properties, None).unwrap(),
         "id=f81d4fae\
          &address=%7B%22city%22%3A%22Somewhere%22%2C%22zip%22%3A%2299999%2B1234%22%7D\
          &tags=a&tags=b"
@@ -521,7 +521,10 @@ fn form_body_omits_null_properties() {
             mode: FormMode::Text,
         },
     ];
-    assert_eq!(serialize_form_body(&body, &properties).unwrap(), "a=x");
+    assert_eq!(
+        serialize_form_body(&body, &properties, None).unwrap(),
+        "a=x"
+    );
 }
 
 #[test]
@@ -538,14 +541,51 @@ fn form_body_emits_properties_in_the_declared_order() {
             mode: FormMode::Text,
         },
     ];
-    assert_eq!(serialize_form_body(&body, &properties).unwrap(), "b=2&a=1");
+    assert_eq!(
+        serialize_form_body(&body, &properties, None).unwrap(),
+        "b=2&a=1"
+    );
+}
+
+#[test]
+fn form_body_sends_additional_members_after_the_declared_ones() {
+    // Issue #697: a typed `additionalProperties` overflow was dropped from the wire. Its members
+    // follow the declared properties, ordered by key, in the mode lowering resolved for their
+    // type; a declared name is never sent twice, and a `null` member is omitted.
+    let body = serde_json::json!({ "a": "x", "z": "last", "b c": "y&z", "n": null });
+    let properties = [FormProperty {
+        name: "a",
+        mode: FormMode::Text,
+    }];
+    assert_eq!(
+        serialize_form_body(&body, &properties, Some(FormMode::Text)).unwrap(),
+        "a=x&b%20c=y%26z&z=last"
+    );
+    let body = serde_json::json!({ "a": "x", "extra": [1, 2] });
+    assert_eq!(
+        serialize_form_body(&body, &properties, Some(FormMode::Json)).unwrap(),
+        "a=x&extra=%5B1%2C2%5D"
+    );
+}
+
+#[test]
+fn form_body_without_an_additional_mode_sends_only_declared_members() {
+    let body = serde_json::json!({ "a": "x", "b": "y" });
+    let properties = [FormProperty {
+        name: "a",
+        mode: FormMode::Text,
+    }];
+    assert_eq!(
+        serialize_form_body(&body, &properties, None).unwrap(),
+        "a=x"
+    );
 }
 
 #[test]
 fn form_body_rejects_a_non_object() {
     let properties: [FormProperty; 0] = [];
     assert!(matches!(
-        serialize_form_body(&serde_json::json!("scalar"), &properties),
+        serialize_form_body(&serde_json::json!("scalar"), &properties, None),
         Err(ParameterError::ExpectedObject)
     ));
 }

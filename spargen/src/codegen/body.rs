@@ -83,11 +83,21 @@ pub(super) fn body_send_tokens(
                     // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
                     // runtime and cannot express a per-property content type.
                     let properties = form_properties_tokens(&encoding);
+                    // The typed `additionalProperties` members, rendered in their type's default
+                    // mode; `None` when the body has no typed overflow to send.
+                    let additional = match &encoding.additional {
+                        Some(mode) => {
+                            let mode = form_mode_tokens(mode);
+                            quote! { Some(#mode) }
+                        }
+                        None => quote! { None },
+                    };
                     quote! {
                         const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];
                         let #body_binding = support::serialize_form_body(
                             #body_binding,
                             FORM_PROPERTIES,
+                            #additional,
                         )
                         .map_err(support::Error::request_construction)?;
                         #request_binding = #request_binding
@@ -270,44 +280,9 @@ fn emit_multipart_body(
                         }
                     };
                 }
-                _ => match kind {
-                    // A binary/bytes property → a file/bytes part carrying the raw bytes.
-                    Some(TypeKind::Bytes) => quote! {
-                        let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
-                    },
-                    // A scalar property → a text part rendered through `Display`.
-                    Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
-                        let mut part = reqwest::multipart::Part::text(#receiver.to_string());
-                    },
-                    // Codegen sees only a checked `Api`; JSON-encoding a reservation would pick a
-                    // part shape for a body nobody lowered.
-                    Some(TypeKind::Reserved) => unreachable!(
-                        "a reservation reached codegen; `check_invariants` should have rejected it"
-                    ),
-                    // Any composite property → a JSON-encoded text part.
-                    _ => quote! {
-                        let mut part = reqwest::multipart::Part::text(
-                            serde_json::to_string(#reference)
-                                .map_err(support::Error::request_construction)?,
-                        );
-                    },
-                },
+                _ => media_part_tokens(kind, receiver, reference),
             };
-            let content_type = match property.map(|property| &property.mode) {
-                Some(crate::ir::EncodingMode::Media { content_type, .. }) => {
-                    Some(content_type.clone())
-                }
-                _ => None,
-            };
-            // `mime_str` consumes the part, so a malformed content type from the spec surfaces as
-            // a request-construction error rather than being silently dropped.
-            let set_type = content_type.map(|content_type| {
-                quote! {
-                    part = part
-                        .mime_str(#content_type)
-                        .map_err(support::Error::request_construction)?;
-                }
-            });
+            let set_type = set_part_type_tokens(property.map(|property| &property.mode));
             quote! {
                 #build
                 #set_type
@@ -330,9 +305,116 @@ fn emit_multipart_body(
             )
         }
     });
+    let additional = additional_parts_tokens(ty, object, api, names, body_binding, encoding);
     quote! {
         let mut form = reqwest::multipart::Form::new();
         #(#parts)*
+        #additional
         #request_binding = #request_binding.multipart(form);
     }
+}
+
+/// The parts of a multipart body's typed `additionalProperties` members, one per overflow-map
+/// entry after the declared parts, ordered by key (the map is a `BTreeMap`). No Encoding Object
+/// can name them, so each takes the mode lowering resolved for the overflow's value type, exactly
+/// as a declared property with no Encoding Object does. An entry whose key repeats a declared
+/// property's name is skipped, so no part name is sent twice, and a `None` entry of a nullable
+/// overflow adds no part, as an absent optional field adds none.
+fn additional_parts_tokens(
+    ty: Ty,
+    object: &crate::ir::Struct,
+    api: &Api,
+    names: &Names,
+    body_binding: &crate::name::Ident,
+    encoding: &crate::ir::BodyEncoding,
+) -> TokenStream {
+    let crate::ir::AdditionalProps::Typed(value_ty) = &object.additional else {
+        return quote! {};
+    };
+    let Some(mode) = &encoding.additional else {
+        return quote! {};
+    };
+    let overflow = names
+        .struct_overflow
+        .get(&ty.id)
+        .expect("overflow field name allocated");
+    let declared = object
+        .fields
+        .iter()
+        .map(|field| field.name.wire.as_str())
+        .collect::<Vec<_>>();
+    let skip_declared = (!declared.is_empty()).then(|| {
+        quote! {
+            if matches!(name.as_str(), #(#declared)|*) {
+                continue;
+            }
+        }
+    });
+    let unwrap_nullable = value_ty.nullable.then(|| {
+        quote! {
+            let Some(value) = value else {
+                continue;
+            };
+        }
+    });
+    let kind = api.types.get(value_ty.id).map(|def| &def.kind);
+    let build = media_part_tokens(kind, &quote! { value }, &quote! { value });
+    let set_type = set_part_type_tokens(Some(mode));
+    quote! {
+        for (name, value) in &#body_binding.#overflow {
+            #skip_declared
+            #unwrap_nullable
+            #build
+            #set_type
+            form = form.part(name.clone(), part);
+        }
+    }
+}
+
+/// The statement binding `part` to a media-mode multipart part built from one value, by the
+/// value's lowered type: a binary value becomes a bytes part, a scalar a text part via `Display`,
+/// and anything composite a JSON-encoded text part. `receiver` is the value for method calls;
+/// `reference` is a `&value` for `serde_json::to_string`.
+fn media_part_tokens(
+    kind: Option<&TypeKind>,
+    receiver: &TokenStream,
+    reference: &TokenStream,
+) -> TokenStream {
+    match kind {
+        // A binary/bytes property → a file/bytes part carrying the raw bytes.
+        Some(TypeKind::Bytes) => quote! {
+            let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
+        },
+        // A scalar property → a text part rendered through `Display`.
+        Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
+            let mut part = reqwest::multipart::Part::text(#receiver.to_string());
+        },
+        // Codegen sees only a checked `Api`; JSON-encoding a reservation would pick a
+        // part shape for a body nobody lowered.
+        Some(TypeKind::Reserved) => unreachable!(
+            "a reservation reached codegen; `check_invariants` should have rejected it"
+        ),
+        // Any composite property → a JSON-encoded text part.
+        _ => quote! {
+            let mut part = reqwest::multipart::Part::text(
+                serde_json::to_string(#reference)
+                    .map_err(support::Error::request_construction)?,
+            );
+        },
+    }
+}
+
+/// The statement setting a media-mode part's resolved `Content-Type`; nothing in RFC 6570 mode,
+/// where `contentType` is inert.
+fn set_part_type_tokens(mode: Option<&crate::ir::EncodingMode>) -> Option<TokenStream> {
+    let Some(crate::ir::EncodingMode::Media { content_type, .. }) = mode else {
+        return None;
+    };
+    // `mime_str` consumes the part, so a malformed content type from the spec surfaces as
+    // a request-construction error rather than being silently dropped.
+    Some(quote! {
+        part = part
+            .mime_str(#content_type)
+            .map_err(support::Error::request_construction)?;
+    })
 }

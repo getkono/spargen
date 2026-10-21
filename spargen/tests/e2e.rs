@@ -2622,6 +2622,55 @@ fn multipart_parts_carry_their_resolved_content_types() {
     server.join().unwrap();
 }
 
+/// The members of a typed `additionalProperties` overflow reach the wire on form-urlencoded and
+/// multipart bodies, as they do on JSON (#697): after the declared properties, ordered by key, in
+/// their type's default encoding — a text form field for a string, a JSON part under
+/// `application/json` for an integer array. An overflow key repeating a declared name is not sent
+/// a second time.
+#[test]
+fn additional_properties_reach_form_and_multipart_bodies() {
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_form_additional(&basic_client::types::RequestBody3c5761a3 {
+            a: "x".to_owned(),
+            additional: [
+                ("z".to_owned(), "last".to_owned()),
+                ("b c".to_owned(), "y&z".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /forms/additional HTTP/1.1"), "{request}");
+    assert!(request.ends_with("\r\n\r\na=x&b%20c=y%26z&z=last"), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .upload_additional(&basic_client::types::RequestBody1654af29 {
+            caption: "c".to_owned(),
+            additional: [
+                ("scores".to_owned(), vec![1, 2]),
+                ("caption".to_owned(), vec![9]),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /upload/additional HTTP/1.1"), "{request}");
+    assert_eq!(request.matches("name=\"caption\"").count(), 1, "{request}");
+    let position = request
+        .find("name=\"scores\"")
+        .unwrap_or_else(|| panic!("{request}"));
+    let part = &request[position..];
+    let (header, value) = part.split_once("\r\n\r\n").unwrap();
+    assert!(header.contains("Content-Type: application/json"), "{header}");
+    assert!(value.starts_with("[1,2]\r\n"), "{value}");
+}
+
 /// A raw byte request body is sent with the `Content-Type` its media key names: the octet gate
 /// admits only `bytes::Bytes`, and a `Bytes` body is emitted with the header before the media
 /// arms are consulted. This pins that wire fact directly, on the request the server actually reads,
@@ -6307,6 +6356,42 @@ paths:
                 explode: false
               blob:
                 contentType: application/json
+      responses:
+        "204": { description: No Content }
+  # Typed `additionalProperties` on form-urlencoded and multipart bodies (#697): the overflow
+  # members are sent after the declared properties, each in its type's default encoding, as the
+  # JSON codec sends them. The form overflow is a string (a text field); the multipart overflow is
+  # an integer array (a JSON part under `application/json`).
+  /forms/additional:
+    post:
+      operationId: submitFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [a]
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  /upload/additional:
+    post:
+      operationId: uploadAdditional
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [caption]
+              properties:
+                caption: { type: string }
+              additionalProperties:
+                type: array
+                items: { type: integer }
       responses:
         "204": { description: No Content }
   # Documented response headers whose schemas are NAMED components. The generated header struct

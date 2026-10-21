@@ -467,46 +467,65 @@ pub enum FormStyle {
 /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
 /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
 /// value is JSON `null` is omitted entirely rather than sent empty.
+///
+/// `additional` is the resolved mode of the body's typed `additionalProperties` members: the
+/// default for their type, since no Encoding Object can name them. When it is `Some`, every member
+/// `properties` does not name follows the declared ones, ordered by key, rendered in that mode;
+/// when it is `None`, such members are not sent.
 pub fn serialize_form_body<T: Serialize>(
     value: &T,
     properties: &[FormProperty],
+    additional: Option<FormMode>,
 ) -> Result<String, ParameterError> {
     let Value::Object(members) = serde_json::to_value(value)? else {
         return Err(ParameterError::ExpectedObject);
     };
     let mut fragments: Vec<String> = Vec::new();
     for property in properties {
-        let Some(member) = members.get(property.name) else {
-            continue;
-        };
-        if member.is_null() {
-            continue;
+        if let Some(member) = members.get(property.name) {
+            push_form_member(&mut fragments, property.name, member, property.mode)?;
         }
-        match property.mode {
-            FormMode::Text => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                scalar(member, PercentEncoding::Form)?
-            )),
-            FormMode::Json => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                encode(&serde_json::to_string(member)?, PercentEncoding::Form)
-            )),
-            FormMode::Style {
-                style,
-                explode,
-                encoding,
-            } => fragments.extend(style_fragments(
-                property.name,
-                member,
-                style,
-                explode,
-                encoding,
-            )?),
+    }
+    if let Some(mode) = additional {
+        // A generated body's overflow is a `BTreeMap`, so its members arrive ordered by key
+        // whichever order `serde_json::Map` keeps.
+        for (name, member) in &members {
+            if !properties.iter().any(|property| property.name == name) {
+                push_form_member(&mut fragments, name, member, mode)?;
+            }
         }
     }
     Ok(fragments.join("&"))
+}
+
+/// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+fn push_form_member(
+    fragments: &mut Vec<String>,
+    name: &str,
+    member: &Value,
+    mode: FormMode,
+) -> Result<(), ParameterError> {
+    if member.is_null() {
+        return Ok(());
+    }
+    match mode {
+        FormMode::Text => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            scalar(member, PercentEncoding::Form)?
+        )),
+        FormMode::Json => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            encode(&serde_json::to_string(member)?, PercentEncoding::Form)
+        )),
+        FormMode::Style {
+            style,
+            explode,
+            encoding,
+        } => fragments.extend(style_fragments(name, member, style, explode, encoding)?),
+    }
+    Ok(())
 }
 
 /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
