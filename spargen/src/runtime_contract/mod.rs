@@ -271,6 +271,7 @@ fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
         severity: Code::RuntimeDependencyContract.severity(),
         pointer: JsonPointer::root(),
         span: None,
+        file: None,
         message,
         remedy: Some("declare the generated client's runtime dependencies in the consuming package's Cargo.toml using the documented supported ranges and features".to_owned()),
         interpretation: None,

@@ -190,8 +190,9 @@ metadata. See the concise
 
 Anything outside the documented surface is rejected or warned loudly, never silent; see the
 [support matrix](docs/support-matrix.md) for the exact boundary. Every diagnostic carries the
-JSON Pointer of the construct it names, and a `line:column` span where that location is known.
-The pinned GitHub OpenAPI 3.1 description generates and its
+JSON Pointer of the construct it names, and where that location is known, the file it lies in (a
+`$ref`'d file included) with its line and column. The pinned GitHub OpenAPI 3.1 description
+generates and its
 full emitted crate is compile-checked in CI; the remaining [corpus](corpus/README.md) pins both
 generating and intentionally rejecting real-world cases.
 

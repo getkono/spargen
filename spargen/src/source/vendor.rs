@@ -231,6 +231,9 @@ pub(crate) fn vendor(
         );
         return Err(Aborted);
     };
+    // Only the root's spans are kept (`parse_scratch` parses every document as `FileId(0)`), so
+    // the root is the one file a vendoring diagnostic's span can name.
+    diags.register_file(crate::diag::FileId(0), spec.to_path_buf());
 
     let mut lock = Lock::default();
     let mut fetch_failed = false;

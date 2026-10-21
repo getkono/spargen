@@ -56,6 +56,11 @@ pub struct Diagnostic {
     pub pointer: JsonPointer,
     /// Source location, when the construct's span is known.
     pub span: Option<Span>,
+    /// The path of the file [`Self::span`] lies in, as the input bundle loaded it: the spec path
+    /// as given for the root document, the path a relative `$ref` resolved to for a referenced
+    /// one, and the vendored copy for a remote one. Set exactly when `span` is and its file was
+    /// loaded by the run that emitted the diagnostic.
+    pub file: Option<String>,
     /// One-line human explanation.
     pub message: String,
     /// An optional suggested fix.
@@ -118,7 +123,11 @@ impl std::fmt::Display for Diagnostic {
         };
         write!(formatter, "{severity}[{}]: {}", self.code, self.message)?;
         if let Some(span) = self.span {
-            write!(formatter, "\n  --> {}:{}", span.start.line, span.start.col)?;
+            write!(formatter, "\n  --> ")?;
+            if let Some(file) = &self.file {
+                write!(formatter, "{file}:")?;
+            }
+            write!(formatter, "{}:{}", span.start.line, span.start.col)?;
         }
         if !self.pointer.as_str().is_empty() {
             write!(formatter, "\n  at {}", self.pointer.as_str())?;
@@ -193,6 +202,7 @@ impl DiagnosticBuilder {
             severity: self.severity,
             pointer: self.provenance.pointer,
             span: self.provenance.span,
+            file: None,
             message: self.message.unwrap_or_else(|| self.code.title().to_owned()),
             remedy: self.remedy,
             interpretation: self.interpretation,
