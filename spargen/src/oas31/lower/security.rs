@@ -73,9 +73,10 @@ pub(super) fn resolve_external_security_schemes(
 
 /// Lower `components.securitySchemes`.
 ///
-/// Every declared scheme gets a disposition here rather than only when something references it: a
-/// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the
-/// requirement site, naming a scheme the document plainly declares.
+/// Every declared scheme gets a disposition here rather than only when something references it, so
+/// a scheme spargen cannot lower is reported where it is declared rather than surfacing — if at
+/// all — as a confusing `E012` at the requirement site, naming a scheme the document plainly
+/// declares.
 pub(super) fn lower_security_schemes(
     document: &Document,
     diags: &mut Diagnostics,

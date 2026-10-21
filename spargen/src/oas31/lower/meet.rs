@@ -92,10 +92,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // made about the intersection — `is_in_progress_root`'s own documentation says the only
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
-        // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` found no meet for it
-        // (it now refuses by a `Reserved` arm of its own), and the null rescue typed the
-        // position as the exact JSON null type. The result was `pub type X = ();` — a client that
+        // identity lets one through, and the rescue below would convert that unanswerable
+        // intersection into a confident wrong answer: finding no non-null meet (which
+        // `intersect_non_null` refuses by a `Reserved` arm of its own), the null rescue would type
+        // the position as the exact JSON null type. That is `pub type X = ();` — a client that
         // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
         // which is the standing invariant's fourth, silent behaviour.
         //

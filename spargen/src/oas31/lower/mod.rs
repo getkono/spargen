@@ -709,7 +709,10 @@ enum StatedNothingNull {
 /// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
 /// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
 /// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
-/// types, that meet decides which of those variants are still `Value` (#660).
+/// replaces, the warning names only the variants the meet carries as `Value` (#660, #675). It is
+/// reported as raised where the gathering or the meet fails, where the meet does not replace the
+/// union (its lowering is still named, or the meet is a reservation), and for every warning a
+/// union other than such a member raised.
 #[derive(Clone, Debug)]
 struct HeldUntypedWarning {
     /// The union the warning is raised at.
@@ -721,8 +724,16 @@ struct HeldUntypedWarning {
 /// The three spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
 /// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
 /// the union as its sibling, an `allOf` with the union beside it on one schema (#419), and an
-/// `allOf` with the union as one of its members (#463). Only the wording of the diagnostics they
-/// report differs.
+/// `allOf` with the union as one of its members (#463). The spelling decides three things:
+///
+/// * the wording of the diagnostics the meet reports ([`Self::subject`], and the messages
+///   [`LowerCtx::reject_all_of_union_meet`] and [`LowerCtx::meet_union_with_all_of`] pick), with
+///   the `$ref` remedy rather than the `allOf` one for [`MetUnion::RefSibling`];
+/// * the hint the meet is inserted under, and so the names its generated types take
+///   ([`Self::meet_suffix`]): `ReferenceIntersection` for a `$ref` sibling, `Intersection` for
+///   either `allOf` spelling;
+/// * which conjunct a branch the meet excludes is read against: the `allOf`'s other members for
+///   [`MetUnion::AllOfMember`], the schema's own sibling keywords for the other two.
 #[derive(Clone, Copy)]
 enum MetUnion {
     RefSibling,
@@ -818,19 +829,19 @@ struct LowerCtx<'a, 'doc> {
     /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
     /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
     /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
-    /// referencing a shared type, and without this memo it re-expanded the target at every use — a
-    /// branching reuse graph cost work and generated types exponential in its depth. The target is
+    /// referencing a shared type, and re-expanding the target at every use would cost a branching
+    /// reuse graph work and generated types exponential in its depth. The target is
     /// expanded once and its contribution replayed at every later use, so the types its body lowers
     /// to are shared exactly as a root component member's are through [`Self::push_ref_member`].
     ///
     /// A contribution is recorded only once its expansion succeeds; one that failed re-expands, and
-    /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
+    /// reports again, at its next use. What is replayed is a copy the enclosing
     /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
     ///
     /// Each recorded contribution carries the nested bundle target it came from (`None`: the
     /// target's own), so a replay adds each target's contribution to a composition once, however
-    /// many paths reach it ([`Self::gatherings`]). Replaying every copy doubled a target's record
-    /// at each level of a branching graph, which the memo alone left exponential (#616).
+    /// many paths reach it ([`Self::gatherings`]). Replaying every copy would double a target's
+    /// record at each level of a branching graph, leaving it exponential despite the memo (#616).
     resolved_contributions: HashMap<String, Vec<RecordedContribution>>,
     /// The bundle-`$ref` `allOf` member targets being expanded right now, outermost first, each
     /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`

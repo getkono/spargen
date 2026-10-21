@@ -457,10 +457,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.gather_ref_target(schema, reference, hint, out)?;
             // `$ref` is an applicator, not a replacement for the member that holds it: the member
             // is the target AND its own shape-bearing siblings, so those are further conjuncts of
-            // this same merge, gathered exactly as a separate member carrying them would be. Every
-            // arm above used to return once the target was pushed, which silently deleted the
-            // siblings' properties and `required`, and let a sibling contradicting its target
-            // generate as the target alone. The gate is the one `lower_schema_inner` asks of a
+            // this same merge, gathered exactly as a separate member carrying them would be.
+            // Returning once the target is pushed would delete the siblings' properties and
+            // `required` silently, and let a sibling contradicting its target generate as the
+            // target alone. The gate is the one `lower_schema_inner` asks of a
             // `$ref`'s siblings, so the two positions agree on what counts as a shape.
             let mut sibling = schema.clone();
             sibling.reference = None;
@@ -548,8 +548,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // test the target's identity (`reservation_at`) instead of `is_in_progress_root`. Without
         // this, a member that is the very schema being lowered descends into its own body again
         // and stops only at `MAX_SCHEMA_DEPTH`, reporting a chain length for what is a cycle of
-        // length one. The component and remote arms above refuse to read an in-progress member;
-        // this one now does too.
+        // length one. Like the component and remote arms above, this one refuses to read an
+        // in-progress member.
         if self.reservation_at(&target.provenance).is_some() {
             return self.reject_all_of_cycle(
                 schema.provenance.clone(),
@@ -674,9 +674,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Expand a bundle-`$ref` `allOf` member's resolved target as [`Self::gather_member`] expands
     /// any member: a target that is itself a `$ref` chains to *its* target (and gathers its own
     /// siblings), one that is an `allOf` flattens its members, and only a plain body is read for
-    /// object or scalar keywords. Reading every target as a plain body took an `allOf` or alias
-    /// target, which carries neither kind of keyword, for a pure annotation, and silently dropped
-    /// everything it constrains (issue #306).
+    /// object or scalar keywords. An `allOf` or alias target carries neither kind of keyword, so
+    /// reading it as a plain body would take it for a pure annotation and silently drop everything
+    /// it constrains (issue #306).
     ///
     /// This recursion does not pass through [`Self::lower_schema`], so it counts against
     /// [`Self::depth`] itself: a long acyclic chain of such targets rejects with `E014` rather than
@@ -717,8 +717,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// A member whose body is still being lowered is refused here, with `recursive` as the
     /// message, rather than by each caller: a reservation's kind says nothing about the schema's
-    /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
-    /// silent scalar. A caller cannot forget the guard because it no longer holds it.
+    /// shape, and reading it as "not a struct" would make a recursive member a silent scalar. The
+    /// guard lives here, so no caller has one to forget.
     ///
     /// `decides_null` is [`Self::ref_target_decides_null`] of the target: an untyped object target,
     /// or one composed of untyped object members alone, admits `null` without deciding the merge's
@@ -739,15 +739,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } = member;
         // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
-        // arm is the whole guard the callers used to hold.
+        // arm is the whole guard against reading one.
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Reserved) => {
                 return self.reject_all_of_cycle(provenance.clone(), recursive)
             }
-            // A target of untyped array applicators alone lowered standalone to `Value`, which met
-            // the merge as its identity and dropped its `items` with no diagnostic (#610); it now
-            // lowers standalone to an array (#614), which would deny the merge's other categories.
-            // Either way the target is read by its keywords, as an inline member and a sub-file
+            // Read by the type it lowers to standalone, a target of untyped array applicators
+            // alone would deny the merge's other categories as an array (#614), or as `Value` meet
+            // the merge as its identity and drop its `items` with no diagnostic (#610). Either way
+            // the target is read by its keywords, as an inline member and a sub-file
             // target are (#607): it refines the merge's arrays and constrains nothing else. It is a
             // `$ref` target, so `open_narrowing` is out of effect for it.
             Some(TypeKind::Any | TypeKind::Array(_) | TypeKind::Tuple(_)) => {
@@ -805,8 +805,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
         // A member carrying its own `oneOf`/`anyOf` is that union, its object keywords refining the
-        // branches as `lower_union` refines them; read as an object by its keywords, the union was
-        // dropped with no diagnostic (issue #419).
+        // branches as `lower_union` refines them; read as an object by its keywords, the union
+        // would be dropped with no diagnostic (issue #419).
         if schema_is_object_like(schema) && !schema_has_union(schema) {
             let (fields, additional) = self.object_body(schema, hint)?;
             out.push(Contribution::Object {
@@ -824,8 +824,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(ImpliedCategory::Only(JsonType::Array))
         ) {
             // Untyped array applicators (`items`, `prefixItems`) name no `type`, so neither arm
-            // above reads them, and they were dropped as an annotation with no diagnostic (#607).
-            // In 2020-12 they constrain only arrays, so they refine the merge's array members and
+            // above reads them; this arm keeps them from being dropped as an annotation with no
+            // diagnostic (#607). In 2020-12 they constrain only arrays, so they refine the merge's
+            // array members and
             // leave the rest, as the same member does beside a union.
             let scoped = self.lower_scoped_refiners(schema, true, None, hint)?;
             out.push(Contribution::Refiner {
