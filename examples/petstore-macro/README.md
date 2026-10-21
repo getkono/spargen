@@ -14,10 +14,11 @@ undocumented statuses, …) lives in the `petstore` example; this one exists to 
 Its invocation exercises `no_uuid`, `no_time`, `carve`, `error_body_cap`, `batch_cap`, and an
 `omit` block with a `components` rule; [spargen-macro's README](../../spargen-macro/README.md)
 shows the rest. The expansion names, through `include_bytes!`, the spec, each file its `$ref`s
-load, the manifests the runtime-dependency audit reads, and a `spargen.lock` and the applied `spargen.toml` beside the spec when there are, so
-Cargo re-expands the macro when one of those files changes; `schemas.yaml` is a relative-file
-`$ref` the spec reaches, there to exercise that. A `spargen.toml` created after the last expansion
-is not yet on that list, so it takes effect only once the macro is re-expanded for another reason.
+load, the manifests the runtime-dependency audit reads, and a `spargen.lock` and the applied
+`spargen.toml` beside the spec when there are, so Cargo re-expands the macro when one of those
+files changes; `schemas.yaml` is a relative-file `$ref` the spec reaches, there to exercise that.
+A `spargen.toml` created after the last expansion is not yet on that list, so it takes effect only
+once the macro is re-expanded for another reason.
 
 ## The runtime-graph invariant
 
