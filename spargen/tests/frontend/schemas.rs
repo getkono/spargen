@@ -648,8 +648,8 @@ components:
 
 #[test]
 fn property_annotations_come_from_the_property_not_the_object() {
-    // Regression: `deprecated`/`readOnly`/`writeOnly` were read from the enclosing object, so an
-    // object-level `deprecated: true` marked every field and a property-level one was ignored.
+    // `deprecated`/`readOnly`/`writeOnly` are read from the property itself: a property-level one
+    // marks its field, and an object-level `deprecated: true` marks no field.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0

@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn server_variables_generate_a_typed_builder() {
-    // Regression: `servers[].variables` was dropped entirely, so a templated URL reached rustdoc
-    // with its `{braces}` intact and no way to fill them.
+    // `servers[].variables` generate a typed builder that fills a templated URL's `{braces}`, so
+    // none reaches the client or its rustdoc unfilled.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.2.0
@@ -85,9 +85,8 @@ paths:
 
 #[test]
 fn path_item_and_operation_servers_override_the_base_url() {
-    // Regression: `servers` was read only at the document root, so a Path Item or Operation Object
-    // that redirects its calls to another host was skipped along with every other non-method key —
-    // silently generating a client that called the document's server instead.
+    // `servers` on a Path Item or Operation Object overrides the document's: a call on that path or
+    // operation goes to the host it names, not the document's server.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -167,9 +166,8 @@ paths:
 
 #[test]
 fn e011_server_url_with_malformed_braces() {
-    // Regression: an unmatched `{` was kept as literal text, so `https://{host` generated a client
-    // whose base URL carried a literal `{host`, and the only diagnostic was the unused-variable
-    // `W011`, naming the wrong cause. The template grammar admits a brace only as one side of a
+    // Regression for #705: an unmatched `{`, as in `https://{host`, is rejected as `E011` at the
+    // server rather than generating a base URL that carries a literal `{host`. The template grammar admits a brace only as one side of a
     // `{name}` reference with a non-empty name, so every other brace is rejected at the server.
     for url in [
         "https://{host",

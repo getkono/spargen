@@ -373,7 +373,7 @@ components:
 
 #[test]
 fn documented_response_headers_get_typed_accessors() {
-    // Regression: `response.headers` was dropped entirely, with no diagnostic.
+    // A response's documented `headers` each get a typed accessor on the generated response.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0

@@ -912,8 +912,8 @@ fn w002_a_dangling_ref_in_a_webhook_body_is_not_e004() {
 
 #[test]
 fn path_item_ref_resolves_into_operations() {
-    // Regression: a Path Item `$ref` was ignored outright, so the path contributed no operations
-    // and the client silently generated with fewer methods than the document describes.
+    // A Path Item `$ref` resolves into the operations it holds, so the client has a method for
+    // every operation the document describes.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
