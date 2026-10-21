@@ -242,6 +242,27 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
     }
 }
 
+/// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
+/// holds every element name it writes to. A component key is not held to it: `[a-zA-Z0-9._-]+`
+/// admits a leading digit, `-` or `.`.
+fn is_xml_name(name: &str) -> bool {
+    fn is_start(ch: char) -> bool {
+        matches!(ch,
+            ':' | 'A'..='Z' | '_' | 'a'..='z'
+            | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+            | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+            | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+    }
+    fn is_char(ch: char) -> bool {
+        is_start(ch)
+            || matches!(ch,
+                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+    }
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_start) && chars.all(is_char)
+}
+
 /// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on
 /// any type that is not XML-dedicated (`W006`), apply root `xml.name`s, and report each hint the
 /// codec cannot honour (`E009` on a type an XML body reaches, `W006` elsewhere).
@@ -258,10 +279,10 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
 /// whoever else uses the type, and the field name of an array property whose items are that struct
 /// (unless the items name their elements themselves); a component struct an XML body reaches with
-/// no root `xml.name` takes its component name as its XML root name; and every hint the codec
-/// cannot honour — a
-/// field's, an items', a root's, or one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is
-/// `E009` on a type an XML body reaches and `W006` elsewhere.
+/// no root `xml.name` takes its component name as its XML root name, or reports it (`W006`) where
+/// it is no XML name; and every hint the codec cannot honour — a field's, an items', a root's, or
+/// one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is `E009` on a type an XML body reaches
+/// and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
@@ -430,18 +451,38 @@ pub(super) fn gate_xml_field_renames(
     // So a struct lowered from a schema directly under `components.schemas` takes that name as its
     // XML root name; codegen writes it only where it differs from the struct's identifier. Only a
     // struct some XML body reaches takes it: on any other, the name moves no wire. It is set after
-    // the item names above, which follow an explicit root `xml.name` only.
-    let inferred: Vec<(TypeId, String)> = graph
+    // the item names above, which follow an explicit root `xml.name` only. A component key that is
+    // no XML name would make quick-xml refuse every serialization of the body at run time, so it
+    // is reported (`W006`) and not applied, and the struct keeps its Rust name.
+    let inferred: Vec<(TypeId, String, Provenance)> = graph
         .emitted()
         .filter(|(id, def)| {
             xml_reachable.contains(id)
                 && matches!(def.kind, TypeKind::Struct(_))
                 && graph.xml_root_name(*id).is_none()
         })
-        .filter_map(|(id, def)| Some((id, component_name(&def.provenance.pointer)?)))
+        .filter_map(|(id, def)| {
+            let name = component_name(&def.provenance.pointer)?;
+            let at = meet_locations.get(&id).unwrap_or(&def.provenance).clone();
+            Some((id, name, at))
+        })
         .collect();
-    for (id, name) in inferred {
-        graph.set_xml_root_name(id, name);
+    for (id, name, at) in inferred {
+        if is_xml_name(&name) {
+            graph.set_xml_root_name(id, name);
+        } else {
+            Diagnostic::warning(Code::XmlHintIgnored, at)
+                .message(format!(
+                    "component name `{name}` is not an XML name, so the element name OpenAPI \
+                     infers from it is not applied: an XML body serializes this struct under its \
+                     generated Rust type name instead"
+                ))
+                .remedy(
+                    "give the schema a root `xml.name` that is an XML name (a letter, `_` or `:` \
+                     first, then letters, digits, `-`, `.`, `_` or `:`), or rename the component",
+                )
+                .emit(diags);
+        }
     }
     for (_, root, target, at) in ref_sites {
         unsupported_reports.push((
