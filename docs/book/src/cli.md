@@ -95,6 +95,14 @@ spargen lock <SPEC> [--format <human|json>]
 
 Commit `.spargen/vendor/`, `spargen.lock`, the root document, and all relative source files.
 
+A fetch that fails (an error status, a refused connection) is reported as `E025` and fails the
+command, but what it leaves on disk is still a usable lock. Every document it did fetch is
+re-vendored and re-pinned at what the server served. A document it could not fetch, and any
+document reachable only through it, keeps the pin the earlier `spargen.lock` held, beside the
+vendored copy the earlier run wrote, so `check` and builds keep resolving it offline. A pin this
+run did not refresh stays until a `spargen lock` in which every fetch succeeds rewrites the lock
+from scratch.
+
 ## `spargen explain`
 
 Show the extended documentation behind a stable diagnostic code.
