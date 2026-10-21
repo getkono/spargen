@@ -329,15 +329,86 @@ fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
 
     let report = diff_configured(&old, &new, |spec| spec.carve(true), |spec| spec.carve(true));
     assert_eq!(kinds(&report), [ChangeKind::OperationAdded], "{report:?}");
-    assert!(
-        report
-            .changes
-            .iter()
-            .all(|change| !change.location.contains("getBad")
-                && !change.location.contains("get_bad")),
-        "the carved operation is on neither surface: {report:?}"
-    );
     assert_eq!(report.bump, Impact::Minor);
+
+    // The carved operation is on neither surface: each carved side diffs clean against the same
+    // spec written without `/bad` and not carved, where a surviving `GET /bad` would be a removal
+    // or an addition.
+    let carve = |spec: Spec| spec.carve(true);
+    let old_without_bad = base();
+    let new_without_bad = spec("", "id", PET_PROPS, EXTRA_OP);
+    let old_side = unsnapshotted_diff(&old, &old_without_bad, carve, |spec| spec);
+    assert!(old_side.changes.is_empty(), "{old_side:?}");
+    let new_side = unsnapshotted_diff(&new_without_bad, &new, |spec| spec, carve);
+    assert!(new_side.changes.is_empty(), "{new_side:?}");
+}
+
+/// A spec with two operations carve can omit (`E006`) and a root-level rejection no omit rule
+/// reaches (`E002`, an unsupported `jsonSchemaDialect`): the carve driver omits both operations and
+/// then cannot make the rest lower.
+const UNCARVABLE: &str = "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://example.com/dialect
+paths:
+  /bad:
+    get:
+      operationId: getBad
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $dynamicRef: '#meta' }
+  /worse:
+    get:
+      operationId: getWorse
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $dynamicRef: '#meta' }
+";
+
+/// With `carve` set, a side the carve driver cannot make lower is rejected with the carve driver's
+/// own report, the one `check` returns under carve: it carries a `W009` for each construct carved
+/// before the driver gave up, and `batch_cap` does not bound it.
+#[test]
+fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_path = temp.path().join("old.yaml");
+    let new_path = temp.path().join("new.yaml");
+    std::fs::write(&old_path, base()).unwrap();
+    std::fs::write(&new_path, UNCARVABLE).unwrap();
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()).carve(true);
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap())
+        .carve(true)
+        .batch_cap(1);
+
+    let rejection = spargen::diff(&old, &new).expect_err("the new side cannot be carved to lower");
+    assert!(rejection.old_spec().is_none(), "{rejection}");
+    let report = rejection.new_spec().expect("the new side is rejected");
+    assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
+    assert!(!report.truncated(), "{report:#?}");
+    assert!(report.diagnostics().len() > 1, "{report:#?}");
+    let carved = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_str() == "W009")
+        .count();
+    assert_eq!(carved, 2, "one W009 per carved operation: {report:#?}");
+    let residual: Vec<_> = report
+        .errors()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(residual, ["E002"], "{report:#?}");
+
+    // `check` under carve returns the same report for the same spec.
+    let checked = spargen::check(&new);
+    assert_eq!(
+        format!("{:?}", checked.diagnostics()),
+        format!("{:?}", report.diagnostics())
+    );
 }
 
 /// A document that never lowers, for the rejection fixtures.
