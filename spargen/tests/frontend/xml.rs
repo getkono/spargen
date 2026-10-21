@@ -806,6 +806,41 @@ components:
     assert!(renames("JsonItem").is_empty(), "{code}");
 }
 
+/// A document whose only XML construct is an XML body still names that body's root element after
+/// its component: no `xml` object anywhere, so nothing but the body itself sets the name.
+#[test]
+fn a_component_name_names_an_xml_body_with_no_xml_object_in_the_document() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/pet-item' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    pet-item:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    assert_eq!(
+        struct_attributes(&code, "PetItem")
+            .into_iter()
+            .filter(|line| line.starts_with("#[serde(rename"))
+            .collect::<Vec<_>>(),
+        [r#"#[serde(rename = "pet-item")]"#],
+        "{code}"
+    );
+}
+
 /// The inline schema of an XML body has no component name to infer the element from, so OpenAPI
 /// requires its `xml.name`; that name is honoured the same way.
 #[test]
