@@ -122,15 +122,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// collapse must count to deny `null`, as the sibling spelling does, and it stays. So it does
     /// beside a variant that accepts `null` itself, such as an exact-null branch's `()`
     /// (`[ {}, { const: null } ]`, or a `$ref` to such a component).
+    ///
+    /// The union members are met first, whatever order the `allOf` writes them in
+    /// ([`Self::union_members_first`]), so each union is met branch by branch with the rest, as
+    /// the sibling spelling meets it (#678).
     fn combine_scalar_union_members(
         &mut self,
         schema: &Schema,
         hint: &str,
-        mut contributions: Vec<Contribution>,
+        contributions: Vec<Contribution>,
         union_members: &[(usize, &Schema)],
         held: Vec<HeldUntypedWarning>,
         lowerings: Vec<(Provenance, Range<u32>)>,
     ) -> Option<Ty> {
+        let (mut contributions, union_members) =
+            self.union_members_first(contributions, union_members);
+        let union_members = union_members.as_slice();
         if self.several_unions_beside_object(union_members, &contributions, false) {
             self.report_held_untyped_warnings(held);
             return self.reject_all_of_several_unions(schema);
@@ -229,6 +236,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.report_held_untyped_warnings(held);
         met
+    }
+
+    /// `contributions` with the members `union_members` records as a union — an inline
+    /// `oneOf`/`anyOf`, or a `$ref` to one — moved ahead of the rest, each group in the order it
+    /// was gathered, and `union_members` with the slots moved alike. The scalar meet nests the
+    /// later member under each branch of the earlier one, so a union member written after a
+    /// `type` member that is a union of its own was met as each of that member's branches, and
+    /// collapsed with `W001`, where written before it, it was met branch by branch and was not
+    /// (#675, #678). Met first in every order, it is met as the sibling spelling meets it.
+    fn union_members_first<'s>(
+        &self,
+        contributions: Vec<Contribution>,
+        union_members: &[(usize, &'s Schema)],
+    ) -> (Vec<Contribution>, Vec<(usize, &'s Schema)>) {
+        let is_union = |member: &Schema| {
+            schema_has_union(member)
+                || member.reference.as_deref().is_some_and(|reference| {
+                    self.ref_target_body(reference, &member.provenance)
+                        .is_some_and(|target| schema_has_union(&target))
+                })
+        };
+        let unions: HashSet<usize> = union_members
+            .iter()
+            .filter(|(_, member)| is_union(member))
+            .map(|(slot, _)| *slot)
+            .collect();
+        let mut order: Vec<usize> = (0..contributions.len()).collect();
+        order.sort_by_key(|slot| !unions.contains(slot));
+        let moved: Vec<usize> = {
+            let mut moved = vec![0; order.len()];
+            for (to, &from) in order.iter().enumerate() {
+                moved[from] = to;
+            }
+            moved
+        };
+        let mut slots: Vec<Option<Contribution>> = contributions.into_iter().map(Some).collect();
+        let contributions = order
+            .iter()
+            .filter_map(|&from| slots[from].take())
+            .collect();
+        let union_members = union_members
+            .iter()
+            .map(|&(slot, member)| (moved.get(slot).copied().unwrap_or(slot), member))
+            .collect();
+        (contributions, union_members)
     }
 
     /// Whether an `allOf` merge whose gathered `contributions` hold an object member would meet
