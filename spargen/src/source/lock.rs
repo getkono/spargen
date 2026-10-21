@@ -572,4 +572,29 @@ mod tests {
         assert!(!path.contains(".."), "{path}");
         assert!(!path.starts_with('/'), "{path}");
     }
+
+    /// Distinct URLs never share a vendored file (#713): the scheme, the query, and characters
+    /// the sanitizer maps to `_` all distinguish the paths their URLs vendor to.
+    #[cfg(feature = "remote-fetch")]
+    #[test]
+    fn distinct_urls_vendor_to_distinct_paths() {
+        for (left, right) in [
+            (
+                "https://example.com/a.yaml?v=1",
+                "https://example.com/a.yaml?v=2",
+            ),
+            ("http://example.com/a.yaml", "https://example.com/a.yaml"),
+            (
+                "https://example.com/a b.yaml",
+                "https://example.com/a_b.yaml",
+            ),
+            ("https://example.com/a.yaml", "https://example.com/a.yaml?"),
+        ] {
+            assert_ne!(
+                vendor_path_for_url(left),
+                vendor_path_for_url(right),
+                "`{left}` and `{right}` share a vendored file"
+            );
+        }
+    }
 }
