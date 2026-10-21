@@ -547,24 +547,73 @@ fn form_body_emits_properties_in_the_declared_order() {
     );
 }
 
+/// The shape codegen emits for a body with a typed `additionalProperties`: declared fields, an
+/// optional one skipped when `None`, then the flattened overflow map.
+#[derive(serde::Serialize)]
+struct OverflowBody<V> {
+    a: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    b: Option<&'static str>,
+    #[serde(flatten)]
+    overflow: std::collections::BTreeMap<&'static str, V>,
+}
+
+impl<V> OverflowBody<V> {
+    fn additional(&self, mode: FormMode) -> Option<(FormMode, usize)> {
+        Some((mode, self.overflow.len()))
+    }
+}
+
+const OVERFLOW_PROPERTIES: [FormProperty; 2] = [
+    FormProperty {
+        name: "a",
+        mode: FormMode::Text,
+    },
+    FormProperty {
+        name: "b",
+        mode: FormMode::Text,
+    },
+];
+
 #[test]
 fn form_body_sends_additional_members_after_the_declared_ones() {
     // Issue #697: a typed `additionalProperties` overflow was dropped from the wire. Its members
     // follow the declared properties, ordered by key, in the mode lowering resolved for their
-    // type; a declared name is never sent twice, and a `null` member is omitted.
-    let body = serde_json::json!({ "a": "x", "z": "last", "b c": "y&z", "n": null });
-    let properties = [FormProperty {
-        name: "a",
-        mode: FormMode::Text,
-    }];
+    // type, and a `null` member is omitted.
+    let body = OverflowBody {
+        a: "x",
+        b: Some("y"),
+        overflow: [("z", Some("last")), ("b c", Some("y&z")), ("n", None)].into(),
+    };
     assert_eq!(
-        serialize_form_body(&body, &properties, Some(FormMode::Text)).unwrap(),
-        "a=x&b%20c=y%26z&z=last"
+        serialize_form_body(&body, &OVERFLOW_PROPERTIES, body.additional(FormMode::Text)).unwrap(),
+        "a=x&b=y&b%20c=y%26z&z=last"
     );
-    let body = serde_json::json!({ "a": "x", "extra": [1, 2] });
+    let body = OverflowBody {
+        a: "x",
+        b: None,
+        overflow: [("extra", [1, 2])].into(),
+    };
     assert_eq!(
-        serialize_form_body(&body, &properties, Some(FormMode::Json)).unwrap(),
+        serialize_form_body(&body, &OVERFLOW_PROPERTIES, body.additional(FormMode::Json)).unwrap(),
         "a=x&extra=%5B1%2C2%5D"
+    );
+}
+
+#[test]
+fn form_body_sends_the_declared_value_under_a_colliding_overflow_key() {
+    // An overflow key that repeats a declared property's name is serialized after the declared
+    // field, and a `serde_json::Value` map would keep the overflow's entry. The declared value is
+    // the one sent, under the declared mode, and nothing is sent when the declared field is
+    // `None`, as in a multipart body.
+    let body = OverflowBody {
+        a: "declared",
+        b: None,
+        overflow: [("a", "overflow-a"), ("b", "overflow-b"), ("c", "kept")].into(),
+    };
+    assert_eq!(
+        serialize_form_body(&body, &OVERFLOW_PROPERTIES, body.additional(FormMode::Json)).unwrap(),
+        "a=declared&c=%22kept%22"
     );
 }
 

@@ -84,13 +84,25 @@ pub(super) fn body_send_tokens(
                     // runtime and cannot express a per-property content type.
                     let properties = form_properties_tokens(&encoding);
                     // The typed `additionalProperties` members, rendered in their type's default
-                    // mode; `None` when the body has no typed overflow to send.
-                    let additional = match &encoding.additional {
-                        Some(mode) => {
+                    // mode, with the overflow map's length, which tells the runtime how many of
+                    // the serialized members are overflow; `None` when the body has no typed
+                    // overflow to send.
+                    let additional = match (&encoding.additional, names.struct_overflow.get(&ty.id))
+                    {
+                        (Some(mode), Some(overflow)) => {
                             let mode = form_mode_tokens(mode);
-                            quote! { Some(#mode) }
+                            let len = if ty.nullable {
+                                quote! {
+                                    #body_binding
+                                        .as_ref()
+                                        .map_or(0, |body| body.#overflow.len())
+                                }
+                            } else {
+                                quote! { #body_binding.#overflow.len() }
+                            };
+                            quote! { Some((#mode, #len)) }
                         }
-                        None => quote! { None },
+                        _ => quote! { None },
                     };
                     quote! {
                         const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];

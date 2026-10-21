@@ -2626,7 +2626,7 @@ fn multipart_parts_carry_their_resolved_content_types() {
 /// multipart bodies, as they do on JSON (#697): after the declared properties, ordered by key, in
 /// their type's default encoding — a text form field for a string, a JSON part under
 /// `application/json` for an integer array. An overflow key repeating a declared name is not sent
-/// a second time.
+/// a second time, and on both media the declared property's value is the one sent.
 #[test]
 fn additional_properties_reach_form_and_multipart_bodies() {
     let (base, server) = capture_one_request();
@@ -2637,6 +2637,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
             additional: [
                 ("z".to_owned(), "last".to_owned()),
                 ("b c".to_owned(), "y&z".to_owned()),
+                ("a".to_owned(), "overflow".to_owned()),
             ]
             .into_iter()
             .collect(),
@@ -2662,6 +2663,9 @@ fn additional_properties_reach_form_and_multipart_bodies() {
     let request = server.join().unwrap();
     assert!(request.starts_with("POST /upload/additional HTTP/1.1"), "{request}");
     assert_eq!(request.matches("name=\"caption\"").count(), 1, "{request}");
+    let caption = &request[request.find("name=\"caption\"").unwrap()..];
+    let (_, caption) = caption.split_once("\r\n\r\n").unwrap();
+    assert!(caption.starts_with("c\r\n"), "{caption}");
     let position = request
         .find("name=\"scores\"")
         .unwrap_or_else(|| panic!("{request}"));
