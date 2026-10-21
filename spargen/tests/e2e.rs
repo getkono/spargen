@@ -4199,6 +4199,10 @@ fn xml_body_types_carry_attribute_and_rename() {
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
+    // Without a root `xml.name`, the component name `xml-receipt` names the root element, as
+    // OpenAPI infers it, in place of the Rust type's name.
+    let xml = quick_xml::se::to_string(&receipt).unwrap();
+    assert_eq!(xml, "<xml-receipt><ReceiptCode>OK</ReceiptCode></xml-receipt>");
     // A present optional element is decoded as the field's own type through its present-value
     // deserializer, not through quick-xml's `Option` handling.
     let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
@@ -5999,7 +6003,7 @@ paths:
           content:
             application/xml:
               schema:
-                $ref: "#/components/schemas/XmlReceipt"
+                $ref: "#/components/schemas/xml-receipt"
   # A bodyless `304` beside a bodied `default` and no success status: the `304` is its own unit
   # variant ahead of `Default`, where it once matched `default` and had its empty body decoded.
   /conditional:
@@ -6301,7 +6305,7 @@ paths:
           content:
             application/xml:
               schema:
-                $ref: "#/components/schemas/XmlReceipt"
+                $ref: "#/components/schemas/xml-receipt"
   # Request bodies whose media key is not their codec's canonical name: a JSON Merge Patch body is
   # serialized as JSON and a `text/xml` body as XML, and each goes out under the `Content-Type` it
   # declares rather than `application/json` / `application/xml`.
@@ -6631,7 +6635,7 @@ paths:
           content:
             application/xml:
               schema:
-                $ref: "#/components/schemas/XmlReceipt"
+                $ref: "#/components/schemas/xml-receipt"
         "204":
           description: No Content
   # An exact `200` beside an overlapping `2XX` range, each with its own body: dispatch is exact
@@ -7259,8 +7263,9 @@ components:
         sku:
           type: string
     # XML response body: `code` renamed via `xml.name`; `note` carries an unsupported
-    # `xml.namespace` hint (→ W006, still generates).
-    XmlReceipt:
+    # `xml.namespace` hint (→ W006, still generates). With no root `xml.name`, the component name,
+    # which is no Rust identifier, names the root element of the `XmlReceipt` struct.
+    xml-receipt:
       type: object
       required: [code]
       properties:

@@ -6545,6 +6545,7 @@ pub mod types {
     pub type XmlOrderid = i64;
     pub type XmlOrdersku = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "xml-receipt")]
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptcode,
