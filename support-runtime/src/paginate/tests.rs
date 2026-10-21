@@ -115,6 +115,26 @@ fn comma_inside_quoted_param_is_not_a_separator() {
 }
 
 #[test]
+fn angle_bracket_inside_quoted_param_opens_no_uri() {
+    // Entry splitting respects `<…>` only outside a quoted string: the `<` in the title is text,
+    // so the comma after the closing quote still separates the two entries.
+    assert_eq!(
+        next_of(r#"<https://x/1>; title="a<b", <https://x/2>; rel="next""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn angle_bracket_in_param_section_does_not_hide_a_semicolon() {
+    // Parameter splitting ignores angle brackets: an unclosed `<` in a parameter value leaves the
+    // following `;` a separator, so the `rel` after it is still read.
+    assert_eq!(
+        next_of("<https://x/2>; title=<x; rel=next"),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
 fn malformed_input_yields_none_without_panic() {
     assert_eq!(next_of("garbage without brackets; rel=next"), None);
     assert_eq!(next_of("<unterminated; rel=next"), None);

@@ -978,10 +978,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// caller reports the empty composition.
     ///
     /// `intersect_types` collapses an empty non-null meet that admits `null` to the null type, so
-    /// the `$ref`-sibling spelling of the same conjunction already lowered to `()`; rejecting it
-    /// here split the spellings of one conjunction (#542), as #450 removed for a nullable union
-    /// refined to nothing but `null`. The meets inserted since `mark` reach nothing the null type
-    /// refers to, so they are discarded, and the null type is the final graph insert.
+    /// the `$ref`-sibling spelling of the same conjunction lowers to `()`; rejecting it here would
+    /// split the spellings of one conjunction (#542), as a nullable union refined to nothing but
+    /// `null` is not split either (#450). The meets inserted since `mark` reach nothing the null
+    /// type refers to, so they are discarded, and the null type is the final graph insert.
     ///
     /// [`schema_is_object_like`]: super::combine::schema_is_object_like
     pub(super) fn null_only_all_of(
@@ -1008,7 +1008,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `const` reaches no contribution, yet still constrains every value of the meet (#569). A
     /// member lowered as a contribution of its own is read by the same conjunction, since its
     /// lowering does not: `{ type: [string, 'null'], enum: [a] }` lowers to a nullable enum though
-    /// its `enum` refuses `null`, and a union member beside it then took that `null` (#649). A
+    /// its `enum` refuses `null`, and a union member beside it would take that `null` (#649). A
     /// component or remote `$ref` lowers to a type, which carries its nullability already.
     pub(super) fn flattened_keywords_admit_null(&self, schema: &Schema) -> bool {
         own_keywords_admit_null(schema)
@@ -1124,11 +1124,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// where the union's branches leave it undecided and still match it by the union's own rule
     /// ([`Self::union_admits_null_undecided`]), such as untyped `items` branches of an `anyOf`, so
     /// the meet admits `null` exactly where every other member does (#621). Lowered on its own,
-    /// such a union denies `null` for want of a decision, and the meet then denied it even beside
-    /// `type: [array, 'null']`, where the object spelling's meet keeps it. A member that lowers to
-    /// `Value` decides nothing, so with no member of any other type the union keeps the answer it
-    /// has on its own. `union` may also be an `allOf` wrapping such a union, which a `$ref` member
-    /// names ([`Self::admits_null_undecided_through_union`], #638).
+    /// such a union denies `null` for want of a decision, and read that way the meet would deny it
+    /// even beside `type: [array, 'null']`, where the object spelling's meet keeps it. A member
+    /// that lowers to `Value` decides nothing, so with no member of any other type the union keeps
+    /// the answer it has on its own. `union` may also be an `allOf` wrapping such a union, which a
+    /// `$ref` member names ([`Self::admits_null_undecided_through_union`], #638).
     pub(super) fn union_member_takes_scalar_null<'c>(
         &self,
         mut ty: Ty,
@@ -1287,7 +1287,7 @@ pub(super) fn stated_nullability(schema: &Schema) -> Option<bool> {
 /// A plain untyped body — no `type`, no `enum` or `const`, no `$ref` and no composition
 /// — is the inline untyped member written as a component: it admits `null` and decides nothing, as
 /// [`stated_nullability`] reads the inline spelling. Anything else keeps its lowered nullability as
-/// the decision it was before, except that [`LowerCtx::ref_target_decides_null`] reads a `$ref`
+/// its decision, except that [`LowerCtx::ref_target_decides_null`] reads a `$ref`
 /// target's `allOf` body through its members (issue #565).
 fn target_decides_null(schema: &Schema) -> bool {
     stated_nullability(schema).is_some()

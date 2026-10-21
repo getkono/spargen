@@ -1,7 +1,6 @@
 //! # support-runtime
 //!
-//! The freestanding runtime support code shipped *inside* every spargen-generated client: the
-//! dispatch routines, the error taxonomy, [`ResponseValue<T>`], and auth plumbing. It is real,
+//! The freestanding runtime support code shipped *inside* every spargen-generated client. It is real,
 //! standalone-compilable source (compiled and linted here in its own right) that spargen embeds
 //! into generated output: its `support` subsystem carries each file via `include_str!`, and
 //! `codegen` emits the text above each file's test module, with `crate::` rewritten to

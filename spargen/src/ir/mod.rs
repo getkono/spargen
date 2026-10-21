@@ -11,6 +11,7 @@ mod auth;
 mod invariant;
 mod media;
 mod operation;
+mod responses;
 mod types;
 
 use std::collections::BTreeSet;
@@ -22,12 +23,15 @@ pub(crate) use auth::{
 };
 pub(crate) use invariant::check_invariants;
 pub(crate) use media::{
-    ApiErrorBodyImpl, BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType,
-    PropertyEncoding, RequestBody, Response, ResponseHeader, Responses, StatusSpec, SuccessShape,
+    BodyEncoding, EncodingMode, Framing, MediaType, PropertyEncoding, RequestBody,
 };
 pub(crate) use operation::{
     Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
     PathTemplate,
+};
+pub(crate) use responses::{
+    ApiErrorBodyImpl, ErrorShape, HeaderShape, Response, ResponseHeader, Responses, StatusSpec,
+    SuccessShape,
 };
 pub(crate) use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,

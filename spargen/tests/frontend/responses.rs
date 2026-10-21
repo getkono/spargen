@@ -683,6 +683,8 @@ paths:
 "##;
     let (report, code) = generate_with_code(spec);
     assert!(!code.contains("pub x_detail:"), "{code}");
+    // The skipped header's type is not emitted either: nothing names it (#927).
+    assert!(!code.contains("HeaderXDetail"), "{code}");
     for report in [report, check(spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert_eq!(
@@ -700,7 +702,7 @@ paths:
 fn w011_a_textual_content_response_header_that_is_not_a_single_value_is_reported() {
     // Textual content carries the field value verbatim, so a list says nothing about how the value
     // is framed — and `simple` is not that framing.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -724,6 +726,43 @@ paths:
         has_code(&report, Code::DeclarationHasNoEffect),
         "{report:#?}"
     );
+    // The skipped header's type is not emitted either: nothing names it (#927).
+    assert!(!code.contains("HeaderXDetail"), "{code}");
+}
+
+#[test]
+fn a_skipped_response_header_keeps_the_component_it_refs_emitted() {
+    // Eliding the types a `W011`-skipped header lowered (#927) must not reach a `$ref`'d
+    // component: the header lowers it first, and its memo hands the same type to the body that
+    // names it afterwards.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              schema: { $ref: "#/components/schemas/Detail" }
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Detail" } }
+components:
+  schemas:
+    Detail:
+      oneOf: [{ type: string }, { type: integer }]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+    assert!(code.contains("pub enum Detail "), "{code}");
+    assert_check_agrees(&report, &check(spec));
 }
 
 /// A Responses key the specification does not define, reached through a Path Item `$ref`.
