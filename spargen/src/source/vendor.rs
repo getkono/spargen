@@ -93,7 +93,7 @@ fn serialize_path<S: serde::Serializer>(
 }
 
 #[derive(Clone)]
-enum Base {
+pub(super) enum Base {
     Local(Utf8PathBuf),
     Remote(String),
 }
@@ -106,7 +106,7 @@ struct ScanDoc {
 /// What a document's OpenAPI 3.2 `$self` makes it, read exactly as the build's
 /// `InputBundle::register_self_identity` reads it, so `spargen lock` resolves each relative `$ref`
 /// to the document the build will ask for (#426).
-enum SelfIdentity {
+pub(super) enum SelfIdentity {
     /// An `http`/`https` URL: the base the document's relative references resolve against, and a
     /// URL a reference reaches the document by.
     Remote(String),
@@ -122,7 +122,7 @@ enum SelfIdentity {
 /// none (or an empty or fragment-only one). A remote document's relative `$self` is resolved
 /// against the URL it was retrieved from; a local document's relative `$self` against its own
 /// path. A non-`http(s)` `$self` with a scheme is opaque in either.
-fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
+pub(super) fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
     let (identity, _) = split_fragment(value.get("$self")?.as_str()?);
     if identity.is_empty() {
         return None;
@@ -445,7 +445,7 @@ pub(crate) fn vendor(
 
 /// Parse text into a value tree for ref-scanning only, discarding parse diagnostics. Chooses the
 /// format by the `.json`/`.yaml`/`.yml` suffix of `name` (a path or URL), else tries YAML then JSON.
-fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
+pub(super) fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
     let id = crate::diag::FileId(0);
     let lowered = name
         .split(['?', '#'])

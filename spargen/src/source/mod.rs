@@ -23,6 +23,11 @@ mod value;
 #[cfg(feature = "remote-fetch")]
 mod vendor;
 
+// The lock walk's and the build's `$self`, format and `http(s)` readings, held to one table. Gated
+// as `vendor` is, since it calls into the lock walk.
+#[cfg(all(test, feature = "remote-fetch"))]
+mod selfid_diff_tests;
+
 pub(crate) use bundle::InputBundle;
 pub(crate) use parse::{parse_json, parse_yaml};
 pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, SpannedValue};
