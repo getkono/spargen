@@ -48,8 +48,7 @@ pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
 
 /// A single diagnostic emitted during a pipeline run.
 ///
-/// Every field is public, so a caller reads each one directly. spargen builds its own diagnostics
-/// through the crate-internal `Diagnostic::error` and `Diagnostic::warning` builders.
+/// Every field is public, so a caller reads each one directly.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {
     /// The stable, documented code (`E###`/`W###`).
