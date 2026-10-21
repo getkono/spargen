@@ -214,7 +214,7 @@ fn audit_in(
                 items
                     .iter()
                     .filter_map(toml::Value::as_str)
-                    .any(|item| item == "dep:tokio" || item == "tokio")
+                    .any(enables_tokio)
             });
         if !wired {
             diagnostics.push(diagnostic(
@@ -231,6 +231,18 @@ fn audit_in(
         diagnostics,
         manifests,
     }
+}
+
+/// Whether one entry of a Cargo feature's list enables the optional `tokio` dependency:
+/// `"dep:tokio"`, the implicit feature `"tokio"`, or a dependency feature `"tokio/<feature>"`,
+/// which enables the dependency along with its feature. The weak form `"tokio?/<feature>"` enables
+/// a feature only of a tokio something else already enables, so it does not count.
+fn enables_tokio(item: &str) -> bool {
+    item == "dep:tokio"
+        || item == "tokio"
+        || item
+            .strip_prefix("tokio/")
+            .is_some_and(|feature| !feature.is_empty())
 }
 
 /// Whether the consumer manifest declares a Cargo feature of its own by this name.
