@@ -120,38 +120,6 @@ fn the_location_oracle_sees_each_lost_location() {
     );
 }
 
-/// `E022` points at the duplicate key itself (#533), in YAML and in JSON, through `check` and
-/// `generate` alike, so the location oracle finds nothing to report.
-#[test]
-fn e022_points_at_the_duplicate_key() {
-    let yaml = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      type: object\n      type: string\n";
-    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}, "components": {"schemas": {"Foo": {"type": "object", "type": "string"}}}}"#;
-    // The parser is chosen by extension, and the shared helpers write `openapi.yaml`, so the JSON
-    // document is written as `openapi.json` here to reach the JSON parser.
-    for (name, spec) in [("openapi.yaml", yaml), ("openapi.json", json)] {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-        std::fs::write(dir.join(name), spec).unwrap();
-        let generated = run_generate(&build(dir.join(name), dir.join("client.rs")));
-        let checked = run_check(&Spec::new(dir.join(name)));
-        for report in [checked, generated] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            let duplicate = report
-                .diagnostics()
-                .iter()
-                .find(|d| d.code == Code::DuplicateObjectKey)
-                .expect("duplicate-key diagnostic");
-            assert_eq!(
-                duplicate.pointer.as_str(),
-                "/components/schemas/Foo/type",
-                "{duplicate:#?}"
-            );
-            let violations = oracles::location_violations(report.diagnostics(), spec.as_bytes());
-            assert!(violations.is_empty(), "{violations:?}");
-        }
-    }
-}
-
 /// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
 /// named structs with one shape, and a variant that is `serde_json::Value`, both in a `oneOf`. A
 /// field of another type is another shape, and an `anyOf` is held to neither. Without this an

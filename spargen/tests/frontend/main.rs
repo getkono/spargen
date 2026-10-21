@@ -49,6 +49,7 @@ mod servers;
 mod union_categories;
 mod union_nullability;
 mod unions;
+mod untyped_branch_nullability;
 mod xml;
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
