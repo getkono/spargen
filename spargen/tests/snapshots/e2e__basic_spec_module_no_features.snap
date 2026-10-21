@@ -6387,6 +6387,7 @@ pub mod types {
     pub type ResponseBody6bf58d24 = bytes::Bytes;
     pub type ResponseBody48bb7a8a = String;
     pub type ResponseBodyDbe5ca3a = bytes::Bytes;
+    pub type Id3e6bacfe = String;
     pub type MatrixItem = String;
     pub type Matrix = Vec<MatrixItem>;
     pub type LabelItem = String;
@@ -7314,6 +7315,10 @@ impl support::ApiErrorProblem for GetRawMultiError {
 #[allow(dead_code)]
 pub type SubmitOrderError = std::convert::Infallible;
 #[allow(dead_code)]
+pub type PatchMergeDocumentError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type SubmitLegacyOrderError = std::convert::Infallible;
+#[allow(dead_code)]
 pub type PostJsonMetaError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type StreamChatError = std::convert::Infallible;
@@ -7861,7 +7866,11 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body_07e95c71);
+        let body_07e95c71 = serde_json::to_vec(body_07e95c71)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body_07e95c71);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -9300,7 +9309,11 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -9745,6 +9758,81 @@ Response `409`: binary error*/
             )
         }
     }
+    ///Response `204`: patched
+    #[inline]
+    pub async fn patch_merge_document(
+        &self,
+        id: impl Into<types::Id3e6bacfe>,
+        body: &types::JsonMeta,
+    ) -> Result<support::ResponseValue<()>, support::Error<PatchMergeDocumentError>> {
+        let id: types::Id3e6bacfe = id.into();
+        let mut path = "/merge-patch/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::PATCH, url);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/merge-patch+json")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    PatchMergeDocumentError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: accepted
+    #[inline]
+    pub async fn submit_legacy_order(
+        &self,
+        body: &types::XmlOrder,
+    ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
+        let mut path = "/xml/legacy-order".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let body = support::to_xml(body).map_err(support::Error::widen)?;
+        request = request.header(reqwest::header::CONTENT_TYPE, "text/xml").body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitLegacyOrderError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
     ///Response `200`: OK
     #[inline]
     pub async fn post_json_meta(
@@ -9759,7 +9847,11 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -11021,6 +11113,28 @@ Response `409`: binary error*/
             support::Error<SubmitOrderError>,
         > {
             self.runtime.block_on(self.inner.submit_order(body))
+        }
+        ///Response `204`: patched
+        #[allow(deprecated)]
+        #[inline]
+        pub fn patch_merge_document(
+            &self,
+            id: impl Into<types::Id3e6bacfe>,
+            body: &types::JsonMeta,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<PatchMergeDocumentError>,
+        > {
+            self.runtime.block_on(self.inner.patch_merge_document(id, body))
+        }
+        ///Response `204`: accepted
+        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_legacy_order(
+            &self,
+            body: &types::XmlOrder,
+        ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
+            self.runtime.block_on(self.inner.submit_legacy_order(body))
         }
         ///Response `200`: OK
         #[allow(deprecated)]

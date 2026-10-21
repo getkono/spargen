@@ -56,17 +56,26 @@ pub(super) fn body_send_tokens(
             raw_bytes_send
         } else {
             match media {
-                MediaType::Json => {
-                    quote! { #request_binding = #request_binding.json(#body_binding); }
-                }
+                // JSON: serialized here rather than through `RequestBuilder::json`, which labels the
+                // body `application/json` whatever the media key says (on wasm it overwrites a
+                // header set before it), so an `application/*+json` body such as JSON Merge Patch
+                // goes out under its declared essence.
+                MediaType::Json => quote! {
+                    let #body_binding = serde_json::to_vec(#body_binding)
+                        .map_err(support::Error::request_construction)?;
+                    #request_binding = #request_binding
+                        .header(reqwest::header::CONTENT_TYPE, #content_type)
+                        .body(#body_binding);
+                },
                 // XML: serialize the typed body to an XML string via the runtime's quick-xml helper
-                // and set it as the body with the XML content-type. `to_xml` yields
-                // `Error<Infallible>`, widened to the operation's error type.
+                // and set it as the body under its declared essence (`application/xml`,
+                // `text/xml`, ...). `to_xml` yields `Error<Infallible>`, widened to the operation's
+                // error type.
                 MediaType::Xml => quote! {
                     let #body_binding = support::to_xml(#body_binding)
                         .map_err(support::Error::widen)?;
                     #request_binding = #request_binding
-                        .header(reqwest::header::CONTENT_TYPE, "application/xml")
+                        .header(reqwest::header::CONTENT_TYPE, #content_type)
                         .body(#body_binding);
                 },
                 MediaType::FormUrlEncoded => {

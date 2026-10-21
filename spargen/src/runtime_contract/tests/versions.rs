@@ -190,7 +190,6 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
     assert!(audit_manifest(CORE_MANIFEST, RuntimeRequirements::default()).is_empty());
 
     let requirements = RuntimeRequirements {
-        reqwest_json: true,
         reqwest_multipart: true,
         bytes_serde: true,
         streams: true,
@@ -204,10 +203,6 @@ fn conditional_dependencies_and_features_are_required_only_when_used() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `json` on `reqwest`"),
-        "{messages}"
-    );
     assert!(
         messages.contains("feature `multipart` on `reqwest`"),
         "{messages}"

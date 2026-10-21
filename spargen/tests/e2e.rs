@@ -2686,6 +2686,121 @@ fn a_byte_request_body_declares_its_content_type() {
     server.join().unwrap();
 }
 
+/// Serve one request with a `204`, handing the whole request (head and `Content-Length` body) back
+/// through the join handle.
+fn capture_one_request() -> (String, std::thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let read = stream.read(&mut buf).unwrap();
+            request.extend_from_slice(&buf[..read]);
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                assert_ne!(read, 0, "connection closed before the request head: {text}");
+                continue;
+            };
+            let length = text[..head_end]
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+            if request.len() >= head_end + 4 + length || read == 0 {
+                break;
+            }
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    (format!("http://{addr}"), server)
+}
+
+/// The `content-type` header lines of a captured request.
+fn content_type_lines(request: &str) -> Vec<&str> {
+    let head = request.split("\r\n\r\n").next().unwrap();
+    head.lines()
+        .filter(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+        .collect()
+}
+
+/// A JSON or XML request body goes out under the `Content-Type` its media key declares, exactly
+/// once, and is still encoded by its codec: an `application/merge-patch+json` body as JSON, a
+/// `text/xml` body as XML, and the canonical `application/json` / `application/xml` keys unchanged.
+#[test]
+fn a_json_or_xml_request_body_declares_its_content_type() {
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .patch_merge_document(
+            "d1",
+            &basic_client::types::JsonMeta {
+                id: 7,
+                sku: "S".to_owned(),
+                note: None,
+            },
+        )
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("PATCH /merge-patch/d1 HTTP/1.1"), "{request}");
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/merge-patch+json"],
+        "{request}"
+    );
+    assert!(request.ends_with(r#"{"id":7,"sku":"S"}"#), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .post_json_meta(&basic_client::types::JsonMeta {
+            id: 7,
+            sku: "S".to_owned(),
+            note: None,
+        })
+        .unwrap_err();
+    let request = server.join().unwrap();
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/json"],
+        "{request}"
+    );
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_legacy_order(&basic_client::types::XmlOrder {
+            id: 42,
+            sku: "ABC".to_owned(),
+        })
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("POST /xml/legacy-order HTTP/1.1"), "{request}");
+    assert_eq!(content_type_lines(&request), ["content-type: text/xml"], "{request}");
+    assert!(request.contains("<sku>ABC</sku>"), "{request}");
+
+    let (base, server) = capture_one_request();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    client
+        .submit_order(&basic_client::types::XmlOrder {
+            id: 42,
+            sku: "ABC".to_owned(),
+        })
+        .unwrap_err();
+    let request = server.join().unwrap();
+    assert_eq!(
+        content_type_lines(&request),
+        ["content-type: application/xml"],
+        "{request}"
+    );
+}
+
 #[test]
 fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5980,6 +6095,33 @@ paths:
             application/xml:
               schema:
                 $ref: "#/components/schemas/XmlReceipt"
+  # Request bodies whose media key is not their codec's canonical name: a JSON Merge Patch body is
+  # serialized as JSON and a `text/xml` body as XML, and each goes out under the `Content-Type` it
+  # declares rather than `application/json` / `application/xml`.
+  /merge-patch/{id}:
+    patch:
+      operationId: patchMergeDocument
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/JsonMeta"
+      responses:
+        "204": { description: patched }
+  /xml/legacy-order:
+    post:
+      operationId: submitLegacyOrder
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema:
+              $ref: "#/components/schemas/XmlOrder"
+      responses:
+        "204": { description: accepted }
   # JSON body carrying `xml` metadata (regression guard): the schema has `xml.attribute`
   # and `xml.name` hints but is used only by a JSON operation. The format-agnostic serde rename must
   # NOT be applied (it would corrupt JSON), so `JsonMeta` keeps its `id`/`sku` wire names — the
@@ -7280,10 +7422,9 @@ components:
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("feature `json` on `reqwest`"),
-        "{messages}"
-    );
+    // A JSON request body is serialized by `serde_json` and sent as bytes, so it needs no
+    // reqwest feature.
+    assert!(!messages.contains("`json`"), "{messages}");
     assert!(
         messages.contains("feature `serde` on `bytes`"),
         "{messages}"
@@ -7604,13 +7745,16 @@ fn workspace_inheritance_audit_agrees_with_cargo() {
         r##"openapi: 3.1.0
 info: { title: Inherited, version: 1.0.0 }
 paths:
-  /json:
+  /upload:
     post:
-      operationId: postJson
+      operationId: upload
       requestBody:
         content:
-          application/json:
-            schema: { type: string }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
       responses:
         "204": { description: ok }
 "##,
@@ -7627,7 +7771,7 @@ paths:
         .find(|dependency| dependency.name == "reqwest")
         .unwrap();
     assert!(
-        reqwest.no_default_features && reqwest.features.contains(&"json"),
+        reqwest.no_default_features && reqwest.features.contains(&"multipart"),
         "the cases below need a required feature and a required `default-features = false`: \
          {requirements:#?}"
     );
@@ -7726,7 +7870,7 @@ paths:
             member: &[
                 (
                     "reqwest",
-                    r#"reqwest = { workspace = true, features = ["json"] }"#,
+                    r#"reqwest = { workspace = true, features = ["multipart"] }"#,
                 ),
                 (
                     "serde",
@@ -7748,7 +7892,7 @@ paths:
                 "the member's default-features = false cannot turn off defaults the root leaves on",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -7760,7 +7904,7 @@ paths:
             name: "the same override, refused outright on edition 2024",
             root: &[(
                 "reqwest",
-                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["multipart"] }"#,
             )],
             member: &[(
                 "reqwest",
@@ -7925,8 +8069,8 @@ paths:
     assert_eq!(kinds.len(), 5, "{raised:#?}");
 }
 
-/// A spec that turns on every capability the requirement table knows: a JSON body (`reqwest/json`),
-/// a multipart body (`reqwest/multipart`), a binary array inside JSON (`bytes/serde`), an XML body
+/// A spec that turns on every capability the requirement table knows: a multipart body
+/// (`reqwest/multipart`), a binary array inside a JSON body (`bytes/serde`), an XML body
 /// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
 /// `format: date-time` (`time`). The advice round trip below is only as strong as the set it
 /// round-trips, so it asserts this spec really derives all of them.
@@ -8086,7 +8230,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
             .features
             .clone()
     };
-    for feature in ["json", "multipart", "stream"] {
+    for feature in ["multipart", "stream"] {
         assert!(
             features_of("reqwest").contains(&feature),
             "{requirements:#?}"
