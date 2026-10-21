@@ -22,6 +22,7 @@
 //!   * valid-skeleton documents wrapping random schemas, so lowering runs to completion;
 //!   * deep `$ref` chains that exercise the recursion depth guard (the stack-overflow vector this
 //!     issue found and fixed);
+//!   * block-style YAML nested past the parsers' nesting cap, up to issue #706's million levels;
 //!   * components whose root is a `$ref` beside random sibling keywords, over a random ref graph
 //!     (the release-mode assertion abort of issue #148).
 //!
@@ -308,6 +309,37 @@ fn arb_ref_chain() -> impl Strategy<Value = String> {
     })
 }
 
+/// The deepest a value may sit in a parsed document, the root at depth 0, in either parser.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// A skeleton document whose `x-deep` holds `depth` nested block-style YAML containers (sequences
+/// written `- - - x`, or mappings one indent apart) around the scalar `x`, which therefore sits at
+/// depth `depth + 1`. Depths straddle [`MAX_NESTING_DEPTH`], and the million-level sequence is
+/// issue #706's reproduction: block style is not bounded by the event parser, so it overflowed
+/// the frontend stack before the builder capped nesting. Mappings stay shallow because their
+/// indentation grows quadratically.
+fn arb_deep_yaml() -> impl Strategy<Value = (usize, String)> {
+    prop_oneof![
+        7 => (1usize..600, any::<bool>()),
+        1 => Just((1_000_000, false)),
+    ]
+    .prop_map(|(depth, mappings)| {
+        let mut nest = String::new();
+        if mappings {
+            for level in 1..depth {
+                nest.push_str(&format!("{}k:\n", " ".repeat(level)));
+            }
+            nest.push_str(&format!("{}k: x\n", " ".repeat(depth)));
+        } else {
+            nest.push_str(&format!("  {}x\n", "- ".repeat(depth)));
+        }
+        let text = format!(
+            "openapi: 3.1.0\ninfo: {{ title: t, version: 1.0.0 }}\npaths: {{}}\nx-deep:\n{nest}"
+        );
+        (depth, text)
+    })
+}
+
 /// Sibling keywords a `$ref` can carry, most of them bearing no shape (annotations, validation-only
 /// keywords, a `default`) and a few that do, so both of the `$ref` arm's exits are reached.
 const REF_SIBLINGS: &[(&str, &str)] = &[
@@ -511,4 +543,36 @@ fn check_never_panics_on_deep_ref_chains() {
         too_deep.get() > 0,
         "no ref chain reported E014, so the depth-cap reject path was never reached"
     );
+}
+
+#[test]
+fn check_never_panics_on_deeply_nested_yaml() {
+    let dir = TempDir::new().unwrap();
+    // How many documents stayed within the nesting cap, and how many crossed it.
+    let within = Cell::new(0u32);
+    let past = Cell::new(0u32);
+    deterministic_runner(32)
+        .run(&arb_deep_yaml(), |(depth, text)| {
+            let report = exercise(&dir, text.as_bytes(), "yaml")?;
+            let too_deep = report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::InvalidInput
+                    && diagnostic.message.contains("YAML nesting is too deep")
+            });
+            // The scalar sits at depth `depth + 1`, so the cap decides the outcome exactly.
+            if depth < MAX_NESTING_DEPTH {
+                prop_assert!(!too_deep, "depth {depth} is within the cap");
+                prop_assert_ne!(report.outcome(), Outcome::Rejected, "depth {}", depth);
+                within.set(within.get() + 1);
+            } else {
+                prop_assert!(too_deep, "depth {depth} is past the cap");
+                past.set(past.get() + 1);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        within.get() > 0,
+        "no document stayed within the nesting cap"
+    );
+    assert!(past.get() > 0, "no document crossed the nesting cap");
 }

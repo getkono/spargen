@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
-use spargen::{CargoIntegration, Outcome, Spec};
+use spargen::{CargoIntegration, Code, Outcome, Spec};
 
 #[path = "shared/remote.rs"]
 mod remote;
@@ -516,6 +516,66 @@ fn a_refused_connection_is_e025_naming_the_url() {
     // The cause, not only reqwest's "error sending request": the refused connect's own I/O
     // error, whose std rendering always carries the OS error number.
     assert!(message.contains("(os error "), "{message}");
+}
+
+/// A failed fetch is located at the `$ref` that names the URL, as `E003` for an unsupported
+/// reference is: its pointer, and its span in the root document, so a description with several
+/// remote references says which one failed.
+#[test]
+fn a_failed_fetch_is_located_at_the_root_ref_that_names_it() {
+    let server = MockServer::start(&[("/pet.yaml", Reply::Body(PET_YAML))]);
+    let fetched = server.url("/pet.yaml");
+    let gone = server.url("/gone.yaml");
+    // The second operation's reference fails; the first one's succeeds, so a location at the
+    // root or at the first reference would both be wrong.
+    let (_temp, spec_path) = remote::workspace(&[&fetched, &gone]);
+
+    let report = spargen::vendor(&Spec::new(spec_path.clone())).unwrap_err();
+
+    let failed: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains(&gone))
+        .collect();
+    assert_eq!(failed.len(), 1, "{report:#?}");
+    let diagnostic = failed[0];
+    assert_eq!(diagnostic.code, Code::RemoteFetchFailed, "{report:#?}");
+    assert_eq!(
+        diagnostic.pointer.as_str(),
+        "/paths/~1pet~1again/get/responses/200/content/application~1json/schema/$ref",
+        "{report:#?}"
+    );
+    let span = diagnostic.span.expect("a root reference carries its span");
+    let text = std::fs::read_to_string(&spec_path).unwrap();
+    assert!(
+        text[span.start.offset..span.end.offset].contains(&gone),
+        "{span:?} in {text}"
+    );
+}
+
+/// A failed fetch of a reference inside a fetched document keeps that reference's pointer in
+/// the fetched document's terms, and no span: every scanned document parses as `FileId(0)`, so
+/// only the root's spans name the file they lie in.
+#[test]
+fn a_failed_fetch_of_a_fetched_documents_ref_is_located_at_its_pointer_without_a_span() {
+    // `pet.yaml`'s `tag.yaml` is unrouted, so the mock answers `404`.
+    let server = MockServer::start(&[("/schemas/pet.yaml", Reply::Body(PET_YAML))]);
+    let tag_url = server.url("/schemas/tag.yaml");
+    let (_temp, spec_path) = workspace(&server.url("/schemas/pet.yaml"));
+
+    let report = spargen::vendor(&Spec::new(spec_path)).unwrap_err();
+
+    let diagnostics = report.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{report:#?}");
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, Code::RemoteFetchFailed, "{report:#?}");
+    assert!(diagnostic.message.contains(&tag_url), "{report:#?}");
+    assert_eq!(
+        diagnostic.pointer.as_str(),
+        "/properties/tag/$ref",
+        "{report:#?}"
+    );
+    assert_eq!(diagnostic.span, None, "{report:#?}");
 }
 
 /// The same fetch through the installed binary, so `spargen lock`'s own wiring is reached too.
