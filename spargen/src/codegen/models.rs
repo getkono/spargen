@@ -76,20 +76,7 @@ fn emit_open_string_enum(
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
-    let listed: Vec<(&String, &crate::name::Ident)> = enumeration
-        .variants
-        .iter()
-        .map(|variant| {
-            let ScalarValue::String(value) = variant else {
-                unreachable!("an open enum is a string enum");
-            };
-            let variant_ident = names
-                .variants
-                .get(&(id, value.clone()))
-                .expect("variant name allocated");
-            (value, variant_ident)
-        })
-        .collect();
+    let listed = string_variants(id, enumeration, names);
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
@@ -146,6 +133,30 @@ fn emit_open_string_enum(
             }
         }
     }
+}
+
+/// Each listed value of string enum `id` beside the variant identifier `name` allocated for it,
+/// in declaration order. An open enum is a string enum too, so both shapes read their variants
+/// here.
+fn string_variants<'a>(
+    id: crate::ir::TypeId,
+    enumeration: &'a crate::ir::ScalarEnum,
+    names: &'a Names,
+) -> Vec<(&'a String, &'a crate::name::Ident)> {
+    enumeration
+        .variants
+        .iter()
+        .map(|variant| {
+            let ScalarValue::String(value) = variant else {
+                unreachable!("a string enum lists only string values");
+            };
+            let variant_ident = names
+                .variants
+                .get(&(id, value.clone()))
+                .expect("variant name allocated");
+            (value, variant_ident)
+        })
+        .collect()
 }
 
 /// Emit the model for one definition: a struct, a string enum (closed or open), an integer or
@@ -205,26 +216,11 @@ fn emit_type_def(
             }
         }
         TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
-            let variants = enumeration.variants.iter().map(|variant| {
-                let value = match variant {
-                    ScalarValue::String(value) => value,
-                    _ => unreachable!("string repr has string variants"),
-                };
-                let ident = names
-                    .variants
-                    .get(&(id, value.clone()))
-                    .expect("variant name allocated");
-                quote! { #[serde(rename = #value)] #ident, }
+            let listed = string_variants(id, enumeration, names);
+            let variants = listed.iter().map(|(value, variant_ident)| {
+                quote! { #[serde(rename = #value)] #variant_ident, }
             });
-            let display_arms = enumeration.variants.iter().map(|variant| {
-                let value = match variant {
-                    ScalarValue::String(value) => value,
-                    _ => unreachable!("string repr has string variants"),
-                };
-                let variant_ident = names
-                    .variants
-                    .get(&(id, value.clone()))
-                    .expect("variant name allocated");
+            let display_arms = listed.iter().map(|(value, variant_ident)| {
                 quote! { #ident::#variant_ident => #value, }
             });
             if enumeration.is_open() {
@@ -257,7 +253,7 @@ fn emit_type_def(
         }
         TypeKind::Enum(enumeration) => {
             let ty = match enumeration.repr {
-                ScalarRepr::String => quote! { String },
+                ScalarRepr::String => unreachable!("a string enum is emitted by the arm above"),
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
