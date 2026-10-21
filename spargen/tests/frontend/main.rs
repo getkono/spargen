@@ -40,6 +40,7 @@ mod placement;
 mod recursion;
 mod ref_siblings;
 mod refs;
+mod requirements;
 mod responses;
 mod schemas;
 mod security;
