@@ -422,7 +422,7 @@ fn a_mixed_report_summarizes_and_displays_every_change() {
 //
 // The nine kinds above were the ones with fixtures. The rest were classified by policy alone, with
 // nothing proving the classifier ever produces them; each of the tests below drives one out of a
-// real pair of specs. `spargen/src/surface/mod.rs` holds the guard that keeps this list complete.
+// real pair of specs. `spargen/src/surface/tests.rs` holds the guard that keeps this list complete.
 
 /// A spec assembled from a whole `paths:` body and a whole `components.schemas:` body, for the
 /// shapes the narrower `spec` helper above cannot express (request bodies, error responses, enums).
