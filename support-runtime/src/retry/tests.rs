@@ -254,9 +254,26 @@ fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
             .expect("a transport error wraps a reqwest error");
         assert!(source.is_builder(), "{url}: {error}");
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1, "{url}");
+        let outcome = RetryOutcome::Transport(&error);
         assert!(
-            !RetryOutcome::Transport(&error).is_transient(),
+            !outcome.is_transient(),
             "{url}: a builder-kind refusal is permanent"
+        );
+        // A transport outcome carries no response: every accessor reports the failure instead.
+        assert!(outcome.response().is_none(), "{url}");
+        assert!(
+            std::ptr::eq(
+                outcome.transport_error().expect("a transport error"),
+                &error
+            ),
+            "{url}"
+        );
+        assert_eq!(outcome.status(), None, "{url}");
+        assert!(
+            outcome
+                .result()
+                .is_err_and(|failure| std::ptr::eq(failure, &error)),
+            "{url}"
         );
     }
 }

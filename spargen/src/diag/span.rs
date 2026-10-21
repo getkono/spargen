@@ -16,8 +16,9 @@ pub struct Loc {
     pub offset: usize,
 }
 
-/// A half-open source span `[start, end)` within a single file, powering `file:line:column`
-/// diagnostics.
+/// A half-open source span `[start, end)`: line and column positions within the file its
+/// [`FileId`] names. A diagnostic renders its start as `line:column`, prefixed by the file's path
+/// when the run loaded it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     /// The file this span lies in.
