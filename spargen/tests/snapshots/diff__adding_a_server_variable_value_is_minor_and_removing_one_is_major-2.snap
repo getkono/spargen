@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|variant-removed|servers::Server0Region|variant removed: `Ap`
+bump=major

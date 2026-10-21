@@ -54,6 +54,37 @@ pub(crate) struct Surface {
     /// a type that turns into one or out of one is a kind change rather than an addition or a
     /// removal.
     aliases: BTreeSet<String>,
+    /// The server builders of the generated `servers` module, keyed by generated builder name.
+    servers: BTreeMap<String, ServerSurface>,
+}
+
+/// One server builder's surface: a setter per server variable, keyed by the generated setter name.
+/// Its fields are private, so the setters are all a consumer reaches of it beyond `new`, `url`, and
+/// `Default`, which every builder has.
+struct ServerSurface {
+    variables: BTreeMap<String, ServerVariableSurface>,
+}
+
+/// What a server variable's setter takes.
+#[derive(PartialEq, Eq)]
+enum ServerVariableSurface {
+    /// A free-form variable: `impl Into<String>`.
+    Free,
+    /// A variable with an `enum`: the generated variable enum, by name, and its variant names.
+    Enum {
+        name: String,
+        variants: BTreeSet<String>,
+    },
+}
+
+impl ServerVariableSurface {
+    /// The setter's argument type, as a consumer writes it.
+    fn argument(&self) -> String {
+        match self {
+            ServerVariableSurface::Free => "impl Into<String>".to_owned(),
+            ServerVariableSurface::Enum { name, .. } => format!("servers::{name}"),
+        }
+    }
 }
 
 /// One client method's surface: the generated method name, its parameters, request body, and the
@@ -260,6 +291,17 @@ pub enum ChangeKind {
     ResponseHeaderTypeChanged,
     /// A response header's required-ness flipped. **Major** — `T` ↔ `Option<T>`.
     ResponseHeaderRequirednessChanged,
+    /// A new server builder appeared in the `servers` module. **Minor** — a new type.
+    ServerAdded,
+    /// A server builder was removed. **Major** — code naming it breaks.
+    ServerRemoved,
+    /// A server builder gained a variable setter. **Minor** — the new variable defaults.
+    ServerVariableAdded,
+    /// A server builder lost a variable setter. **Major** — calls to it break.
+    ServerVariableRemoved,
+    /// A server variable's setter now takes another type: a free-form variable gained or lost its
+    /// `enum`, or its variable enum was renamed. **Major**.
+    ServerVariableTypeChanged,
 }
 
 impl ChangeKind {
@@ -273,7 +315,9 @@ impl ChangeKind {
             | ChangeKind::FieldAdded
             | ChangeKind::VariantAdded
             | ChangeKind::ResponseHeadersAdded
-            | ChangeKind::ResponseHeaderAdded => Impact::Minor,
+            | ChangeKind::ResponseHeaderAdded
+            | ChangeKind::ServerAdded
+            | ChangeKind::ServerVariableAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
             | ChangeKind::RequestBodyAdded
@@ -300,7 +344,10 @@ impl ChangeKind {
             | ChangeKind::RequiredResponseHeaderAdded
             | ChangeKind::ResponseHeaderRemoved
             | ChangeKind::ResponseHeaderTypeChanged
-            | ChangeKind::ResponseHeaderRequirednessChanged => Impact::Major,
+            | ChangeKind::ResponseHeaderRequirednessChanged
+            | ChangeKind::ServerRemoved
+            | ChangeKind::ServerVariableRemoved
+            | ChangeKind::ServerVariableTypeChanged => Impact::Major,
         }
     }
 
@@ -342,6 +389,11 @@ impl ChangeKind {
             ChangeKind::ResponseHeaderRemoved => "response-header-removed",
             ChangeKind::ResponseHeaderTypeChanged => "response-header-type-changed",
             ChangeKind::ResponseHeaderRequirednessChanged => "response-header-requiredness-changed",
+            ChangeKind::ServerAdded => "server-added",
+            ChangeKind::ServerRemoved => "server-removed",
+            ChangeKind::ServerVariableAdded => "server-variable-added",
+            ChangeKind::ServerVariableRemoved => "server-variable-removed",
+            ChangeKind::ServerVariableTypeChanged => "server-variable-type-changed",
         }
     }
 }
@@ -566,7 +618,55 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         operations,
         types,
         aliases,
+        servers: servers(api, names),
     }
+}
+
+/// The server builders codegen's `emit_servers` declares, named as it names them.
+fn servers(api: &Api, names: &Names) -> BTreeMap<String, ServerSurface> {
+    let mut builders = BTreeMap::new();
+    for (index, server) in api.servers.iter().enumerate() {
+        let name = names
+            .servers
+            .get(index)
+            .expect("server name allocated")
+            .as_str()
+            .to_owned();
+        let variables = server
+            .variables
+            .iter()
+            .map(|(variable, declared)| {
+                let key = (index, variable.clone());
+                let setter = names
+                    .server_variable_fields
+                    .get(&key)
+                    .expect("server variable field allocated")
+                    .as_str()
+                    .to_owned();
+                let surface = match names.server_variable_enums.get(&key) {
+                    Some(enum_name) => ServerVariableSurface::Enum {
+                        name: enum_name.as_str().to_owned(),
+                        variants: declared
+                            .enum_values
+                            .iter()
+                            .map(|value| {
+                                names
+                                    .server_variable_variants
+                                    .get(&(index, variable.clone(), value.clone()))
+                                    .expect("server variable variant allocated")
+                                    .as_str()
+                                    .to_owned()
+                            })
+                            .collect(),
+                    },
+                    None => ServerVariableSurface::Free,
+                };
+                (setter, surface)
+            })
+            .collect();
+        builders.insert(name, ServerSurface { variables });
+    }
+    builders
 }
 
 /// The typed response-header structs codegen's `emit_response_headers` declares for `operation`:
@@ -615,6 +715,7 @@ pub(crate) fn diff(old: &Surface, new: &Surface) -> DiffReport {
     let mut changes = Vec::new();
     diff_operations(old, new, &mut changes);
     diff_types(old, new, &mut changes);
+    diff_servers(old, new, &mut changes);
 
     // Deterministic order: most-severe first, then by location, then by machine code, then detail.
     changes.sort_by(|a, b| {
@@ -875,6 +976,86 @@ fn diff_header_fields(
                     ));
                 }
             }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between two `servers` modules: builders by name, each builder's setters, and the
+/// variants of each variable enum a setter takes on both sides.
+fn diff_servers(old: &Surface, new: &Surface, changes: &mut Vec<Change>) {
+    for name in keys(&old.servers, &new.servers) {
+        let location = format!("servers::{name}");
+        match (old.servers.get(name), new.servers.get(name)) {
+            (None, Some(_)) => changes.push(Change::new(
+                ChangeKind::ServerAdded,
+                location,
+                "new server builder",
+            )),
+            (Some(_), None) => changes.push(Change::new(
+                ChangeKind::ServerRemoved,
+                location,
+                "server builder removed",
+            )),
+            (Some(old_server), Some(new_server)) => {
+                diff_server_variables(&location, old_server, new_server, changes);
+            }
+            (None, None) => unreachable!("key drawn from the union of both maps"),
+        }
+    }
+}
+
+/// The changes between one server builder's setters on both sides.
+fn diff_server_variables(
+    builder: &str,
+    old: &ServerSurface,
+    new: &ServerSurface,
+    changes: &mut Vec<Change>,
+) {
+    for setter in keys(&old.variables, &new.variables) {
+        let location = format!("{builder}::{setter}");
+        match (old.variables.get(setter), new.variables.get(setter)) {
+            (None, Some(variable)) => changes.push(Change::new(
+                ChangeKind::ServerVariableAdded,
+                location,
+                format!("server variable added: `{}`", variable.argument()),
+            )),
+            (Some(variable), None) => changes.push(Change::new(
+                ChangeKind::ServerVariableRemoved,
+                location,
+                format!("server variable removed (was `{}`)", variable.argument()),
+            )),
+            // The same enum on both sides: the setter is unchanged, and the enum's variants are
+            // compared as any enum's are.
+            (
+                Some(ServerVariableSurface::Enum {
+                    name: old_name,
+                    variants: old_variants,
+                }),
+                Some(ServerVariableSurface::Enum {
+                    name: new_name,
+                    variants: new_variants,
+                }),
+            ) if old_name == new_name => {
+                diff_variant_set(
+                    &format!("servers::{new_name}"),
+                    old_variants,
+                    new_variants,
+                    changes,
+                );
+            }
+            (Some(old_variable), Some(new_variable)) if old_variable != new_variable => {
+                changes.push(Change::new(
+                    ChangeKind::ServerVariableTypeChanged,
+                    location,
+                    format!(
+                        "server variable type `{}` -> `{}`",
+                        old_variable.argument(),
+                        new_variable.argument()
+                    ),
+                ));
+            }
+            (Some(_), Some(_)) => {}
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
     }

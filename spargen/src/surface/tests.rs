@@ -43,6 +43,11 @@ fn all_kinds() -> Vec<ChangeKind> {
         ChangeKind::ResponseHeaderRemoved,
         ChangeKind::ResponseHeaderTypeChanged,
         ChangeKind::ResponseHeaderRequirednessChanged,
+        ChangeKind::ServerAdded,
+        ChangeKind::ServerRemoved,
+        ChangeKind::ServerVariableAdded,
+        ChangeKind::ServerVariableRemoved,
+        ChangeKind::ServerVariableTypeChanged,
     ];
     for kind in every {
         // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
@@ -82,7 +87,12 @@ fn all_kinds() -> Vec<ChangeKind> {
             | ChangeKind::RequiredResponseHeaderAdded
             | ChangeKind::ResponseHeaderRemoved
             | ChangeKind::ResponseHeaderTypeChanged
-            | ChangeKind::ResponseHeaderRequirednessChanged => {}
+            | ChangeKind::ResponseHeaderRequirednessChanged
+            | ChangeKind::ServerAdded
+            | ChangeKind::ServerRemoved
+            | ChangeKind::ServerVariableAdded
+            | ChangeKind::ServerVariableRemoved
+            | ChangeKind::ServerVariableTypeChanged => {}
         }
     }
     every.to_vec()
@@ -126,6 +136,11 @@ fn variant_name(kind: ChangeKind) -> &'static str {
         ChangeKind::ResponseHeaderRemoved => "ResponseHeaderRemoved",
         ChangeKind::ResponseHeaderTypeChanged => "ResponseHeaderTypeChanged",
         ChangeKind::ResponseHeaderRequirednessChanged => "ResponseHeaderRequirednessChanged",
+        ChangeKind::ServerAdded => "ServerAdded",
+        ChangeKind::ServerRemoved => "ServerRemoved",
+        ChangeKind::ServerVariableAdded => "ServerVariableAdded",
+        ChangeKind::ServerVariableRemoved => "ServerVariableRemoved",
+        ChangeKind::ServerVariableTypeChanged => "ServerVariableTypeChanged",
     }
 }
 
@@ -133,7 +148,7 @@ fn variant_name(kind: ChangeKind) -> &'static str {
 fn the_kind_list_covers_the_whole_enum() {
     assert_eq!(
         all_kinds().len(),
-        35,
+        40,
         "a `ChangeKind` variant reached the exhaustive match without joining the list"
     );
 }
@@ -194,6 +209,8 @@ fn only_the_additive_kinds_are_minor() {
         ChangeKind::VariantAdded,
         ChangeKind::ResponseHeadersAdded,
         ChangeKind::ResponseHeaderAdded,
+        ChangeKind::ServerAdded,
+        ChangeKind::ServerVariableAdded,
     ];
     for kind in all_kinds() {
         let expected = if MINOR.contains(&kind) {
