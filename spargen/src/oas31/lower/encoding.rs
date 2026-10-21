@@ -142,13 +142,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
-    /// Apply the Encoding Object's mode switch for one property.
+    /// Apply the Encoding Object's mode switch for one property, or `None` once a refusal is
+    /// reported.
     ///
-    /// In media mode a part's bytes come from the property's lowered type and its declared
-    /// `contentType` rides on it as the header. A declaration is refused (`E009`) where the two
-    /// cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose declared
-    /// type is not JSON, on multipart (the part's header) and on form-urlencoded (the field's
-    /// serialization syntax) alike.
+    /// Any of `style`, `explode` or `allowReserved` selects style mode. It refuses (`E009`) a
+    /// style that is not a form style, a delimited style with `explode: true`, and, on multipart,
+    /// `deepObject` and an object property; `allowReserved` on multipart is inert (`W011`).
+    ///
+    /// Otherwise media mode: a part's bytes come from the property's lowered type and its declared
+    /// `contentType` — the first element of the list, else the default for the type — rides on it
+    /// as the header. A declared `contentType` is refused (`E009`) where it is a wildcard, not a
+    /// media type, or carries a parameter that is not `name=value` (or, on multipart, one the
+    /// client cannot send), and where it and the bytes cannot agree: a property rendered as JSON
+    /// (anything but a scalar or bytes) whose declared type is not JSON, on multipart (the part's
+    /// header) and on form-urlencoded (the field's serialization syntax) alike. A binary property
+    /// on form-urlencoded is refused (`E009`) whether or not a `contentType` made it binary.
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -451,7 +459,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The literal extra part headers of one multipart property.
     ///
     /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
-    /// through `const`, or `default` in its absence — gives a client something to send.
+    /// through `const`, or `default` in its absence, read through a `$ref` to the Header Object or
+    /// in its schema ([`Self::literal_header_value`]) — gives a client something to send. A
+    /// `Content-Type` entry is skipped (`contentType` describes it), `headers` on a body that is
+    /// not multipart is inert (`W011`), and so is a header that pins no value (`W011`); a
+    /// reference that resolves to nothing is reported where it is resolved (`E004`) and nothing
+    /// more is said of that header.
     ///
     /// What is sent is held to RFC 9110: a name that is not a `token`, or a pinned literal that
     /// is not a field value, is refused (`E009`), so `None` is returned once every such header
