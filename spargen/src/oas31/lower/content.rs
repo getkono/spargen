@@ -7,6 +7,8 @@ use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::MediaType;
 use crate::oas31::media::{classify_media, classify_media_range, media_essence};
 
+/// The codec a `content` key's essence classifies as, or `None` with an `E009` for one spargen
+/// does not support.
 pub(super) fn lower_media_type(
     media: &str,
     provenance: &crate::diag::Provenance,
@@ -50,9 +52,11 @@ pub(super) struct ChosenMedia<'a, T> {
 /// `None` with nothing reported for an empty `content`, and `None` with an `E009` naming the first
 /// key when no key classifies. Otherwise the selection, with the `W014` naming every other key
 /// built but not emitted ([`ChosenMedia::narrowing`]); `None` there when nothing else is offered.
-/// A response that selects `application/octet-stream` leaves out of that `W014` each other
-/// octet-stream alternative `opaque` proves constrains nothing, since it would decode exactly
-/// like the selection. `opaque` answers that without lowering anything.
+/// A response whose selection classifies as octet-stream — `application/octet-stream`, a
+/// non-text range such as `video/*`, or an `image`/`audio`/`video` member such as `image/png` —
+/// leaves out of that `W014` each other octet-classified alternative `opaque` proves constrains
+/// nothing, since it would decode exactly like the selection. `opaque` answers that without
+/// lowering anything.
 pub(super) fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,
@@ -70,7 +74,7 @@ pub(super) fn choose_media<'a, T>(
         };
         // A request sends its media key as `Content-Type`, which must be concrete (RFC 9110 § 8.3),
         // so a range is only a candidate there once no concrete key classifies — and then it is
-        // selected and rejected by `lower_request_body`, never silently skipped.
+        // selected and rejected by `lower_chosen_request_body`, never silently skipped.
         let unsendable = position == BodyPosition::Request
             && classify_media_range(media_essence(media)).is_some();
         let candidate = (
@@ -101,7 +105,7 @@ pub(super) fn choose_media<'a, T>(
         // rather than conservatism waiting to be relaxed. Octet-stream is the one codec whose gate
         // collapses every body it admits onto a single type: `opaque_octets` maps an absent or
         // empty schema to `Bytes`, `format: binary` and `contentEncoding: base64` are `Bytes`, and
-        // anything else is rejected outright. No other codec has that property, and three things
+        // anything else is rejected outright. No other codec has that property, and two things
         // go wrong the moment the rule is widened on the strength of "both sides constrain
         // nothing":
         //
@@ -111,11 +115,13 @@ pub(super) fn choose_media<'a, T>(
         //   keys decide the response type, silently.
         // - `itemSchema` lives outside the body schema entirely. Two sequential entries can both
         //   constrain nothing and still stream different item types.
+        //
         // A *request* narrows at the wire whatever the types do, so nothing is suppressed there at
         // all. The chosen media key becomes the `Content-Type` verbatim, and a server documented as
         // accepting `application/octet-stream` and `video/*` is only ever sent the first — a real
         // narrowing even though both decode to `Bytes`. It is tempting to think ranges cannot reach
-        // a request anyway, since one is rejected as a request `Content-Type` below; that rejection
+        // a request anyway, since one is rejected as a request `Content-Type` by
+        // `lower_chosen_request_body`; that rejection
         // fires on the media actually *selected*, and a suppressed alternative is never selected.
         //
         // "Constrains nothing" also has to be proved, not assumed from the media type: an

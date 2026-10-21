@@ -129,6 +129,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
+        // The exact JSON `null` has no non-null value, so its non-null meet with anything is empty;
+        // the `null` both sides may admit is settled below.
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
             Err(NoMeet::Empty)
         } else {
@@ -552,8 +554,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// every caller reports it (`E013`) instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NoMeet {
-    /// No JSON value satisfies both sides: their value categories are disjoint (a string and an
-    /// integer), or their scalar `enum` sets share no value.
+    /// No non-null JSON value satisfies both sides: their value categories are disjoint (a string
+    /// and an integer), their scalar `enum` sets share no value, one side is the exact JSON `null`
+    /// or uninhabited (`Never`), a property one side requires has no value both admit, or no
+    /// branch of a union side meets the other side. [`LowerCtx::intersect_types`] still answers
+    /// `null` for it where both sides admit `null`.
     Empty,
     /// The sides may share values, but no single Rust type represents the ones they share — `uuid`
     /// and `contentEncoding: base64` are both annotations on a string, so every string satisfies
@@ -589,9 +594,9 @@ pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
 }
 
 /// Why two non-null kinds that no intersection rule meets do not meet: empty when one side is
-/// uninhabited or the two sit in disjoint JSON categories, and otherwise unrepresentable — two
-/// strings of different formats, tuples of different lengths — because nothing here proves that
-/// no value satisfies both.
+/// uninhabited (`Never`) or the two sit in disjoint JSON categories, and otherwise unrepresentable
+/// — two strings of different formats, tuples of different lengths — because nothing here proves
+/// that no value satisfies both.
 pub(super) fn no_meet(left: &TypeKind, right: &TypeKind) -> NoMeet {
     if matches!(left, TypeKind::Never) || matches!(right, TypeKind::Never) {
         return NoMeet::Empty;

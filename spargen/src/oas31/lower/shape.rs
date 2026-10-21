@@ -1,5 +1,7 @@
-//! Whether a schema's keywords give it a shape of its own, which decides whether a `$ref`'s
-//! siblings are intersected with its target.
+//! Two keyword gates over one schema: [`schema_has_shape_constraint`], whether a schema's keywords
+//! give it a shape of its own, which decides whether a `$ref`'s siblings are intersected with its
+//! target; and [`schema_imposes_scalar`], whether an `allOf` member not read as an object still
+//! constrains its instances, which decides whether it is lowered whole as a scalar contribution.
 
 use crate::oas31::Schema;
 

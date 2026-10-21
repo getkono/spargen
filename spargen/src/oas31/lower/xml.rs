@@ -231,7 +231,9 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
     )
 }
 
-/// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.
+/// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on
+/// any type that is not XML-dedicated (`W006`), apply root `xml.name`s, and report each hint the
+/// codec cannot honour (`E009` on a type an XML body reaches, `W006` elsewhere).
 ///
 /// A serde `rename` applies to every serde format, so honoring an `xml.name`/`xml.attribute` hint on
 /// a struct field also rewrites that field's JSON wire name. That is only safe when the owning type
@@ -244,8 +246,9 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
 /// It also settles each schema's root `xml` object (`root_xml`, less the sites a field reads): a
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
 /// whoever else uses the type, and the field name of an array property whose items are that struct
-/// (unless the items name their elements themselves), and every hint the codec cannot honour — a field's, an items', or a
-/// root's — is `E009` on a type an XML body reaches and `W006` elsewhere.
+/// (unless the items name their elements themselves); and every hint the codec cannot honour — a
+/// field's, an items', a root's, or one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is
+/// `E009` on a type an XML body reaches and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
@@ -461,10 +464,8 @@ pub(super) fn gate_xml_field_renames(
     // Two quite different situations reach the same suppression, and a consumer needs to tell them
     // apart. A type that is never reached from an XML body carries an inert hint: nothing on any
     // wire moves. A type reached from an XML body *and* a non-XML one is genuinely shared, and
-    // suppressing its hint changes what the XML body puts on the wire. The second became reachable
-    // for a sub-file schema only once one target started generating one type; before that the two
-    // uses were two types and the XML one kept its rename. Same code, same count — so the message
-    // has to carry the distinction or there is nothing to compare across an upgrade.
+    // suppressing its hint changes what the XML body puts on the wire. Both are one `W006` each,
+    // so the message carries the distinction.
     let to_suppress: Vec<(TypeId, bool)> = graph
         .emitted()
         .filter_map(|(id, def)| {

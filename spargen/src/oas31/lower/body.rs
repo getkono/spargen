@@ -18,6 +18,9 @@ use super::content::{
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Choose the `content` entry a request sends ([`choose_media`]) and lower it, or `None` when
+    /// no entry can be chosen or the chosen one is refused. The `W014`s for the entries passed
+    /// over are emitted only once the chosen one has lowered.
     pub(super) fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         // A structured-suffix range such as `application/*+json` ranks with the concrete types its
         // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
@@ -46,8 +49,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(lowered)
     }
 
-    /// Lower the request body entry [`Self::lower_request_body`] selected, or `None` when one of
-    /// the request-body gates (each an `E009`) refuses it.
+    /// Lower the request body entry [`Self::lower_request_body`] selected, or `None` when it is
+    /// refused: by the Media Type Object's or media key's own gates
+    /// ([`Self::resolve_media_object`], [`lower_media_type`]), by one of the request-body gates
+    /// here (each an `E009`: a media range, streaming media, a non-object form or multipart body,
+    /// a raw body whose schema is not raw content or admits `null`), or by its encoding
+    /// ([`Self::lower_body_encoding`]). An `itemSchema` on the entry is inert (`W010`).
     fn lower_chosen_request_body(
         &mut self,
         body: &RequestBodyObject,
@@ -200,9 +207,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// OpenAPI 3.1 aligned Schema Objects with JSON Schema 2020-12 and removed `format: binary`, so
     /// an empty (always-true) Schema Object — or no `schema` at all — is now how a document says
     /// *any octets*: the media type already carries the meaning, and `type: string` would be the
-    /// 3.0 spelling the release deliberately retired. Both lower to `Any`, which on
-    /// `application/octet-stream` would emit `serde_json::Value` for a byte stream, so the use site
-    /// is retyped to `Bytes`.
+    /// 3.0 spelling the release deliberately retired. An empty schema lowers to `Any`, which on
+    /// `application/octet-stream` would emit `serde_json::Value` for a byte stream, and no schema
+    /// reaches here as no type at all (`ty` is `None`); either way the use site is typed `Bytes`.
+    /// A `ty` that is anything but `Any` is returned unchanged.
     ///
     /// `declared_but_unlowerable` is a schema that was written and failed to lower for its own
     /// reason: it has already reported that, and must not be silently rewritten into bytes.
