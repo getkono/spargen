@@ -26,6 +26,8 @@ use serde_json::Value;
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
 use crate::source::{canonical_pointer, InputBundle, Node, Number, SpannedValue};
 
+use super::deserialize::version_supported;
+
 const OAS31_SCHEMA: &str = include_str!("spec/oas-3.1-2025-09-15.json");
 const OAS32_SCHEMA: &str = include_str!("spec/oas-3.2-2025-09-17.json");
 
@@ -63,11 +65,12 @@ impl MetaSchemaValidator {
     pub(crate) fn validate(&self, bundle: &InputBundle, diags: &mut Diagnostics) {
         let root = bundle.root();
         let version = match root.get("openapi").and_then(SpannedValue::as_str) {
-            Some(version) if version.starts_with("3.1.") => &self.oas31,
+            // `parse_document` owns E001 and its forward-compatible version explanation, for every
+            // version its classifier rejects (a malformed `3.1.x` included). Avoid obscuring it
+            // with a structure error from a schema the version's prefix would select.
+            Some(version) if !version_supported(version) => return,
             Some(version) if version.starts_with("3.2.") => &self.oas32,
-            // `parse_document` owns E001 and its forward-compatible version explanation. Avoid
-            // obscuring it with a second structure error from an arbitrarily selected schema.
-            Some(_) => return,
+            Some(_) => &self.oas31,
             // Select 3.1 only to report the shared required `openapi` field as E011.
             None => &self.oas31,
         };

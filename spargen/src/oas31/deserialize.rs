@@ -144,7 +144,11 @@ pub(crate) fn parse_document(
     diags.result(document)
 }
 
-fn version_supported(value: &str) -> bool {
+/// Whether an `openapi` value names a release spargen implements: `3.1.<patch>` or `3.2.<patch>`.
+///
+/// [`parse_document`] reports `E001` for anything it rejects, and the metaschema validator reads it
+/// to step aside for the same values, so that `E001` is the code they get.
+pub(super) fn version_supported(value: &str) -> bool {
     let mut parts = value.split('.');
     let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next()) else {
         return false;

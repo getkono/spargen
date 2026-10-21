@@ -493,6 +493,46 @@ fn oas30_document_still_rejected_e001() {
 }
 
 #[test]
+fn malformed_oas31_and_oas32_versions_are_rejected_e001_not_e011() {
+    // A value that opens like a supported version but names no release of it is an unsupported
+    // version, so it gets `E001` and its version guidance rather than a structure error from the
+    // schema its prefix would select; `generate` holds `check` to the same codes.
+    for version in ["3.1.x", "3.1.0.1", "3.2.x", "3.2.0.1"] {
+        let spec =
+            format!("openapi: {version}\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n");
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{version}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnsupportedOpenApiVersion),
+            "{version}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{version}: {report:#?}"
+        );
+        assert_eq!(
+            check(&spec).outcome(),
+            Outcome::Rejected,
+            "{version}: {report:#?}"
+        );
+    }
+
+    // A document with no `openapi` field at all is a structure error for the missing required
+    // field, not a version to classify.
+    let report = generate("info: { title: T, version: 1.0.0 }\npaths: {}\n");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedOpenApiVersion),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn oas32_retains_the_oas31_base_dialect_identifier() {
     let accepted = r##"
 openapi: 3.2.0
