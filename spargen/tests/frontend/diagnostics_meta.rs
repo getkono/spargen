@@ -99,6 +99,25 @@ fn the_location_oracle_sees_each_lost_location() {
     let key = reasons(located(Code::InvalidInput, "", 0, (2, 15, 16), "m"));
     assert_eq!(key.len(), 1, "{key:?}");
     assert!(key[0].contains("the pointer is empty"), "{key:?}");
+    // A non-string key is addressed by the mapping that holds it (#923): the empty pointer is its
+    // location only where the root mapping itself holds such a key.
+    let non_string = located(
+        Code::InvalidInput,
+        "",
+        0,
+        (2, 15, 16),
+        "YAML object keys must be strings",
+    );
+    let nested = oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\nx: { 1: one }\n",
+    );
+    assert_eq!(nested.len(), 1, "{nested:?}");
+    assert!(oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\n1: one\n"
+    )
+    .is_empty());
     // The validator's verdict on the root value is about the root, however short the YAML parser
     // spans a flow collection (`[]` to its closing bracket's start), and so is a stream that is
     // not one document.
