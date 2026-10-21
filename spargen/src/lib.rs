@@ -31,7 +31,8 @@
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
 //! lowest layer, which every stage may reach and which depends on nothing, and `ir` as the
 //! lowered model `oas31` produces and `name`, `codegen` and `surface` read. `compat` preprocesses
-//! the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and never feeds generation.
+//! the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and never feeds
+//! generation.
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
 //! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
