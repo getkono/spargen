@@ -254,8 +254,7 @@ fn aide_document_generates_with_only_validation_warnings() {
         "only validation-only warnings expected: {:?}",
         report.diagnostics()
     );
-    // ...and those hints do fire: `corpus/README.md` lists this recipe as firing `W001`, and the
-    // `all` above holds vacuously when nothing fires.
+    // ...and those hints do fire: the `all` above holds vacuously when nothing fires.
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "W001 expected for schemars' validation hints: {:?}",
