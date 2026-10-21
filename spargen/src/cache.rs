@@ -654,6 +654,46 @@ components:
         );
     }
 
+    #[test]
+    fn a_cache_hit_replays_the_truncation_of_the_run_that_seeded_it() {
+        // The record once stored the diagnostics but not whether they were cut at `batch_cap`,
+        // so a second build presented a partial list as the whole one (#724).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openapi.yaml");
+        std::fs::write(
+            &root,
+            r#"openapi: 3.1.0
+info: { title: Cache, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    First: { type: string, minLength: 3 }
+    Second: { type: string, maxLength: 5 }
+"#,
+        )
+        .unwrap();
+        let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
+            .batch_cap(1)
+            .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
+            .cargo(CargoIntegration::Off);
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        assert!(
+            first.truncated(),
+            "the fixture must warn past batch_cap: {first:#?}"
+        );
+
+        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
+        assert!(
+            second.truncated(),
+            "a cache hit presented a truncated list as complete: {second:#?}"
+        );
+        assert_eq!(second.to_string(), first.to_string());
+    }
+
     /// CLAUDE.md calls the fingerprint "complete". Every `Spec` field changes what is generated,
     /// so every one must move the digest — otherwise a config change leaves a stale module in place
     /// with nothing to tell the consumer. `Spec` is destructured with no `..` rest pattern, so a new
