@@ -38,9 +38,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
     ) -> Option<Option<UnionSibling>> {
         let mut sibling = schema.clone();
-        sibling.one_of.clear();
-        sibling.any_of.clear();
-        sibling.discriminator = None;
+        sibling.clear_union_keywords();
 
         // Asked of the sibling's OWN keywords. `type`, `enum`, `const`, `$ref` and `allOf` each
         // state something about `null` — an `enum` either lists it or does not, a `$ref`'s target
@@ -607,9 +605,7 @@ pub(super) fn multi_category_types(schema: &Schema) -> Option<CategoryMask> {
 pub(super) fn union_sibling_is_categories_alone(schema: &Schema) -> Option<CategoryMask> {
     let categories = multi_category_types(schema)?;
     let mut rest = schema.clone();
-    rest.one_of.clear();
-    rest.any_of.clear();
-    rest.discriminator = None;
+    rest.clear_union_keywords();
     rest.types.types.clear();
     (!schema_has_shape_constraint(&rest)).then_some(categories)
 }

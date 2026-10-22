@@ -500,8 +500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `enum`, a sibling `$ref`: anything at all makes it a constrained schema rather than
         // another name for its target.
         let mut without_union = schema.clone();
-        without_union.one_of.clear();
-        without_union.any_of.clear();
+        without_union.clear_union_keywords();
         if schema_has_shape_constraint(&without_union) {
             return None;
         }

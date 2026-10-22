@@ -163,9 +163,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// its `oneOf`, `anyOf` and `discriminator`.
     pub(super) fn union_sibling_null_admission(&self, schema: &Schema) -> NullAdmission {
         let mut sibling = schema.clone();
-        sibling.one_of.clear();
-        sibling.any_of.clear();
-        sibling.discriminator = None;
+        sibling.clear_union_keywords();
         self.null_admission(&sibling)
     }
 
@@ -708,9 +706,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return false;
         }
         let mut rest = schema.clone();
-        rest.one_of.clear();
-        rest.any_of.clear();
-        rest.discriminator = None;
+        rest.clear_union_keywords();
         if self.all_of_decides_null(&rest, depth + 1) {
             return false;
         }

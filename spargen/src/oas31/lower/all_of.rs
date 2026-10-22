@@ -644,9 +644,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::reject_all_of_several_unions`]).
     pub(super) fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut composition = schema.clone();
-        composition.one_of.clear();
-        composition.any_of.clear();
-        composition.discriminator = None;
+        composition.clear_union_keywords();
         // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
         // schema's own object keywords and its `null`.
         composition.types = crate::oas31::TypeSet::default();
