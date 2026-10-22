@@ -1301,8 +1301,8 @@ mod tests {
             ("OmitCreatedInvalidDocument", "carve.rs"),
             ("OmittedConstruct", "carve.rs"),
             // The runtime-dependency contract needs a real consumer manifest to audit.
-            ("RuntimeDependencyContract", "e2e.rs"),
-            ("RuntimeAuditSkipped", "e2e.rs"),
+            ("RuntimeDependencyContract", "e2e/manifest_audit.rs"),
+            ("RuntimeAuditSkipped", "e2e/manifest_audit.rs"),
             // The Cargo-integration policy is a property of the build environment, not of the
             // spec; `frontend/` deliberately runs every fixture with the integration off.
             ("CargoIntegrationDegraded", "config.rs"),
