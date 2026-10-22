@@ -583,7 +583,7 @@ fn check(
         }
         // The arity check above is all there is to `()`.
         Shape::Null => return Ok(()),
-        Shape::Primitive(prim) => super::prim_label(*prim).to_owned(),
+        Shape::Primitive(prim) => super::extract::prim_label(*prim).to_owned(),
         Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
         Shape::IntEnum => "i64".to_owned(),
         Shape::BoolEnum => "bool".to_owned(),
@@ -613,7 +613,7 @@ proptest::proptest! {
         };
         let mut names = crate::name::Names::default();
         let ty = insert(&node, &mut api, &mut names);
-        let rendered = super::canon_ty(ty, &api, &names);
+        let rendered = super::extract::canon_ty(ty, &api, &names);
         let parsed = syn::parse_str::<syn::Type>(&rendered);
         proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
         check(&node, ty, &parsed.expect("checked"), &api, &names)?;
