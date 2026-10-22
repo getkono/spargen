@@ -124,6 +124,10 @@ pub(crate) fn finalized(rendered: &str, input_digest: &str) -> (String, String) 
     )
 }
 
+/// The content digest of the generated file at `path` when it is still the output of
+/// `input_digest`. `None`, which makes the caller regenerate, when the file is unreadable, lacks
+/// either header line, records a different input digest, or its body no longer hashes to the
+/// recorded content digest (a manual edit).
 pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let first = bytes.iter().position(|byte| *byte == b'\n')?;
@@ -146,6 +150,9 @@ pub(crate) struct CachedRun {
     pub(crate) requirements: RuntimeRequirements,
 }
 
+/// The recorded run for this input and output. `None`, which makes the caller rerun the pipeline,
+/// when the cache file is unreadable or does not parse, or its format, input digest or content
+/// digest differs from the current one.
 pub(crate) fn read_cache(
     path: &Utf8Path,
     input_digest: &str,

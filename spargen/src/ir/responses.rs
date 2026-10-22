@@ -158,8 +158,8 @@ impl Responses {
     /// declares; `default` is never among them. A success status is a 2xx one as
     /// [`StatusSpec::is_success`] decides it, so a documented `3XX` — `304 Not Modified` included —
     /// is never an entry here and never promotes a lone body to the enum: `200` with a body beside
-    /// a bodyless `304` is plain `T`, and the `304` is on the error side (issue #198; the
-    /// tests below pin both, since issue #105 exists because this comment was once false). It is the success source only when `by_status`
+    /// a bodyless `304` is plain `T`, and the `304` is on the error side (issues #198 and
+    /// #105; the tests below pin both). It is the success source only when `by_status`
     /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
     /// return that bypasses the count above — and is offered to the error shape as
     /// [`StatusSpec::Default`] whenever it is declared, subject there to the same entry rule (see

@@ -11,7 +11,7 @@
 //!   [`OmitRule::Component`] path/name — and an [`OmitRule::Pointer`] string — that contains a glob
 //!   metacharacter (`*`, `**`, or `?`) is matched as a glob over the construct's path/name (or the
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
-//!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
+//!   metacharacter is an exact rule and removes exactly the one construct it names. A metacharacter is escapable
 //!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
 //!   auto-carve builds from literal document text are escaped for exactly that reason. A
 //!   backslash escapes whatever character follows it, in exact and glob rules alike (`\b` is `b`,
@@ -41,7 +41,7 @@ pub use rule::{ComponentKind, OmitMethod, OmitRule, UnknownOmitToken};
 /// A compatibility omit profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Omit {
-    /// Exact omit rules.
+    /// Omit rules (exact or glob).
     pub rules: Vec<OmitRule>,
 }
 
@@ -633,8 +633,8 @@ mod tests {
     }
 
     /// Exact and glob rules share one escaping rule: a backslash escapes whatever follows it, so
-    /// `\b` is the literal `b` in both forms. The exact form used to keep the backslash, so the
-    /// exact rule `/a\b` named the path `/a\b` while the glob `/a\b*` named `/abc`.
+    /// `\b` is the literal `b` in both forms: the exact rule `/a\b` names the path `/ab`, as the
+    /// glob `/a\b*` matches `/abc`.
     #[test]
     fn an_escaped_ordinary_character_means_itself_in_exact_and_glob_rules() {
         assert_eq!(unescape_glob(r"/a\b"), "/ab");
