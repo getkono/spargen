@@ -284,23 +284,45 @@ fn every_kind_has_a_fixture_in_the_diff_suite() {
     }
 }
 
-/// The `diff` suite's source files, relative to `root`: the target's root `spargen/tests/diff.rs`
-/// and every `.rs` file of its module directory `spargen/tests/diff/`, sorted. Both must exist.
+/// The `diff` suite's compiled source files, relative to `root`: the target's root
+/// `spargen/tests/diff.rs` and each module it declares with `#[path = "diff/…"]`, sorted.
+///
+/// Only a declared module is compiled, so only a declared module can hold a fixture. The
+/// declarations must also name exactly the `.rs` files of `spargen/tests/diff/`: a file there that
+/// `diff.rs` does not declare is never compiled, and a fixture in it would pin nothing.
 fn diff_suite_files(root: &std::path::Path) -> Vec<String> {
     const MODULES: &str = "spargen/tests/diff";
+    const DECLARATION: &str = "#[path = \"diff/";
+    let root_source = read_repo_file(root, &format!("{MODULES}.rs"));
+    let mut declared: Vec<String> = root_source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(DECLARATION))
+        .map(|rest| {
+            let name = rest.strip_suffix("\"]").unwrap_or_else(|| {
+                panic!("unparsed module declaration `{DECLARATION}{rest}` in {MODULES}.rs")
+            });
+            format!("{MODULES}/{name}")
+        })
+        .collect();
+    assert!(!declared.is_empty(), "{MODULES}.rs declares no module");
+    declared.sort();
     let entries = std::fs::read_dir(root.join(MODULES)).unwrap_or_else(|error| {
         panic!("{MODULES}/ must exist in the repository, and reading it failed: {error}")
     });
-    let mut modules: Vec<String> = entries
+    let mut on_disk: Vec<String> = entries
         .map(|entry| entry.expect("readable directory entry").file_name())
         .filter_map(|name| name.into_string().ok())
         .filter(|name| name.ends_with(".rs"))
         .map(|name| format!("{MODULES}/{name}"))
         .collect();
-    assert!(!modules.is_empty(), "{MODULES}/ holds no module");
-    modules.sort();
+    on_disk.sort();
+    assert_eq!(
+        declared, on_disk,
+        "the modules {MODULES}.rs declares with `#[path]` must be exactly the `.rs` files of \
+         {MODULES}/: an undeclared file is never compiled"
+    );
     let mut files = vec![format!("{MODULES}.rs")];
-    files.extend(modules);
+    files.extend(declared);
     files
 }
 
