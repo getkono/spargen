@@ -1108,11 +1108,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The variants [`Self::warn_untyped_one_of_variants`] reports of `union`, each variant's hint
     /// beside its label from `labels`: those that lower to `serde_json::Value`, in a trial-matched
     /// `oneOf` of two or more variants. Empty for any other union.
-    pub(super) fn untyped_one_of_variants(
-        &self,
-        union: &Union,
-        labels: &[usize],
-    ) -> Vec<(String, usize)> {
+    fn untyped_one_of_variants(&self, union: &Union, labels: &[usize]) -> Vec<(String, usize)> {
         if union.variants.len() < 2
             || !matches!(
                 union.strategy,

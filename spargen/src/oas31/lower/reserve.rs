@@ -51,7 +51,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
     /// root component key, so neither could be declared, and the filter says so without relying on
     /// it.
-    pub(super) fn root_component_at<'p>(
+    fn root_component_at<'p>(
         &self,
         file: crate::diag::FileId,
         pointer: &'p crate::diag::JsonPointer,
@@ -682,12 +682,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nothing repeated can accumulate against it.
     ///
     /// [`MAX_SCHEMA_DEPTH`]: super::MAX_SCHEMA_DEPTH
-    pub(super) fn ensure_resolved(
-        &mut self,
-        reference: &str,
-        at: &Provenance,
-        hint: &str,
-    ) -> Option<Ty> {
+    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
         self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
     }
 

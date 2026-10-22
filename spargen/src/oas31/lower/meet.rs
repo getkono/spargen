@@ -668,7 +668,7 @@ pub(super) fn carries_key(fields: &[Field], wire: &str) -> bool {
 /// only the keys no side declares) does not reach a property the other side declares. So the
 /// declared field is kept whole — its type, default, flags and `xml` hints — and the requirement
 /// is added to it. Two declarations, or two undeclared fields, are left to the caller to intersect.
-pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
+fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     if existing.undeclared == other.undeclared {
         return false;
     }

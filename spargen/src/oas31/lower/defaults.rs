@@ -323,7 +323,7 @@ pub(super) fn default_display_for(raw: &SpannedValue, kind: Option<&TypeKind>) -
 }
 
 /// Render a representable default for its rustdoc `Default:` note.
-pub(super) fn default_display(value: &DefaultValue) -> String {
+fn default_display(value: &DefaultValue) -> String {
     match value {
         DefaultValue::Bool(value) => value.to_string(),
         DefaultValue::Int(value) => value.to_string(),

@@ -425,7 +425,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// folded into one they keep, so it was neither reported (`W011`) nor told apart from it,
     /// where the sibling spelling of the same constraints reports it. The enclosing hold, if
     /// any, is restored.
-    pub(super) fn lower_scalar_meet_union<T>(
+    fn lower_scalar_meet_union<T>(
         &mut self,
         union: &Provenance,
         lower: impl FnOnce(&mut Self) -> T,

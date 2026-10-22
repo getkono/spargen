@@ -456,7 +456,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides. Each `$ref`
     /// target is read once per pass and its answer replayed
     /// ([`Self::target_decides_null_memo`], [`Self::resolved_all_of_decides_null_memo`]).
-    pub(super) fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
+    fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH
             || stated_nullability(schema).is_some()
             || schema.enum_values.is_some()
@@ -1108,7 +1108,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// that lowers to `Value` decides nothing, so with no member of any other type the union keeps
     /// the answer it has on its own. `union` may also be an `allOf` wrapping such a union, which a
     /// `$ref` member names ([`Self::admits_null_undecided_through_union`], #638).
-    pub(super) fn union_member_takes_scalar_null<'c>(
+    fn union_member_takes_scalar_null<'c>(
         &self,
         mut ty: Ty,
         union: &Schema,
@@ -1309,6 +1309,6 @@ fn type_beside_all_of_is_null_only(schema: &Schema) -> bool {
 /// Whether every one of a schema's own `type`, `enum` and `const` that it states admits `null`
 /// (vacuously so where it states none): their conjunction, [`NullAdmission::of_own_keywords`],
 /// so `{type: string, enum: [null]}` admits no `null`.
-pub(super) fn own_keywords_admit_null(schema: &Schema) -> bool {
+fn own_keywords_admit_null(schema: &Schema) -> bool {
     NullAdmission::of_own_keywords(schema).matches()
 }
