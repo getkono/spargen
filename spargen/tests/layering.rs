@@ -1580,7 +1580,7 @@ const MAX_FILE_LINES: usize = 1666;
 
 /// The files already over [`MAX_FILE_LINES`]. It only shrinks: an entry back under the limit, or
 /// no longer tracked, fails the gate until it is removed, and a new file over it is not added.
-const OVER_LENGTH_BASELINE: &[&str] = &["spargen/tests/corpus_manifest.rs"];
+const OVER_LENGTH_BASELINE: &[&str] = &[];
 
 /// Directories of vendored text, copied verbatim from upstream rather than written here.
 const VENDORED: &[&str] = &["references/"];

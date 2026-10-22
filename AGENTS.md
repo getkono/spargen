@@ -90,7 +90,7 @@ they are too slow, so a green pre-push is not a green CI. `msrv` needs
 CI spells the commands out itself rather than calling `mise`, and a `mise` task and its CI job are
 **identical**: the same commands with the same flags, in the same order, under the same
 environment, and neither stricter nor narrower than the other. Change both sides together.
-`spargen/tests/corpus_manifest.rs` enforces this and the pins below; the "repository gates" row of
+`spargen/tests/repo_gates/` enforces this and the pins below; the "repository gates" row of
 the testing-strategy table names each of its tests. Every job of every workflow under
 `.github/workflows/` is paired with a task, except in `release-plz.yml`, the one listed non-gate
 workflow (it publishes, and dispatches `benchmarks.yml` on each `spargen` release tag, because a
@@ -121,7 +121,7 @@ Two named exceptions sit in `TOOLCHAIN_EXCEPTIONS`: `msrv`, which runs on the wo
 `runtime-dependencies` job's `@nightly`, which stays **floating** (its `-Z
 direct-minimal-versions` lockfile resolution needs a nightly cargo; nothing else runs on it). Bump
 the pin by hand, in a pull request of its own that changes `rust-toolchain.toml`'s `channel`, every
-`dtolnay/rust-toolchain@<version>` step, and the matching literals in `corpus_manifest.rs`'s
+`dtolnay/rust-toolchain@<version>` step, and the matching literals in `repo_gates/pairing.rs`'s
 `PAIRINGS` together, and that passes clippy and fmt on the new release.
 
 CI additionally gates what no local task can: `commits` checks exactly the pull request's range.
@@ -141,7 +141,7 @@ red with nothing committed. The comments on `[tasks.deny]` and `[tasks.deny-publ
   yank or advisory on such an entry is fixed as "anywhere else" below: nothing compiles it.
 - Each run logs the advisory-database revision it judged against, so a past green is read against
   that revision, and an audit that exited 0 but printed an error or warning fails (`AUDIT_GUARD` in
-  `corpus_manifest.rs`).
+  `repo_gates/supply_chain.rs`).
 - `deny.yml` runs it daily on `master` and on `workflow_dispatch`. GitHub sends a failed scheduled
   run to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
   repository activity; re-enable it from the Actions tab.
@@ -168,8 +168,8 @@ resolves the affected crate:
   that reaches the crate, never named in code), *and* a `[bans] deny` entry in `deny.toml` in the
   `name` + `version = "<patched"` form whose `reason` names the advisory, and bumps each lockfile
   that carries the crate. A later advisory on a crate that already has a floor moves both to the
-  new release. `advisory_floors_are_manifest_requirements` in `spargen/tests/corpus_manifest.rs`
-  holds every ban to a manifest requirement at exactly its release, so neither half lands alone.
+  new release. `advisory_floors_are_manifest_requirements` in
+  `spargen/tests/repo_gates/supply_chain.rs` holds every ban to a manifest requirement at exactly its release, so neither half lands alone.
   Where the patched release is outside the range the parent dependency accepts (a new minor on a
   `0.x` line), a floor cannot select it: bump the parent instead, and floor what it still leaves
   open. A floor goes when the parent's own requirement reaches it, or when the parent moves off
@@ -206,7 +206,7 @@ Standing invariants:
   attributes ride on emitted items.
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
   API; module privacy plus the layering DAG is how coupling stays controlled. The DAG is enforced
-  by `spargen/tests/layering.rs`, which diffs each `//! layer-deps:` header against the module's
+  by `spargen/tests/layering/`, which diffs each `//! layer-deps:` header against the module's
   real `crate::` edges.
 - A doc comment may say that something **does not exist** — no such operation, no nameable
   type, no such variant, not among these entries — only while a test fails as soon as that
@@ -238,7 +238,7 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | `support-runtime` | each file's `#[cfg(test)]` module, out of line in `<stem>/tests.rs` for `auth`, `client`, `datetime`, `dispatch`, `error`, `header`, `middleware`, `paginate`, `parameter`, `retry`, `stream` and `xml`, and inline in `blocking`, `lib`, `response`, `transport` and `wasm` | URL building, auth attachment (all schemes + alternatives + failure modes), status classification, error taxonomy semantics. No async runtime: poll-once with `Waker::noop`. |
 | whole tool | `examples/petstore` + `examples/petstore-macro` (`mise run example`) | The generated client driven over real HTTP against a local mock server (params, bodies, auth, typed errors, undocumented statuses), via both the `build.rs` and macro paths; the macro run also asserts spargen stays out of the runtime graph (`cargo tree -e no-proc-macro`). |
 | corpus | `spargen/tests/corpus_manifest.rs` / `mise run corpus-smoke` | `corpus/manifest.toml` is the single source of expectations (`expect = "generate"` / `"reject:E###"`); update them only with a reviewed reason. The suite checks the `expect` grammar (`every_declared_expectation_is_a_shape_the_suite_understands`), drives every case (`every_case_meets_its_declared_expectation`), verifies each file is fetched content matching its pinned `sha256` (`every_pinned_spec_is_present_and_is_not_an_unfetched_lfs_pointer`, `every_pinned_spec_matches_the_hash_the_manifest_declares`), and holds the smoke task and the CI job (`the_corpus_smoke_gate_covers_every_manifest_case`), `snapshot.rs` (`the_snapshot_suite_covers_every_manifest_case`), and `corpus/README.md` (`the_corpus_readme_mirrors_the_manifest`) to the manifest — adding a case means adding it everywhere. |
-| repository gates | `spargen/tests/corpus_manifest.rs` | Assertions over this repository's own gate configuration (`mise.toml`, `.github/workflows/`, `rust-toolchain.toml`, `deny.toml`, and this file); a new one goes here. Task/CI pairing (`every_mise_task_runs_exactly_what_its_ci_job_runs`); tool and toolchain pins (`ci_installs_exactly_the_tool_versions_mise_pins`, `ci_installs_the_rust_toolchain_this_file_pins`, `the_msrv_gate_runs_on_the_declared_rust_version`); the supply-chain audit's scope, every flag held to an allow-list (`the_deny_gate_states_the_feature_scope_it_audits`, `the_lockfile_audit_reads_every_committed_lockfile`, `the_published_lockfile_audit_covers_every_shipped_binary`, `advisory_floors_are_manifest_requirements`, `the_audit_flag_allow_lists_admit_only_what_they_name`); no fixed `/tmp/` path (`the_corpus_smoke_gate_writes_only_inside_the_checkout`); no LFS smudge in the release preview (`the_release_preview_never_smudges_lfs_content`); the release benchmarks dispatched from `release-plz.yml` on the `spargen` tag, and no workflow triggered by a tag push or a release event, which release-plz's `GITHUB_TOKEN` never starts (`benchmarks_are_recorded_once_for_each_spargen_release`); and this file's Quality list and table (`the_quality_list_quotes_its_tasks_verbatim`, `the_testing_strategy_table_names_every_test_in_its_suite`, `a_cited_test_counts_whatever_its_name_is_shaped_like`). This row and the corpus row together name every test in the file, and only tests it defines. |
+| repository gates | `spargen/tests/repo_gates/` | Assertions over this repository's own gate configuration (`mise.toml`, `.github/workflows/`, `rust-toolchain.toml`, `deny.toml`, and this file); a new one goes here, in the module of its kind (`supply_chain.rs`, `pairing.rs`, `toolchain.rs`, `claude_md.rs`), with the workflow readers more than one module uses in `main.rs` and the `mise.toml` and file readers it shares with `corpus_manifest.rs` in `shared/repo.rs`. Task/CI pairing (`every_mise_task_runs_exactly_what_its_ci_job_runs`); tool and toolchain pins (`ci_installs_exactly_the_tool_versions_mise_pins`, `ci_installs_the_rust_toolchain_this_file_pins`, `the_msrv_gate_runs_on_the_declared_rust_version`); the supply-chain audit's scope, every flag held to an allow-list (`the_deny_gate_states_the_feature_scope_it_audits`, `the_lockfile_audit_reads_every_committed_lockfile`, `the_published_lockfile_audit_covers_every_shipped_binary`, `advisory_floors_are_manifest_requirements`, `the_audit_flag_allow_lists_admit_only_what_they_name`); no fixed `/tmp/` path (`the_corpus_smoke_gate_writes_only_inside_the_checkout`); no LFS smudge in the release preview (`the_release_preview_never_smudges_lfs_content`); the release benchmarks dispatched from `release-plz.yml` on the `spargen` tag, and no workflow triggered by a tag push or a release event, which release-plz's `GITHUB_TOKEN` never starts (`benchmarks_are_recorded_once_for_each_spargen_release`); and this file's Quality list and table (`the_quality_list_quotes_its_tasks_verbatim`, `the_testing_strategy_table_names_every_test_in_its_suite`, `a_cited_test_counts_whatever_its_name_is_shaped_like`). This row names every test in the suite's files, and only tests they define; the corpus row does the same for `corpus_manifest.rs`. |
 | `compat` (carve) | `spargen/tests/carve.rs` | Omit-profile globbing and auto-carve: rules match what they say, carve reaches a fixpoint, and it stays deterministic. |
 | `surface` | `spargen/tests/diff.rs` (shared helpers and snapshots) with its modules in `spargen/tests/diff/` + in-module | `spargen diff` semver classification per change kind, and stability of the same pair twice. Every `ChangeKind` needs a fixture in that suite; the in-module tests enforce that, and pin the impact policy and the kebab-case codes (`ChangeKind` is `#[non_exhaustive]`, so only an in-crate test can notice a new variant). |
 | `config` / CLI | `spargen/tests/config.rs`, `spargen/tests/cli.rs` | Config discovery and precedence, `spargen deps` output, the Cargo-integration policy, and the subcommand set (`generate` is deliberately absent). |
