@@ -654,9 +654,10 @@ pub(crate) struct XmlField {
     /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to; under
     /// OpenAPI 3.2, also the XML root name of the struct a [`Self::by_reference`] field resolves to.
     pub(crate) name: Option<String>,
-    /// Whether the property's schema — or, for an array property, its `items` — is a `$ref`, to
-    /// which OpenAPI 3.2 gives the node type `none`: the node names no element, and the referenced
-    /// schema's own element stands in its place.
+    /// Whether the property's schema — or, for an array property, its `items` — is a `$ref` whose
+    /// node type is `none`, as OpenAPI 3.2 defaults it: the node names no element, and the
+    /// referenced schema's own element stands in its place. An explicit `xml.nodeType` other than
+    /// `none` on that node leaves this `false`.
     pub(crate) by_reference: bool,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
