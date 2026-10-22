@@ -1013,7 +1013,8 @@ fn names_object_beside_another_category(schema: &Schema) -> bool {
 impl LowerCtx<'_, '_> {
     /// The index of the one `allOf` member that is a union
     /// ([`LowerCtx::lower_all_of_with_union_member`]): an inline `oneOf`/`anyOf`, or a `$ref`
-    /// with no shape-bearing siblings to a root component that is one, which is met as its
+    /// with no shape-bearing siblings to a root component that is one and is not being lowered
+    /// already, which is met as its
     /// target's union (#841). Where several members are unions and exactly one of them has two or
     /// more non-null branches ([`real_union`]), it is that one: the others each lower to their one
     /// real branch, and are met with the object members as that branch (#841). Otherwise an
@@ -1032,7 +1033,12 @@ impl LowerCtx<'_, '_> {
                 let Some(reference) = member.reference.as_deref() else {
                     return schema_has_union(member).then(|| (index, real_union(member)));
                 };
-                reference.strip_prefix("#/components/schemas/")?;
+                // A component still being lowered is a recursive member, which the gather
+                // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here.
+                let name = reference.strip_prefix("#/components/schemas/")?;
+                if self.in_progress.contains_key(name) {
+                    return None;
+                }
                 let mut siblings = member.as_ref().clone();
                 siblings.reference = None;
                 if schema_has_shape_constraint(&siblings) {

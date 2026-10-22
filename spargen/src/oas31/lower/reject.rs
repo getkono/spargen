@@ -75,7 +75,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// An `allOf` whose object members would meet two or more `oneOf`/`anyOf` unions
-    /// ([`Self::several_unions_beside_object`]): an object composition is met with one union branch
+    /// ([`Self::several_unions_beside_object`]), or a `$ref` to an object, or object keywords,
+    /// beside a union sibling and a union the `$ref`'s target is or its `allOf` sibling reaches
+    /// ([`Self::meet_ref_union_sibling`]): an object composition is met with one union branch
     /// by branch, and a second would nest one union's branches under the other's, so the
     /// conjunction is refused rather than generated as unions of unions whose branches the
     /// generated types cannot tell apart.

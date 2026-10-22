@@ -784,8 +784,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
-    /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), on a
-    /// schema with no union of its own. The member applies to every instance as the others do, so
+    /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), or a
+    /// bare `$ref` to a union component, met as its target's union (#841), on a schema with no
+    /// union of its own ([`Self::sole_union_member`]). The member applies to every instance as the others do, so
     /// the schema is the union met branch by branch with the rest of the composition, as
     /// `{$ref: A, oneOf: […]}` meets its union with `A` and as the same union written beside the
     /// `allOf` is met ([`Self::lower_all_of_beside_union`]): a branch the composition excludes
@@ -799,9 +800,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// it gives them; members of untyped object or array applicators alone refine the union's
     /// branches of their own category, as beside the `allOf`. Where no member is an object and
     /// none refines one, the union is combined as the scalar member it always was. Where an
-    /// object member is gathered beside a further union — a `$ref` member to one, or one nested in
-    /// an inner `allOf` — the object would meet two unions, which is `E013`
-    /// ([`Self::reject_all_of_several_unions`]).
+    /// object member is gathered beside a further union — a `$ref` member to one, one nested in
+    /// an inner `allOf`, or one in this member's own `allOf` — the object would meet two unions,
+    /// which is `E013` ([`Self::reject_all_of_several_unions`]).
     pub(super) fn lower_all_of_with_union_member(
         &mut self,
         schema: &Schema,
@@ -1103,7 +1104,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// the same conjunction are lowered (#538): `keywords` meet the target, the union is met with
     /// that composition, and what the meet leaves sharing one generated type collapses with `W001`
     /// ([`Self::meet_union_with_all_of`]). Untyped object or array `keywords` refine the union's
-    /// branches of their own category after the collapse, as such an `allOf` member does.
+    /// branches of their own category after the collapse, as such an `allOf` member does. An
+    /// object target or object `keywords` met with the union and a second one — the target's own,
+    /// or one the keywords' `allOf` reaches — is `E013`, as the `allOf` spelling of the same
+    /// conjunction is ([`Self::reject_all_of_several_unions`]).
     ///
     /// Lowered as one schema, the sibling met `keywords` with each branch before the target, and
     /// the union hoisted every branch's `null` to itself, so the collapse could no longer count
