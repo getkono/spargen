@@ -690,6 +690,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if contributions.is_empty() && scoped.is_empty() && nested.is_empty() {
             return self.lower_union(&union, hint);
         }
+        let composed_from = self.graph_mark();
         let composed = if contributions.is_empty() {
             None
         } else {
@@ -702,6 +703,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .any(|contribution| matches!(contribution, Contribution::Object { .. }));
             Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
         };
+        let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
         refiners.extend(
             nested
@@ -727,8 +729,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+        self.elide_unused_composition(met, composed_lowered);
         self.elide_unused_lowerings(member_lowerings);
         met
+    }
+
+    /// [`Self::elide_unused_union_lowering`] of `composed`, the ids [`Self::combine_all_of`]
+    /// inserted for the composition a union was met with, once the meet re-emitted its result
+    /// under the schema's own name. The composition is an input to that meet, as a `$ref` sibling's
+    /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct was emitted
+    /// as a public type nothing referred to (#852). [`Self::meet_union_with_all_of`] inserts its
+    /// result after `composed` ends, so the result is never one of the ids elided. A met
+    /// reservation's body is not known yet, so nothing is elided against it.
+    fn elide_unused_composition(&mut self, met: Option<Ty>, composed: Range<u32>) {
+        if met.is_some_and(|met| !self.is_reservation(met.id)) {
+            self.elide_unused_union_lowering(composed);
+        }
     }
 
     /// [`Self::elide_unused_union_lowering`] of each of `lowerings`, the ids an `allOf` member's
@@ -869,6 +885,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_all_of_several_unions(schema);
         }
         let nested = take_refiners(&mut contributions);
+        let composed_from = self.graph_mark();
         let composed = if contributions.is_empty() {
             None
         } else {
@@ -876,6 +893,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.combine_all_of(schema, &format!("{hint}Composition"), &contributions)?;
             Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
         };
+        let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
         refiners.extend(
             nested
@@ -891,6 +909,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             &union_hint,
             MetUnion::AllOfMember,
         );
+        self.elide_unused_composition(met, composed_lowered);
         self.elide_unused_lowerings(member_lowerings);
         met
     }
