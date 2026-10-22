@@ -44,6 +44,48 @@ components:
     assert!(code.contains("profile"), "{code}");
 }
 
+/// The `headers` of an Encoding Object apply "either with or without the RFC6570-style
+/// serialization fields" (OpenAPI 3.2 § Encoding Object). A property in RFC 6570 mode built its
+/// parts without them, so a pinned header was dropped with no diagnostic (#812). It is sent, and
+/// nothing reports it as having no effect.
+#[test]
+fn an_encoding_header_is_sent_on_an_rfc6570_serialized_part() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                tags: { type: array, items: { type: string } }
+            encoding:
+              tags:
+                style: form
+                explode: true
+                headers:
+                  X-Part-Kind:
+                    schema: { type: string, const: tag }
+      responses:
+        '204': { description: ok }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for report in [report, check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "a pinned header on a style-serialized part has an effect: {report:#?}"
+        );
+    }
+    assert!(code.contains("serialize_multipart_values"), "{code}");
+    assert!(code.contains("X-Part-Kind"), "{code}");
+    assert!(code.contains(r#"HeaderValue::try_from("tag")"#), "{code}");
+}
+
 /// A multipart encoding header whose `schema` is a `$ref`: one schema component holding the
 /// literal to send, written with `encoding.headers.X.schema`.
 fn encoding_header_schema_document(schema: &str, components: &str) -> String {

@@ -9001,6 +9001,10 @@ paths:
               names:
                 style: form
                 explode: true
+                # A pinned part header rides on every part the style serialization produces.
+                headers:
+                  X-Part-Kind:
+                    schema: { type: string, const: name }
       responses:
         "204": { description: No Content }
 "##,
@@ -9068,6 +9072,12 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
         request.matches(r#"name="names""#).count(),
         2,
         "an exploded array must send one part per item: {request}"
+    );
+    // The pinned `X-Part-Kind` header rides on each of those parts, and on no other.
+    assert_eq!(
+        request.to_ascii_lowercase().matches("x-part-kind: name\r\n").count(),
+        2,
+        "every style-serialized part must carry its pinned header: {request}"
     );
 }
 "##,

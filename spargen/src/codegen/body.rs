@@ -209,7 +209,8 @@ fn form_style_tokens(style: &crate::ir::ParamStyle) -> TokenStream {
 /// deterministic), and attach it to the request.
 ///
 /// A property in RFC 6570 mode (its Encoding Object sets `style`, `explode`, or `allowReserved`)
-/// is style-serialized, one plain text part per value. Otherwise the property's own lowered type
+/// is style-serialized, one plain text part per value, each carrying any header the Encoding Object
+/// pins to a literal value. Otherwise the property's own lowered type
 /// decides how its value becomes bytes — the only thing the generator can know for a media type it
 /// has no codec for: a binary field (`bytes::Bytes`) becomes a bytes part, a scalar a text part via
 /// `Display`, and anything composite a JSON-encoded text part; and that part carries the
@@ -273,18 +274,29 @@ fn emit_multipart_body(
         let add_part = |receiver: &TokenStream, reference: &TokenStream| {
             let build = match &property.map(|property| &property.mode) {
                 // RFC 6570 mode: the part value is style-serialized, and an array becomes one part
-                // per item under the same name. `contentType` is inert in this mode.
+                // per item under the same name. `contentType` is inert in this mode; the pinned
+                // headers are not (OpenAPI 3.2 § Encoding Object), so each part carries them.
                 Some(crate::ir::EncodingMode::Style {
                     style,
                     explode,
                     ..
                 }) => {
                     let style = form_style_tokens(style);
+                    let add = match &extra_headers {
+                        Some(extra_headers) => quote! {
+                            let mut part = reqwest::multipart::Part::text(value);
+                            #extra_headers
+                            form = form.part(#wire, part);
+                        },
+                        None => quote! {
+                            form = form.part(#wire, reqwest::multipart::Part::text(value));
+                        },
+                    };
                     return quote! {
                         for value in support::serialize_multipart_values(#reference, #style, #explode)
                             .map_err(support::Error::request_construction)?
                         {
-                            form = form.part(#wire, reqwest::multipart::Part::text(value));
+                            #add
                         }
                     };
                 }
