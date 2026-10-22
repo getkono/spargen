@@ -406,3 +406,83 @@ fn a_manifest_path_with_a_line_break_is_never_written_as_a_directive() {
         ]
     );
 }
+
+fn codes(environment: &CargoEnvironment) -> Vec<&'static str> {
+    environment
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect()
+}
+
+/// Every Cargo-integration branch, without touching process-global environment state.
+#[test]
+fn cargo_integration_policy_covers_each_environment() {
+    let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
+
+    // A real build script: directives are emitted and the manifest is audited, silently.
+    let ideal = resolve_cargo_environment(CargoIntegration::Auto, true, manifest.clone());
+    assert!(ideal.directives);
+    assert_eq!(ideal.manifest, manifest);
+    assert!(codes(&ideal).is_empty());
+    assert!(!ideal.fatal);
+
+    // A build script with no discoverable manifest: nothing to audit, said out loud.
+    let unauditable = resolve_cargo_environment(CargoIntegration::Auto, true, None);
+    assert!(unauditable.directives);
+    assert_eq!(codes(&unauditable), ["W012"]);
+    assert!(!unauditable.fatal);
+
+    // Not a build script: no directives, no audit — the degraded default.
+    let degraded = resolve_cargo_environment(CargoIntegration::Auto, false, manifest.clone());
+    assert!(!degraded.directives);
+    assert!(degraded.manifest.is_none());
+    assert_eq!(codes(&degraded), ["W013"]);
+    assert!(!degraded.fatal);
+
+    // The same, but the caller declared it must not happen.
+    let required = resolve_cargo_environment(CargoIntegration::Required, false, manifest.clone());
+    assert_eq!(codes(&required), ["E024"]);
+    assert!(required.fatal);
+
+    // Required *and* under a build script, but unauditable: also fatal, by request.
+    let unauditable_required = resolve_cargo_environment(CargoIntegration::Required, true, None);
+    assert_eq!(codes(&unauditable_required), ["E024"]);
+    assert!(unauditable_required.fatal);
+
+    // Off says nothing in any environment — that is the whole point of it.
+    for under_build_script in [true, false] {
+        let off =
+            resolve_cargo_environment(CargoIntegration::Off, under_build_script, manifest.clone());
+        assert!(!off.directives);
+        assert!(off.manifest.is_none());
+        assert!(codes(&off).is_empty());
+        assert!(!off.fatal);
+    }
+}
+
+/// Each Cargo-integration message reads as one single-spaced sentence: a lost `\` line
+/// continuation in a wrapped literal leaves its indentation mid-sentence instead.
+#[test]
+fn cargo_integration_messages_are_single_spaced() {
+    let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
+    let environments = [
+        resolve_cargo_environment(CargoIntegration::Auto, true, None),
+        resolve_cargo_environment(CargoIntegration::Auto, false, manifest.clone()),
+        resolve_cargo_environment(CargoIntegration::Required, false, manifest),
+        resolve_cargo_environment(CargoIntegration::Required, true, None),
+    ];
+    let mut seen = Vec::new();
+    for environment in &environments {
+        for diagnostic in &environment.diagnostics {
+            seen.push(diagnostic.code.as_str());
+            let message = &diagnostic.message;
+            assert!(
+                !message.contains("  ") && message.trim() == message,
+                "{}: {message:?}",
+                diagnostic.code.as_str()
+            );
+        }
+    }
+    assert_eq!(seen, ["W012", "W013", "E024", "E024"]);
+}

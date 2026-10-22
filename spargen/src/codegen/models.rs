@@ -493,7 +493,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::CodegenOptions;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{Api, Docs, Info, Prim, Ty, TypeDef, TypeGraph, TypeKind};
 
     /// Every capitalised identifier in `tokens` that is written bare — not after `::` or `.`, and
@@ -601,7 +601,7 @@ mod tests {
             types,
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         let file: syn::File = syn::parse2(super::emit_models(
             &api,
             &names,

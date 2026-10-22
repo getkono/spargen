@@ -5,7 +5,9 @@
 //!
 //! This file is the audit's driver: it reads the consumer manifest, locates the workspace root,
 //! runs every requirement through the checks, and owns the `E023` diagnostic and the
-//! `cargo:rerun-if-changed` lines. The rest is split by concern:
+//! `cargo:rerun-if-changed` lines. It also holds the Cargo-integration policy
+//! ([`CargoEnvironment`]): whether this run emits directives and audits a manifest at all, and the
+//! `W012`/`W013`/`E024` diagnostics that say why not. The rest is split by concern:
 //!
 //! - `requirements` — the tested dependency floors, what one lowered API requires, and the
 //!   requirement table both the audit and `spargen deps` read;
@@ -20,8 +22,8 @@ mod workspace;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::diag::{Diagnostic, OutcomeClaim};
-use crate::{Code, JsonPointer};
+use crate::diag::Diagnostic;
+use crate::{Build, CargoIntegration, Code, Severity};
 
 use check::{check_dependency, DependencyCheck, WorkspaceOrigin};
 use requirements::requirement_table;
@@ -40,6 +42,97 @@ pub(crate) fn under_build_script() -> bool {
 /// [`manifest_from_env`] read only where [`under_build_script`] holds.
 pub(crate) fn build_script_manifest() -> Option<Utf8PathBuf> {
     under_build_script().then(manifest_from_env).flatten()
+}
+
+/// What the Cargo environment affords this run, resolved from [`CargoIntegration`] once so the
+/// generation path never has to re-decide it.
+pub(crate) struct CargoEnvironment {
+    /// Emit `cargo:rerun-if-changed` directives.
+    pub(crate) directives: bool,
+    /// The consumer manifest to audit against (`E023`), when one was found.
+    pub(crate) manifest: Option<Utf8PathBuf>,
+    /// `W012`/`W013` for a degraded run, or `E024` for a required one.
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Whether `diagnostics` contains a hard failure.
+    pub(crate) fatal: bool,
+}
+
+/// Resolve the Cargo integration policy against the actual process environment.
+pub(crate) fn cargo_environment(build: &Build) -> CargoEnvironment {
+    resolve_cargo_environment(build.cargo, under_build_script(), build_script_manifest())
+}
+
+/// The policy decision itself, as a pure function of what the environment affords — so every
+/// branch is reachable in a test without mutating process-global state.
+///
+/// Each diagnostic is about the build environment rather than the document, so it points at the
+/// document root.
+fn resolve_cargo_environment(
+    integration: CargoIntegration,
+    under_build_script: bool,
+    manifest: Option<Utf8PathBuf>,
+) -> CargoEnvironment {
+    match integration {
+        CargoIntegration::Off => CargoEnvironment {
+            directives: false,
+            manifest: None,
+            diagnostics: Vec::new(),
+            fatal: false,
+        },
+        CargoIntegration::Auto | CargoIntegration::Required if under_build_script => {
+            let diagnostics = match (&manifest, integration) {
+                // A build script with no discoverable manifest cannot be audited, and an
+                // un-audited build is exactly how `E023` reaches the user as a compile error in
+                // generated code instead of a spargen diagnostic.
+                (None, CargoIntegration::Required) => vec![Diagnostic::at_root(
+                    Code::CargoIntegrationRequired,
+                    "cargo integration is required, but no consumer manifest was found; \
+                     set CARGO_MANIFEST_DIR or use `CargoIntegration::Auto`",
+                )
+                .build()],
+                (None, _) => vec![Diagnostic::at_root(
+                    Code::RuntimeAuditSkipped,
+                    "no consumer manifest was found, so the runtime-dependency audit was \
+                     skipped; run `spargen deps <spec>` for the dependencies generated output \
+                     requires",
+                )
+                .build()],
+                (Some(_), _) => Vec::new(),
+            };
+            let fatal = diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error);
+            CargoEnvironment {
+                directives: true,
+                manifest,
+                diagnostics,
+                fatal,
+            }
+        }
+        CargoIntegration::Required => CargoEnvironment {
+            directives: false,
+            manifest: None,
+            diagnostics: vec![Diagnostic::at_root(
+                Code::CargoIntegrationRequired,
+                "cargo integration is required, but this is not a build-script process; \
+                 call `generate` from a `build.rs`, or relax to `CargoIntegration::Auto`",
+            )
+            .build()],
+            fatal: true,
+        },
+        CargoIntegration::Auto => CargoEnvironment {
+            directives: false,
+            manifest: None,
+            diagnostics: vec![Diagnostic::at_root(
+                Code::CargoIntegrationDegraded,
+                "not a build-script process: no rebuild triggers were emitted and the \
+                 runtime-dependency audit was skipped; call `generate` from a `build.rs`, or \
+                 silence this with `CargoIntegration::Off`",
+            )
+            .build()],
+            fatal: false,
+        },
+    }
 }
 
 /// The consuming package's manifest, as a build script's environment names it:
@@ -292,17 +385,9 @@ fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
     // A TOML parse error ends in a newline, which would strand the suffix on a line of its own.
     message.truncate(message.trim_end().len());
     message.push_str(&format!("{AUDITED_MANIFEST}`{audited}`"));
-    Diagnostic {
-        code: Code::RuntimeDependencyContract,
-        severity: Code::RuntimeDependencyContract.severity(),
-        pointer: JsonPointer::root(),
-        span: None,
-        file: None,
-        message,
-        remedy: Some("declare the generated client's runtime dependencies in the consuming package's Cargo.toml using the documented supported ranges and features".to_owned()),
-        interpretation: None,
-        claim: OutcomeClaim::of(Code::RuntimeDependencyContract.severity()),
-    }
+    Diagnostic::at_root(Code::RuntimeDependencyContract, message)
+        .remedy("declare the generated client's runtime dependencies in the consuming package's Cargo.toml using the documented supported ranges and features")
+        .build()
 }
 
 #[cfg(test)]

@@ -175,6 +175,18 @@ impl Diagnostic {
             interpretation: code.interpretation(),
         }
     }
+
+    /// Begin building a diagnostic for `code`, at `code`'s own severity, about something with no
+    /// location in the document — the build environment, an output or cache file, the consumer
+    /// manifest — so it points at the document root and carries no span.
+    pub(crate) fn at_root(code: Code, message: impl Into<String>) -> DiagnosticBuilder {
+        let at = Provenance::new(JsonPointer::root(), None);
+        let builder = match code.severity() {
+            Severity::Error => Self::error(code, at),
+            Severity::Warning => Self::warning(code, at),
+        };
+        builder.message(message)
+    }
 }
 
 /// Fluent builder for a [`Diagnostic`], begun by [`Diagnostic::error`] or [`Diagnostic::warning`]:
@@ -246,6 +258,39 @@ mod tests {
                 .claim,
             OutcomeClaim::Independent
         );
+    }
+
+    #[test]
+    fn a_root_diagnostic_takes_its_codes_severity_and_points_at_the_root() {
+        // The four root-pointer sites (the facade's pipeline errors, the Cargo-integration
+        // policy, the build cache, and the `E023` audit) built these by hand before; each must
+        // read exactly as it did, which is what the explicit builders produce.
+        for (code, built) in [
+            (
+                Code::InvalidInput,
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    Provenance::new(JsonPointer::root(), None),
+                ),
+            ),
+            (
+                Code::CargoIntegrationDegraded,
+                Diagnostic::warning(
+                    Code::CargoIntegrationDegraded,
+                    Provenance::new(JsonPointer::root(), None),
+                ),
+            ),
+        ] {
+            let at_root = Diagnostic::at_root(code, "the message").build();
+            assert_eq!(
+                serde_json::to_value(&at_root).unwrap(),
+                serde_json::to_value(built.message("the message").build()).unwrap()
+            );
+            assert_eq!(at_root.severity, code.severity());
+            assert_eq!(at_root.pointer, JsonPointer::root());
+            assert!(at_root.span.is_none() && at_root.file.is_none());
+            assert_eq!(at_root.claim, OutcomeClaim::of(code.severity()));
+        }
     }
 
     #[test]
