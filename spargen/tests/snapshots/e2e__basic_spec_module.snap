@@ -11116,6 +11116,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
     /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
     /// failure as the constructors' `RequestConstruction` error.
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+    #[allow(clippy::result_large_err)]
     fn new_runtime() -> Result<
         support::BlockingRuntime,
         support::Error<std::convert::Infallible>,

@@ -61,6 +61,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
             /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
             /// failure as the constructors' `RequestConstruction` error.
             #cfg
+            #[allow(clippy::result_large_err)]
             fn new_runtime(
             ) -> Result<support::BlockingRuntime, support::Error<std::convert::Infallible>> {
                 support::BlockingRuntime::new().map_err(support::Error::request_construction)
