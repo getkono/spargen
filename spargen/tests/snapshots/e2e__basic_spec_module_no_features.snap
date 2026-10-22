@@ -617,14 +617,15 @@ mod support {
         }
         /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
         fn append_query(url: &mut Url, query: &[String]) {
-            if query.is_empty() {
-                return;
+            if !query.is_empty() {
+                append_query_text(url, &query.join("&"));
             }
+        }
+        /// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
+        fn append_query_text(url: &mut Url, text: &str) {
             let joined = match url.query() {
-                Some(existing) if !existing.is_empty() => {
-                    format!("{existing}&{}", query.join("&"))
-                }
-                _ => query.join("&"),
+                Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
+                _ => text.to_owned(),
             };
             url.set_query(Some(&joined));
         }
@@ -650,13 +651,7 @@ mod support {
             url.set_query(None);
             append_query(&mut url, query);
             if let Some(query_string) = query_string {
-                let joined = match url.query() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{existing}&{query_string}")
-                    }
-                    _ => query_string.to_owned(),
-                };
-                url.set_query(Some(&joined));
+                append_query_text(&mut url, query_string);
             }
             Ok(url)
         }
@@ -1792,39 +1787,47 @@ mod support {
                 parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
             }
             if shape == HeaderShape::SetCookie {
-                let lines = |scalars| Value::Array(
-                    parts.iter().map(|part| scalar(part, scalars)).collect(),
-                );
-                if let Ok(value) = serde_json::from_value(lines(Scalars::Text)) {
-                    return Ok(Some(value));
-                }
-                return serde_json::from_value(lines(Scalars::Json))
-                    .map(Some)
-                    .map_err(|error| HeaderError::Parse {
+                return text_then_json(
                         name,
-                        message: error.to_string(),
-                    });
+                        |scalars| {
+                            Value::Array(
+                                parts.iter().map(|part| scalar(part, scalars)).collect(),
+                            )
+                        },
+                    )
+                    .map(Some);
             }
             let raw = parts.join(",");
             if shape == HeaderShape::Json {
                 return serde_json::from_str(&raw)
                     .map(Some)
-                    .map_err(|error| HeaderError::Parse {
-                        name,
-                        message: error.to_string(),
-                    });
+                    .map_err(|error| parse_error(name, &error));
             }
-            let textual = reconstruct(&raw, shape, explode, Scalars::Text);
-            if let Ok(value) = serde_json::from_value(textual) {
-                return Ok(Some(value));
-            }
-            let typed = reconstruct(&raw, shape, explode, Scalars::Json);
-            serde_json::from_value(typed)
+            text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars))
                 .map(Some)
-                .map_err(|error| HeaderError::Parse {
-                    name,
-                    message: error.to_string(),
-                })
+        }
+        /// Deserialize the value `build` rebuilds from header text, reading every token as text first.
+        ///
+        /// `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the number
+        /// 1 — the encoding cannot tell them apart. The target type can: the text-only reading is tried
+        /// first, and the JSON reading only if that does not deserialize. The error reported is the
+        /// JSON-flavored one, which is the more informative of the two.
+        fn text_then_json<T: DeserializeOwned>(
+            name: &'static str,
+            build: impl Fn(Scalars) -> Value,
+        ) -> Result<T, HeaderError> {
+            if let Ok(value) = serde_json::from_value(build(Scalars::Text)) {
+                return Ok(value);
+            }
+            serde_json::from_value(build(Scalars::Json))
+                .map_err(|error| parse_error(name, &error))
+        }
+        /// The [`HeaderError::Parse`] for header `name`, carrying serde's message.
+        fn parse_error(name: &'static str, error: &serde_json::Error) -> HeaderError {
+            HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            }
         }
         /// How a bare header token is interpreted when rebuilding a JSON value.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
