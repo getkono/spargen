@@ -314,7 +314,7 @@ pub fn serialize_form<T: Serialize>(
 /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
 ///
 /// Both styles are defined only for arrays and objects with `explode: false`, and any other value
-/// is refused with [`ParameterError::ExpectedComposite`].
+/// is refused with `ParameterError::ExpectedComposite`.
 pub fn serialize_delimited<T: Serialize>(
     name: &str,
     value: &T,
@@ -415,7 +415,7 @@ pub enum FormStyle {
 /// is, or nothing when that property is absent, as in a multipart body.
 ///
 /// A `value` that does not serialize to a JSON object is refused with
-/// [`ParameterError::ExpectedObject`].
+/// `ParameterError::ExpectedObject`.
 pub fn serialize_form_body<T: Serialize>(
     value: &T,
     properties: &[FormProperty],
@@ -523,7 +523,7 @@ fn push_form_member(
 /// Object values never reach here: the specification defines no part representation for them, so
 /// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
 /// style) rather than guessing at one. A `deepObject` `style` is refused with
-/// [`ParameterError::ExpectedObject`].
+/// `ParameterError::ExpectedObject`.
 pub fn serialize_multipart_values<T: Serialize>(
     value: &T,
     style: FormStyle,
