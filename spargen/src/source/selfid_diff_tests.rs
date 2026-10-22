@@ -214,8 +214,6 @@ fn build_format(name: &str, remote: bool) -> Format {
 fn the_lock_and_the_build_parse_every_document_alike() {
     use Expect::{Both, Disagree};
     use Format::{Either, Json, Yaml};
-    // The lock matches the suffix of a dot-file name; the build reads it as having no extension.
-    const DOTFILE_BUG: u32 = 917;
     // The lock reads a remote URL's suffix through a trailing `/`; the build reads the vendored
     // path, which drops the empty last segment.
     const SLASH_BUG: u32 = 918;
@@ -236,22 +234,8 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("specs/api.yaml?v=1", Both(Either)),
         ("specs/api.json#x", Both(Either)),
         // A name that is only a dot and an extension.
-        (
-            "specs/.json",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
-        (
-            "specs/.yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
+        ("specs/.json", Both(Either)),
+        ("specs/.yaml", Both(Either)),
     ];
     let remote: &[(&str, Expect<Format>)] = &[
         ("https://h.example/api.json", Both(Json)),
@@ -283,14 +267,7 @@ fn the_lock_and_the_build_parse_every_document_alike() {
             },
         ),
         // A name that is only a dot and an extension.
-        (
-            "https://h.example/.json",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
+        ("https://h.example/.json", Both(Either)),
     ];
     let rows = local.iter().map(|row| (row, false));
     let rows = rows.chain(remote.iter().map(|row| (row, true)));

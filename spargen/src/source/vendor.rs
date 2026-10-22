@@ -449,22 +449,26 @@ pub(crate) fn vendor(
 }
 
 /// Parse a local document's text into a value tree for ref-scanning only, discarding parse
-/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the text
-/// after the last `.` of `path`. A `?` or `#` in a local path is part of the file's name (a
-/// relative `$ref` such as `api.yaml?v=1` keeps its query in the path it names), so it is read
-/// through rather than cut off: `api.json?v=1` names no recognised extension here, as it names
-/// none to the build's `Utf8Path::extension` (#916).
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from `path`, the reading the build's `parse_by_name`
+/// makes: a name that is only a dot and an extension, such as `.json`, has none (#917). A `?` or
+/// `#` in a local path is part of the file's name (a relative `$ref` such as `api.yaml?v=1` keeps
+/// its query in the path it names), so it is read through rather than cut off: `api.json?v=1`
+/// names no recognised extension (#916).
 pub(super) fn parse_scratch_local(path: &str, text: &str) -> Option<SpannedValue> {
-    parse_scratch(path.rsplit_once('.').map(|(_, extension)| extension), text)
+    parse_scratch(Utf8Path::new(path).extension(), text)
 }
 
 /// Parse a fetched document's text into a value tree for ref-scanning only, discarding parse
-/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the text
-/// after the last `.` of `url` with any `?` query or `#` fragment cut off first, as the vendored
-/// path the build reads drops them.
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from the last `/`-separated segment of `url`, with any
+/// `?` query or `#` fragment cut off first, as the vendored path the build reads drops them. A
+/// segment that is only a dot and an extension, such as `.json`, has none, as it has none to the
+/// build (#917).
 pub(super) fn parse_scratch_remote(url: &str, text: &str) -> Option<SpannedValue> {
     let stem = url.split(['?', '#']).next().unwrap_or(url);
-    parse_scratch(stem.rsplit_once('.').map(|(_, extension)| extension), text)
+    let segment = stem.rsplit_once('/').map_or(stem, |(_, segment)| segment);
+    parse_scratch(Utf8Path::new(segment).extension(), text)
 }
 
 fn parse_scratch(extension: Option<&str>, text: &str) -> Option<SpannedValue> {
