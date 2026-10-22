@@ -503,9 +503,11 @@ pub(super) fn gate_xml_field_renames(
         let ref_names: Vec<(TypeId, usize, String)> = view
             .emitted()
             .filter(|(id, _)| xml_reachable.contains(id))
-            .filter_map(|(id, def)| match &def.kind {
-                TypeKind::Struct(object) => Some((id, object)),
-                _ => None,
+            .filter_map(|(id, def)| {
+                let TypeKind::Struct(object) = &def.kind else {
+                    return None;
+                };
+                Some((id, object))
             })
             .flat_map(|(id, object)| {
                 object
@@ -516,9 +518,11 @@ pub(super) fn gate_xml_field_renames(
                         field.xml.by_reference && field.xml.name.is_none() && !field.xml.attribute
                     })
                     .filter_map(move |(index, field)| {
-                        let element = match &view.get(field.ty.id)?.kind {
-                            TypeKind::Array(item) => item.id,
-                            _ => field.ty.id,
+                        // An array's items are each its element; anything else is the element.
+                        let element = if let TypeKind::Array(item) = &view.get(field.ty.id)?.kind {
+                            item.id
+                        } else {
+                            field.ty.id
                         };
                         Some((id, index, view.xml_root_name(element)?.to_owned()))
                     })
