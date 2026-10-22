@@ -182,7 +182,7 @@ run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.mutants]
 description = "Mutation testing over the runtime, the response partition and the name allocator"
-# CI's `mutants` job in `mutants.yml` runs this command byte for byte, weekly and on
+# CI's `mutants` job in `mutants.yml` runs these commands byte for byte, weekly and on
 # `workflow_dispatch` (`every_mise_task_runs_exactly_what_its_ci_job_runs`): it takes well over the
 # time a pull request should wait, so no hook or pull request runs it. The scope is the embedded
 # runtime, the media codecs in `ir/media.rs` and the success/error partition in
@@ -197,10 +197,19 @@ description = "Mutation testing over the runtime, the response partition and the
 #   mutant only an integration test (`spargen/tests/e2e.rs` and the rest) would catch is reported
 #   missed, which fails the run; the kill belongs beside the code. Running the integration suites
 #   per mutant would take hours.
-# - `|| test $? -eq 3` accepts cargo-mutants' "timeouts but none missed" status. A mutant that hangs
-#   the suite (`+=` to `*=` on a loop index that starts at 0 never ends) has been detected; exit
-#   status 2, any missed mutant, still fails, as do 1 (usage) and 4 (the unmutated tree fails).
-run = "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3"
+# - `|| test $? -eq 3` accepts cargo-mutants' exit status 3, "some mutant timed out": a mutant that
+#   hangs the suite (`+=` to `*=` on a loop index that starts at 0 never ends) has been detected.
+#   Status 3 says nothing about missed mutants, though: cargo-mutants checks for a timeout before
+#   it checks for a missed mutant, so a run with any timeout exits 3 however many it missed (#881).
+#   Status 2 (missed mutants and no timeout), 1 (usage) and 4 (the unmutated tree fails) fail here.
+# - The second command reads the run's own count, `missed` in `mutants.out/outcomes.json`, and
+#   fails unless it is 0, so a missed mutant fails the gate whether or not a timeout came with it.
+#   `jq -e` exits non-zero on `false`, and on a missing file, so a run that wrote no outcomes fails
+#   too.
+run = [
+  "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3",
+  "jq -e '.missed == 0' mutants.out/outcomes.json",
+]
 
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"
