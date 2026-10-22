@@ -738,10 +738,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// inserted for the composition a union was met with, once the meet re-emitted its result
     /// under the schema's own name. The composition is an input to that meet, as a `$ref` sibling's
     /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct was emitted
-    /// as a public type nothing referred to (#852). A met reservation's body is not known yet, so
-    /// nothing is elided against it.
+    /// as a public type nothing referred to (#852). [`Self::meet_union_with_all_of`] inserts its
+    /// result after `composed` ends, so the result is never one of the ids elided. A met
+    /// reservation's body is not known yet, so nothing is elided against it.
     fn elide_unused_composition(&mut self, met: Option<Ty>, composed: Range<u32>) {
-        if met.is_some_and(|met| !self.is_reservation(met.id) && !composed.contains(&met.id.0)) {
+        if met.is_some_and(|met| !self.is_reservation(met.id)) {
             self.elide_unused_union_lowering(composed);
         }
     }
