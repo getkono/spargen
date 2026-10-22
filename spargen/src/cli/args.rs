@@ -132,7 +132,7 @@ pub(crate) struct DiffArgs {
 /// Arguments for `spargen explain`.
 #[derive(Debug, Args)]
 pub(crate) struct ExplainArgs {
-    /// The diagnostic code, e.g. `E042`.
+    /// The diagnostic code, e.g. `E013`.
     pub(crate) code: String,
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Human)]

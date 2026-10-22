@@ -421,7 +421,7 @@ fn lower_pass(
                         ))
                         .remedy(
                             "declare the scheme under components.securitySchemes as http \
-                             bearer/basic, apiKey, oauth2, or openIdConnect",
+                             bearer/basic, apiKey, oauth2, openIdConnect, or mutualTLS",
                         )
                         .emit(ctx.diags);
                     }

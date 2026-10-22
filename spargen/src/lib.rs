@@ -828,8 +828,8 @@ pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {
     }
 }
 
-/// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
-/// published errors index.
+/// Extended documentation for a stable diagnostic code, backing `spargen explain E###`. The
+/// published errors index, `docs/errors.md`, lists each code's severity and title.
 pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
     Code::from_str(code).map(Code::explain)
 }
