@@ -750,14 +750,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether this definition is a named component root — reachable by name from anywhere else in
     /// the document, rather than owned by the single use site that produced it.
     pub(super) fn is_component_root(&self, id: TypeId) -> bool {
+        self.reservation_roots().any(|root| root == id)
+    }
+
+    /// The root id of every reservation, finished or still being lowered, across every
+    /// [`Reservation`] frame: both memos [`Self::reservation_memos`] hands out for each.
+    pub(super) fn reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components
             .values()
-            .chain(self.in_progress.values())
             .chain(self.remote_components.values())
-            .chain(self.remote_in_progress.values())
             .chain(self.resolved_components.values())
+            .map(|&(root, _)| root)
+            .chain(self.open_reservation_roots())
+    }
+
+    /// The root id of every reservation whose body is still being lowered: the in-progress memo
+    /// of each [`Reservation`] frame.
+    fn open_reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.in_progress
+            .values()
+            .chain(self.remote_in_progress.values())
             .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+            .map(|&(root, _)| root)
     }
 
     /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
@@ -776,11 +790,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// [`TypeGraph::reserve`]: crate::ir::TypeGraph::reserve
     pub(super) fn is_in_progress_root(&self, id: TypeId) -> bool {
-        self.in_progress
-            .values()
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+        self.open_reservation_roots().any(|root| root == id)
     }
 
     /// Whether the graph currently holds `id` as a [`TypeKind::Reserved`] placeholder.

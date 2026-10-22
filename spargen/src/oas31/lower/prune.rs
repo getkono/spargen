@@ -37,17 +37,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .flat_map(|(_, def)| kind_edges(&def.kind))
             .filter(inside)
             .collect();
-        roots.extend(
-            self.components
-                .values()
-                .chain(self.in_progress.values())
-                .chain(self.remote_components.values())
-                .chain(self.remote_in_progress.values())
-                .chain(self.resolved_components.values())
-                .chain(self.resolved_in_progress.values())
-                .map(|&(id, _)| id)
-                .filter(inside),
-        );
+        roots.extend(self.reservation_roots().filter(inside));
         for (_, contribution) in self.resolved_contributions.values().flatten() {
             match contribution {
                 Contribution::Object { fields, .. } => {

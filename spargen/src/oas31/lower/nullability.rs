@@ -363,14 +363,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `id` is the type of a component, a remote or a resolved target, finished or still
     /// being lowered: a type other uses share, which one use's lowering does not change.
     fn is_component_def(&self, id: TypeId) -> bool {
-        self.components
-            .values()
-            .chain(self.in_progress.values())
-            .chain(self.remote_components.values())
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_components.values())
-            .chain(self.resolved_in_progress.values())
-            .any(|&(component, _)| component == id)
+        self.reservation_roots().any(|component| component == id)
     }
 
     /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
