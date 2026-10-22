@@ -518,22 +518,15 @@ mod support {
         use reqwest::{Request, Response, Url};
         use serde::de::DeserializeOwned;
         use super::{ClientCore, Error, ResponseValue};
-        /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-        /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+        /// Build a request URL from the base URL, or an optional per-operation server override, and a
+        /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
+        /// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
+        /// runtime regex. Non-generic.
         ///
         /// `query` holds complete `name=value` fragments that the parameter helpers have already
         /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
         /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
         /// a `,` inside one of them.
-        pub fn build_url(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_on(core, None, path, query)
-        }
-        /// As [`build_url`], but against an optional per-operation server override. An absolute override
-        /// replaces the client's base URL; a relative one is joined onto it.
         pub fn build_url_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -629,17 +622,9 @@ mod support {
             };
             url.set_query(Some(&joined));
         }
-        /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-        /// Both forms replace any query embedded in the selected server URL.
-        pub fn build_url_with_query_string(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-            query_string: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_with_query_string_on(core, None, path, query, query_string)
-        }
-        /// As [`build_url_with_query_string`], but against an optional per-operation server override.
+        /// As [`build_url_on`], for a URL whose entire query string is owned by an OpenAPI 3.2
+        /// `in: querystring` parameter. With or without a query string, it replaces any query embedded in
+        /// the selected server URL.
         pub fn build_url_with_query_string_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -4212,11 +4197,10 @@ mod support {
     };
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
-        build_url, build_url_on, build_url_with_query_string,
-        build_url_with_query_string_on, classify_error, classify_error_bytes,
-        classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-        decode_success_with, decode_text_body, read_error_body, send, unexpected_status,
-        StatusSpec,
+        build_url_on, build_url_with_query_string_on, classify_error,
+        classify_error_bytes, classify_error_text, decode_success, decode_success_bytes,
+        decode_success_text, decode_success_with, decode_text_body, read_error_body,
+        send, unexpected_status, StatusSpec,
     };
     pub use error::{
         ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError,
@@ -4228,7 +4212,7 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, ParameterError, PercentEncoding,
+        FormStyle, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use response::ResponseValue;

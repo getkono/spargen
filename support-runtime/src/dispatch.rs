@@ -15,23 +15,15 @@ use serde::de::DeserializeOwned;
 
 use crate::{ClientCore, Error, ResponseValue};
 
-/// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-/// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+/// Build a request URL from the base URL, or an optional per-operation server override, and a
+/// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
+/// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
+/// runtime regex. Non-generic.
 ///
 /// `query` holds complete `name=value` fragments that the parameter helpers have already
 /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
 /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
 /// a `,` inside one of them.
-pub fn build_url(
-    core: &ClientCore,
-    path: &str,
-    query: &[String],
-) -> Result<Url, Error<Infallible>> {
-    build_url_on(core, None, path, query)
-}
-
-/// As [`build_url`], but against an optional per-operation server override. An absolute override
-/// replaces the client's base URL; a relative one is joined onto it.
 pub fn build_url_on(
     core: &ClientCore,
     server: Option<&str>,
@@ -131,18 +123,9 @@ fn append_query_text(url: &mut Url, text: &str) {
     url.set_query(Some(&joined));
 }
 
-/// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-/// Both forms replace any query embedded in the selected server URL.
-pub fn build_url_with_query_string(
-    core: &ClientCore,
-    path: &str,
-    query: &[String],
-    query_string: Option<&str>,
-) -> Result<Url, Error<Infallible>> {
-    build_url_with_query_string_on(core, None, path, query, query_string)
-}
-
-/// As [`build_url_with_query_string`], but against an optional per-operation server override.
+/// As [`build_url_on`], for a URL whose entire query string is owned by an OpenAPI 3.2
+/// `in: querystring` parameter. With or without a query string, it replaces any query embedded in
+/// the selected server URL.
 pub fn build_url_with_query_string_on(
     core: &ClientCore,
     server: Option<&str>,
