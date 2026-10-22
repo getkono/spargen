@@ -35,7 +35,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             self.ensure_component(name, Some(reference), at)
         } else if is_remote_ref(reference) {
-            self.ensure_remote(reference)
+            self.ensure_remote(reference, at)
         } else {
             self.ensure_resolved(reference, at, hint)
         }
@@ -603,13 +603,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// schema comes from the vendored, hash-pinned copy already in the bundle; no network). A remote
     /// ref re-entered while its own body is still lowering — a self- or mutually-recursive vendored
     /// schema — returns a boxed back-edge against the reserved root id, so recursion terminates and
-    /// generates a finite (boxed) type instead of overflowing the stack.
-    pub(super) fn ensure_remote(&mut self, reference: &str) -> Option<Ty> {
-        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference))
+    /// generates a finite (boxed) type instead of overflowing the stack. `at` is the site of the
+    /// `$ref` being lowered, where a loop of bare-`$ref` vendored documents is reported.
+    pub(super) fn ensure_remote(&mut self, reference: &str, at: &Provenance) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference, at))
     }
 
     /// [`Self::ensure_remote`]'s body, run with `open_narrowing` out of effect, as for a component.
-    fn ensure_remote_closed(&mut self, reference: &str) -> Option<Ty> {
+    fn ensure_remote_closed(&mut self, reference: &str, at: &Provenance) -> Option<Ty> {
         if let Some(ty) = self.reserved_type(Reservation::Remote(reference.to_owned())) {
             return Some(ty);
         }
@@ -625,7 +626,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema.reference.is_some() {
             if !self.remote_alias_stack.insert(reference.to_owned()) {
                 // E004 case: cycle
-                Diagnostic::error(Code::UnresolvedRef, self.document.provenance.clone())
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!("remote $ref `{reference}` forms an alias cycle"))
                     .emit(self.diags);
                 return None;

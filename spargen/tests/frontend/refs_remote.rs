@@ -510,6 +510,45 @@ fn a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected(
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
 
+/// Two vendored remote documents that are each nothing but a `$ref` to the other. Neither has
+/// a body to reserve a root for, so `ensure_remote` chains through them under its own alias
+/// guard, and that guard is what reports the loop rather than recursing until the stack ends.
+#[test]
+fn two_vendored_remote_documents_aliasing_each_other_are_an_alias_cycle() {
+    const A_URL: &str = "https://api.example.com/schemas/a.yaml";
+    const B_URL: &str = "https://api.example.com/schemas/b.yaml";
+    const A_YAML: &str = "$ref: \"b.yaml\"\n";
+    const B_YAML: &str = "$ref: \"a.yaml\"\n";
+    const A_SHA: &str = "984dfccb3155e113ff9f3e6a18f95eaffe372fdbdcdb4199164d4eaf50e84b43";
+    const B_SHA: &str = "eb5e71cf27b9ae8ec27197ca8fe135d1da08e427a4e004e8c308dc9fb5d006ea";
+
+    let lock = format!(
+        "version = 1\n\n[[remote]]\nurl = \"{A_URL}\"\nsha256 = \"{A_SHA}\"\npath = \
+             \"api.example.com/schemas/a.yaml\"\n\n[[remote]]\nurl = \"{B_URL}\"\nsha256 = \
+             \"{B_SHA}\"\npath = \"api.example.com/schemas/b.yaml\"\n"
+    );
+    let vendor = [
+        ("api.example.com/schemas/a.yaml", A_YAML),
+        ("api.example.com/schemas/b.yaml", B_YAML),
+    ];
+    let (generated, _temp, _out) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, false);
+    let (checked, _temp2, _out2) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, true);
+
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert!(
+            !has_code(report, Code::VendoredRefDrift),
+            "{entry}: {report:#?}"
+        );
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            messages_for(report, Code::UnresolvedRef)
+                .iter()
+                .any(|m| m.starts_with("remote $ref `") && m.ends_with("` forms an alias cycle")),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 /// Two vendored remote schemas in mutual recursion through a nullable alias — the remote
 /// spelling of the commonest recursive idiom there is, and the one frame of the three whose
 /// open reservations no guard could see.
