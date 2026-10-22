@@ -8,7 +8,7 @@ use crate::diag::Provenance;
 use crate::ir::{Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
 
-use super::combine::{take_refiners, Contribution};
+use super::combine::{objects_met_as_their_unions, take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
 use super::shape::schema_has_union;
@@ -129,6 +129,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let (mut contributions, union_members) =
             self.union_members_first(contributions, union_members);
         let union_members = union_members.as_slice();
+        // Each union member meets a member whose `type` names `object` beside another category as
+        // the union of its categories, branch by branch, as the sibling spelling meets it (#827).
+        let member_lowerings = if union_members.is_empty() {
+            Vec::new()
+        } else {
+            objects_met_as_their_unions(&mut contributions)
+        };
         if self.several_unions_beside_object(union_members, &contributions, false) {
             self.report_held_untyped_warnings(held);
             return self.reject_all_of_several_unions(schema);
@@ -196,6 +203,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.report_untyped_one_of(warning);
             }
         }
+        self.elide_unused_lowerings(member_lowerings);
         self.report_held_untyped_warnings(held);
         met
     }
@@ -673,6 +681,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &mut lowerings,
             )
         })?;
+        // As the union written as an `allOf` member meets it (#827).
+        let member_lowerings = objects_met_as_their_unions(&mut contributions);
         if self.several_unions_beside_object(&union_members, &contributions, real_union(&union)) {
             return self.reject_all_of_several_unions(schema);
         }
@@ -717,7 +727,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+        self.elide_unused_lowerings(member_lowerings);
         met
+    }
+
+    /// [`Self::elide_unused_union_lowering`] of each of `lowerings`, the ids an `allOf` member's
+    /// own lowering inserted ([`objects_met_as_their_unions`]), once the merge's result is in.
+    pub(super) fn elide_unused_lowerings(&mut self, lowerings: Vec<Range<u32>>) {
+        for lowered in lowerings {
+            self.elide_unused_union_lowering(lowered);
+        }
     }
 
     /// Lower an `allOf` exactly one of whose members is an inline `oneOf`/`anyOf` (#463), on a
@@ -787,6 +806,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.report_held_untyped_warnings(held);
             return None;
         }
+        // A member whose `type` names `object` beside another category is the union of its
+        // categories the union meets branch by branch, as beside the same `type` written as the
+        // union's sibling, where no other object member keeps the composition an object (#827).
+        let member_lowerings = objects_met_as_their_unions(&mut contributions);
         // With no object member, the union meets the other members as the scalar it is, ahead of
         // them as every union member of a scalar meet is ([`Self::union_members_first`], #678):
         // the scalar meet already intersects a union branch by branch, and it keeps the narrowing
@@ -827,7 +850,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             union_members.push((union_slot, union.as_ref()));
             // The union members take `null` there, where it can satisfy the merge.
-            return self.combine_scalar_union_members(
+            let met = self.combine_scalar_union_members(
                 schema,
                 hint,
                 contributions,
@@ -835,6 +858,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 held,
                 lowerings,
             );
+            self.elide_unused_lowerings(member_lowerings);
+            return met;
         }
         // The union is met below with its merge held back, so its own report waits for that meet
         // ([`Self::warn_untyped_met_variants`]); the members' stand as raised.
@@ -857,7 +882,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .map(|(member, refiner)| (member.as_ref(), *refiner)),
         );
-        self.meet_union_with_all_of(
+        let met = self.meet_union_with_all_of(
             schema,
             hint,
             composed,
@@ -865,7 +890,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             union,
             &union_hint,
             MetUnion::AllOfMember,
-        )
+        );
+        self.elide_unused_lowerings(member_lowerings);
+        met
     }
 
     /// Lower the `allOf` members of untyped object or array applicators alone, which refine a

@@ -41,8 +41,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         roots.extend(self.reservation_roots().filter(inside));
         for (_, contribution) in self.resolved_contributions.values().flatten() {
             match contribution {
-                Contribution::Object { fields, .. } => {
+                Contribution::Object { fields, union, .. } => {
                     roots.extend(fields.iter().map(|field| field.ty.id).filter(inside));
+                    roots.extend(union.map(|union| union.id).filter(inside));
                 }
                 Contribution::Scalar(ty) => roots.extend(Some(ty.id).filter(inside)),
                 Contribution::Refiner { scoped, .. } => roots.extend(

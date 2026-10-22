@@ -7,13 +7,16 @@
 use super::*;
 
 /// The `type` (and its own `enum` / `const`) one constraint set holds the union to, a `type` array
-/// of two non-null categories included (#677).
-const NULL_CONJUNCTS: [&str; 10] = [
+/// of two non-null categories included (#677), and one naming `object` or `array` beside a scalar
+/// category (#827).
+const NULL_CONJUNCTS: [&str; 12] = [
     "type: [string, 'null']",
     "type: [integer, 'null']",
     "type: string",
     "type: [string, integer]",
     "type: [string, integer, 'null']",
+    "type: [object, string]",
+    "type: [array, integer, 'null']",
     "type: [string, 'null'], enum: [a]",
     "type: [string, 'null'], enum: [a, null]",
     "type: [string, 'null'], const: a",
