@@ -626,12 +626,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.gathering(|ctx| ctx.gather_resolved_target(target, &hint, &mut contributed));
         self.resolved_member_stack.pop();
         expanded?;
+        // A target's member whose `type` names `object` beside another category is met as its
+        // object alone, as before #827: the union of its categories is read only for a member
+        // written inline in the composition ([`objects_met_as_their_unions`]). Recorded here, it
+        // would stay reachable from the memo at every later use, and be emitted unused.
+        let mut unread = Vec::new();
+        for contribution in &mut contributed {
+            if let Contribution::Object {
+                union,
+                lowered: lowered @ Some(_),
+                ..
+            } = contribution
+            {
+                *union = None;
+                unread.extend(lowered.take());
+            }
+        }
         let recorded = contributed
             .into_iter()
             .enumerate()
             .map(|(index, contribution)| (gathering.origins.get(&index).cloned(), contribution))
             .collect();
         self.resolved_contributions.insert(key.clone(), recorded);
+        // The fields stay, held by the record; what only the union reached goes.
+        self.elide_unused_lowerings(unread);
         self.replay_resolved(&key, out);
         Some(())
     }

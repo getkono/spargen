@@ -733,7 +733,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// [`Self::elide_unused_union_lowering`] of each of `lowerings`, the ids an `allOf` member's
     /// own lowering inserted ([`objects_met_as_their_unions`]), once the merge's result is in.
-    fn elide_unused_lowerings(&mut self, lowerings: Vec<Range<u32>>) {
+    pub(super) fn elide_unused_lowerings(&mut self, lowerings: Vec<Range<u32>>) {
         for lowered in lowerings {
             self.elide_unused_union_lowering(lowered);
         }
