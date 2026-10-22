@@ -359,30 +359,48 @@ fn test_only_module_files(file: &Path, source: &str) -> Vec<PathBuf> {
     gated
 }
 
-/// What a path from the library root may name besides a module: every name a `use` in `lib.rs`
-/// brings into the root, mapped to the first segment of its path (`Spec` → `config`), and every
-/// `#[macro_export]` macro, mapped to the subsystem that defines it (`omit` → `compat`).
-fn root_names(root: &Path) -> BTreeMap<String, String> {
-    fn walk(tree: &syn::UseTree, first: Option<&str>, out: &mut BTreeMap<String, String>) {
+/// Every name a `use` in `lib.rs` brings into the root, mapped to the first segment of its path
+/// after a leading `crate` or `self` (`Spec` → `config`, and `crate::config::Spec` the same). A
+/// name a `crate::`/`self::` path re-exports straight from the root maps to that module when it
+/// is one (`self::ir as model` → `ir`), and to [`FACADE`] when it is a root item
+/// (`crate::generate as run`).
+fn lib_use_names(lib: &syn::File) -> BTreeMap<String, String> {
+    fn leaf(original: &str, first: Option<&str>, rooted: bool) -> String {
+        match first {
+            Some(first) => first.to_owned(),
+            None if !rooted => original.to_owned(),
+            None if SUBSYSTEMS.contains(&original) || FACADE_PLUMBING.contains(&original) => {
+                original.to_owned()
+            }
+            None => FACADE.to_owned(),
+        }
+    }
+    fn walk(
+        tree: &syn::UseTree,
+        first: Option<&str>,
+        rooted: bool,
+        out: &mut BTreeMap<String, String>,
+    ) {
         match tree {
             syn::UseTree::Path(path) => {
                 let segment = path.ident.to_string();
-                walk(&path.tree, Some(first.unwrap_or(&segment)), out);
+                if first.is_none() && (segment == "crate" || segment == "self") {
+                    walk(&path.tree, None, true, out);
+                } else {
+                    walk(&path.tree, Some(first.unwrap_or(&segment)), rooted, out);
+                }
             }
             syn::UseTree::Name(name) => {
                 let name = name.ident.to_string();
-                out.insert(name.clone(), first.unwrap_or(&name).to_owned());
+                out.insert(name.clone(), leaf(&name, first, rooted));
             }
             syn::UseTree::Rename(rename) => {
                 let original = rename.ident.to_string();
-                out.insert(
-                    rename.rename.to_string(),
-                    first.unwrap_or(&original).to_owned(),
-                );
+                out.insert(rename.rename.to_string(), leaf(&original, first, rooted));
             }
             syn::UseTree::Group(group) => {
                 for item in &group.items {
-                    walk(item, first, out);
+                    walk(item, first, rooted, out);
                 }
             }
             syn::UseTree::Glob(_) => panic!(
@@ -391,15 +409,23 @@ fn root_names(root: &Path) -> BTreeMap<String, String> {
             ),
         }
     }
-    let lib_path = root.join("spargen/src/lib.rs");
-    let lib: syn::File = syn::parse_str(&read(&lib_path))
-        .unwrap_or_else(|error| panic!("{lib_path:?} must parse: {error}"));
     let mut names = BTreeMap::new();
     for item in &lib.items {
         if let syn::Item::Use(item) = item {
-            walk(&item.tree, None, &mut names);
+            walk(&item.tree, None, false, &mut names);
         }
     }
+    names
+}
+
+/// What a path from the library root may name besides a module: every name [`lib_use_names`]
+/// reads from `lib.rs`, and every `#[macro_export]` macro, mapped to the subsystem that defines
+/// it (`omit` → `compat`).
+fn root_names(root: &Path) -> BTreeMap<String, String> {
+    let lib_path = root.join("spargen/src/lib.rs");
+    let lib: syn::File = syn::parse_str(&read(&lib_path))
+        .unwrap_or_else(|error| panic!("{lib_path:?} must parse: {error}"));
+    let mut names = lib_use_names(&lib);
     for subsystem in SUBSYSTEMS {
         for file in subsystem_files(root, subsystem) {
             let parsed: syn::File = syn::parse_str(&read(&file))
@@ -424,14 +450,15 @@ fn root_names(root: &Path) -> BTreeMap<String, String> {
 /// The edge a root path's first segment takes: the module it is, or the module a root re-export
 /// or exported macro of that name comes from. A name the root re-exports from outside the crate
 /// (`Utf8Path`) takes none. Any other segment (`self`, a glob, an item `lib.rs` defines itself,
-/// such as `crate::generate`) reaches the facade, which `FACADE` names.
+/// such as `crate::generate`, or a root re-export of one) reaches the facade, which `FACADE`
+/// names.
 fn root_edge(head: &str, names: &BTreeMap<String, String>) -> Option<String> {
     let is_module = |name: &str| SUBSYSTEMS.contains(&name) || FACADE_PLUMBING.contains(&name);
     if is_module(head) {
         return Some(head.to_owned());
     }
     match names.get(head) {
-        Some(module) if is_module(module) => Some(module.clone()),
+        Some(module) if is_module(module) || module == FACADE => Some(module.clone()),
         Some(_) => None,
         None => Some(FACADE.to_owned()),
     }
@@ -659,6 +686,44 @@ fn the_edge_reader_maps_root_reexports_and_super_paths() {
             "{source:?} reaches the crate root's own items"
         );
     }
+}
+
+/// A `lib.rs` re-export spelled through `crate::` or `self::` maps to the module after that
+/// prefix, never to `crate`/`self` themselves, which would take no edge and exempt the path.
+#[test]
+fn the_root_name_reader_strips_a_leading_crate_or_self() {
+    let lib: syn::File = syn::parse_str(
+        "pub use crate::config::Spec;\n\
+         pub use self::{diag::Code, cache::Fingerprint as Print};\n\
+         pub use crate::ir as model;\n\
+         pub use self::generate as run;\n\
+         pub use compat::Omit;\n\
+         use camino::Utf8Path;\n",
+    )
+    .expect("the fixture lib.rs parses");
+    let names = lib_use_names(&lib);
+    let expected = [
+        ("Spec", "config"),
+        ("Code", "diag"),
+        ("Print", "cache"),
+        ("model", "ir"),
+        ("run", FACADE),
+        ("Omit", "compat"),
+        ("Utf8Path", "camino"),
+    ]
+    .map(|(name, module)| (name.to_owned(), module.to_owned()));
+    assert_eq!(names, BTreeMap::from(expected));
+    let read = |source: &str| edges(source, "emit", Path::new("fixture.rs"), 1, &names);
+    assert_eq!(
+        read("use crate::{Spec, Print, model::Api};\n"),
+        BTreeSet::from(["cache", "config", "ir"].map(str::to_owned)),
+        "each `crate::`/`self::` re-export takes the edge of the module it comes from"
+    );
+    assert_eq!(
+        read("fn f() { crate::run(); }\n"),
+        BTreeSet::from([FACADE.to_owned()]),
+        "a root re-export of a root item reaches the facade"
+    );
 }
 
 /// The row key of the facade in the `lib.rs` DAG table, and the one cell it may carry.
