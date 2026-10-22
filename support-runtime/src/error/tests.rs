@@ -135,7 +135,7 @@ const REQUEST_VARIANTS: usize = 4;
 ///   `REQUEST_VARIANTS` alone: **not caught here**. Nothing in this module ever evaluates this
 ///   function on a value of the new variant, because no such value is ever constructed. It is
 ///   **caught** by `every_error_variant_is_counted_by_its_enumeration` in
-///   `spargen/tests/layering.rs`, which counts the top-level variants of `RequestError` and
+///   `spargen/tests/layering/runtime_embed.rs`, which counts the top-level variants of `RequestError` and
 ///   `Error` in the text of `error.rs` and requires `REQUEST_VARIANTS` and `ERROR_VARIANTS`, read
 ///   from this file's text, to equal them. With the count held to the enum, the first case then forces the value to be listed.
 ///
