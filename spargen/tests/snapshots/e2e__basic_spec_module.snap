@@ -2060,7 +2060,7 @@ mod support {
         //! assembled here rather than through `url`'s `query_pairs_mut`, which would encode both alike.
         use std::fmt;
         use serde::Serialize;
-        use serde_json::Value;
+        use serde_json::{Map, Value};
         /// Which characters survive unencoded when a serialized value is placed on the wire.
         ///
         /// The variant is chosen by codegen from the parameter's location, style, and `allowReserved`;
@@ -2244,26 +2244,9 @@ mod support {
                 Value::Null => Ok(String::new()),
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding),
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join(","))
+                    Ok(object_pairs(&values, encoding)?.join(","))
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(parts.join(","))
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding),
                 value => scalar(&value, encoding),
             }
         }
@@ -2295,25 +2278,15 @@ mod support {
                     )
                 }
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    ";{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.concat())
+                    Ok(
+                        object_pairs(&values, encoding)?
+                            .iter()
+                            .map(|pair| format!(";{pair}"))
+                            .collect(),
+                    )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(format!(";{name}={}", parts.join(",")))
+                    Ok(format!(";{name}={}", object_flat(& values, ",", encoding) ?))
                 }
                 value => Ok(format!(";{name}={}", scalar(& value, encoding) ?)),
             }
@@ -2335,26 +2308,9 @@ mod support {
                 }
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join("."))?
+                    object_pairs(&values, encoding)?.join(".")
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    parts.join(",")
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding)?,
                 value => scalar(&value, encoding)?,
             };
             Ok(format!(".{rendered}"))
@@ -2388,25 +2344,13 @@ mod support {
                         ],
                     )
                 }
-                Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect()
-                }
+                Value::Object(values) if explode => object_pairs(&values, encoding),
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(","))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, ",", encoding) ?)
+                        ],
+                    )
                 }
                 value => Ok(vec![format!("{name}={}", scalar(& value, encoding) ?)]),
             }
@@ -2432,12 +2376,12 @@ mod support {
                     )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(delimiter.as_str()))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, delimiter
+                            .as_str(), encoding) ?)
+                        ],
+                    )
                 }
                 _ => Err(ParameterError::ExpectedComposite),
             }
@@ -2693,6 +2637,37 @@ mod support {
                 .map(|value| scalar(value, encoding))
                 .collect::<Result<Vec<_>, ParameterError>>()
                 .map(|parts| parts.join(separator))
+        }
+        /// An object's members as `key,value` alternating in one `separator`-joined value: the
+        /// `explode: false` shape every style but `deepObject` shares.
+        fn object_flat(
+            values: &Map<String, Value>,
+            separator: &str,
+            encoding: PercentEncoding,
+        ) -> Result<String, ParameterError> {
+            let mut parts = Vec::with_capacity(values.len() * 2);
+            for (key, value) in values {
+                parts.push(encode(key, encoding));
+                parts.push(scalar(value, encoding)?);
+            }
+            Ok(parts.join(separator))
+        }
+        /// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
+        /// style then prefixes or joins.
+        fn object_pairs(
+            values: &Map<String, Value>,
+            encoding: PercentEncoding,
+        ) -> Result<Vec<String>, ParameterError> {
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(
+                        format!(
+                            "{}={}", encode(key, encoding), scalar(value, encoding) ?
+                        ),
+                    )
+                })
+                .collect()
         }
         fn scalar(
             value: &Value,
@@ -5139,32 +5114,6 @@ pub mod types {
         pub x: Option<NullOnlyPropertyx>,
     }
     #[derive(Debug, Clone)]
-    pub enum NullOnlyPropertyx84222325 {}
-    impl<'de> serde::Deserialize<'de> for NullOnlyPropertyx84222325 {
-        fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            Err(
-                serde::de::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
-    }
-    impl serde::Serialize for NullOnlyPropertyx84222325 {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(
-                serde::ser::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
-    }
-    #[derive(Debug, Clone)]
     pub enum NullOnlyPropertyx {}
     impl<'de> serde::Deserialize<'de> for NullOnlyPropertyx {
         fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -6618,7 +6567,6 @@ pub mod types {
     pub type RequestBody43755b84 = bytes::Bytes;
     pub type Cursor842223252 = String;
     pub type RequestBodydigest = bytes::Bytes;
-    pub type RequestBodypreviousC67f70f9 = bytes::Bytes;
     pub type RequestBodyprevious = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
@@ -6634,7 +6582,6 @@ pub mod types {
         pub digest: Option<ResponseBodydigest>,
     }
     pub type RequestBodyfile = bytes::Bytes;
-    pub type RequestBodythumb1536c7fa = bytes::Bytes;
     pub type RequestBodythumb = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody20d50470 {

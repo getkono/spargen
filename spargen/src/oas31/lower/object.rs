@@ -150,10 +150,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Collect the value types in deterministic source order: patternProperties entries first
         // (IndexMap preserves source order), then a typed `additionalProperties` value if present.
         let mut value_types: Vec<Ty> = Vec::new();
+        // Where the lowering of every value after the first starts: the map takes the first
+        // value's type, so the later ones' own lowerings are unused copies of it (#926).
+        let mut rest_from = None;
         for (_pattern, child) in &schema.pattern_properties {
             let ty = self.lower_schema_or(child, &format!("{hint}Value"))?;
             self.warn_structural_default_or(child, "a `patternProperties` value");
             value_types.push(ty);
+            rest_from.get_or_insert_with(|| self.graph_mark());
         }
         if let Some(additional) = schema.additional_properties.as_deref() {
             // `true`/absent leave unknown non-pattern keys unconstrained; the typed map still stands
@@ -187,6 +191,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if undecided {
             self.deferred_map_values
                 .push((schema.provenance.clone(), value_types));
+        }
+        // Every later value generates the first's Rust type, or the document is rejected, so what
+        // their lowerings inserted is unused unless something else reaches it: a component one of
+        // them `$ref`s, which a memo holds (#926). The deferred comparison above reads the graph,
+        // which keeps an elided definition.
+        if let Some(rest_from) = rest_from {
+            self.elide_unused_union_lowering(rest_from..self.graph_mark());
         }
 
         Some(AdditionalProps::Typed(Box::new(first)))

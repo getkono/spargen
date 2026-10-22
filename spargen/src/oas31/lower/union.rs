@@ -209,6 +209,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // when the union is a component body (a bare `$ref` member would otherwise return an existing
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
+            // The member is lowered under this schema's own hint and then re-emitted below, so its
+            // own lowering is a second copy of the same type (#926).
+            let member_from = self.graph_mark();
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
             // Everything the sibling meet below inserts has an id at or above this mark; the
             // member and the sibling were lowered before it.
@@ -409,6 +412,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // (`…Constrained`, and whatever it built on the way) are unused unless `kind` reaches
             // them (#462). Without a sibling nothing was inserted since `mark`.
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
+            // The member's own lowering, which the re-emitted def replaced, is unused unless the
+            // re-emitted kind reaches it or a memo holds it (#926).
+            self.elide_unused_union_lowering(member_from..mark);
             // A `null` member beside a member that accepts `null` itself puts `null` in two
             // branches, which fails a `oneOf`'s exactly-one rule (#563), counted after the meet
             // like the multi-member path's variants. An untyped object or array member is such a
