@@ -553,9 +553,10 @@ pub(super) fn parse_by_name(
 
 /// Parse `text` in the format `extension` names, compared ASCII case-insensitively: `json` as
 /// JSON, `yaml` or `yml` as YAML, and any other extension, or none, as YAML then JSON. The build
-/// ([`parse_by_name`]) and `spargen lock` (`vendor::parse_scratch`) each read the extension from
-/// a document's name and both choose the format here, so an upper- or mixed-case extension
-/// such as `.JSON` names the same format to both (#915).
+/// ([`parse_by_name`]) and `spargen lock` (`vendor::parse_scratch_local` and
+/// `vendor::parse_scratch_remote`) each read the extension from a document's name and both choose
+/// the format here, so an upper- or mixed-case extension such as `.JSON` names the same format to
+/// both (#915).
 pub(super) fn parse_by_extension(
     id: FileId,
     extension: Option<&str>,
