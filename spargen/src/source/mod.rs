@@ -34,6 +34,7 @@ mod vendor;
 mod selfid_diff_tests;
 
 pub(crate) use bundle::InputBundle;
+pub(crate) use lock::LOCK_FILE_NAME;
 pub(crate) use parse::{parse_json, parse_yaml};
 pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, SpannedValue};
 
