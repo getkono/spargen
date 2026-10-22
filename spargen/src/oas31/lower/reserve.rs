@@ -837,7 +837,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             //
             // Only one shape reaches here: a vendored document whose **whole body** is the union,
             // because only then does the provenance canonicalise to a frame's own `file#pointer`.
-            // `remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
+            // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
             // document and the only thing in the suite that executes this loop; deleting the loop
             // turns it red. Every other remote recursion sits at a property or an `allOf` member,
             // whose pointer is not the frame's, so it reaches here and matches nothing.
