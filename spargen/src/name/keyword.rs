@@ -258,10 +258,10 @@ mod tests {
     }
 
     /// A sample of the table, written out here rather than read from `KEYWORDS`, so these words
-    /// cannot be dropped from it unnoticed. Deliberately small: a full second copy is what this
-    /// module used to carry, and it bought deletion-detection at the price of an omission blind
-    /// spot in both lists at once. The count assertion below covers deletion in general; this
-    /// covers the words whose loss would hurt most.
+    /// cannot be dropped from it unnoticed. Deliberately small: a full second copy would buy
+    /// deletion-detection at the price of an omission blind spot in both lists at once. The count
+    /// assertion below covers deletion in general; this covers the words whose loss would hurt
+    /// most.
     const KNOWN_KEYWORDS: &[&str] = &[
         "as", "fn", "type", "match", "self", "Self", "async", "dyn", "try", "yield", "become",
         "gen",
@@ -285,7 +285,7 @@ mod tests {
         }
     }
 
-    /// `is_keyword` and the test that iterates it now read one list, so a word deleted from that
+    /// `is_keyword` and the test that iterates it read one list, so a word deleted from that
     /// list is simply never tested. The count is the guard: adding or removing an entry is a
     /// deliberate act that has to update this number, and a reviewer sees it in the diff.
     #[test]

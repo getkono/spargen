@@ -295,7 +295,7 @@ pub(super) fn operation_args(
     }
     if let Some(params_binding) = &bindings.params {
         // `impl Into<Option<..>>` accepts the bundle directly as well as `None`/`Some(..)`, so a
-        // caller who sets optional parameters no longer wraps them in `Some`.
+        // caller who sets optional parameters passes the bundle without wrapping it in `Some`.
         args.push(quote! { #params_binding: impl Into<Option<#params_ident>> });
         forwards.push(quote! { #params_binding });
     }

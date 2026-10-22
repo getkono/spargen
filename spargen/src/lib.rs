@@ -428,7 +428,8 @@ fn prepend(diagnostics: &mut Vec<Diagnostic>, leading: &[Diagnostic]) {
 ///
 /// When called from a build script, this also runs the consumer-manifest dependency audit, so
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
-/// package to audit — `spargen deps` prints the required `[dependencies]` block instead.
+/// package to audit — `spargen deps` prints the dependency tables generated output
+/// requires instead.
 pub fn check(spec: &Spec) -> Report {
     let result = run_mode(spec, PipelineMode::Requirements);
     let mut report = result.report;
@@ -696,13 +697,13 @@ pub mod __private {
     }
 }
 
-/// The exact `[dependencies]` block generated output from `spec` requires — what backs
-/// `spargen deps`.
+/// The dependency tables generated output from `spec` requires — what backs `spargen deps`.
 ///
 /// Generated output is freestanding, so the consuming package declares its own runtime
 /// dependencies. Which ones depends on the API: multipart bodies pull in a `reqwest` feature,
-/// `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`. Until now that
-/// set could only be discovered reactively, one `E023` at a time; this returns all of it at once.
+/// `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`. This returns the
+/// whole set before a build, rather than leaving `E023` to report what the consuming package
+/// lacks.
 ///
 /// The spec must lower — a rejection is returned as the [`Report`] that explains why.
 pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {

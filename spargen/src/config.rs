@@ -1,9 +1,11 @@
 //! The generation inputs: [`Spec`] (*what* is generated) and [`Build`] (*where* it is written).
 //!
-//! Every entry point takes one of these two. [`check`](crate::check), [`diff`](crate::diff),
-//! [`vendor`](crate::vendor) and [`requirements`](crate::requirements) analyse a spec and write
-//! nothing, so they take a `Spec`; only [`generate`](crate::generate) writes a file, so only it
-//! takes a `Build`, and the analysis entry points demand no output path they would never use.
+//! Every entry point takes one of these two. [`check`](crate::check), [`diff`](crate::diff) and
+//! [`requirements`](crate::requirements) analyse a spec and write nothing, so they take a `Spec`.
+//! [`vendor`](crate::vendor) takes a `Spec` too: it writes only beside the spec
+//! (`.spargen/vendor/` and `spargen.lock`). [`generate`](crate::generate) writes the generated
+//! module, so it takes a `Build`, and the other entry points demand no output path they would
+//! never use.
 //!
 //! Both types have private fields and chained setters, so a new knob is an additive change rather
 //! than a breaking one.
@@ -23,7 +25,7 @@
 //! carve = false           # auto-carve unsupported constructs (same as `--carve`)
 //! batch_cap = 100         # max diagnostics collected before batching stops
 //! error_body_cap = 65536  # max bytes of a response body retained on error variants
-//! open_narrowing = false  # open a response body's string `const` narrowings (default false)
+//! open_narrowing = false  # open response-body string `enum`/`const` narrowings (default false)
 //!
 //! # Zero or more omit rules. The rule KIND is discriminated by field presence, and a key that
 //! # kind does not use (`file` beside `path`, say) is an error. A path/name (or
@@ -208,7 +210,8 @@ impl Spec {
     }
 
     /// Apply `spargen.toml` from beside the spec, if one is there. A missing file is not an
-    /// error — this is the discovery path every entry point uses by default.
+    /// error. `generate_api!` always calls this, and the CLI does when no `--config` is given; a
+    /// `build.rs` that wants the file calls it explicitly.
     ///
     /// A file that is found is recorded as [`config_file`](Self::config_file) records it. A
     /// missing one records nothing: creating `spargen.toml` later does not rerun a build on its
@@ -233,7 +236,7 @@ impl Spec {
             .map_err(|error| ConfigError::new(format!("invalid config file `{path}`: {error}")))?;
         if file.features.is_some() {
             // `deny_unknown_fields` alone would say "unknown field `features`", which does not
-            // tell a 0.2 user what to do. The keys moved to the top level in 0.3.
+            // tell the author of a file that still carries the table where its keys belong.
             return Err(ConfigError::new(format!(
                 "invalid config file `{path}`: the `[features]` table was removed; \
                  move its keys (`carve`, `batch_cap`, …) to the top level of the file"
