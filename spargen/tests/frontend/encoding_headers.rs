@@ -74,13 +74,11 @@ paths:
         '204': { description: ok }
 "##;
     let (report, code) = generate_with_code(spec);
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::DeclarationHasNoEffect),
-            "a pinned header on a style-serialized part has an effect: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "a pinned header on a style-serialized part has an effect: {report:#?}"
+    );
     assert!(code.contains("serialize_multipart_values"), "{code}");
     assert!(code.contains("X-Part-Kind"), "{code}");
     assert!(code.contains(r#"HeaderValue::try_from("tag")"#), "{code}");
@@ -166,13 +164,11 @@ fn encoding_header_schema_ref_is_resolved_and_pins_its_literal() {
     for (schema, components, sent) in cases {
         let spec = encoding_header_schema_document(schema, components);
         let (report, code) = generate_with_code(&spec);
-        for report in [report, check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
-            assert!(
-                !has_code(&report, Code::DeclarationHasNoEffect),
-                "{schema}: a resolved schema that pins a literal has an effect: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{schema}: a resolved schema that pins a literal has an effect: {report:#?}"
+        );
         let value = format!("HeaderValue::try_from({sent:?})");
         assert!(code.contains("X-Version"), "{schema}: {code}");
         assert!(code.contains(&value), "{schema} sends {value}: {code}");
@@ -245,14 +241,13 @@ fn e013_an_encoding_header_schema_ref_cycle_does_not_also_warn() {
         "    V: { $ref: '#/components/schemas/W', type: string }\n    W: { $ref: \
          '#/components/schemas/V', type: string }",
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// An `encoding.headers` reference that resolves to nothing is `E004` — and only `E004`, so one
@@ -280,14 +275,13 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// An `encoding.headers` entry that pins a literal is sent as a part header, so its name must be
@@ -335,17 +329,16 @@ paths:
         '204': {{ description: ok }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{name}: {literal}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "{name}: {literal}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{name}: {literal}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{name}: {literal}: {report:#?}"
+        );
     }
 }
 

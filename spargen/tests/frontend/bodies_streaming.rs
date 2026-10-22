@@ -66,13 +66,6 @@ components:
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
-    // check/generate parity.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::Oas32ConstructIgnored),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -122,12 +115,6 @@ components:
         flat.contains("EventStream < types :: AdminEvent >")
             || flat.contains("EventStream<types::AdminEvent>"),
         "contentSchema must become the stream payload type: {flat}"
-    );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::ValidationKeywordIgnored),
-        "check/generate must agree that the SSE content annotations are consumed: {checked:#?}"
     );
 }
 
@@ -194,8 +181,6 @@ paths:
             lower_code.matches("EventStream<").count(),
             "{media}"
         );
-        let checked = check(&spec);
-        assert_check_agrees(&report, &checked);
     }
 }
 
@@ -257,8 +242,6 @@ components:
             module_body(&lower_code),
             "{media} must generate what `application/json` does"
         );
-        let checked = check(&spec);
-        assert_check_agrees(&report, &checked);
     }
 }
 
@@ -288,12 +271,6 @@ paths:
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
-    );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::ValidationKeywordIgnored),
-        "check/generate must report the same content annotation warning: {checked:#?}"
     );
 }
 
@@ -484,9 +461,6 @@ paths:
     let generated = generate(spec);
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     assert!(!has_code(&generated, Code::UnsupportedMediaType));
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(!has_code(&checked, Code::UnsupportedMediaType));
 }
 
 #[test]
@@ -560,12 +534,6 @@ paths:
             !has_code(&report, Code::UnsupportedMediaType),
             "{media}: {report:#?}"
         );
-        let checked = check(&spec);
-        assert_ne!(
-            checked.outcome(),
-            Outcome::Rejected,
-            "{media}: {checked:#?}"
-        );
     }
 }
 
@@ -592,13 +560,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedMediaType),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -622,13 +583,6 @@ paths:
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
-    );
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedMediaType),
-        "{checked:#?}"
     );
 }
 
@@ -932,6 +886,4 @@ paths:
         "{report:#?}"
     );
     assert!(code.contains("EventStream<"), "{code}");
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }

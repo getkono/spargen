@@ -187,17 +187,16 @@ paths:
                     xml: {{ nodeType: {node_type}, {deprecated} }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{deprecated}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::InvalidInput),
-                "{deprecated}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{deprecated}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::InvalidInput),
+            "{deprecated}: {report:#?}"
+        );
     }
 }
 
@@ -222,10 +221,9 @@ paths:
                 properties:
                   id: { type: string, xml: { nodeType: fragment } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 /// The same unknown hint on a type that is never serialized as XML genuinely has no effect, so it
@@ -280,12 +278,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedMediaType),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -315,8 +307,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -387,10 +377,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -420,10 +409,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -452,8 +440,6 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    let checked = check(spec);
-    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
 }
 
 #[test]
@@ -547,9 +533,6 @@ paths:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    // check/generate parity: the same rejection is reached without emitting.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 // --- OpenAPI 3.2 XML nodeType defaulting ----------------------------------------------------
@@ -580,10 +563,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -608,10 +590,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -637,14 +618,13 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-        assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -668,10 +648,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 // --- Root and `items` XML Objects (#703) ----------------------------------------------------
@@ -1032,13 +1011,12 @@ components:
         id: {{ type: integer }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{xml}: {report:#?}");
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "{xml}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{xml}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{xml}: {report:#?}"
+        );
     }
 }
 

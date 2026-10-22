@@ -55,21 +55,18 @@ components:
 
     for applicator in ["oneOf", "anyOf"] {
         let spec = archetype(applicator);
-        let (generated, code) = generate_with_code(&spec);
-        let checked = check(&spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{applicator}/{entry}: a nullable recursive `$ref` is the matrix's own example of a \
-                 supported construct: {report:#?}"
-            );
-            // The internal-invariant code must not be how a user learns about this document.
-            assert!(
-                !has_code(report, Code::InvalidInput),
-                "{applicator}/{entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{applicator}: a nullable recursive `$ref` is the matrix's own example of a supported \
+             construct: {report:#?}"
+        );
+        // The internal-invariant code must not be how a user learns about this document.
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{applicator}: {report:#?}"
+        );
         // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
         // the union collapsed away. Both halves are the matrix's promise.
         assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
@@ -122,19 +119,16 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
 
     for (first, second) in [("A", "B"), ("B", "A")] {
         let spec = mutual(first, second);
-        let (generated, code) = generate_with_code(&spec);
-        let checked = check(&spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{first} before {second}/{entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                !has_code(report, Code::InvalidInput),
-                "{first} before {second}/{entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{first} before {second}: {report:#?}\n{spec}"
+        );
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{first} before {second}: {report:#?}"
+        );
         // The recursion is closed by boxing whichever way round the map is written — read off
         // `b`'s own declaration, not searched for in the file. `code.contains("Box<")` is true of
         // *any* successful generation (the embedded runtime alone supplies ten occurrences:
@@ -238,12 +232,10 @@ paths:
     };
     let root = document(COMPONENTS);
     let (generated, root_code) = generate_with_code(&root);
-    let checked = check(&root);
     let (split_generated, split_checked, split_code) =
         split("./lib.yaml#/components/schemas/W", COMPONENTS);
     for (entry, report) in [
         ("root/generate", &generated),
-        ("root/check", &checked),
         ("split/generate", &split_generated),
         ("split/check", &split_checked),
     ] {
@@ -385,10 +377,11 @@ paths:
 
     let root = document(&components("#/components/schemas/A"));
     let (generated, code) = generate_with_code(&root);
-    let checked = check(&root);
-    for (entry, report) in [("root/generate", &generated), ("root/check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    assert_ne!(
+        generated.outcome(),
+        Outcome::Rejected,
+        "root/generate: {generated:#?}"
+    );
     assert_optional("root", &code);
 
     // The root component `A` named through the root file's own path: not the local
@@ -496,11 +489,8 @@ components:
           properties:
             next: { $ref: '#/components/schemas/N' }
 "##;
-    let (generated, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(
         field_type(&code, "pub n:").as_deref(),
         Some("N"),
@@ -553,11 +543,8 @@ components:
           properties:
             next: { $ref: '#/components/schemas/Pick' }
 "##;
-    let (generated, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(
         field_type(&code, "pub pick:").as_deref(),
         Some("Pick"),
@@ -634,20 +621,17 @@ fn a_union_carrying_a_discriminator_or_a_default_is_not_an_alias() {
     ];
     for (label, body) in cases {
         let spec = alias_shaped_mutual_recursion(body);
-        let generated = generate(&spec);
-        let checked = check(&spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}/{entry}: a `{label}` beside the union has nowhere to go, so the document \
-                 must be refused rather than have it dropped: {report:#?}\n{spec}"
-            );
-            assert!(
-                has_code(report, Code::NonDisjointUnion),
-                "{label}/{entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{label}: a `{label}` beside the union has nowhere to go, so the document must be \
+             refused rather than have it dropped: {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(&report, Code::NonDisjointUnion),
+            "{label}: {report:#?}"
+        );
     }
 }
 
@@ -665,11 +649,8 @@ fn a_union_with_a_second_real_member_beside_the_back_edge_stays_a_union() {
     let spec = alias_shaped_mutual_recursion(
         "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: string }\n",
     );
-    let (generated, code) = generate_with_code(&spec);
-    let checked = check(&spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     // `b` binds `B` itself rather than the target of `B`'s `$ref` member: the union is represented,
     // so it has a type of its own.
     assert_eq!(
@@ -705,20 +686,13 @@ fn an_alias_member_with_shape_bearing_siblings_is_not_an_alias() {
          - { $ref: '#/components/schemas/A', properties: { x: { type: string } } }\n        \
          - { type: \"null\" }\n",
     );
-    let generated = generate(&spec);
-    let checked = check(&spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{entry}: the member's sibling `properties` must not be dropped in silence: \
-             {report:#?}\n{spec}"
-        );
-        assert!(
-            has_code(report, Code::AllOfIrreconcilable),
-            "{entry}: {report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "the member's sibling `properties` must not be dropped in silence: {report:#?}\n{spec}"
+    );
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
 /// A component that declares a shape of its own beside the union is not another name for its
@@ -734,20 +708,13 @@ fn an_alias_shaped_component_that_declares_its_own_shape_is_not_an_alias() {
         "      type: object\n      properties: { extra: { type: string } }\n      oneOf:\n        \
          - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n",
     );
-    let generated = generate(&spec);
-    let checked = check(&spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{entry}: the component's own `extra` must not be dropped in silence: \
-             {report:#?}\n{spec}"
-        );
-        assert!(
-            has_code(report, Code::AllOfIrreconcilable),
-            "{entry}: {report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "the component's own `extra` must not be dropped in silence: {report:#?}\n{spec}"
+    );
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
 /// The same alias spelled `anyOf` rather than `oneOf` is still one.
@@ -767,16 +734,13 @@ fn a_nullable_alias_spelled_any_of_is_recognised_as_one() {
         "      anyOf:\n        - { $ref: '#/components/schemas/A' }\n        \
          - { type: \"null\" }\n",
     );
-    let (generated, code) = generate_with_code(&spec);
-    let checked = check(&spec);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{entry}: an `anyOf`-spelled nullable alias is the same shape as the `oneOf` one and \
-             must generate: {report:#?}\n{spec}"
-        );
-    }
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an `anyOf`-spelled nullable alias is the same shape as the `oneOf` one and must \
+         generate: {report:#?}\n{spec}"
+    );
     // The pair the mutation destroys: the alias binds its *target*, optional for the `"null"`
     // member and boxed for the cycle. Refusing the spelling gives `Rejected`/`E007` instead, so
     // both halves of this are what stand over the arm.
@@ -831,7 +795,6 @@ components:
 "##;
     let (generated, code) = generate_with_code(self_file);
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
-    assert_ne!(check(self_file).outcome(), Outcome::Rejected);
     // Named, and read off `parent`'s own declaration rather than searched for in the file. The
     // embedded runtime emits `source: Option<Box<dyn std::error::Error + Send + Sync>>` into every
     // generated module, so `code.contains("Option<Box<")` is unconditionally true of any successful

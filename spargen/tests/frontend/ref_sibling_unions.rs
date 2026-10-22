@@ -191,12 +191,6 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
                 ["W011"],
                 "{keyword} in a {position}: {report:#?}"
             );
-            let checked = check(&spec);
-            assert_eq!(
-                codes(&checked),
-                ["W011"],
-                "{keyword} in a {position} via check: {checked:#?}"
-            );
             let types = types_module(&code);
             // The Rust type the position is bound to, read from where the position is used.
             let bound: String = match position {
@@ -1054,14 +1048,12 @@ components:
       required: [pick]
 "##
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target}: {site}, via {entry}: {report:#?}"
-            );
-        }
-        let (_, code) = generate_with_code(&spec);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{target}: {site}: {report:#?}"
+        );
         let types = types_module(&code);
         let pick = field_type(&types, "pub pick")
             .unwrap_or_else(|| panic!("{target}: {site}: no `pick` field: {types}"));

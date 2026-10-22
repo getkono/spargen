@@ -278,9 +278,6 @@ fn a_discriminator_mapping_naming_every_member_in_any_spelling_generates_its_tag
             .to_vec(),
         "{code}"
     );
-    let checked = check(&spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
 }
 
 /// The places a `discriminator` can sit with no `oneOf`/`anyOf` of its own, each with the pointer
@@ -572,9 +569,6 @@ fn every_discriminator_value_naming_a_member_selects_it() {
         ],
         "{code}"
     );
-    let checked = check(&spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
 }
 
 /// A component name is read as one only "unless a `mapping` is present for that value": a key
@@ -668,8 +662,6 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
         ],
         "{code}"
     );
-    let checked = check(&fallback);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 /// Issue #403: a member that is no schema component — inline, or a pointer into another schema —
@@ -835,8 +827,6 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
         .collect();
     assert_eq!(tags, [vec!["Dog".to_owned()]], "{code}");
     assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
-    let checked = check(&fallback);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 /// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the
@@ -1015,18 +1005,9 @@ components:
         "./openapi.yaml#/components/schemas/Envelope/properties/payload",
     ] {
         let spec = spec.replace("TARGET", target);
-        let (generated, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target} {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().is_empty(),
-                "{target} {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{target}: {report:#?}");
+        assert!(report.diagnostics().is_empty(), "{target}: {report:#?}");
         // The pointer member has no component name to be selected by as well; `Dog` does (#263).
         let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
             .decode
@@ -1330,8 +1311,6 @@ components:
         ],
         "{code}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]

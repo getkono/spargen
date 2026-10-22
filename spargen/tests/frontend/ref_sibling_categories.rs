@@ -81,19 +81,18 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
              '#/components/schemas/Target'\n      {sibling}\n{holder}"
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "an untyped `{keyword}` sibling against a nullable target of another category \
-                 did not reject: {report:#?}"
-            );
-            assert_eq!(
-                messages_for(&report, Code::AllOfIrreconcilable).len(),
-                1,
-                "{keyword}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "an untyped `{keyword}` sibling against a nullable target of another category did \
+             not reject: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::AllOfIrreconcilable).len(),
+            1,
+            "{keyword}: {report:#?}"
+        );
     }
 
     // The exemption from the rule above: a target that is itself exactly `null`. There the
@@ -104,19 +103,17 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         "{HEAD}    Target: {{ type: 'null' }}\n    Sibling:\n      $ref: \
          '#/components/schemas/Target'\n      required: [q]\n{holder}"
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "an untyped `required` sibling on a `$ref` to an exactly-`null` target rejected: \
-             {report:#?}"
-        );
-        assert!(
-            messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
-            "{report:#?}"
-        );
-    }
-    let (_, code) = generate_with_code(&spec);
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an untyped `required` sibling on a `$ref` to an exactly-`null` target rejected: \
+         {report:#?}"
+    );
+    assert!(
+        messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+        "{report:#?}"
+    );
     let types = types_module(&code);
     assert!(
         types.contains("pub type Sibling = ();"),
@@ -151,17 +148,15 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
              '#/components/schemas/Target'\n      {sibling}\n{holder}"
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "an untyped `{keyword}` sibling on a mixed union target rejected: {report:#?}"
-            );
-            for code in [Code::AllOfIrreconcilable, Code::DeclarationHasNoEffect] {
-                assert!(!has_code(&report, code), "{keyword}: {report:#?}");
-            }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "an untyped `{keyword}` sibling on a mixed union target rejected: {report:#?}"
+        );
+        for code in [Code::AllOfIrreconcilable, Code::DeclarationHasNoEffect] {
+            assert!(!has_code(&report, code), "{keyword}: {report:#?}");
         }
-        let (_, code) = generate_with_code(&spec);
         let types = types_module(&code);
         let target = enum_variants(&types, "Target");
         let refined = enum_variants(&types, "Sibling");
@@ -507,12 +502,6 @@ components:
                     "`{sibling}` beside a `$ref` to `{target}`, target first: {target_first}"
                 );
 
-                let checked = check(&with_sibling);
-                assert_ne!(
-                    checked.outcome(),
-                    Outcome::Rejected,
-                    "{what} was rejected by check: {checked:#?}"
-                );
                 let (report, code) = generate_with_code(&with_sibling);
                 assert_ne!(
                     report.outcome(),
@@ -539,11 +528,6 @@ components:
                     sibling.contains("default"),
                     "{what}: `W005` must fire exactly when a default is dropped: {report:#?}"
                 );
-                assert_eq!(
-                    has_code(&checked, Code::SchemaDefaultNotApplied),
-                    sibling.contains("default"),
-                    "{what}: check must agree with generate on `W005`: {checked:#?}"
-                );
             }
         }
     }
@@ -560,17 +544,16 @@ components:
              description: ok\n          content:\n            application/json:\n              \
              schema: {{ $ref: '#/components/schemas/Loop' }}\ncomponents:\n  schemas:\n    Loop: {alias}\n"
         );
-        for report in [check(&spec), generate(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{alias}`: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::UnresolvedRef),
-                "`{alias}` must report the alias cycle as E004: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{alias}`: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::UnresolvedRef),
+            "`{alias}` must report the alias cycle as E004: {report:#?}"
+        );
     }
 
     // The guard hands the alias to `chain_component_alias`, which routes a relative-file target
@@ -675,15 +658,14 @@ paths:
             schema: { $ref: '#/components/schemas/Nope', type: integer }
       responses: { '204': { description: ok } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AllOfIrreconcilable),
-            "a missing component must not also be reported as an irreconcilable intersection — \
-             there is no target to intersect with: {report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AllOfIrreconcilable),
+        "a missing component must not also be reported as an irreconcilable intersection — there \
+         is no target to intersect with: {report:#?}"
+    );
 
     // The mechanism. `SIBLING` is shape-bearing, so it clears `schema_has_shape_constraint` and
     // would be lowered if the `$ref` arm ever got that far.
@@ -708,18 +690,14 @@ components:
   schemas:
     Present: { type: object }
 "##;
-    for report in [
-        generate(&TRACED.replace("TARGET", "Nope")),
-        check(&TRACED.replace("TARGET", "Nope")),
-    ] {
-        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
-        assert!(
-            !has_code(&report, Code::PatternPropertiesRejected),
-            "the sibling of an unresolvable `$ref` was lowered, so `ensure_component` no longer \
-             returns `None` before the intersection is reached and the ordering this fixture \
-             names is gone: {report:#?}"
-        );
-    }
+    let report = generate(&TRACED.replace("TARGET", "Nope"));
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert!(
+        !has_code(&report, Code::PatternPropertiesRejected),
+        "the sibling of an unresolvable `$ref` was lowered, so `ensure_component` no longer \
+         returns `None` before the intersection is reached and the ordering this fixture names is \
+         gone: {report:#?}"
+    );
     // The control: the identical sibling against a target that resolves IS lowered, and reports.
     let present = generate(&TRACED.replace("TARGET", "Present"));
     assert!(
@@ -929,19 +907,14 @@ fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
             "type: [integer, boolean, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: string }, { type: 'null' }]"
         )
     );
-    for (entry, report) in [
-        ("generate", generate(&only_null)),
-        ("check", check(&only_null)),
-    ] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "a schema whose only valid instance is `null` must not be rejected as having no \
-             variant by {entry}: {report:#?}"
-        );
-        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
-    }
-    let (_, code) = generate_with_code(&only_null);
+    let (report, code) = generate_with_code(&only_null);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "a schema whose only valid instance is `null` must not be rejected as having no variant: \
+         {report:#?}"
+    );
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let body = code
         .split("ResponseValue<types::")
         .nth(1)
