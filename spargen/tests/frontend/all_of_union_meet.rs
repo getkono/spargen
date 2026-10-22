@@ -1184,3 +1184,115 @@ fn an_all_of_union_member_beside_a_union_is_met_before_its_branches_merge() {
         );
     }
 }
+
+/// An `allOf` member whose `type` names `object` beside another category admits that category's
+/// instances too, so a union met with it keeps every branch of a category the array names, as the
+/// sibling spelling `{type: [object, string], oneOf: [...]}` does (#827). Read as an object member,
+/// it dropped the `string` branch as excluded (`W011`) and collapsed `Pick` to an empty struct
+/// that refuses every string. A branch of a category the array omits is still reported, and an
+/// object member beside the array keeps the composition an object, so there the `string` branch
+/// is excluded, and the array beside an object member alone still merges into that object.
+#[test]
+fn an_all_of_type_array_naming_object_keeps_the_union_branches_of_its_categories() {
+    let excluded = |report: &Report| -> Vec<String> {
+        messages_for(report, Code::DeclarationHasNoEffect)
+            .into_iter()
+            .filter(|message| message.starts_with("union member "))
+            .map(str::to_owned)
+            .collect()
+    };
+    let union = "oneOf: [ { type: object }, { type: string } ]";
+    let wider = "oneOf: [ { type: object }, { type: string }, { type: integer } ]";
+    let array = "type: [object, string]";
+    // Each spelling, with the union branches the meet excludes.
+    let cases: [(&str, String, &[&str]); 6] = [
+        (
+            "the sibling spelling",
+            format!("{{ {array}, {union} }}"),
+            &[],
+        ),
+        (
+            "an allOf member",
+            format!("{{ allOf: [ {{ {array} }}, {{ {union} }} ] }}"),
+            &[],
+        ),
+        (
+            "an allOf member nested in an inner allOf",
+            format!("{{ allOf: [ {{ {array} }}, {{ allOf: [ {{ {union} }} ] }} ] }}"),
+            &[],
+        ),
+        (
+            "beside an allOf",
+            format!("{{ {union}, allOf: [ {{ {array} }} ] }}"),
+            &[],
+        ),
+        (
+            "an allOf member with object keywords, a branch of an omitted category beside it",
+            format!(
+                "{{ allOf: [ {{ {array}, properties: {{ a: {{ type: string }} }} }}, {{ {wider} \
+                 }} ] }}"
+            ),
+            &["union member 2"],
+        ),
+        (
+            "an allOf member beside an object member",
+            format!(
+                "{{ allOf: [ {{ {array} }}, {{ type: object, properties: {{ a: {{ type: string \
+                 }} }} }}, {{ {union} }} ] }}"
+            ),
+            &["union member 1"],
+        ),
+    ];
+    for (spelling, pick, expected) in cases {
+        let (report, code) =
+            generate_with_code(&with_schemas("3.1.0", &format!("    Pick: {pick}\n")));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
+        );
+        let excluded = excluded(&report);
+        assert_eq!(excluded.len(), expected.len(), "{spelling}: {excluded:#?}");
+        for (message, member) in excluded.iter().zip(expected) {
+            assert!(message.starts_with(member), "{spelling}: {message}");
+        }
+        let variants = enum_variants(&code, "Pick");
+        if expected == ["union member 1"] {
+            assert!(
+                variants.is_empty(),
+                "{spelling}: an object composition:\n{code}"
+            );
+            assert_eq!(
+                declared_fields(&code, "Pick"),
+                ["a"],
+                "{spelling}: the object member's field is kept:\n{code}"
+            );
+        } else {
+            assert_eq!(variants.len(), 2, "{spelling}: {variants:#?}\n{code}");
+            assert!(
+                variants.iter().any(|variant| {
+                    let payload = variant.split_once("(Box<").map(|(_, rest)| rest);
+                    payload
+                        .and_then(|rest| rest.strip_suffix(">)"))
+                        .is_some_and(|name| alias_target(&code, name).as_deref() == Some("String"))
+                }),
+                "{spelling}: the `string` branch is a variant: {variants:#?}\n{code}"
+            );
+        }
+        assert_no_untyped_value(&code);
+    }
+    // Beside an object member alone, the array still merges into that object, and the union of
+    // its categories it was also lowered to is not emitted unused.
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        &format!(
+            "    Pick: {{ allOf: [ {{ $ref: '#/components/schemas/Cat' }}, {{ {array} }} ] }}\n"
+        ),
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(declared_fields(&code, "Pick"), ["kind"], "{code}");
+    assert!(
+        !types_module(&code).contains("pub enum PickMember1"),
+        "the member's own union is emitted unused:\n{code}"
+    );
+}

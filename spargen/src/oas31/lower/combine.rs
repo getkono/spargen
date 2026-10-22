@@ -2,6 +2,7 @@
 //! a `$ref`, and combining them.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -157,6 +158,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|def| def.kind.clone())?;
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
+            self.elide_unused_member_lowerings(contributions);
             return Some(ty);
         }
 
@@ -381,7 +383,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
         // it satisfies every member.
         ty.nullable = object_all_of_admits_null(contributions);
+        self.elide_unused_member_lowerings(contributions);
         Some(ty)
+    }
+
+    /// Elide what the merge's result leaves unused of each inline member's own lowering that
+    /// [`Contribution::Object`]'s `lowered` records: the union of its `type` array's categories
+    /// where the merge took it as an object, and its fields where it took it as that union. The
+    /// result is inserted already, so whatever it reaches stays.
+    fn elide_unused_member_lowerings(&mut self, contributions: &[Contribution]) {
+        for contribution in contributions {
+            if let Contribution::Object {
+                lowered: Some(lowered),
+                ..
+            } = contribution
+            {
+                self.elide_unused_union_lowering(lowered.clone());
+            }
+        }
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -409,6 +428,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
                 union: None,
+                lowered: None,
             });
         }
         Some(())
@@ -789,6 +809,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     required,
                     nullable: decides_null.then_some(ty.nullable),
                     union,
+                    lowered: None,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -806,13 +827,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // branches as `lower_union` refines them; read as an object by its keywords, the union
         // would be dropped with no diagnostic (issue #419).
         if schema_is_object_like(schema) && !schema_has_union(schema) {
+            let from = self.graph_mark();
             let (fields, additional) = self.object_body(schema, hint)?;
+            // A `type` naming `object` beside another non-null category admits that category's
+            // instances too, so the member also carries the union of its categories it lowers to
+            // on its own, which a union met with the merge meets branch by branch: read as an
+            // object alone, it dropped every branch of that union that is not an object, and
+            // reported each as excluded (#827).
+            let union = if names_object_beside_another_category(schema) {
+                Some(self.lower_schema(schema, hint)?)
+            } else {
+                None
+            };
+            let lowered = union.map(|_| from..self.graph_mark());
             out.push(Contribution::Object {
                 fields,
                 additional,
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
-                union: None,
+                union,
+                lowered,
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -859,9 +893,17 @@ pub(super) enum Contribution {
         /// The type a `$ref` member's target lowered to, where that target is a `oneOf`/`anyOf`
         /// that lowered to one object (its one real branch): beside scalar members alone it is
         /// met with them as the union it is ([`LowerCtx::combine_all_of`]), as the same union
-        /// written inline is, rather than mixed with them as an object (#678). `None` for every
-        /// other object member.
+        /// written inline is, rather than mixed with them as an object (#678). For an inline
+        /// member whose `type` names `object` beside another non-null category, the union of its
+        /// categories it lowers to on its own, met as that union beside scalar members alone and
+        /// beside a union the merge is met with ([`objects_met_as_their_unions`], #827). `None`
+        /// for every other object member.
         union: Option<Ty>,
+        /// The ids the inline member's own lowering inserted, where `union` is the union of its
+        /// `type` array's categories: its fields and that union, each elided where the merge
+        /// leaves it unused ([`LowerCtx::elide_unused_union_lowering`]). `None` for every other
+        /// object member.
+        lowered: Option<Range<u32>>,
     },
     Scalar(Ty),
     /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the
@@ -907,6 +949,46 @@ pub(super) fn take_refiners(contributions: &mut Vec<Contribution>) -> Vec<(Box<S
         Contribution::Object { .. } | Contribution::Scalar(_) => true,
     });
     refiners
+}
+
+/// Take each inline object member of `contributions` whose `type` names `object` beside another
+/// non-null category as the union of its categories it lowered to ([`Contribution::Object`]'s
+/// `union`), where no other object member keeps the merge an object, and return the ids each
+/// one's own lowering inserted, for the caller to elide once its result no longer uses them. A
+/// union met with the merge then meets that member branch by branch, as the sibling spelling
+/// meets the same `type` array (#827): read as an object, it dropped every branch of the union
+/// that is not an object.
+pub(super) fn objects_met_as_their_unions(contributions: &mut [Contribution]) -> Vec<Range<u32>> {
+    let keeps_object = contributions
+        .iter()
+        .any(|contribution| matches!(contribution, Contribution::Object { lowered: None, .. }));
+    if keeps_object {
+        return Vec::new();
+    }
+    let mut lowerings = Vec::new();
+    for contribution in contributions.iter_mut() {
+        if let Contribution::Object {
+            union: Some(union),
+            lowered: Some(lowered),
+            ..
+        } = contribution
+        {
+            lowerings.push(lowered.clone());
+            *contribution = Contribution::Scalar(*union);
+        }
+    }
+    lowerings
+}
+
+/// Whether `schema`'s own `type` names `object` and at least one other category besides `null`:
+/// a multi-category `type` array, which lowers to a union of its categories rather than to an
+/// object ([`LowerCtx::gather_inline`]).
+fn names_object_beside_another_category(schema: &Schema) -> bool {
+    let types = &schema.types.types;
+    types.contains(&JsonType::Object)
+        && types
+            .iter()
+            .any(|ty| !matches!(ty, JsonType::Object | JsonType::Null))
 }
 
 /// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is
