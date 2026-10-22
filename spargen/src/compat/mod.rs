@@ -304,7 +304,10 @@ fn emit_omitted(diags: &mut Diagnostics, pointer: &JsonPointer, span: Span, desc
         Provenance::new(pointer.clone(), Some(span)),
     )
     .message(format!("omitted construct matched by `{describe}`"))
-    .remedy("the source schema was not modified; remove the omit rule once spargen supports this construct")
+    .remedy(
+        "the source schema was not modified; once spargen supports this construct, remove a \
+         hand-written omit rule (auto-carve stops omitting it on its own)",
+    )
     .emit(diags);
 }
 
@@ -389,7 +392,7 @@ fn emit_invalid_rule(
         Provenance::new(JsonPointer::root(), Some(bundle.root().span())),
     )
     .message(format!("{message}: {}", rule.describe()))
-    .remedy("use exact paths, operation methods, component names, or RFC 6901 pointers")
+    .remedy("fix the rule so it names a construct below the root of a loaded file, or remove it")
     .emit(diags);
 }
 
@@ -402,6 +405,7 @@ fn emit_invalid_rule(
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
     let reject = |message: String, diags: &mut Diagnostics| {
+        // E020 case: required-root-field, no-root-member
         Diagnostic::error(
             Code::OmitCreatedInvalidDocument,
             Provenance::new(JsonPointer::root(), Some(root.span())),

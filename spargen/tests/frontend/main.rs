@@ -13,8 +13,8 @@
 //! `lowering_props.rs`.
 //!
 //! This file holds that shared harness; the fixtures sit in one module per construct family or
-//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies`, ...), each reaching the
-//! harness through `use super::*`.
+//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies_streaming`, ...), each
+//! reaching the harness through `use super::*`.
 
 use camino::Utf8PathBuf;
 use spargen::{
@@ -32,7 +32,9 @@ mod all_of_merge;
 mod all_of_nullability;
 mod all_of_union_meet;
 mod audit_reach;
-mod bodies;
+mod bodies_binary;
+mod bodies_media_keys;
+mod bodies_streaming;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;
@@ -42,11 +44,16 @@ mod encoding_headers;
 mod parameters;
 mod pattern_properties;
 mod placement;
-mod recursion;
+mod recursion_aliases;
+mod recursion_cycles;
+mod recursion_reservations;
 mod ref_sibling_categories;
 mod ref_sibling_rejections;
 mod ref_sibling_unions;
 mod refs;
+mod refs_bundle_identity;
+mod refs_remote;
+mod refs_sub_files;
 mod requirements;
 mod responses;
 mod schema_keywords;

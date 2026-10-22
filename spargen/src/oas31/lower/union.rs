@@ -247,7 +247,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
             // without siblings, and with one member or several.
             // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
-            // `tests/frontend/recursion.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
+            // `tests/frontend/recursion_reservations.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
                 return self.reject_union_member_is_the_union(schema);
             }
@@ -1171,6 +1171,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             (format!("{noun}s"), "lower")
         };
+        // W001 case: untyped-one-of-variant
         Diagnostic::warning(Code::ValidationKeywordIgnored, provenance.clone())
             .message(format!(
                 "{prefix} {noun} {} {verb} to `serde_json::Value`, which accepts every value, so \
@@ -1230,6 +1231,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             "each such set is one variant of the generated enum"
         };
+        // W001 case: indistinguishable-branches
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(format!(
                 "this `oneOf`'s {} lower to the same generated type or to identically structured \

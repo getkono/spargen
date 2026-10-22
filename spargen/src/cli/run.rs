@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use spargen::{check, explain, ConfigError, Spec};
+use spargen::{check, explain, ConfigError, Report, Spec};
 
 use super::args::{Cli, Command, Format};
 use super::config;
@@ -20,11 +20,7 @@ use super::exit::ExitStatus;
 /// depends only on the facade.
 pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
-        Command::Check(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
+        Command::Check(args) => with_spec(args.spec, &args.options, |spec| {
             let report = check(&spec);
             emit(&report, args.format, Stream::Stderr);
             if report.succeeded() {
@@ -32,39 +28,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             } else {
                 ExitStatus::Diagnostics.into()
             }
-        }
-        Command::Deps(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
-            match spargen::requirements(&spec) {
-                Ok(requirements) => {
-                    emit(&requirements, args.format, Stream::Stdout);
-                    ExitStatus::Ok.into()
-                }
-                Err(report) => {
-                    emit(&report, args.format, Stream::Stderr);
-                    ExitStatus::Diagnostics.into()
-                }
-            }
-        }
-        Command::Lock(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
-            match spargen::vendor(&spec) {
-                Ok(vendored) => {
-                    emit(&vendored, args.format, Stream::Stdout);
-                    ExitStatus::Ok.into()
-                }
-                Err(report) => {
-                    emit(&report, args.format, Stream::Stderr);
-                    ExitStatus::Diagnostics.into()
-                }
-            }
-        }
+        }),
+        Command::Deps(args) => with_spec(args.spec, &args.options, |spec| {
+            report_or(spargen::requirements(&spec), args.format)
+        }),
+        Command::Lock(args) => with_spec(args.spec, &args.options, |spec| {
+            report_or(spargen::vendor(&spec), args.format)
+        }),
         Command::Diff(args) => {
             let (old, new) = match spec_pair(args.old, args.new, &args.options) {
                 Ok(pair) => pair,
@@ -104,6 +74,37 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                 ExitStatus::Usage.into()
             }
         },
+    }
+}
+
+/// Resolve `spec` with `options` and run `then` over it, or report the config/flag error and exit
+/// with a usage status.
+fn with_spec(
+    spec: camino::Utf8PathBuf,
+    options: &super::args::SpecArgs,
+    then: impl FnOnce(Spec) -> ExitCode,
+) -> ExitCode {
+    match config::resolve(spec, options) {
+        Ok(spec) => then(spec),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Emit `result`'s value on stdout and exit cleanly, or its rejection [`Report`] on stderr and
+/// exit with the diagnostics status.
+fn report_or<T: std::fmt::Display + serde::Serialize>(
+    result: Result<T, Report>,
+    format: Format,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            emit(&value, format, Stream::Stdout);
+            ExitStatus::Ok.into()
+        }
+        Err(report) => {
+            emit(&report, format, Stream::Stderr);
+            ExitStatus::Diagnostics.into()
+        }
     }
 }
 

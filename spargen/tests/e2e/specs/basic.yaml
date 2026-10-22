@@ -520,7 +520,7 @@ paths:
   # a JSON member, both ways, and a multipart part become `Option<bytes::Bytes>` whichever way the
   # `null` is spelled, and a query parameter an `Option<String>` (the binary parameter remap). The
   # `type: [string, 'null']` spelling used to lose its `null` here; a *raw* body admitting `null`
-  # is rejected instead (`E009`, pinned in `frontend/bodies.rs`).
+  # is rejected instead (`E009`, pinned in `frontend/bodies_binary.rs`).
   /nullable-bytes:
     post:
       operationId: postNullableBytes
