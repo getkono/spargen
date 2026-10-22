@@ -5,7 +5,8 @@ use super::{ChangeKind, Impact};
 /// Every change kind, produced by an exhaustive match so a new variant does not compile until
 /// it is listed — which is what makes the coverage assertions below closed over the enum.
 /// `ChangeKind` is `#[non_exhaustive]`, so this list can only live inside the crate; the
-/// fixtures that drive each kind live in `tests/diff.rs`, which cannot match exhaustively.
+/// fixtures that drive each kind live in the `diff` suite (`tests/diff.rs` and its modules in
+/// `tests/diff/`), which cannot match exhaustively.
 fn all_kinds() -> Vec<ChangeKind> {
     let every = [
         ChangeKind::OperationAdded,
@@ -238,7 +239,7 @@ fn only_the_additive_kinds_are_minor() {
     }
 }
 
-/// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
+/// CLAUDE.md asks the `diff` suite for "semver classification per change kind". Nine of the 24
 /// had a fixture; the rest were classified by policy alone, with nothing proving the
 /// classifier ever produces them. This makes "per change kind" mean what it says.
 ///
@@ -254,24 +255,53 @@ fn every_kind_has_a_fixture_in_the_diff_suite() {
         eprintln!("skipping: not tested from the workspace");
         return;
     };
-    let suite = read_repo_file(&root, "spargen/tests/diff.rs");
-    let asserted = assert_eq_spans(&suite);
+    let suite: Vec<(String, Vec<std::ops::Range<usize>>)> = diff_suite_files(&root)
+        .into_iter()
+        .map(|relative| {
+            let source = read_repo_file(&root, &relative);
+            let asserted = assert_eq_spans(&source);
+            (source, asserted)
+        })
+        .collect();
     for kind in all_kinds() {
         let variant = variant_name(kind);
         let needle = format!("ChangeKind::{variant}");
-        let pinned = suite.match_indices(&needle).any(|(at, _)| {
-            let whole = suite[at + needle.len()..]
-                .chars()
-                .next()
-                .is_none_or(|next| !next.is_alphanumeric() && next != '_');
-            whole && asserted.iter().any(|span| span.contains(&at))
+        let pinned = suite.iter().any(|(source, asserted)| {
+            source.match_indices(&needle).any(|(at, _)| {
+                let whole = source[at + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphanumeric() && next != '_');
+                whole && asserted.iter().any(|span| span.contains(&at))
+            })
         });
         assert!(
             pinned,
-            "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs",
+            "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs \
+             or spargen/tests/diff/",
             kind.code()
         );
     }
+}
+
+/// The `diff` suite's source files, relative to `root`: the target's root `spargen/tests/diff.rs`
+/// and every `.rs` file of its module directory `spargen/tests/diff/`, sorted. Both must exist.
+fn diff_suite_files(root: &std::path::Path) -> Vec<String> {
+    const MODULES: &str = "spargen/tests/diff";
+    let entries = std::fs::read_dir(root.join(MODULES)).unwrap_or_else(|error| {
+        panic!("{MODULES}/ must exist in the repository, and reading it failed: {error}")
+    });
+    let mut modules: Vec<String> = entries
+        .map(|entry| entry.expect("readable directory entry").file_name())
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| name.ends_with(".rs"))
+        .map(|name| format!("{MODULES}/{name}"))
+        .collect();
+    assert!(!modules.is_empty(), "{MODULES}/ holds no module");
+    modules.sort();
+    let mut files = vec![format!("{MODULES}.rs")];
+    files.extend(modules);
+    files
 }
 
 /// The byte span of every `assert_eq!(…)` argument list in `source`, found by bracket depth.
@@ -286,7 +316,7 @@ fn assert_eq_spans(source: &str) -> Vec<std::ops::Range<usize>> {
         let mut depth = 1_usize;
         while depth > 0 {
             let Some(&byte) = bytes.get(at) else {
-                panic!("unbalanced `assert_eq!(` at byte {start} of spargen/tests/diff.rs")
+                panic!("unbalanced `assert_eq!(` at byte {start} of a `diff` suite file")
             };
             match byte {
                 b'(' | b'[' | b'{' => depth += 1,
