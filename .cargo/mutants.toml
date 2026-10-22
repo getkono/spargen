@@ -20,6 +20,15 @@ exclude_re = [
   # the pattern matches nothing and the two mutants fail the run as missed until it is updated,
   # rather than excluding whatever moved onto that line.
   '^support-runtime/src/dispatch\.rs:451:5: replace read_capped -> ',
+  # `support-runtime/src/paginate.rs`, the guard on `split_outside`'s `>` arm: whenever
+  # `respect_angles && !in_quote` is false, `in_angle` is already false, so the arm's
+  # `in_angle = false` changes nothing and no input can tell the guard from `true` (or its `&&` from
+  # `||`). Only the `<` arm sets `in_angle`, and it needs `respect_angles`; a quoted string opens
+  # only outside `<…>`, and inside one the `<` arm sets nothing. The `<` arm carries the same
+  # guard text and is tested, so the pattern is anchored on the `>` arm's line and columns, as the
+  # `read_capped` entry above is.
+  '^support-runtime/src/paginate\.rs:240:21: replace match guard respect_angles && !in_quote with true in split_outside$',
+  '^support-runtime/src/paginate\.rs:240:36: replace && with \|\| in split_outside$',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
   # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
   # and no test or caller can observe what the body returns.
