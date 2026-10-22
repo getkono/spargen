@@ -126,7 +126,7 @@ pub(crate) fn finalized(rendered: &str, input_digest: &str) -> (String, String) 
 
 /// The content digest of the generated file at `path` when it is still the output of
 /// `input_digest`. `None`, which makes the caller regenerate, when the file is unreadable, lacks
-/// either header line, records a different input digest, or its body no longer hashes to the
+/// either header line, records a different input digest, or its body does not hash to the
 /// recorded content digest (a manual edit).
 pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;

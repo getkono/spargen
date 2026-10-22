@@ -25,7 +25,7 @@
 //! carve = false           # auto-carve unsupported constructs (same as `--carve`)
 //! batch_cap = 100         # max diagnostics collected before batching stops
 //! error_body_cap = 65536  # max bytes of a response body retained on error variants
-//! open_narrowing = false  # open a response body's string `enum`/`const` narrowings (default false)
+//! open_narrowing = false  # open response-body string `enum`/`const` narrowings (default false)
 //!
 //! # Zero or more omit rules. The rule KIND is discriminated by field presence, and a key that
 //! # kind does not use (`file` beside `path`, say) is an error. A path/name (or

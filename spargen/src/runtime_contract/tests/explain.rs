@@ -48,7 +48,7 @@ use super::*;
 /// without someone re-typing it in the test and classifying it there.** They do not make the
 /// body true. A false clause stays false with every guard green (#171), and a maintainer who
 /// re-types a change into the expected file has made this test agree with it, not verified
-/// it. What holds a resolver clause to the code is the fixture its `promises` entry cites.
+/// it.
 #[test]
 fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     let explain = Code::RuntimeDependencyContract.explain();
