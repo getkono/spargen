@@ -18,12 +18,22 @@ pub(super) fn lower_media_type(
     match classify_media(essence) {
         Some((media, _)) => Some(media),
         None => {
-            Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!("media type `{essence}` is not supported"))
-                .emit(diags);
+            media_type_not_supported(essence, provenance, diags);
             None
         }
     }
+}
+
+/// Report `E009` for a media type spargen has no codec for, spelled as `spelling`: the essence
+/// where one key is classified, the raw `content` key where none of them is.
+fn media_type_not_supported(
+    spelling: &str,
+    provenance: &crate::diag::Provenance,
+    diags: &mut Diagnostics,
+) {
+    Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
+        .message(format!("media type `{spelling}` is not supported"))
+        .emit(diags);
 }
 
 /// Where a body sits, which decides whether an alternative that decodes identically may go
@@ -148,9 +158,7 @@ pub(super) fn choose_media<'a, T>(
         });
     }
     let (media, _) = content.first()?;
-    Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-        .message(format!("media type `{media}` is not supported"))
-        .emit(diags);
+    media_type_not_supported(media, provenance, diags);
     None
 }
 

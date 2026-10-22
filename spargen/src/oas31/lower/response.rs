@@ -18,7 +18,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(status) = parse_status(status) {
                 if let Some(response) = self
                     .resolve_response(response)
-                    .and_then(|r| self.lower_response(&r))
+                    .map(|r| self.lower_response(&r))
                 {
                     by_status.push((status, response));
                 }
@@ -28,11 +28,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .default
             .as_ref()
             .and_then(|response| self.resolve_response(response))
-            .and_then(|response| self.lower_response(&response));
+            .map(|response| self.lower_response(&response));
         Responses { by_status, default }
     }
 
-    fn lower_response(&mut self, response: &ResponseObject) -> Option<Response> {
+    fn lower_response(&mut self, response: &ResponseObject) -> Response {
         let body = choose_media(
             &response.content,
             &response.provenance,
@@ -63,12 +63,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // this is the operation's single success body (see `Responses::stream_success`), and a
         // bodied stream anywhere else rejects the operation (`Responses::stream_outside_single_success`).
         let headers = self.lower_response_headers(response);
-        Some(Response {
+        Response {
             media: body.map(|(media, _, _)| media),
             body: body.and_then(|(_, ty, _)| ty),
             stream: body.and_then(|(_, _, stream)| stream),
             headers,
-        })
+        }
     }
 
     /// Lower the response body entry [`Self::lower_response`] selected into its media, type, and
@@ -81,6 +81,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<(MediaType, Option<Ty>, Option<crate::ir::Framing>)> {
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &response.provenance, self.diags)?;
+        // The whole-body `schema`, lowered only on the paths that read it.
+        let lower_whole_body = |ctx: &mut Self| {
+            object
+                .schema
+                .as_ref()
+                .and_then(|schema| ctx.lower_schema_ref(schema, "ResponseBody"))
+        };
         // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
         // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
         // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
@@ -120,13 +127,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .emit(self.diags);
                 return None;
             } else {
-                (
-                    object
-                        .schema
-                        .as_ref()
-                        .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                    Some(framing),
-                )
+                (lower_whole_body(self), Some(framing))
             }
         } else {
             if object.item_schema.is_some() {
@@ -137,13 +138,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     )
                     .emit(self.diags);
             }
-            (
-                object
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                None,
-            )
+            (lower_whole_body(self), None)
         };
         if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
             self.warn_structural_default_ref(schema, "a response body schema");

@@ -14,6 +14,17 @@ use super::nullability::{non_nullable, type_accepts_null};
 use super::{LowerCtx, Refiner, ScopeReach};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Where the schema `ty` lowers from was authored: the location [`Self::meet_locations`]
+    /// recorded for a meet struct, else the type's own provenance, unless that is the document root
+    /// every synthesized type falls back to.
+    fn authored_location(&self, ty: Ty) -> Option<Provenance> {
+        if let Some(location) = self.meet_locations.get(&ty.id) {
+            return Some(location.clone());
+        }
+        let def = self.graph.get(ty.id)?;
+        (!def.provenance.pointer.as_str().is_empty()).then(|| def.provenance.clone())
+    }
+
     /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
     /// value must satisfy every member, so any member denying unknown keys forbids them outright),
     /// whatever the other side's value schema is. Two typed value schemas merge to their typed
@@ -572,15 +583,9 @@ pub(super) enum NoMeet {
 /// a (base64) JSON string.
 pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
     match kind {
-        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
-        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
-        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
-        | TypeKind::Bytes => Some(JsonCategory::String),
-        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
-            ScalarRepr::String => JsonCategory::String,
-            ScalarRepr::Int => JsonCategory::Number,
-            ScalarRepr::Bool => JsonCategory::Boolean,
-        }),
+        TypeKind::Primitive(primitive) => Some(primitive_category(*primitive)),
+        TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(repr_category(enumeration.repr)),
         TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
         TypeKind::Struct(_) => Some(JsonCategory::Object),
         // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
@@ -628,15 +633,28 @@ fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     })
 }
 
-fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
-    match repr {
-        ScalarRepr::String => matches!(
-            primitive,
-            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
-        ),
-        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
-        ScalarRepr::Bool => primitive == Prim::Bool,
+/// The JSON category every value of a scalar primitive falls in.
+fn primitive_category(primitive: Prim) -> JsonCategory {
+    match primitive {
+        Prim::Bool => JsonCategory::Boolean,
+        Prim::I32 | Prim::I64 | Prim::F64 => JsonCategory::Number,
+        Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date => JsonCategory::String,
     }
+}
+
+/// The JSON category every member of a scalar enum backed by `repr` falls in.
+fn repr_category(repr: ScalarRepr) -> JsonCategory {
+    match repr {
+        ScalarRepr::String => JsonCategory::String,
+        ScalarRepr::Int => JsonCategory::Number,
+        ScalarRepr::Bool => JsonCategory::Boolean,
+    }
+}
+
+/// Whether an enum backed by `repr` and a `primitive` sit in one JSON category, so their
+/// intersection narrows the enum to the primitive.
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    repr_category(repr) == primitive_category(primitive)
 }
 
 /// Whether one side of an intersection carries a field for the wire name `wire`, declared or only
