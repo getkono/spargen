@@ -153,10 +153,12 @@ fn insert_heads(tree: Option<&proc_macro2::TokenTree>, out: &mut BTreeSet<String
 /// path rustfmt wraps across lines is still one path.
 ///
 /// Only production code is read. An item behind an outer test-only `cfg` (see
-/// [`is_test_only_cfg`]) is skipped through its end, the first `;` or `{…}` block after the
+/// [`is_test_only_cfg`]) is skipped through its end, the first `;`, `,` or `{…}` block after the
 /// attribute, which ends every item shape the crate puts behind one (`mod tests { … }`,
-/// `mod tests;`, an `impl` or `fn` block, a `use`); an inner `#![cfg(test)]` skips the rest of its
-/// module. A file that only a test-only `mod name;` reaches is left out by
+/// `mod tests;`, an `impl` or `fn` block, a `use`) and a field or variant. Where one of the three
+/// comes earlier inside the item (`impl<A, B>`), the rest of the item is read as production code,
+/// so the skip errs toward reading too much, never toward hiding an edge outside the item. An
+/// inner `#![cfg(test)]` skips the rest of its module. A file that only a test-only `mod name;` reaches is left out by
 /// [`test_only_module_files`] instead.
 ///
 /// A string literal inside an attribute other than `#[doc]` is read too, because attributes such
@@ -201,6 +203,7 @@ fn path_heads(tokens: proc_macro2::TokenStream, reading: Reading<'_>, out: &mut 
         }
         if skipping {
             let ends_item = is_punct(Some(tree), ';')
+                || is_punct(Some(tree), ',')
                 || matches!(tree, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace);
             skipping = !ends_item;
             continue;
@@ -563,6 +566,11 @@ mod tests {
     use crate::compat::Omit;
 }
 fn after() -> crate::source::Spec { todo!() }
+struct Fields {
+    #[cfg(test)]
+    probe: crate::emit::Probe,
+    kept: crate::name::Names,
+}
 "#;
     assert_eq!(
         edges(
@@ -572,7 +580,8 @@ fn after() -> crate::source::Spec { todo!() }
             2,
             &fixture_names()
         ),
-        BTreeSet::from(["ir", "source", "support"].map(str::to_owned)),
+        BTreeSet::from(["ir", "name", "source", "support"].map(str::to_owned)),
+        "a test-only item or field is skipped through its end, and the next one is read"
     );
     assert_eq!(
         test_only_module_files(Path::new("src/codegen/client.rs"), source),
