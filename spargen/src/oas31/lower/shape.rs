@@ -24,8 +24,7 @@ pub(super) fn schema_imposes_scalar(schema: &Schema) -> bool {
         || schema.const_value.is_some()
         || schema.content_encoding.is_some()
         || schema.format.as_deref() == Some("binary")
-        || !schema.one_of.is_empty()
-        || !schema.any_of.is_empty()
+        || schema_has_union(schema)
 }
 
 /// One row of [`SHAPE_KEYWORDS`]: a keyword's published spelling, and whether a schema carries it.

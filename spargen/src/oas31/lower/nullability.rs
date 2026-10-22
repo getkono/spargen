@@ -1287,8 +1287,7 @@ pub(super) fn member_is_null_only(member: &SchemaOr) -> bool {
     };
     schema.reference.is_none()
         && schema.types.types == [JsonType::Null]
-        && schema.one_of.is_empty()
-        && schema.any_of.is_empty()
+        && !schema_has_union(schema)
         && schema.all_of.is_empty()
         && schema.enum_values.is_none()
         && schema.const_value.is_none()
