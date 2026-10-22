@@ -29,7 +29,8 @@ fn subsystem_files(root: &Path, subsystem: &str) -> Vec<PathBuf> {
     rust_files(&root.join("spargen/src").join(subsystem), &["runtime"])
 }
 
-/// The modules `lib.rs` declares with `mod <name>;` (any visibility, any attributes), in order.
+/// The file modules `lib.rs` declares, one per line as `mod <name>;`, `pub mod <name>;` or
+/// `pub(crate) mod <name>;`, in order. An inline `mod <name> { … }` is not read.
 fn library_modules(lib: &str) -> Vec<String> {
     lib.lines()
         .filter_map(|line| {
@@ -45,9 +46,9 @@ fn library_modules(lib: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every module of the library is a subsystem, facade plumbing, or test support, each by name, so
-/// a module `lib.rs` adds is classified before a subsystem can reach it unseen: `edges` counts
-/// only the first two kinds.
+/// Every file module `lib.rs` declares is a subsystem, facade plumbing, or test support, each by
+/// name, so a file module `lib.rs` adds is classified before a subsystem can reach it unseen:
+/// `edges` counts only the first two kinds.
 #[test]
 fn every_library_module_is_a_subsystem_plumbing_or_test_support() {
     let lib = read(&workspace_root().join("spargen/src/lib.rs"));
