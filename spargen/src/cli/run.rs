@@ -3,7 +3,7 @@
 //!
 //! The optional analysis binary. It is not a `mod` of the library: `src/bin/spargen.rs` pulls these
 //! files in with `#[path]`, so the CLI depends on the published facade exactly as any other
-//! consumer would, and can reach nothing private.
+//! consumer would, and reaches only spargen's `pub` items, as any consumer does.
 
 use std::process::ExitCode;
 
@@ -90,8 +90,8 @@ fn with_spec(
     }
 }
 
-/// Emit `result`'s value on stdout and exit cleanly, or its rejection [`Report`] on stderr and
-/// exit with the diagnostics status.
+/// Emit `result`'s value and exit cleanly, or emit its rejection [`Report`] and exit with the
+/// diagnostics status. Human output puts the value on stdout and the rejection on stderr.
 fn report_or<T: std::fmt::Display + serde::Serialize>(
     result: Result<T, Report>,
     format: Format,
@@ -127,8 +127,8 @@ fn config_error(error: ConfigError) -> ExitCode {
     ExitStatus::Usage.into()
 }
 
-/// Where a rendered value goes: diagnostics belong on stderr so `--format json` output stays
-/// pipeable on stdout.
+/// Where the human rendering of a value goes: diagnostics on stderr, results on stdout. JSON
+/// output ignores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stream {
     Stdout,
@@ -138,10 +138,11 @@ enum Stream {
 /// Render one value in the requested format.
 ///
 /// Every renderable type implements both `Display` (the human form) and `Serialize` (the JSON
-/// form), so the CLI holds no formatting logic of its own and cannot drift from the library's.
+/// form), so every command but `explain` renders through the library's own forms. `explain`
+/// prints its text, or builds its `{ "code", "explain" }` JSON object, inline in [`run`].
 ///
-/// `stream` chooses where the *human* rendering goes — diagnostics belong on stderr. JSON is
-/// machine output and always goes to stdout so it stays pipeable.
+/// `stream` chooses where the *human* rendering goes. JSON always goes to stdout, whatever
+/// `stream` says.
 fn emit<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format, stream: Stream) {
     match format {
         Format::Json => {
