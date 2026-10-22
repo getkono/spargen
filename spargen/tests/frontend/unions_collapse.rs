@@ -796,3 +796,56 @@ components:
         }
     }
 }
+
+/// A union with one real member is that member re-emitted under the union's own name, so the
+/// member's own lowering, which took the same name first, is a second copy nothing names (#926):
+/// `S0` emitted `pub struct S071def3c4 {}` beside `pub struct S0 {}`. Only the re-emitted type is
+/// emitted, with or without a `null` member and a sibling meet; the harness's
+/// [`assert_no_unreferenced_copy`] holds every other fixture to the same.
+#[test]
+fn a_union_with_one_real_member_emits_no_copy_of_it() {
+    for (shape, body) in [
+        ("a single-branch `oneOf`", "{ oneOf: [ { type: object } ] }"),
+        (
+            "a single-branch `anyOf` beside a `null` member",
+            "{ anyOf: [ { type: string }, { type: 'null' } ] }",
+        ),
+        (
+            "a single-branch `oneOf` met with a sibling",
+            "{ oneOf: [ { type: object, properties: { a: { type: string } } } ], required: [a] }",
+        ),
+    ] {
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    S0: {body}\n"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{shape}: {report:#?}");
+        let types = types_module(&code);
+        let declared: Vec<&str> = types
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| {
+                ["pub struct ", "pub enum ", "pub type "]
+                    .iter()
+                    .find_map(|item| line.strip_prefix(item))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';', '=']).next())
+            .filter(|name| name.starts_with("S0"))
+            .collect();
+        // A copy takes the name with the stable 8-hex-digit suffix of its pointer.
+        let copies: Vec<&&str> = declared
+            .iter()
+            .filter(|name| {
+                name.len() > 8
+                    && name[name.len() - 8..]
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit())
+            })
+            .collect();
+        assert!(
+            declared.contains(&"S0") && copies.is_empty(),
+            "{shape}: `S0` and no copy of it: {declared:?}\n{code}"
+        );
+    }
+}

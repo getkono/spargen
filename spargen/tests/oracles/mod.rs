@@ -5,6 +5,8 @@
 //! * [`location_violations`]: every diagnostic names a real location (#454);
 //! * [`indistinguishable_variants`]: every union's variants can be told apart (#402), unless a
 //!   `W001` at the union says why ([`unexplained_variants`]);
+//! * [`unreferenced_copies`]: no second lowering of a schema is emitted where nothing names it
+//!   (#926), a narrowing of [`unreferenced_types`];
 //! * [`relocate`] and [`shape`]: moving a document's schemas into a referenced file changes no
 //!   verdict, code or shape (#446).
 //!
@@ -549,4 +551,187 @@ pub fn schema_names(spec: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Whether `text` holds `ident` as a whole identifier, not as part of a longer one.
+fn names(text: &str, ident: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(ident).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(is_ident)
+            && !text[at + ident.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_ident)
+    })
+}
+
+/// The type a top-level item of the `types` module belongs to: the one it declares (`pub struct`,
+/// `pub enum`, `pub type`) or implements (`impl … for X`, `impl X`). `None` for anything else, such
+/// as a helper function or a `use`.
+fn owner_of(first_line: &str) -> Option<String> {
+    let ident = |text: &str| -> String {
+        text.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect()
+    };
+    for prefix in ["pub struct ", "pub enum ", "pub type "] {
+        if let Some(rest) = first_line.strip_prefix(prefix) {
+            return Some(ident(rest));
+        }
+    }
+    let rest = first_line.strip_prefix("impl")?;
+    if let Some((_, target)) = rest.rsplit_once(" for ") {
+        return Some(ident(target.trim_start()));
+    }
+    // `impl<T> X<T> {`: skip the generics the impl declares.
+    let rest = match rest.strip_prefix('<') {
+        Some(generics) => generics.split_once('>').map_or("", |(_, after)| after),
+        None => rest,
+    };
+    Some(ident(rest.trim_start()))
+}
+
+/// Each type the generated module `code` declares in its `types` module that nothing else in the
+/// module names and that is not one of `spec`'s components (#561, #926): a type the lowering built
+/// for itself and then left behind, such as a union a meet replaced or a second lowering of a
+/// schema a position did not take, is a public type of the output no field, variant, alias or
+/// operation uses.
+///
+/// A type is named when an item other than its own declaration and impls mentions it, inside
+/// `types` or anywhere else in the module (an operation's parameters and bodies are named by the
+/// client). A component is the document's own vocabulary, so it is emitted whether or not anything
+/// uses it; the Rust name allocated to component `my_pet` is `MyPet`, so names are compared
+/// [`normalized`], allowing a numeric suffix a name collision adds, and the hash suffix a
+/// component takes when its name collides with a reserved one.
+pub fn unreferenced_types(code: &str, spec: &str) -> Vec<String> {
+    let Some(start) = code.find("pub mod types {") else {
+        return Vec::new();
+    };
+    let body_start = start + "pub mod types {".len();
+    let body_len = code[body_start..]
+        .find("\n}")
+        .unwrap_or(code.len() - body_start);
+    let body = &code[body_start..body_start + body_len];
+    // The client after the module; the embedded runtime before it is no use of a generated type.
+    let outside = &code[body_start + body_len..];
+    // The top-level items of `types`, each with the type it belongs to: an item runs from its
+    // first line to the line its braces close on, or that ends it with `;`.
+    let mut items: Vec<(Option<String>, String)> = Vec::new();
+    let (mut depth, mut current, mut owner): (i64, String, Option<Option<String>>) =
+        (0, String::new(), None);
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        current.push_str(line);
+        current.push('\n');
+        if trimmed.starts_with("//") || (depth == 0 && trimmed.starts_with("#[")) {
+            continue;
+        }
+        if owner.is_none() {
+            owner = Some(owner_of(trimmed));
+        }
+        depth += trimmed.matches('{').count() as i64 - trimmed.matches('}').count() as i64;
+        if depth <= 0 && (trimmed.ends_with('}') || trimmed.ends_with(';')) {
+            items.push((owner.take().flatten(), std::mem::take(&mut current)));
+            depth = 0;
+        }
+    }
+    let declared: BTreeSet<&str> = items
+        .iter()
+        .filter(|(owner, text)| {
+            owner.is_some()
+                && text.lines().any(|line| {
+                    let line = line.trim();
+                    ["pub struct ", "pub enum ", "pub type "]
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                })
+        })
+        .filter_map(|(owner, _)| owner.as_deref())
+        .collect();
+    let components: Vec<String> = component_names(spec)
+        .iter()
+        .map(|name| normalized(name))
+        .collect();
+    // A component's own name, or that name with a numeric collision suffix.
+    let names_component = |name: &str, component: &str| {
+        name.strip_prefix(component)
+            .is_some_and(|suffix| suffix.chars().all(|c| c.is_ascii_digit()))
+    };
+    let is_component = |name: &str| {
+        let name = normalized(name);
+        components.iter().any(|component| {
+            names_component(&name, component)
+                // A component whose name collides with one the module reserves (`Box`) is
+                // allocated its name with the stable 8-hex-digit suffix instead (`Box00ba9f5f`),
+                // but only when no declared type has the component's own name: otherwise the
+                // suffixed type is a second lowering of the component's schema (#926).
+                || (name.strip_prefix(component.as_str()).is_some_and(|suffix| {
+                    suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                }) && !declared
+                    .iter()
+                    .any(|other| names_component(&normalized(other), component)))
+        })
+    };
+    declared
+        .iter()
+        .copied()
+        .filter(|name| !is_component(name))
+        .filter(|name| {
+            !names(outside, name)
+                && !items
+                    .iter()
+                    .any(|(owner, text)| owner.as_deref() != Some(*name) && names(text, name))
+        })
+        .map(|name| format!("`{name}` is emitted, but nothing names it and it is no component"))
+        .collect()
+}
+
+/// The [`unreferenced_types`] that are a second copy of a type: a schema lowered again under the
+/// name a first lowering already took is allocated that name with the stable 8-hex-digit suffix
+/// of its pointer (`S071def3c4`, `ResponseBody9c134e93`), and where the position takes the first
+/// lowering, the copy is elided (#926).
+///
+/// The copies of a `$ref`-sibling or `allOf` meet's `<Hint>Constraint` intermediate are left to
+/// that intermediate's own fix (#924), which removes the first lowering and its copies alike.
+pub fn unreferenced_copies(code: &str, spec: &str) -> Vec<String> {
+    unreferenced_types(code, spec)
+        .into_iter()
+        .filter(|reason| {
+            let name = reason.split('`').nth(1).unwrap_or_default();
+            let Some(split) = name
+                .len()
+                .checked_sub(8)
+                .filter(|&split| split > 0 && name.is_char_boundary(split))
+            else {
+                return false;
+            };
+            let (base, suffix) = name.split_at(split);
+            suffix.chars().all(|c| c.is_ascii_hexdigit())
+                && suffix.chars().any(|c| c.is_ascii_digit())
+                && !base.ends_with("Constraint")
+        })
+        .collect()
+}
+
+/// The names `spec` declares under any `components` section (`schemas`, `responses`, …), in
+/// document order.
+pub fn component_names(spec: &str) -> Vec<String> {
+    let Some(mut root) = YamlLoader::load_from_str(spec)
+        .ok()
+        .and_then(|documents| documents.into_iter().next())
+    else {
+        return Vec::new();
+    };
+    let Some(Yaml::Hash(sections)) = entry(&mut root, "components") else {
+        return Vec::new();
+    };
+    sections
+        .values()
+        .filter_map(Yaml::as_hash)
+        .flat_map(|entries| entries.keys())
+        .filter_map(|name| name.as_str().map(str::to_owned))
+        .collect()
 }
