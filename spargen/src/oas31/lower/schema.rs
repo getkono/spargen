@@ -10,7 +10,6 @@ use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::all_of::MetUnionMember;
-use super::combine::sole_union_member;
 use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
@@ -360,7 +359,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if schema_has_union(schema) {
                 return self.lower_all_of_beside_union(schema, hint);
             }
-            if let Some(index) = sole_union_member(schema) {
+            if let Some(index) = self.sole_union_member(schema) {
                 return self.lower_all_of_with_union_member(schema, hint, index);
             }
             return self.lower_all_of(schema, hint);

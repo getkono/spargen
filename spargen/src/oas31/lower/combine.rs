@@ -11,6 +11,7 @@ use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind
 use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
+use super::all_of::real_union;
 use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
@@ -1009,17 +1010,45 @@ fn names_object_beside_another_category(schema: &Schema) -> bool {
             .any(|ty| !matches!(ty, JsonType::Object | JsonType::Null))
 }
 
-/// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is
-/// ([`LowerCtx::lower_all_of_with_union_member`]). A member that is a `$ref` is its target first,
-/// and an `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
-/// members, and beside object members they are `E013`
-/// ([`LowerCtx::reject_all_of_several_unions`]).
-pub(super) fn sole_union_member(schema: &Schema) -> Option<usize> {
-    let mut unions = schema.all_of.iter().enumerate().filter(|(_, member)| {
-        matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))
-    });
-    let (index, _) = unions.next()?;
-    unions.next().is_none().then_some(index)
+impl LowerCtx<'_, '_> {
+    /// The index of the one `allOf` member that is a union
+    /// ([`LowerCtx::lower_all_of_with_union_member`]): an inline `oneOf`/`anyOf`, or a `$ref`
+    /// with no shape-bearing siblings to a root component that is one, which is met as its
+    /// target's union (#841). Where several members are unions and exactly one of them has two or
+    /// more non-null branches ([`real_union`]), it is that one: the others each lower to their one
+    /// real branch, and are met with the object members as that branch (#841). Otherwise an
+    /// `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
+    /// members, and beside object members they are `E013`
+    /// ([`LowerCtx::reject_all_of_several_unions`]).
+    pub(super) fn sole_union_member(&self, schema: &Schema) -> Option<usize> {
+        let unions: Vec<(usize, bool)> = schema
+            .all_of
+            .iter()
+            .enumerate()
+            .filter_map(|(index, member)| {
+                let SchemaOr::Schema(member) = member else {
+                    return None;
+                };
+                let Some(reference) = member.reference.as_deref() else {
+                    return schema_has_union(member).then(|| (index, real_union(member)));
+                };
+                reference.strip_prefix("#/components/schemas/")?;
+                let mut siblings = member.as_ref().clone();
+                siblings.reference = None;
+                if schema_has_shape_constraint(&siblings) {
+                    return None;
+                }
+                let target = self.ref_target_body(reference, &member.provenance)?;
+                schema_has_union(&target).then(|| (index, real_union(&target)))
+            })
+            .collect();
+        if let [(index, _)] = unions.as_slice() {
+            return Some(*index);
+        }
+        let mut real = unions.iter().filter(|(_, real)| *real);
+        let (index, _) = real.next()?;
+        real.next().is_none().then_some(*index)
+    }
 }
 
 /// The `E013` cycle wording for an `allOf` member that is a `$ref` to a root component still being

@@ -786,8 +786,35 @@ components:
             ],
         ),
     ];
+    // Each variant's payload by its fields and whether each is optional: the variant and payload
+    // names follow the spelling, the shape does not.
+    let shapes = |code: &str, variants: &[String]| -> Vec<Vec<String>> {
+        variants
+            .iter()
+            .map(|variant| {
+                let payload = variant
+                    .split_once('(')
+                    .map(|(_, rest)| rest.trim_end_matches(')'))
+                    .map(|ty| ty.trim_start_matches("Box<").trim_end_matches('>'))
+                    .unwrap_or_default();
+                let mut lines = code
+                    .lines()
+                    .map(str::trim_start)
+                    .skip_while(|line| !line.starts_with(&format!("pub struct {payload} ")));
+                lines.next();
+                lines
+                    .take_while(|line| !line.starts_with('}'))
+                    .filter_map(|line| line.strip_prefix("pub "))
+                    // A field's string alias is named after the spelling too; whether it is
+                    // required is the shape.
+                    .filter_map(|field| field.split_once(": "))
+                    .map(|(name, ty)| format!("{name}: {}", ty.starts_with("Option<")))
+                    .collect()
+            })
+            .collect()
+    };
     for (case, spellings) in &agreeing {
-        let mut expected: Option<Vec<String>> = None;
+        let mut expected: Option<Vec<Vec<String>>> = None;
         for pick in spellings {
             let spec = spec(pick);
             let (report, code) = generate_with_code(&spec);
@@ -804,10 +831,16 @@ components:
                 "{case}, `{pick}`: `Pick` is the union's two branches met with the object: {}",
                 types_module(&code)
             );
+            let shape = shapes(&code, &variants);
+            assert!(
+                shape.iter().all(|fields| !fields.is_empty()),
+                "{case}, `{pick}`: each variant is a met object: {}",
+                types_module(&code)
+            );
             match &expected {
-                None => expected = Some(variants),
+                None => expected = Some(shape),
                 Some(expected) => assert_eq!(
-                    &variants,
+                    &shape,
                     expected,
                     "{case}, `{pick}` must agree with its `$ref` spelling: {}",
                     types_module(&code)
