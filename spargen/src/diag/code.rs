@@ -39,9 +39,12 @@ pub enum Code {
     NonDisjointUnion,
     /// A heterogeneous or structured `enum`/`const` value set is rejected.
     NonScalarEnum,
-    /// A request body media type spargen does not support (XML, multipart, …).
+    /// A media type, or a use of one, that spargen cannot generate faithfully; `spargen explain
+    /// E009` lists the media that are generated and the cases that reach this code.
     UnsupportedMediaType,
-    /// An unsupported parameter style (`deepObject`, `spaceDelimited`, …) (matrix: Parameters → R).
+    /// A parameter serialization with no defined wire form spargen can generate; `spargen explain
+    /// E010` lists the supported styles and the cases that reach this code (matrix: Parameters →
+    /// R).
     UnsupportedParameterStyle,
     /// `webhooks`/`callbacks`/`links` acknowledged; no code emitted (matrix: Document → W).
     ServerInitiatedFlowIgnored,
@@ -53,16 +56,20 @@ pub enum Code {
     /// conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a `$ref`
     /// that closes a reference cycle back to the component enclosing it (matrix: Schema shape).
     AllOfIrreconcilable,
-    /// The input could not be parsed or violates a required structural OpenAPI shape.
+    /// The input could not be parsed or violates a required structural OpenAPI shape, or the
+    /// generation pipeline itself failed (reading or writing a file, inputs that kept changing
+    /// while read, or an internal invariant of the lowered model).
     InvalidInput,
     /// An object declares the same key twice; the duplicate makes the member ambiguous, so it is
     /// rejected rather than silently collapsed to one occurrence.
     DuplicateObjectKey,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
     InvalidOmitRule,
-    /// A compatibility omit profile removed a construct.
+    /// An omit rule removed a construct: one written in a compatibility omit profile, or one
+    /// auto-carve derived to cut away a rejected construct.
     OmittedConstruct,
-    /// A compatibility omit profile created an invalid remaining document.
+    /// Applying the omit rules removed a required OpenAPI root field (`openapi`, `info`) or left
+    /// none of `paths`, `components`, and `webhooks`.
     OmitCreatedInvalidDocument,
     /// A schema `default` value could not be applied as a deserialization default (it is not a
     /// scalar matching the field's type); it is documented in rustdoc but not wired (matrix: Schema
@@ -97,8 +104,8 @@ pub enum Code {
     /// acknowledged rather than dropped in silence, so the input never has an undocumented
     /// disposition.
     DeclarationHasNoEffect,
-    /// Generation ran without a consumer Cargo manifest, so the generated runtime's dependency
-    /// contract (`E023`) could not be audited.
+    /// Generation ran in a Cargo build script that located no consumer Cargo manifest, so the
+    /// generated runtime's dependency contract (`E023`) could not be audited.
     RuntimeAuditSkipped,
     /// Generation ran outside a Cargo build script, so no rebuild triggers were emitted and the
     /// dependency audit was skipped.
@@ -195,7 +202,8 @@ impl Code {
         }
     }
 
-    /// Extended documentation shown by `spargen explain E###` and on the published errors index.
+    /// Extended documentation shown by `spargen explain E###`. The published errors index,
+    /// `docs/errors.md`, lists each code's severity and title; this body is the explanation.
     ///
     /// Every body is published, user-facing text, but not every body is held to the code by a
     /// test, and a contributor editing one should know which kind they are editing:
@@ -235,7 +243,7 @@ impl Code {
                 "`spargen lock` is the only step that touches the network, and this error means it could not fetch a remote (`http`/`https`) `$ref` it had to vendor: the request failed in transport (the name did not resolve, the connection was refused or timed out, a proxy or the TLS handshake rejected it), or the server answered with an error status. The message names the URL and carries the underlying error. It says nothing about the document itself — the `$ref` is well-formed and is what `spargen lock` exists to pin — so the fix is on the network side: check the URL and the status or transport error the message reports, then re-run `spargen lock <spec>`. The failed URL is not vendored again, and the run is rejected; the lock it still writes keeps the pin the earlier `spargen.lock` held for that URL, and for any document reachable only through it, beside the vendored copy that pin names, so an earlier working lock stays usable offline. If the document cannot be reached from where the lock step runs, vendor it by hand and reference it with a relative file path. `generate` and `check` never fetch, so they never report this code."
             }
             Code::ValidationKeywordIgnored => {
-                "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape. It is also reported for a `oneOf` decoded by trial matching that keeps a variant lowering to `serde_json::Value` (an untyped member such as `{}`) beside others: that variant accepts every value, so the other branches act only as validation, excluding the values they accept from it. They decode no value of their own, and serializing one fails the exactly-one rule; give the untyped branch a type, or use `anyOf`. OpenAPI 3.2 `contentMediaType`/`contentSchema` are consumed without this warning only on the string `data` property of a sequential `text/event-stream` item envelope, where they define the JSON payload type."
+                "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape. It is also reported for a `oneOf` decoded by trial matching that keeps a variant lowering to `serde_json::Value` (an untyped member such as `{}`) beside others: that variant accepts every value, so the other branches act only as validation, excluding the values they accept from it. They decode no value of their own, and serializing one fails the exactly-one rule; give the untyped branch a type, or use `anyOf`. It is reported, too, where union branches lower to the same generated type, or to identically structured ones, differing only in keywords that type does not carry — whether the branches are written that way or an intersection with keywords beside the union leaves them so: they become one type, or one variant of the generated enum, so which of them a value matches is not enforced; keep producer-side validation for the branch constraints. OpenAPI 3.2 `contentMediaType`/`contentSchema` are consumed without this warning only on the string `data` property of a sequential `text/event-stream` item envelope, where they define the JSON payload type."
             }
             Code::PatternPropertiesRejected => {
                 "`patternProperties` is represented as a typed overflow map (`#[serde(flatten)]`) when every pattern value schema — and any typed `additionalProperties` value — lowers to the same emitted Rust type; the key regex itself is validation-only and reported as `W001`. Value schemas that are distinct definitions still share one map when they emit one Rust type: two `{type: string}` values are both `String`, and two integer `enum`s, or an integer `enum` beside `format: int64`, are all `i64`. A struct, string enum, union, uninhabited type (the `false` schema), or array or tuple that closes a `$ref` cycle is its own Rust item, so two distinct ones are two types even where their shapes agree. It is rejected only when a faithful map is impossible: value schemas that emit different Rust types (which one map cannot type), or a combination with `additionalProperties: false` (a flatten map cannot both capture pattern values and deny other unknown keys)."
@@ -274,10 +282,10 @@ impl Code {
                 "A compatibility omit rule must match at least one source construct, and cannot omit the document root. An exact rule — a path, operation, component, pointer, or file-local pointer whose value carries no glob metacharacter — must name a construct the document holds. A glob rule — a `path`, operation `path`, component `name`, or `pointer` value carrying `*`, `**`, or `?` — removes every construct it matches and must match at least one. A file-local pointer rule must also name a file the input bundle loaded. Fix or remove the stale rule; a backslash (`\\*`, `\\?`) makes a metacharacter literal and keeps the rule exact."
             }
             Code::OmittedConstruct => {
-                "A compatibility omit profile removed this construct before OpenAPI validation/lowering. The source schema on disk was not modified."
+                "An omit rule removed this construct before OpenAPI validation/lowering: either a rule written in a compatibility omit profile, or one auto-carve derived to cut away a construct spargen rejects. The source schema on disk was not modified. Once spargen supports the construct, remove a hand-written rule to generate it again; auto-carve stops omitting it on its own, because it carves only what is rejected."
             }
             Code::OmitCreatedInvalidDocument => {
-                "After applying omit rules, the remaining document is structurally invalid. Omit dependent consumers too, or fix the source schema."
+                "After the omit rules were applied, what remains is no longer a valid OpenAPI root: a rule removed `openapi` or `info`, which every OpenAPI document requires, or the rules left none of `paths`, `components`, and `webhooks`, of which a document must carry at least one. A `$ref` an omission leaves dangling is reported as `E004`. Narrow the rules so they keep those root fields, or fix the source schema."
             }
             Code::SchemaDefaultNotApplied => {
                 "A `default` is applied as a serde deserialization default only when it is a single scalar (bool/integer/number/string) that matches the field's own scalar type or one of its enum variants. Object, array, null, heterogeneous, or type-mismatched defaults cannot be lowered to a Rust literal, so the value is recorded in the field's rustdoc but not wired — deserialization of an absent field yields `None` rather than the default. The field's type is the one it ends lowering with: where an intersection (`allOf` members, or a `$ref` with sibling `properties`) narrows a property, a member's default is decided again against the narrowed type — a string default on a property narrowed to an enum becomes the enum's variant — and one that is no value of it is reported at that `default`, naming the type whose field drops it, while the member that wrote it keeps it on its own type. Where the sides of an intersection declare two different defaults for one property, the merged field keeps one — an applicable default before one that cannot be applied, then the lesser rustdoc note, the same one in either order — and the other is reported at its `default`, naming the kept one's location. A `default` with no field, parameter, or type of its own to carry it is reported and neither applied nor documented: on array `items`, a tuple `prefixItems` entry, an `additionalProperties` or `patternProperties` value, a request or response body root, or an SSE envelope's JSON `data` content schema; and beside a bare `$ref` — one with no other shape-bearing sibling — as a schema component, or as a parameter, header, or Media Type `schema` or `itemSchema`, where the reference resolves to its target and the default has nowhere to go."
@@ -304,7 +312,7 @@ impl Code {
                 "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: an `in: header` parameter named `Accept`, `Content-Type`, or `Authorization`, which the specification says SHALL be ignored because the protocol layer owns those headers; `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `allowReserved` on a `multipart` Encoding Object, whose part values are never percent-encoded; `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; `prefixEncoding` or `itemEncoding` on `application/x-www-form-urlencoded`, which the specification scopes to `multipart` alone; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a response header whose `schema` has a shape `simple` serialization cannot express, or whose `content` media type spargen cannot decode, or whose textual `content` schema is not a single value, or which declares `content` with no schema at all, none of which yields a typed accessor; a `summary` or `description` on a Reference Object, which documents one use site of a component that every use site shares as one generated item, so the override has nowhere to land; a server variable that its server's `url` never uses; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; a union branch that the enclosing schema's own constraints have already made unsatisfiable, whether they are keywords beside the union, the target of a `$ref` beside it, or the other members of an `allOf` the union is a member of (a branch that is the exact JSON `null` alone, beside constraints that refuse `null`, drops out unreported in every spelling, as a `{type: 'null'}` branch does); untyped object or array keywords beside a union, or beside a `$ref` to one, when no branch has their category, which they then constrain nothing of; a `discriminator` on a schema with no `oneOf` or `anyOf` of its own, which selects nothing because spargen dispatches by tag only across the members of the union beside it — the `allOf` polymorphism form, where child schemas reach the parent through `allOf`, is not generated, since no keyword of the parent lists its children — so the schema lowers by its other keywords, while each `mapping` and `defaultMapping` value is still resolved and one naming no schema is `E004`; a `discriminator` beside a union member that is no schema component — an inline member, or a `$ref` pointing into another schema — and that no `mapping` entry or `defaultMapping` names, because the specification gives such a member no implicit value, so no discriminator value selects it and spargen will not invent one: the members a tag does name keep their tag dispatch, and the untagged member is matched by its own schema only when the tag is absent or names no tagged member, or, where no member carries a tag at all, the union is decoded by its members' schemas, as one with no discriminator is; and a schema component declared inside a referenced sub-file whose name the root document also declares. That last one is a fact about the *document* rather than about one keyword: a JSON Pointer fragment addresses the file it is written in, so a sub-file's own `#/components/schemas/<name>` asks for that file's declaration — but spargen consults the root document's component map first, so where both declare the name the root's wins and the sub-file's is never read. The warning names both namespaces and fires once per reference site, because the site is what has to be found; address the file-local declaration explicitly with a relative-file reference, or rename one of the two, if the root's is not the one you meant. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
             }
             Code::RuntimeAuditSkipped => {
-                "Generated output is freestanding: the consuming package must itself declare the crates and dependency features that specific API needs. Spargen audits the consumer's `Cargo.toml` for that contract and reports any gap as `E023` — but only when it can find the manifest, which in practice means a real `build.rs` process, where Cargo puts the package in the environment. Generating from a test, a wrapper binary, or a script leaves nothing to audit, so the contract is unverified and a missing dependency surfaces later as a compile error in the generated module instead of a spargen diagnostic. Run `spargen deps <spec>` to print the exact `[dependencies]` block that spec requires, or generate from a build script so the audit runs automatically. Set `CargoIntegration::Off` if this generation is deliberately not part of a Cargo build."
+                "Generated output is freestanding: the consuming package must itself declare the crates and dependency features that specific API needs. Spargen audits the consumer's `Cargo.toml` for that contract and reports any gap as `E023` — but only when it can locate that manifest. This generation ran in a Cargo build script, so its rebuild triggers were still emitted, but its environment named no consumer manifest: spargen reads `CARGO_MANIFEST_PATH`, or else `CARGO_MANIFEST_DIR`, which Cargo sets for a build script it runs. With nothing to audit, the contract is unverified, and a missing dependency surfaces later as a compile error in the generated module instead of a spargen diagnostic. Run `spargen deps <spec>` to print the exact `[dependencies]` block that spec requires and check the package against it, or run the build script where Cargo sets those variables so the audit runs. Set `CargoIntegration::Required` to make a missing manifest an error (`E024`), or `CargoIntegration::Off` to skip the audit without this warning. Under `CargoIntegration::Auto`, generation outside a build script is reported as `W013` instead."
             }
             Code::CargoIntegrationDegraded => {
                 "`generate` was called outside a Cargo build-script process, so two things Cargo would otherwise do did not happen: no `cargo:rerun-if-changed` directives were emitted, meaning an edited spec will NOT trigger a rebuild and the checked-in module can silently go stale; and the consumer manifest could not be located, so the runtime-dependency audit (`E023`) was skipped. Neither is an error — generating outside a build script is a legitimate thing to do — but both are silent by nature, which is why they are reported. Call `generate` from a `build.rs` to get both, or declare the intent with `CargoIntegration::Off` to accept them silently."
@@ -388,7 +396,7 @@ impl std::fmt::Display for Code {
 impl std::str::FromStr for Code {
     type Err = UnknownCode;
 
-    /// Parse a stable string form (`"E042"`) back into a [`Code`].
+    /// Parse a stable string form (`"E001"`) back into a [`Code`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Code::all()
             .iter()
