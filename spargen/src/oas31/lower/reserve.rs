@@ -10,7 +10,7 @@ use crate::source::is_remote_ref;
 
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
 /// One of a reservation frame's two memos: a key to its root id and nullability.
@@ -51,7 +51,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
     /// root component key, so neither could be declared, and the filter says so without relying on
     /// it.
-    pub(super) fn root_component_at<'p>(
+    fn root_component_at<'p>(
         &self,
         file: crate::diag::FileId,
         pointer: &'p crate::diag::JsonPointer,
@@ -176,9 +176,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // note on a def, and an alias has no def to carry it, so it is reported as `W005` in the
         // parser's words for the bare `$ref`+`default` spelling rather than dropped silently.
         if let Some(reference) = schema.reference.as_deref() {
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            if !schema_has_shape_constraint(&sibling) {
+            if !ref_siblings_bear_shape(schema) {
                 // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
                 self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
@@ -502,8 +500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `enum`, a sibling `$ref`: anything at all makes it a constrained schema rather than
         // another name for its target.
         let mut without_union = schema.clone();
-        without_union.one_of.clear();
-        without_union.any_of.clear();
+        without_union.clear_union_keywords();
         if schema_has_shape_constraint(&without_union) {
             return None;
         }
@@ -517,9 +514,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let target = only.reference.as_deref()?;
         // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
         // siblings, which is an intersection and not an alias.
-        let mut member_without_ref = only.clone();
-        member_without_ref.reference = None;
-        if schema_has_shape_constraint(&member_without_ref) {
+        if ref_siblings_bear_shape(only) {
             return None;
         }
         let (id, target_nullable) = self.open_reservation_for_ref(target, &only.provenance)?;
@@ -687,12 +682,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nothing repeated can accumulate against it.
     ///
     /// [`MAX_SCHEMA_DEPTH`]: super::MAX_SCHEMA_DEPTH
-    pub(super) fn ensure_resolved(
-        &mut self,
-        reference: &str,
-        at: &Provenance,
-        hint: &str,
-    ) -> Option<Ty> {
+    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
         self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
     }
 
@@ -754,14 +744,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether this definition is a named component root — reachable by name from anywhere else in
     /// the document, rather than owned by the single use site that produced it.
     pub(super) fn is_component_root(&self, id: TypeId) -> bool {
+        self.reservation_roots().any(|root| root == id)
+    }
+
+    /// The root id of every reservation, finished or still being lowered, across every
+    /// [`Reservation`] frame: both memos [`Self::reservation_memos`] hands out for each.
+    pub(super) fn reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components
             .values()
-            .chain(self.in_progress.values())
             .chain(self.remote_components.values())
-            .chain(self.remote_in_progress.values())
             .chain(self.resolved_components.values())
+            .map(|&(root, _)| root)
+            .chain(self.open_reservation_roots())
+    }
+
+    /// The root id of every reservation whose body is still being lowered: the in-progress memo
+    /// of each [`Reservation`] frame.
+    fn open_reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.in_progress
+            .values()
+            .chain(self.remote_in_progress.values())
             .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+            .map(|&(root, _)| root)
     }
 
     /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
@@ -780,11 +784,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// [`TypeGraph::reserve`]: crate::ir::TypeGraph::reserve
     pub(super) fn is_in_progress_root(&self, id: TypeId) -> bool {
-        self.in_progress
-            .values()
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+        self.open_reservation_roots().any(|root| root == id)
     }
 
     /// Whether the graph currently holds `id` as a [`TypeKind::Reserved`] placeholder.

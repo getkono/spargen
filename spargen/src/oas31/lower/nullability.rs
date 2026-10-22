@@ -8,9 +8,11 @@ use crate::ir::{Ty, TypeId, TypeKind, Union};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
-use super::combine::{schema_has_union, schema_is_object_like, Contribution};
+use super::combine::Contribution;
 use super::refiner::{implied_applicator_category, ImpliedCategory};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{
+    ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
+};
 use super::strategy::retain_strategy;
 use super::{memoised_answer, memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -161,9 +163,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// its `oneOf`, `anyOf` and `discriminator`.
     pub(super) fn union_sibling_null_admission(&self, schema: &Schema) -> NullAdmission {
         let mut sibling = schema.clone();
-        sibling.one_of.clear();
-        sibling.any_of.clear();
-        sibling.discriminator = None;
+        sibling.clear_union_keywords();
         self.null_admission(&sibling)
     }
 
@@ -361,14 +361,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `id` is the type of a component, a remote or a resolved target, finished or still
     /// being lowered: a type other uses share, which one use's lowering does not change.
     fn is_component_def(&self, id: TypeId) -> bool {
-        self.components
-            .values()
-            .chain(self.in_progress.values())
-            .chain(self.remote_components.values())
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_components.values())
-            .chain(self.resolved_in_progress.values())
-            .any(|&(component, _)| component == id)
+        self.reservation_roots().any(|component| component == id)
     }
 
     /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
@@ -463,7 +456,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides. Each `$ref`
     /// target is read once per pass and its answer replayed
     /// ([`Self::target_decides_null_memo`], [`Self::resolved_all_of_decides_null_memo`]).
-    pub(super) fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
+    fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH
             || stated_nullability(schema).is_some()
             || schema.enum_values.is_some()
@@ -560,9 +553,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return false;
         };
         // A `$ref` with siblings of its own is an intersection this does not read.
-        let mut sibling = member.as_ref().clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| {
@@ -632,9 +623,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let category = if let Some(reference) = member.reference.as_deref() {
                         // A `$ref` member with siblings of its own is an intersection this does
                         // not read.
-                        let mut sibling = member.as_ref().clone();
-                        sibling.reference = None;
-                        if schema_has_shape_constraint(&sibling) {
+                        if ref_siblings_bear_shape(member) {
                             None
                         } else {
                             self.ref_target_body(reference, &member.provenance)
@@ -717,9 +706,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return false;
         }
         let mut rest = schema.clone();
-        rest.one_of.clear();
-        rest.any_of.clear();
-        rest.discriminator = None;
+        rest.clear_union_keywords();
         if self.all_of_decides_null(&rest, depth + 1) {
             return false;
         }
@@ -774,9 +761,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(reference) = member.reference.as_deref() else {
             return self.schema_is_untyped_shape(member, depth);
         };
-        let mut sibling = member.as_ref().clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| {
@@ -805,9 +790,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(reference) = member.reference.as_deref() else {
             return lists_null(member);
         };
-        let mut sibling = member.clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| lists_null(&target))
@@ -856,9 +839,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(reference) => {
                     // A `$ref` member with siblings of its own is an intersection this does not
                     // read.
-                    let mut sibling = member.clone();
-                    sibling.reference = None;
-                    !schema_has_shape_constraint(&sibling)
+                    !ref_siblings_bear_shape(member)
                         && self
                             .ref_target_body(reference, &member.provenance)
                             .is_some_and(|body| {
@@ -954,9 +935,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(next) = &target.reference else {
                 return Some(target);
             };
-            let mut sibling = target.as_ref().clone();
-            sibling.reference = None;
-            if schema_has_shape_constraint(&sibling) {
+            if ref_siblings_bear_shape(&target) {
                 return Some(target);
             }
             reference.clone_from(next);
@@ -983,7 +962,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `null` is not split either (#450). The meets inserted since `mark` reach nothing the null
     /// type refers to, so they are discarded, and the null type is the final graph insert.
     ///
-    /// [`schema_is_object_like`]: super::combine::schema_is_object_like
+    /// [`schema_is_object_like`]: super::shape::schema_is_object_like
     pub(super) fn null_only_all_of(
         &mut self,
         schema: &Schema,
@@ -1129,7 +1108,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// that lowers to `Value` decides nothing, so with no member of any other type the union keeps
     /// the answer it has on its own. `union` may also be an `allOf` wrapping such a union, which a
     /// `$ref` member names ([`Self::admits_null_undecided_through_union`], #638).
-    pub(super) fn union_member_takes_scalar_null<'c>(
+    fn union_member_takes_scalar_null<'c>(
         &self,
         mut ty: Ty,
         union: &Schema,
@@ -1177,9 +1156,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 let target = match member.reference.as_deref() {
                     Some(reference) => {
-                        let mut sibling = member.clone();
-                        sibling.reference = None;
-                        if schema_has_shape_constraint(&sibling) {
+                        if ref_siblings_bear_shape(member) {
                             return None;
                         }
                         self.ref_target_body(reference, &member.provenance)?
@@ -1212,11 +1189,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// Whether `schema` composes constraints whose `null` its own `type` alone does not settle: an
 /// `allOf`, a `oneOf` or `anyOf`, a `$ref` with shape-bearing siblings, or an `enum` or `const`.
 fn schema_is_composed(schema: &Schema) -> bool {
-    let ref_with_siblings = schema.reference.is_some() && {
-        let mut sibling = schema.clone();
-        sibling.reference = None;
-        schema_has_shape_constraint(&sibling)
-    };
+    let ref_with_siblings = schema.reference.is_some() && ref_siblings_bear_shape(schema);
     ref_with_siblings
         || (schema.reference.is_none()
             && (!schema.all_of.is_empty()
@@ -1314,8 +1287,7 @@ pub(super) fn member_is_null_only(member: &SchemaOr) -> bool {
     };
     schema.reference.is_none()
         && schema.types.types == [JsonType::Null]
-        && schema.one_of.is_empty()
-        && schema.any_of.is_empty()
+        && !schema_has_union(schema)
         && schema.all_of.is_empty()
         && schema.enum_values.is_none()
         && schema.const_value.is_none()
@@ -1336,6 +1308,6 @@ fn type_beside_all_of_is_null_only(schema: &Schema) -> bool {
 /// Whether every one of a schema's own `type`, `enum` and `const` that it states admits `null`
 /// (vacuously so where it states none): their conjunction, [`NullAdmission::of_own_keywords`],
 /// so `{type: string, enum: [null]}` admits no `null`.
-pub(super) fn own_keywords_admit_null(schema: &Schema) -> bool {
+fn own_keywords_admit_null(schema: &Schema) -> bool {
     NullAdmission::of_own_keywords(schema).matches()
 }

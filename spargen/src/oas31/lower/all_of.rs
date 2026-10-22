@@ -8,9 +8,10 @@ use crate::diag::Provenance;
 use crate::ir::{Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
 
-use super::combine::{schema_has_union, take_refiners, Contribution};
+use super::combine::{take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
+use super::shape::schema_has_union;
 use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
 
 /// A union an `allOf` meet met with its other members, for
@@ -424,7 +425,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// folded into one they keep, so it was neither reported (`W011`) nor told apart from it,
     /// where the sibling spelling of the same constraints reports it. The enclosing hold, if
     /// any, is restored.
-    pub(super) fn lower_scalar_meet_union<T>(
+    fn lower_scalar_meet_union<T>(
         &mut self,
         union: &Provenance,
         lower: impl FnOnce(&mut Self) -> T,
@@ -643,9 +644,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ([`Self::reject_all_of_several_unions`]).
     pub(super) fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut composition = schema.clone();
-        composition.one_of.clear();
-        composition.any_of.clear();
-        composition.discriminator = None;
+        composition.clear_union_keywords();
         // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
         // schema's own object keywords and its `null`.
         composition.types = crate::oas31::TypeSet::default();

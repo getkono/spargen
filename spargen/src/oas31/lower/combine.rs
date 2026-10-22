@@ -10,10 +10,12 @@ use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind
 use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
-use super::meet::{carries_key, merge_field_default, NoMeet};
+use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
-use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
+use super::shape::{
+    schema_has_shape_constraint, schema_has_union, schema_imposes_scalar, schema_is_object_like,
+};
 use super::{
     all_of_entry_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
     ScopedRefiners, MAX_SCHEMA_DEPTH,
@@ -368,11 +370,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if required.contains(&field.name.wire) {
                 field.required = true;
             }
-            if field.required {
-                if let Some(default) = &mut field.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(field);
         }
 
         // A property repeated by three or more members is met pair by pair, and each meet replaces
@@ -909,22 +907,6 @@ pub(super) fn take_refiners(contributions: &mut Vec<Contribution>) -> Vec<(Box<S
         Contribution::Object { .. } | Contribution::Scalar(_) => true,
     });
     refiners
-}
-
-/// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
-/// policy, a `required` set, or an explicit `object` type — and so contributes fields to an `allOf`
-/// merge rather than a scalar.
-pub(super) fn schema_is_object_like(schema: &Schema) -> bool {
-    !schema.properties.is_empty()
-        || !schema.pattern_properties.is_empty()
-        || schema.additional_properties.is_some()
-        || !schema.required.is_empty()
-        || schema.types.types.contains(&JsonType::Object)
-}
-
-/// Whether a schema carries a `oneOf` or an `anyOf` of its own.
-pub(super) fn schema_has_union(schema: &Schema) -> bool {
-    !schema.one_of.is_empty() || !schema.any_of.is_empty()
 }
 
 /// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is

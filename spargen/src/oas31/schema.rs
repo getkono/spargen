@@ -110,6 +110,15 @@ impl Schema {
         self.additional_properties = None;
     }
 
+    /// Remove the union keywords: `oneOf`, `anyOf` and the `discriminator` that selects among
+    /// their branches. Lowering does this where it reads a union's sibling keywords apart from the
+    /// union itself.
+    pub(crate) fn clear_union_keywords(&mut self) {
+        self.one_of.clear();
+        self.any_of.clear();
+        self.discriminator = None;
+    }
+
     /// Whether this schema constrains a value at all — neither its storage shape nor its
     /// validation.
     ///

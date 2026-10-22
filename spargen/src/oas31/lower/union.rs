@@ -15,7 +15,7 @@ use super::prune::{kind_edges, reachable_types};
 use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
-use super::shape::schema_has_shape_constraint;
+use super::shape::ref_siblings_bear_shape;
 use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -1108,11 +1108,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The variants [`Self::warn_untyped_one_of_variants`] reports of `union`, each variant's hint
     /// beside its label from `labels`: those that lower to `serde_json::Value`, in a trial-matched
     /// `oneOf` of two or more variants. Empty for any other union.
-    pub(super) fn untyped_one_of_variants(
-        &self,
-        union: &Union,
-        labels: &[usize],
-    ) -> Vec<(String, usize)> {
+    fn untyped_one_of_variants(&self, union: &Union, labels: &[usize]) -> Vec<(String, usize)> {
         if union.variants.len() < 2
             || !matches!(
                 union.strategy,
@@ -1271,13 +1267,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member: &SchemaOr,
         hint: &str,
     ) -> Option<(Ty, Option<String>)> {
-        let root = self.resolver.root_id();
         if let (Some(name), SchemaOr::Schema(schema)) =
-            (member_component_name(member, root), member)
+            (member_component_name(member, self.resolver), member)
         {
-            let mut sibling = schema.as_ref().clone();
-            sibling.reference = None;
-            let ty = if schema_has_shape_constraint(&sibling) {
+            let ty = if ref_siblings_bear_shape(schema) {
                 self.lower_schema_or(member, hint)?
             } else {
                 // The member itself never reaches `lower_schema_inner`, which reports this.
