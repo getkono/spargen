@@ -224,7 +224,7 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
 
     // The outcomes a *found* root has, and the promise that the diagnostic tells them apart
     // instead of reporting the crate as missing. Each fixture below observes one of them, and
-    // the clause now says only what the resolver does: `check_declaration` renders
+    // the clause says only what the resolver does: `check_declaration` renders
     // `WorkspaceOrigin::Resolved` as "declares no `x` there" and `Unreadable` as "could not be
     // read", so a found root's two failures are distinguished.
     let unresolved_outcomes: &[&str] = &[

@@ -253,7 +253,7 @@ fn check_native_target(
         return;
     }
 
-    // With one counting table a message names no table; with several, each says which table it
+    // With one counting table a message names no counting table; with several, each says which table it
     // is about.
     let several = counting.len() > 1;
     let mut resolved = Vec::new();

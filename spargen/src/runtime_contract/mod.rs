@@ -360,8 +360,8 @@ fn declares_feature(manifest: &toml::Value, feature: &str) -> bool {
         .is_some()
 }
 
-/// `kind` names which manifest failed. Both call sites read a different file, and calling the
-/// workspace root "the consumer manifest" contradicted the very diagnostic printed beside it.
+/// `kind` names which manifest failed, so the message names the file actually read: the consumer
+/// manifest at one call site, the workspace manifest at the other.
 fn read_toml(path: &Utf8Path, kind: &str) -> Result<toml::Value, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read {kind} `{path}`: {error}"))?;
