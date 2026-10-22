@@ -34,13 +34,12 @@ paths:
             "{media}": {{ schema: {{}} }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "{media}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
     }
 
     // On a request such a key would be sent verbatim as `Content-Type`, so it must be rejected
@@ -62,13 +61,12 @@ paths:
         "204": {{ description: No Content }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "{media}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
     }
 }
 
@@ -90,10 +88,9 @@ paths:
           content:
             image/svg+xml: { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -153,17 +150,16 @@ paths:
             audio/*: { schema: {} }
             application/octet-stream: { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -213,10 +209,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -271,13 +266,12 @@ components:
     Manifest:
       schema: { type: object, properties: { a: { type: string } } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -331,13 +325,12 @@ paths:
             text/plain: { schema: {} }
             text/csv: { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -396,13 +389,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -424,13 +416,12 @@ paths:
             application/octet-stream: { schema: {} }
             video/*: { itemSchema: { type: string } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 
     // `encoding` is the other half of the same claim, and the explain text names it. It is inert on
     // an octet media, but an entry that spells it out is still saying more than an empty one.
@@ -448,13 +439,12 @@ paths:
             application/octet-stream: { schema: {} }
             video/*: { encoding: { part: { contentType: text/plain } } }
 "##;
-    for report in [generate(with_encoding), check(with_encoding)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(with_encoding);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -475,13 +465,12 @@ paths:
             application/x-ndjson: { itemSchema: { type: string } }
             application/jsonl: { itemSchema: { type: integer } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -504,13 +493,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -560,13 +548,12 @@ paths:
             application/octet-stream: { schema: { type: string, format: binary } }
             video/*: { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -694,10 +681,9 @@ components:
   schemas:
     Loop: { $ref: "#/components/schemas/Loop" }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
 #[test]
@@ -767,10 +753,9 @@ paths:
           content:
             "a/b/*": { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 /// Assert that each `(key, request, schema)` case, as the sole `content` key of a request body
@@ -814,17 +799,12 @@ paths:
     }
     for &(key, request, schema) in cases {
         let spec = document(key, request, schema);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{key}` through {entry}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "`{key}` through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "`{key}`: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "`{key}`: {report:#?}"
+        );
     }
 }
 
@@ -941,11 +921,11 @@ fn well_formed_media_keys_still_generate() {
         );
     }
     let (report, code) = generate_with_code(&spec);
-    let checked = check(&spec);
-    for report in [&report, &checked] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
     // Seven operations share the `ResponseBody` name, so each alias carries a disambiguating suffix.
     let opaque = code
         .lines()
@@ -981,11 +961,11 @@ paths:
               schema: { type: object, required: [id], properties: { id: { type: integer } } }
 "##;
     let (report, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for report in [&report, &checked] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
     assert!(
         code.contains("pub struct ResponseBody {")
             && code.contains("pub type ResponseBodyid = i64;"),

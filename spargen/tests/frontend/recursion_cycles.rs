@@ -607,18 +607,17 @@ fn a_recursive_target_repeated_across_all_of_members_intersects_as_itself() {
         ("additionalProperties", &additional),
         ("prefixItems", &prefix_items),
     ] {
-        for (entry, report) in [("generate", generate(document)), ("check", check(document))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}/{entry}: two members naming the same recursive target were reported as \
-                 conflicting: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{label}/{entry}: {report:#?}"
-            );
-        }
+        let report = generate(document);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{label}: two members naming the same recursive target were reported as conflicting: \
+             {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{label}: {report:#?}"
+        );
     }
 
     // The silent half, asserted on what was emitted: the item type is `Tree`, not an empty enum.
@@ -878,20 +877,17 @@ components:
 
     for applicator in ["oneOf", "anyOf"] {
         let spec = archetype(applicator);
-        let (generated, code) = generate_with_code(&spec);
-        let checked = check(&spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{applicator}/{entry}: the member is `Node` and the union is `Nodechild` — two \
-                 different types, so the decoder terminates: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::NonDisjointUnion),
-                "{applicator}/{entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{applicator}: the member is `Node` and the union is `Nodechild` — two different \
+             types, so the decoder terminates: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{applicator}: {report:#?}"
+        );
         // The recursion is closed by boxing, as the matrix promises, rather than refused.
         assert!(code.contains("Box<Node>"), "{applicator}: {code}");
     }

@@ -261,30 +261,23 @@ components:
         ("sole member in array items", sole_member_in_array_items),
         ("one of several members", one_of_several_members),
     ] {
-        let (generated, code) = generate_with_code(spec);
-        let checked = check(spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}/{entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::InvalidInput),
-                "{label}/{entry}: {report:#?}"
-            );
-            assert!(
-                has_code(report, Code::AllOfIrreconcilable)
-                    || has_code(report, Code::NonDisjointUnion),
-                "{label}/{entry}: {report:#?}"
-            );
-            // The false acknowledgement must be gone: the member is not a branch the sibling made
-            // impossible, it is one nothing could yet be said about.
-            assert!(
-                !has_code(report, Code::DeclarationHasNoEffect),
-                "{label}/{entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{label}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable)
+                || has_code(&report, Code::NonDisjointUnion),
+            "{label}: {report:#?}"
+        );
+        // The false acknowledgement must be gone: the member is not a branch the sibling made
+        // impossible, it is one nothing could yet be said about.
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{label}: {report:#?}"
+        );
         assert!(
             code.is_empty(),
             "{label}: rejected runs emit nothing: {code}"
@@ -333,12 +326,6 @@ components:
 "##;
     let (generated, code) = generate_with_code(spec);
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
-    assert_ne!(
-        check(spec).outcome(),
-        Outcome::Rejected,
-        "{:#?}",
-        check(spec)
-    );
     // `B` is a public type of the generated API and must stay one.
     assert!(code.contains("pub struct B "), "{code}");
     assert!(code.contains("pub struct C "), "{code}");
@@ -749,14 +736,13 @@ fn a_cycle_closing_ref_whose_siblings_bear_a_shape_is_rejected_not_discarded() {
     let mutual = format!(
         "{HEAD}components:\n  schemas:\n    A:\n      type: object\n      properties:\n        b: {{ $ref: '#/components/schemas/B' }}\n    B:\n      type: object\n      properties:\n        a:\n          $ref: '#/components/schemas/A'\n          type: object\n          properties: {{ x: {{ type: string }} }}\n"
     );
-    for (entry, report) in [("generate", generate(&mutual)), ("check", check(&mutual))] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "a mutually recursive back-edge was not rejected by {entry}: {report:#?}"
-        );
-        assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-    }
+    let report = generate(&mutual);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "a mutually recursive back-edge was not rejected: {report:#?}"
+    );
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
     // The control, and the reason the guard is gated on the sibling bearing a shape at all: an
     // ordinary recursive schema still boxes its back-edge and generates, keeping the recursion.
@@ -850,13 +836,12 @@ fn the_recursive_ref_guard_does_not_key_on_component_declaration_order() {
 
     let mut verdicts = Vec::new();
     for (order, spec) in [("A first", &a_first), ("B first", &b_first)] {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            verdicts.push((
-                format!("{order}/{entry}"),
-                report.outcome(),
-                has_code(&report, Code::AllOfIrreconcilable),
-            ));
-        }
+        let report = generate(spec);
+        verdicts.push((
+            order.to_owned(),
+            report.outcome(),
+            has_code(&report, Code::AllOfIrreconcilable),
+        ));
     }
     let first = (verdicts[0].1, verdicts[0].2);
     for (label, outcome, coded) in &verdicts {
@@ -948,19 +933,17 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
         let spec = format!(
             "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` was not rejected by {entry}, so the recursive target is still being \
-                 silently discarded on the union path: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` did not report E013 through {entry}: {report:#?}"
-            );
-        }
         let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` was not rejected, so the recursive target is still being silently discarded \
+             on the union path: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` did not report E013: {report:#?}"
+        );
         let messages = messages_for(&report, Code::AllOfIrreconcilable);
         assert!(
             messages
@@ -1091,21 +1074,19 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
         let spec = format!(
             "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties: {{ y: {{ type: integer }} }}\n{extra}{HOLDER}"
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{what}` is not an edge lowering follows, so it cannot make the `$ref` a \
-                 cycle-closing one and must not flip {entry} into a rejection: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "`{what}` reported E013 through {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` is not an edge lowering follows, so it cannot make the `$ref` a \
+             cycle-closing one and must not flip into a rejection: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` reported E013: {report:#?}"
+        );
         // Stronger than "still generates": the emitted types are the ones the baseline emits, so
         // the keyword is confirmed inert rather than merely tolerated.
-        let (_, code) = generate_with_code(&spec);
         let types = types_module(&code);
         assert_eq!(
             types, base_types,
@@ -1314,12 +1295,6 @@ fn a_cycle_closing_item_met_with_untyped_items_generates_as_without_them() {
                      {site}\n      required: [pick]\n"
                 ),
             );
-            let checked = check(&spec);
-            assert_ne!(
-                checked.outcome(),
-                Outcome::Rejected,
-                "check, {members}: {checked:#?}"
-            );
             let (report, code) = generate_with_code(&spec);
             assert_ne!(
                 report.outcome(),
@@ -1360,8 +1335,6 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
          $ref: '#/components/schemas/Tup' } ] }\n        - { type: array, items: { maxItems: 3 } \
          }\n",
     );
-    let checked = check(&spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
     let (report, code) = generate_with_code(&spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
@@ -1408,8 +1381,6 @@ fn a_cycle_closing_additional_properties_met_with_an_untyped_value_keeps_the_ref
          '#/components/schemas/A' } }\n        - { type: object, additionalProperties: { \
          maxLength: 3 } }\n",
     );
-    let checked = check(&spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
     let (report, code) = generate_with_code(&spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(

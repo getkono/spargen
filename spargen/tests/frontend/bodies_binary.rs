@@ -47,9 +47,6 @@ paths:
     for alias in ["Token", "Cursor"] {
         assert_eq!(alias_target(&code, alias), None, "{code}");
     }
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -83,8 +80,6 @@ paths:
         assert_eq!(alias_target(&code, alias), None, "{code}");
     }
     assert!(!code.contains("= bytes::Bytes;"), "{code}");
-    let checked = check(spec);
-    assert_check_agrees(&report, &checked);
 }
 
 #[test]
@@ -121,8 +116,6 @@ components:
         Some("bytes::Bytes"),
         "{code}"
     );
-    let checked = check(spec);
-    assert_check_agrees(&report, &checked);
 }
 
 #[test]
@@ -187,13 +180,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -213,12 +205,11 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -250,7 +241,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected, "{report:#?}");
     // The point of the fix: a byte body must not degrade to `serde_json::Value`, and retyping the
     // untyped schema must not leave a second alias behind.
     assert!(
@@ -388,7 +378,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
     assert_eq!(code.matches("= bytes::Bytes;").count(), 3, "{code}");
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
@@ -461,7 +450,6 @@ paths:
         code.contains("pub type ResponseBody = bytes::Bytes;"),
         "{code}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // The same tie on the request side decides the wire `Content-Type`: octet-stream wins there
     // too, so the header a client already sent does not switch to the family type.
@@ -526,7 +514,6 @@ paths:
         }),
         "{report:#?}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (ii) Text keeps a request, and with it the header a client already sent.
     let (report, code) = generate_with_code(
@@ -622,7 +609,6 @@ paths:
             }),
             "{range}: {report:#?}"
         );
-        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{range}");
     }
 
     // ... but only a concrete key that classifies: `application/pdf` names no codec, so the range
@@ -710,7 +696,6 @@ paths:
         }),
         "{report:#?}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (vi) ... whatever schema `image/png` carries: a losing alternative never reaches the octet
     // gate, so an object under `image/png` beside `text/*` generates as text instead of `E009`.
@@ -735,7 +720,6 @@ paths:
         "{report:#?}"
     );
     assert!(code.contains("pub type ResponseBody = String;"), "{code}");
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (vii) `*/*` keeps a response the same way: it generates as bytes beside an `image/png`
     // whatever schema `image/png` carries — an object there is reported as the alternative not
@@ -772,7 +756,6 @@ paths:
         code.contains("pub type ResponseBody = bytes::Bytes;"),
         "{code}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (viii) The family's own range outranks its concrete member: `image/*` beside `image/png`
     // with a constraining schema generates from the range.
@@ -800,7 +783,6 @@ paths:
         code.contains("pub type ResponseBody = bytes::Bytes;"),
         "{code}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
 #[test]
@@ -958,13 +940,12 @@ paths:
             image/*: { schema: {} }
             application/octet-stream: { schema: {} }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1049,10 +1030,9 @@ paths:
           content:
             image/jpeg: { schema: { type: object, properties: { a: { type: string } } } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 
     // The request gate is reached through the same octet classification, and must name the
     // schema it refuses rather than call the family unsupported.

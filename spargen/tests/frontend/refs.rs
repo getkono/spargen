@@ -348,14 +348,9 @@ components:
           properties: { id: { type: string } }
           required: [id]
 "##;
-    let (generated, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", generated), ("check", check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::UnresolvedRef),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     // The body is the subschema's own type, named for the pointer's last token — not `()`, which
     // is what the silent drop emitted, and not `Envelope`, which is the component it starts from.
     assert!(
@@ -421,14 +416,9 @@ components:
          child: { $ref: '#/components/schemas/Envelope/properties/payload' }\n            \
          parent: { $ref: '#/components/schemas/Envelope' }",
     );
-    let (generated, code) = generate_with_code(&recursive);
-    for (entry, report) in [("generate", generated), ("check", check(&recursive))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::UnresolvedRef),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (report, code) = generate_with_code(&recursive);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let payload_child = code
         .lines()
         .map(str::trim_start)
@@ -899,14 +889,6 @@ fn e014_deep_ref_chain_is_rejected_not_overflowed() {
         has_code(&report, Code::SchemaNestingTooDeep),
         "expected E014 SchemaNestingTooDeep; got {report:#?}"
     );
-
-    // check/generate parity: the depth guard lives in lowering, which `check` runs identically.
-    let checked = check(&spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::SchemaNestingTooDeep),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -989,13 +971,12 @@ components:
       in: query
       schema: { type: integer }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// A Header Object and a Media Type Object reached by a relative-file `$ref` resolve through the

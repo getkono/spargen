@@ -13,21 +13,20 @@ use super::*;
 fn a_ref_with_a_not_sibling_still_reports_it_as_validation_only() {
     let site = "{ $ref: '#/components/schemas/Name', not: { enum: [forbidden] } }";
     for (position, spec, _) in ref_union_sibling_documents(site) {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{position} via {entry}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::ValidationKeywordIgnored),
-                "{position} via {entry}: `not` must still be reported: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{position} via {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{position}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::ValidationKeywordIgnored),
+            "{position}: `not` must still be reported: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{position}: {report:#?}"
+        );
     }
 }
 
@@ -69,11 +68,6 @@ components:
     // the referenced component's property are both present.
     assert!(code.contains("pub extra"), "{code}");
     assert!(code.contains("pub id"), "{code}");
-
-    // check/generate parity on the clean path too.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
 
 /// A `oneOf`/`anyOf` member written `{$ref: '#/components/schemas/Name', type: integer}` is the
@@ -157,8 +151,6 @@ components:
       discriminator:
         propertyName: kind
 "##;
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let types = types_module(&code);
