@@ -66,18 +66,11 @@ impl Default for CodegenOptions {
     }
 }
 
-/// A single generated source file, already formatted rustfmt-clean via `prettyplease`.
-#[derive(Debug, Clone)]
-pub(crate) struct GeneratedFile {
-    /// The formatted source.
-    pub(crate) contents: String,
-}
-
-/// The complete generated code for one client (models, client, embedded support).
+/// The complete generated code for one client (models, client, embedded support): one module.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GeneratedCode {
-    /// The generated files, in deterministic order.
-    pub(crate) files: Vec<GeneratedFile>,
+    /// The module's source, already formatted rustfmt-clean via `prettyplease`.
+    pub(crate) contents: String,
 }
 
 /// Generate the Rust source for a client from the IR and allocated names.
@@ -127,7 +120,5 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
             format!("spargen internal codegen error: {error}")
         )
     });
-    GeneratedCode {
-        files: vec![GeneratedFile { contents }],
-    }
+    GeneratedCode { contents }
 }

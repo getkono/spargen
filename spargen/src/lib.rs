@@ -347,7 +347,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             prepend(&mut report.diagnostics, &cargo_diagnostics);
             return report;
         }
-        let Some(rendered) = preview.files.first().map(String::as_str) else {
+        let Some(rendered) = preview.contents.as_deref() else {
             return pipeline_error_report("generation produced no module".to_owned());
         };
         let Some(requirements) = preview.requirements.as_ref() else {
@@ -470,19 +470,15 @@ fn apply_audit(
 #[derive(Debug, Clone)]
 struct PipelinePreview {
     report: Report,
-    files: Vec<String>,
+    contents: Option<String>,
     requirements: Option<runtime_contract::RuntimeRequirements>,
 }
 
 fn preview_inner(spec: &Spec) -> PipelinePreview {
     let result = run_mode(spec, PipelineMode::Preview);
-    let files = result
-        .plan
-        .map(|plan| plan.files.into_iter().map(|file| file.contents).collect())
-        .unwrap_or_default();
     PipelinePreview {
         report: result.report,
-        files,
+        contents: result.plan.map(|plan| plan.contents),
         requirements: result.requirements,
     }
 }
@@ -664,7 +660,7 @@ pub mod __private {
 
     fn preview_impl(spec: &Spec, manifest: Option<&Utf8Path>) -> MacroPreview {
         let preview = super::preview_inner(spec);
-        let contents = preview.files.first().cloned();
+        let contents = preview.contents;
         // The files a generation reads are the build cache's inputs: the root spec, every
         // relative-file `$ref` target and vendored remote copy, `spargen.lock`, and the applied
         // config files, whose edit changes what was generated and so re-expands. An input set that
@@ -831,14 +827,8 @@ fn lower_bundle(
 }
 
 /// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// the internal preview. Returns the fully rendered module plan or `Err(())` with the layout error
-/// already pushed onto `diags`.
-fn build_emit_plan(
-    spec: &Spec,
-    api: &ir::Api,
-    names: &name::Names,
-    diags: &mut diag::Diagnostics,
-) -> Result<emit::EmitPlan, ()> {
+/// the internal preview. Returns the fully rendered module plan.
+fn build_emit_plan(spec: &Spec, api: &ir::Api, names: &name::Names) -> emit::EmitPlan {
     let code = codegen::generate(
         api,
         names,
@@ -860,9 +850,7 @@ fn build_emit_plan(
         },
     };
 
-    emit::plan(&code, &emit_options).map_err(|error| {
-        emit_pipeline_error(diags, error.to_string());
-    })
+    emit::plan(&code, &emit_options)
 }
 
 /// Run `mode` over `spec` on the dedicated frontend stack, through the auto-carve driver when
@@ -896,13 +884,10 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             requirements: Some(requirements),
         },
         // Preview keeps the rendered plan and writes nothing.
-        PipelineMode::Preview => match build_emit_plan(spec, &api, &names, &mut diags) {
-            Ok(plan) => PipelineResult {
-                report: report(diags, Outcome::Generated),
-                plan: Some(plan),
-                requirements: Some(requirements),
-            },
-            Err(()) => PipelineResult::bare(report(diags, Outcome::Rejected)),
+        PipelineMode::Preview => PipelineResult {
+            plan: Some(build_emit_plan(spec, &api, &names)),
+            report: report(diags, Outcome::Generated),
+            requirements: Some(requirements),
         },
     }
 }
