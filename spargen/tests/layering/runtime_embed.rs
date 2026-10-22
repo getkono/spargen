@@ -531,10 +531,13 @@ fn the_variant_counter_reads_names_not_payloads() {
     );
 }
 
+/// Generated output carries no test module, with every conditionally embedded runtime module
+/// (`stream`, `xml`, `datetime`) generated alongside the unconditional ones, so each embedded
+/// file's stripping is what is checked.
 #[test]
 fn generated_output_carries_no_test_module() {
     const SPEC: &str = r#"
-openapi: 3.1.0
+openapi: 3.2.0
 info: { title: Embed, version: 1.0.0 }
 servers: [{ url: "https://example.com" }]
 paths:
@@ -546,7 +549,28 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { type: array, items: { type: string } }
+              schema: { type: array, items: { type: string, format: date-time } }
+  /things/xml:
+    get:
+      operationId: listThingsXml
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema: { type: object, properties: { name: { type: string } } }
+  /things/events:
+    get:
+      operationId: watchThings
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              itemSchema:
+                type: object
+                required: [data]
+                properties: { data: { type: string } }
 "#;
 
     let temp = tempfile::tempdir().unwrap();
@@ -562,6 +586,13 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
+    for module in ["stream", "xml", "datetime"] {
+        assert!(
+            generated.contains(&format!("mod {module} {{")),
+            "the spec must embed the conditional `{module}` runtime module for its stripping to be \
+             checked"
+        );
+    }
     assert!(
         !generated.contains("#[cfg(test)]"),
         "the embedded runtime's test modules must be stripped: generated output would otherwise \

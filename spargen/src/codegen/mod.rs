@@ -1,5 +1,5 @@
 //! # Subsystem: codegen
-//! layer-deps: ir, name, support, diag
+//! layer-deps: ir, name, support
 //!
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
 //! deterministic item ordering and `prettyplease` formatting. Codegen never
