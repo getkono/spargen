@@ -878,6 +878,27 @@ fn json_sequence_discards_junk_and_skips_empty_records() {
     }
 }
 
+/// Consecutive empty JSON text sequence records still buffered when the body ends do not end
+/// the stream: with no reconnect policy, every record behind them is yielded before `None`.
+#[test]
+fn json_sequence_yields_the_records_behind_consecutive_empty_records_at_end_of_body() {
+    for (body, expected) in [
+        ("\x1e\n\x1e\n\x1e2\n", vec![serde_json::json!(2)]),
+        (
+            "\x1e\n\x1e \n\x1e\n\x1e{\"a\":1}\n\x1e\n\x1e\n\x1e{\"a\":2}\n\x1e\n\x1e\n",
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})],
+        ),
+    ] {
+        let mut stream: EventStream<serde_json::Value> =
+            EventStream::new(response(body), Framing::JsonSequence);
+        let mut items = Vec::new();
+        while let Some(item) = poll_ready(stream.next()) {
+            items.push(item.unwrap());
+        }
+        assert_eq!(items, expected, "{body:?}");
+    }
+}
+
 /// A stream whose `ClientCore` bounds an unterminated item at `max_stream_frame` bytes and
 /// retains 4 bytes of an error body, holding a replayable request and the given policy.
 fn bounded_stream(
