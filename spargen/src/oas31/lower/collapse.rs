@@ -103,12 +103,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Only some branches share a generated type: they become one variant, as the inline
             // merge makes them, and the others stand. A `serde_json::Value` variant left among them
             // is the caller's to report ([`Self::warn_untyped_met_variants`]), once whatever still
-            // meets the union after the collapse has made its branches final (#535).
+            // meets the union after the collapse has made its branches final (#535). Where every
+            // variant stays distinct, the `null` its variants accept is the one decision's to
+            // settle once the conjunction is lowered ([`Self::settle_null_admission`]).
             None if one_of => {
-                let collapsed = match self.merge_intersected_one_of(schema, met, hint, spelling) {
-                    Some(merged) => merged,
-                    None => self.drop_null_matching_two_branches(met, hint),
-                };
+                let collapsed = self
+                    .merge_intersected_one_of(schema, met, hint, spelling)
+                    .unwrap_or(met);
                 (collapsed, true)
             }
             None => (met, false),
@@ -241,42 +242,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let mut ty = self.insert_type(hint, TypeKind::Union(union), Docs::default(), None);
         ty.nullable = met.nullable;
-        ty.boxed = met.boxed;
-        ty
-    }
-
-    /// `met`, a `oneOf` meet whose variants all stay distinct, with `null` made invalid where two
-    /// or more of its sources accept it (#563): the union's own `null` (`met.nullable`, which
-    /// carries the branches the union hoisted before the meet) and each variant the meet left
-    /// accepting it, such as an untyped branch that took a nullable target's shape. `null` in two
-    /// branches fails exactly-one, so no variant keeps it and neither does the union, as
-    /// [`Self::merge_intersected_one_of`] answers for the variants it merges.
-    fn drop_null_matching_two_branches(&mut self, met: Ty, hint: &str) -> Ty {
-        let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) else {
-            return met;
-        };
-        let nullable_variants = union
-            .variants
-            .iter()
-            .filter(|variant| variant.ty.nullable)
-            .count();
-        // An exact-`null` variant (`const: null`) is a branch `null` matches too, counted beside a
-        // variant the meet left accepting it, as the inline union counts it (#586).
-        let null_variants = union
-            .variants
-            .iter()
-            .filter(|variant| self.is_exact_null(variant.ty))
-            .count();
-        if nullable_variants == 0
-            || usize::from(met.nullable) + nullable_variants + null_variants < 2
-        {
-            return met;
-        }
-        let mut union = union.clone();
-        for variant in &mut union.variants {
-            variant.ty.nullable = false;
-        }
-        let mut ty = self.insert_type(hint, TypeKind::Union(union), Docs::default(), None);
         ty.boxed = met.boxed;
         ty
     }

@@ -849,3 +849,54 @@ fn a_union_with_one_real_member_emits_no_copy_of_it() {
         );
     }
 }
+
+/// Issue #934: a `oneOf` an `allOf`'s scalar meet leaves with every variant distinct is emitted
+/// once, under its own hint. Its variants' `null` is the one decision's to settle once the
+/// conjunction is lowered, so the meet inserts no second copy of the union to clear it, and no
+/// generated type takes the 8-hex-digit suffix a copy is named with. Here two `oneOf` members,
+/// each a branch that states nothing beside a one-value string enum, meet `type: [string, 'null']`
+/// in every member order and nested in an inner `allOf`.
+#[test]
+fn a_met_one_of_whose_variants_stay_distinct_is_emitted_once_under_its_hint() {
+    let a = "{ oneOf: [ {}, { type: string, enum: [a] } ] }";
+    let b = "{ oneOf: [ {}, { type: string, enum: [b] } ] }";
+    let ty = "{ type: [string, 'null'] }";
+    let mut mismatches = Vec::new();
+    for site in [
+        format!("{{ allOf: [ {ty}, {a}, {b} ] }}"),
+        format!("{{ allOf: [ {a}, {ty}, {b} ] }}"),
+        format!("{{ allOf: [ {a}, {b}, {ty} ] }}"),
+        format!("{{ allOf: [ {ty}, {{ allOf: [ {a}, {b} ] }} ] }}"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{site}: {report:#?}");
+        let types = types_module(&code);
+        // A copy takes the name with the stable 8-hex-digit suffix of its pointer.
+        let copies: Vec<&str> = types
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| line.strip_prefix("pub enum "))
+            .filter_map(|rest| rest.split([' ', '<', '{']).next())
+            .filter(|name| {
+                name.starts_with("Pick")
+                    && name.len() > 8
+                    && name[name.len() - 8..]
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit())
+            })
+            .collect();
+        if !copies.is_empty() || !types.contains("pub enum PickIntersection2Variant0 {") {
+            mismatches.push(format!(
+                "{site}: the met union is not `PickIntersection2Variant0` alone: {copies:?}\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

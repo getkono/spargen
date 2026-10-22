@@ -751,8 +751,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // of the variants merge below, since two put `null` in two branches, which fails
         // exactly-one (#563). Decided here, before a meet the union is held back for
         // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
-        // them. That meet removes `null` from a typed branch only; an untyped branch it gives
-        // `null` is counted after it ([`Self::drop_null_matching_two_branches`]).
+        // them. That meet removes `null` from a typed branch only; the `null` it gives an untyped
+        // branch is settled by the one decision after it ([`Self::settle_null_admission`]).
         // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
         // (#586): elsewhere it stays the variant `null` decodes to. A branch that states nothing
         // is counted where it took `null` from the conjunct (#592), and the meet's copy of that
