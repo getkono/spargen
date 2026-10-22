@@ -136,12 +136,13 @@ pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     // Only a `$ref` whose node type is `none` (its default) defers to the referenced element: an
     // explicit `nodeType: element` makes the reference itself an element, named after the property.
     let node = field_items(schema).unwrap_or(schema);
-    field.by_reference = node.reference.is_some()
-        && node
-            .xml
-            .as_ref()
-            .and_then(|hints| hints.node_type.as_deref())
-            .is_none_or(|node_type| node_type == "none");
+    let node_type = node
+        .xml
+        .as_ref()
+        .and_then(|hints| hints.node_type.as_deref());
+    field.by_reference =
+        node.reference.is_some() && node_type.is_none_or(|node_type| node_type == "none");
+    field.element_reference = node.reference.is_some() && node_type == Some("element");
     if let Some(items) = field_items(schema) {
         if let Some(hints) = &items.xml {
             let (name, unsupported) = read_hints(items, hints, XmlNode::Items);
@@ -204,8 +205,9 @@ fn read_hints(schema: &Schema, hints: &XmlHints, node: XmlNode) -> (Option<Strin
         // A field can be an attribute. A list element or a body's root element cannot.
         "attribute" => node == XmlNode::Property,
         // On an array this is precisely `wrapped: true` — it asks for an element wrapping the
-        // list, which is the representation quick-xml does not give us. On a `$ref` it names the
-        // element the referenced component already produces.
+        // list, which is the representation quick-xml does not give us. On a `$ref` it makes the
+        // reference an element of its own, named after the property rather than after the
+        // referenced component (`field_xml`), which a nested struct field already is.
         "element" => !is_array,
         "none" => defaults_to_none,
         _ => false,
@@ -430,7 +432,9 @@ pub(super) fn gate_xml_field_renames(
     // reads its container rename there, so the root name becomes the field's, unless the items
     // already gave one. Only an owner some XML body reaches takes it: on any other, the rename is
     // derived rather than written and moves no wire, so it is not set at all. On an owner a non-XML
-    // body also reaches, it is a field rename like any other, suppressed below (`W006`).
+    // body also reaches, it is a field rename like any other, suppressed below (`W006`). Under 3.2,
+    // items that are a `$ref` declared `nodeType: element` are an element of their own, named after
+    // the property, so they take no root name either.
     let view: &TypeGraph = graph;
     let item_names: Vec<(TypeId, usize, String)> = view
         .emitted()
@@ -446,7 +450,11 @@ pub(super) fn gate_xml_field_renames(
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, field)| field.xml.name.is_none() && !field.xml.attribute)
+                .filter(|(_, field)| {
+                    field.xml.name.is_none()
+                        && !field.xml.attribute
+                        && !(is_oas32 && field.xml.element_reference)
+                })
                 .filter_map(move |(index, field)| {
                     let TypeKind::Array(item) = &view.get(field.ty.id)?.kind else {
                         return None;

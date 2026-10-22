@@ -209,6 +209,9 @@ components:
         others:
           type: array
           items: { $ref: '#/components/schemas/Cat', xml: { nodeType: element } }
+        named:
+          type: array
+          items: { $ref: '#/components/schemas/Pet', xml: { nodeType: element } }
         spare: { $ref: '#/components/schemas/Dog', xml: { nodeType: none } }
     Pet: { type: object, xml: { name: pet }, properties: { id: { type: integer } } }
     Cat: { type: object, properties: { id: { type: integer } } }
@@ -218,6 +221,9 @@ components:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(code.contains(r#"rename = "favourite","#), "{code}");
     assert!(code.contains(r#"rename = "others","#), "{code}");
+    // Items naming a root-named struct keep the property name too: `element` is the items' own.
+    assert!(code.contains(r#"rename = "named","#), "{code}");
+    assert!(!code.contains(r#"rename = "pet","#), "{code}");
     // `none`, restated, is the default: the referenced element stands in its place.
     assert!(code.contains(r#"rename = "Dog","#), "{code}");
 }

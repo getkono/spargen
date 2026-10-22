@@ -659,6 +659,10 @@ pub(crate) struct XmlField {
     /// referenced schema's own element stands in its place. An explicit `xml.nodeType` other than
     /// `none` on that node leaves this `false`.
     pub(crate) by_reference: bool,
+    /// Whether that same node is a `$ref` with an explicit `xml.nodeType: element`: under OpenAPI
+    /// 3.2 the reference is then an element of its own, named after the property, so the field
+    /// takes no name from the struct it resolves to, not even an array item's root `xml.name`.
+    pub(crate) element_reference: bool,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub(crate) attribute: bool,
