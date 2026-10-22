@@ -157,4 +157,26 @@ mod tests {
         // `new` / `with_client` install a default `ReqwestBackend` under the hood.
         let _core = ClientCore::new("https://example.com").unwrap();
     }
+
+    /// `client` hands back the wrapped client, not a default one: it still holds the default
+    /// header the wrapped client was configured with, which `reqwest::Client`'s `Debug` renders.
+    #[test]
+    fn client_returns_the_wrapped_client() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-wrapped",
+            reqwest::header::HeaderValue::from_static("yes"),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let backend = ReqwestBackend::new(client);
+        let rendered = format!("{:?}", backend.client());
+        assert!(rendered.contains("x-wrapped"), "{rendered}");
+        assert!(
+            !format!("{:?}", reqwest::Client::default()).contains("x-wrapped"),
+            "a default client carries no such header"
+        );
+    }
 }

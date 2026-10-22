@@ -222,6 +222,28 @@ fn with_middlewares_matches_layered_order() {
     );
 }
 
+/// `middlewares` reports the chain in run order: what `layer` appended, outermost first, and
+/// nothing for a bare `new`.
+#[test]
+fn middlewares_lists_the_chain_in_run_order() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let outer: Arc<dyn Middleware> = Arc::new(Tracer {
+        label: "outer",
+        log: log.clone(),
+    });
+    let inner_mw: Arc<dyn Middleware> = Arc::new(Tracer {
+        label: "inner",
+        log,
+    });
+    let bare = MiddlewareBackend::new(Arc::new(RecordingBackend::default()));
+    assert!(bare.middlewares().is_empty());
+    let backend = bare.layer(outer.clone()).layer(inner_mw.clone());
+    let chain = backend.middlewares();
+    assert_eq!(chain.len(), 2);
+    assert!(Arc::ptr_eq(&chain[0], &outer));
+    assert!(Arc::ptr_eq(&chain[1], &inner_mw));
+}
+
 #[test]
 fn composes_over_retry_backend() {
     // Composability: `MiddlewareBackend` wraps ANY `HttpBackend`, including a `RetryBackend`. Here

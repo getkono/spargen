@@ -19,7 +19,7 @@ exclude_re = [
   # the wasm body's line and column: the native one stays tested, and once an edit moves the line
   # the pattern matches nothing and the two mutants fail the run as missed until it is updated,
   # rather than excluding whatever moved onto that line.
-  '^support-runtime/src/dispatch\.rs:664:5: replace read_capped -> ',
+  '^support-runtime/src/dispatch\.rs:451:5: replace read_capped -> ',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
   # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
   # and no test or caller can observe what the body returns.
