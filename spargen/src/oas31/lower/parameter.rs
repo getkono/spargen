@@ -164,12 +164,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_querystring_parameter(&mut self, parameter: &ParameterObject) -> Option<Parameter> {
         // The official document schema requires `content` on an `in: querystring` parameter,
         // with exactly one entry, so a document reaching lowering without one was already
-        // rejected as `E011`. The arm stays so a future schema relaxation cannot leave the
-        // parameter silently unsent.
+        // rejected as `E011`. The arm reports that same code, so a path that skips validation
+        // (or a future schema relaxation) cannot leave the parameter silently unsent.
         let Some((media_name, object)) = parameter.content.iter().next() else {
             return self.reject_parameter(
-                // E010 case: schema-rejected
-                Code::UnsupportedParameterStyle,
+                Code::InvalidInput,
                 parameter,
                 "`in: querystring` requires one content media type with a schema",
                 None,
@@ -235,8 +234,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ParamLoc::QueryString => unreachable!("querystring returned above"),
         });
         // The legal `(style, in)` pairs are enforced by the official document schema before
-        // lowering (`E011`), so an unknown pairing here is a generator bug rather than user input.
-        // The arm is kept so a future schema relaxation cannot silently mis-serialize.
+        // lowering (`E011`), so a validated document does not reach the catch-all arm. It reports
+        // that same code, so a path that skips validation (or a future schema relaxation) cannot
+        // silently mis-serialize.
         let style = match (location, style_name) {
             (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
             (ParamLoc::Path, "matrix") => ParamStyle::Matrix,
@@ -248,8 +248,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
                 return self.reject_parameter(
-                    // E010 case: schema-rejected
-                    Code::UnsupportedParameterStyle,
+                    Code::InvalidInput,
                     parameter,
                     format!(
                         "parameter style `{style_name}` is not permitted for `{}` parameters",

@@ -616,11 +616,6 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
-                tag: "encoding-style",
-                stated_as: "an `encoding.style` that is not a form style",
-                reserved_wording: None,
-            },
-            Case {
                 tag: "undefined-rfc6570",
                 stated_as: "the RFC 6570 combinations the specification leaves undefined",
                 reserved_wording: None,
@@ -668,12 +663,6 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
     (
         Code::UnsupportedParameterStyle,
         &[
-            Case {
-                tag: "schema-rejected",
-                stated_as: "are rejected before lowering by the official document schema, \
-                                as `E011`",
-                reserved_wording: None,
-            },
             Case {
                 tag: "delimited-explode",
                 stated_as: "`spaceDelimited`/`pipeDelimited` with `explode: true`",

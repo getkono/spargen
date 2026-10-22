@@ -170,9 +170,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.encoding_media_mode(declared, field_ty, media, name, at)
     }
 
-    /// Style mode for one property. It refuses (`E009`) a style that is not a form style, a
-    /// delimited style with `explode: true`, and, on multipart, `deepObject` and an object
-    /// property; `allowReserved` on multipart is inert (`W011`).
+    /// Style mode for one property. It refuses (`E009`) a delimited style with `explode: true`,
+    /// and, on multipart, `deepObject` and an object property; `allowReserved` on multipart is
+    /// inert (`W011`).
     fn encoding_style_mode(
         &mut self,
         encoding: &EncodingObject,
@@ -186,11 +186,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "spaceDelimited" => ParamStyle::Delimited(Delimiter::Space),
             "pipeDelimited" => ParamStyle::Delimited(Delimiter::Pipe),
             "deepObject" => ParamStyle::DeepObject,
-            // The document schema enumerates these four, so this is unreachable for a
-            // validated document.
+            // The document schema enumerates these four and rejects any other as `E011`, so a
+            // validated document does not reach this arm; it reports that same code for a path
+            // that skips validation.
             _ => {
-                // E009 case: encoding-style
-                Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                Diagnostic::error(Code::InvalidInput, encoding.provenance.clone())
                     .message(format!(
                         "`encoding.{name}.style: {style_name}` is not a form style"
                     ))
