@@ -362,6 +362,7 @@ fn lower_pass(
             // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
             // A lone XML success body beside a bodyless status is still that one body.
             if responses.xml_in_multi_status() {
+                // E009 case: xml-multi-body
                 Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
                     .message(
                         "an application/xml (or text/xml) response body is only supported as an \
@@ -381,6 +382,7 @@ fn lower_pass(
             // side), or a success enum beside a second bodied success — would be decoded as one
             // whole JSON body, so it is rejected (narrowed `E009`) rather than misread on the wire.
             if responses.stream_outside_single_success() {
+                // E009 case: streaming-response-position
                 Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
                     .message(
                         "a streaming (text/event-stream, application/x-ndjson, or JSON Text \
