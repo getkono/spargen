@@ -12,7 +12,7 @@
 use std::fmt;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Which characters survive unencoded when a serialized value is placed on the wire.
 ///
@@ -222,25 +222,8 @@ pub fn serialize_simple<T: Serialize>(
     match serde_json::to_value(value)? {
         Value::Null => Ok(String::new()),
         Value::Array(values) => join_scalars(values.iter(), ",", encoding),
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.join(",")),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(parts.join(","))
-        }
+        Value::Object(values) if explode => Ok(object_pairs(&values, encoding)?.join(",")),
+        Value::Object(values) => object_flat(&values, ",", encoding),
         value => scalar(&value, encoding),
     }
 }
@@ -266,25 +249,11 @@ pub fn serialize_matrix<T: Serialize>(
             ";{name}={}",
             join_scalars(values.iter(), ",", encoding)?
         )),
-        Value::Object(values) if explode => values
+        Value::Object(values) if explode => Ok(object_pairs(&values, encoding)?
             .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    ";{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.concat()),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(format!(";{name}={}", parts.join(",")))
-        }
+            .map(|pair| format!(";{pair}"))
+            .collect()),
+        Value::Object(values) => Ok(format!(";{name}={}", object_flat(&values, ",", encoding)?)),
         value => Ok(format!(";{name}={}", scalar(&value, encoding)?)),
     }
 }
@@ -303,25 +272,8 @@ pub fn serialize_label<T: Serialize>(
         Value::Null => String::new(),
         Value::Array(values) if explode => join_scalars(values.iter(), ".", encoding)?,
         Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.join("."))?,
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            parts.join(",")
-        }
+        Value::Object(values) if explode => object_pairs(&values, encoding)?.join("."),
+        Value::Object(values) => object_flat(&values, ",", encoding)?,
         value => scalar(&value, encoding)?,
     };
     Ok(format!(".{rendered}"))
@@ -350,24 +302,11 @@ pub fn serialize_form<T: Serialize>(
             "{name}={}",
             join_scalars(values.iter(), ",", encoding)?
         )]),
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect(),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(vec![format!("{name}={}", parts.join(","))])
-        }
+        Value::Object(values) if explode => object_pairs(&values, encoding),
+        Value::Object(values) => Ok(vec![format!(
+            "{name}={}",
+            object_flat(&values, ",", encoding)?
+        )]),
         value => Ok(vec![format!("{name}={}", scalar(&value, encoding)?)]),
     }
 }
@@ -388,14 +327,10 @@ pub fn serialize_delimited<T: Serialize>(
             "{name}={}",
             join_scalars(values.iter(), delimiter.as_str(), encoding)?
         )]),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(vec![format!("{name}={}", parts.join(delimiter.as_str()))])
-        }
+        Value::Object(values) => Ok(vec![format!(
+            "{name}={}",
+            object_flat(&values, delimiter.as_str(), encoding)?
+        )]),
         _ => Err(ParameterError::ExpectedComposite),
     }
 }
@@ -638,6 +573,39 @@ fn join_scalars<'a>(
         .map(|value| scalar(value, encoding))
         .collect::<Result<Vec<_>, ParameterError>>()
         .map(|parts| parts.join(separator))
+}
+
+/// An object's members as `key,value` alternating in one `separator`-joined value: the
+/// `explode: false` shape every style but `deepObject` shares.
+fn object_flat(
+    values: &Map<String, Value>,
+    separator: &str,
+    encoding: PercentEncoding,
+) -> Result<String, ParameterError> {
+    let mut parts = Vec::with_capacity(values.len() * 2);
+    for (key, value) in values {
+        parts.push(encode(key, encoding));
+        parts.push(scalar(value, encoding)?);
+    }
+    Ok(parts.join(separator))
+}
+
+/// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
+/// style then prefixes or joins.
+fn object_pairs(
+    values: &Map<String, Value>,
+    encoding: PercentEncoding,
+) -> Result<Vec<String>, ParameterError> {
+    values
+        .iter()
+        .map(|(key, value)| {
+            Ok(format!(
+                "{}={}",
+                encode(key, encoding),
+                scalar(value, encoding)?
+            ))
+        })
+        .collect()
 }
 
 fn scalar(value: &Value, encoding: PercentEncoding) -> Result<String, ParameterError> {
