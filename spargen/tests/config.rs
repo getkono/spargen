@@ -506,8 +506,8 @@ fn diff(dir: &Path, old: &Path, new: &Path, extra: &[&str]) -> Output {
 #[test]
 fn open_narrowing_is_a_flag_and_a_config_key() {
     // What it changes in emitted code is pinned by
-    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in `e2e.rs`. Here the
-    // change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
+    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in
+    // `e2e/open_narrowing.rs`. Here the change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
     // document in two directories, only the new one's config opening the narrowing.
     let temp = tempfile::tempdir().unwrap();
     let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
@@ -815,7 +815,7 @@ fn deps_reports_a_rejection_instead_of_a_block() {
 //
 // `W012`, `W013`, and `E024` are the facade's own diagnostics rather than the frontend's, so they
 // have no inline-spec fixture in `frontend/`. `W013` and `E024` are reachable from any plain
-// process; `W012` needs a real build script and lives in `e2e.rs` for that reason.
+// process; `W012` needs a real build script and lives in `e2e/manifest_audit.rs` for that reason.
 
 /// Generating outside a build script emits no rebuild triggers and skips the dependency audit.
 /// Under `Auto` that is a degradation worth saying out loud, not a silent one.

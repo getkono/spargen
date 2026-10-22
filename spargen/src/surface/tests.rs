@@ -5,7 +5,8 @@ use super::{ChangeKind, Impact};
 /// Every change kind, produced by an exhaustive match so a new variant does not compile until
 /// it is listed — which is what makes the coverage assertions below closed over the enum.
 /// `ChangeKind` is `#[non_exhaustive]`, so this list can only live inside the crate; the
-/// fixtures that drive each kind live in `tests/diff.rs`, which cannot match exhaustively.
+/// fixtures that drive each kind live in the `diff` suite (`tests/diff.rs` and its modules in
+/// `tests/diff/`), which cannot match exhaustively.
 fn all_kinds() -> Vec<ChangeKind> {
     let every = [
         ChangeKind::OperationAdded,
@@ -238,7 +239,7 @@ fn only_the_additive_kinds_are_minor() {
     }
 }
 
-/// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
+/// CLAUDE.md asks the `diff` suite for "semver classification per change kind". Nine of the 24
 /// had a fixture; the rest were classified by policy alone, with nothing proving the
 /// classifier ever produces them. This makes "per change kind" mean what it says.
 ///
@@ -254,24 +255,75 @@ fn every_kind_has_a_fixture_in_the_diff_suite() {
         eprintln!("skipping: not tested from the workspace");
         return;
     };
-    let suite = read_repo_file(&root, "spargen/tests/diff.rs");
-    let asserted = assert_eq_spans(&suite);
+    let suite: Vec<(String, Vec<std::ops::Range<usize>>)> = diff_suite_files(&root)
+        .into_iter()
+        .map(|relative| {
+            let source = read_repo_file(&root, &relative);
+            let asserted = assert_eq_spans(&source);
+            (source, asserted)
+        })
+        .collect();
     for kind in all_kinds() {
         let variant = variant_name(kind);
         let needle = format!("ChangeKind::{variant}");
-        let pinned = suite.match_indices(&needle).any(|(at, _)| {
-            let whole = suite[at + needle.len()..]
-                .chars()
-                .next()
-                .is_none_or(|next| !next.is_alphanumeric() && next != '_');
-            whole && asserted.iter().any(|span| span.contains(&at))
+        let pinned = suite.iter().any(|(source, asserted)| {
+            source.match_indices(&needle).any(|(at, _)| {
+                let whole = source[at + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphanumeric() && next != '_');
+                whole && asserted.iter().any(|span| span.contains(&at))
+            })
         });
         assert!(
             pinned,
-            "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs",
+            "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs \
+             or spargen/tests/diff/",
             kind.code()
         );
     }
+}
+
+/// The `diff` suite's compiled source files, relative to `root`: the target's root
+/// `spargen/tests/diff.rs` and each module it declares with `#[path = "diff/…"]`, sorted.
+///
+/// Only a declared module is compiled, so only a declared module can hold a fixture. The
+/// declarations must also name exactly the `.rs` files of `spargen/tests/diff/`: a file there that
+/// `diff.rs` does not declare is never compiled, and a fixture in it would pin nothing.
+fn diff_suite_files(root: &std::path::Path) -> Vec<String> {
+    const MODULES: &str = "spargen/tests/diff";
+    const DECLARATION: &str = "#[path = \"diff/";
+    let root_source = read_repo_file(root, &format!("{MODULES}.rs"));
+    let mut declared: Vec<String> = root_source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(DECLARATION))
+        .map(|rest| {
+            let name = rest.strip_suffix("\"]").unwrap_or_else(|| {
+                panic!("unparsed module declaration `{DECLARATION}{rest}` in {MODULES}.rs")
+            });
+            format!("{MODULES}/{name}")
+        })
+        .collect();
+    assert!(!declared.is_empty(), "{MODULES}.rs declares no module");
+    declared.sort();
+    let entries = std::fs::read_dir(root.join(MODULES)).unwrap_or_else(|error| {
+        panic!("{MODULES}/ must exist in the repository, and reading it failed: {error}")
+    });
+    let mut on_disk: Vec<String> = entries
+        .map(|entry| entry.expect("readable directory entry").file_name())
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| name.ends_with(".rs"))
+        .map(|name| format!("{MODULES}/{name}"))
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        declared, on_disk,
+        "the modules {MODULES}.rs declares with `#[path]` must be exactly the `.rs` files of \
+         {MODULES}/: an undeclared file is never compiled"
+    );
+    let mut files = vec![format!("{MODULES}.rs")];
+    files.extend(declared);
+    files
 }
 
 /// The byte span of every `assert_eq!(…)` argument list in `source`, found by bracket depth.
@@ -286,7 +338,7 @@ fn assert_eq_spans(source: &str) -> Vec<std::ops::Range<usize>> {
         let mut depth = 1_usize;
         while depth > 0 {
             let Some(&byte) = bytes.get(at) else {
-                panic!("unbalanced `assert_eq!(` at byte {start} of spargen/tests/diff.rs")
+                panic!("unbalanced `assert_eq!(` at byte {start} of a `diff` suite file")
             };
             match byte {
                 b'(' | b'[' | b'{' => depth += 1,
@@ -583,7 +635,7 @@ fn check(
         }
         // The arity check above is all there is to `()`.
         Shape::Null => return Ok(()),
-        Shape::Primitive(prim) => super::prim_label(*prim).to_owned(),
+        Shape::Primitive(prim) => super::extract::prim_label(*prim).to_owned(),
         Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
         Shape::IntEnum => "i64".to_owned(),
         Shape::BoolEnum => "bool".to_owned(),
@@ -613,7 +665,7 @@ proptest::proptest! {
         };
         let mut names = crate::name::Names::default();
         let ty = insert(&node, &mut api, &mut names);
-        let rendered = super::canon_ty(ty, &api, &names);
+        let rendered = super::extract::canon_ty(ty, &api, &names);
         let parsed = syn::parse_str::<syn::Type>(&rendered);
         proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
         check(&node, ty, &parsed.expect("checked"), &api, &names)?;

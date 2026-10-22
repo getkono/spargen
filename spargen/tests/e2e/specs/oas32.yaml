@@ -1,0 +1,192 @@
+
+openapi: 3.2.0
+info:
+  title: Records
+  version: 1.0.0
+# A templated server with an enumerated variable: the generated `servers` module must offer a typed
+# builder whose default resolves with no arguments, and whose enum makes an illegal region
+# unconstructible.
+servers:
+  - url: https://{region}.example.com/{version}
+    variables:
+      region:
+        default: us
+        enum: [us, eu]
+      version:
+        default: v1
+paths:
+  # `in: querystring` with a JSON `content:` entry: the whole query string is the serialized value,
+  # percent-encoded as one opaque token. Required and optional set the raw query differently (an
+  # initializer against a conditional assignment), so both are compile-verified.
+  /lookup:
+    get:
+      operationId: lookupRecords
+      parameters:
+        - name: filter
+          in: querystring
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
+    post:
+      operationId: lookupRecordsMaybe
+      parameters:
+        - name: filter
+          in: querystring
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
+  /records:
+    get:
+      operationId: listRecords
+      parameters:
+        - name: filter
+          in: querystring
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                $ref: "#/components/schemas/Query"
+        # `style: cookie` is 3.2-only: the cookie value is sent verbatim, never percent-encoded.
+        - name: session
+          in: cookie
+          style: cookie
+          schema: { type: string }
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-Total-Count:
+              required: true
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Record"
+    query:
+      operationId: searchRecords
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Query"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Record"
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseEnvelope"
+  # An `itemSchema` whose `data` carries no JSON content schema types each item as the whole
+  # event, so the stream decodes with `support::Framing::SseEvent` rather than `SseJsonData`.
+  /events/raw:
+    get:
+      operationId: streamRawEvents
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseTextEvent"
+  # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
+  # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
+  # response is a discriminated union with `defaultMapping` — three constructs that each emit code
+  # and, until now, were only ever checked for diagnostics.
+  /records/cache:
+    additionalOperations:
+      PURGE:
+        operationId: purgeCache
+        requestBody:
+          required: true
+          content:
+            application/json:
+              $ref: "#/components/mediaTypes/QueryBody"
+        responses:
+          "200":
+            description: ok
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CacheOutcome"
+components:
+  schemas:
+    Record:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    Query:
+      type: object
+      properties:
+        term: { type: string }
+    SseEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: "#/components/schemas/AdminEvent"
+        id: { type: [string, "null"] }
+        retry: { type: [integer, "null"] }
+    SseTextEvent:
+      type: object
+      required: [data]
+      properties:
+        event: { type: string }
+        data: { type: string }
+    AdminEvent:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        resource: { type: [string, "null"] }
+    CacheOutcome:
+      oneOf:
+        - $ref: "#/components/schemas/CachePurged"
+        - $ref: "#/components/schemas/CacheUnknown"
+      discriminator:
+        propertyName: outcome
+        mapping:
+          purged: "#/components/schemas/CachePurged"
+        # 3.2: an absent or unrecognized discriminator value decodes into this branch instead of
+        # failing, and spargen generates exactly that fallback.
+        defaultMapping: "#/components/schemas/CacheUnknown"
+    CachePurged:
+      type: object
+      required: [outcome, entries]
+      properties:
+        outcome: { type: string }
+        entries: { type: integer }
+    CacheUnknown:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: string }
+  mediaTypes:
+    QueryBody:
+      schema:
+        $ref: "#/components/schemas/Query"

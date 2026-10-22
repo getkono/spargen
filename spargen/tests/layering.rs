@@ -1582,8 +1582,6 @@ const MAX_FILE_LINES: usize = 1666;
 /// no longer tracked, fails the gate until it is removed, and a new file over it is not added.
 const OVER_LENGTH_BASELINE: &[&str] = &[
     "spargen/tests/corpus_manifest.rs",
-    "spargen/tests/diff.rs",
-    "spargen/tests/e2e.rs",
     "spargen/tests/frontend/bodies.rs",
     "spargen/tests/frontend/recursion.rs",
     "spargen/tests/frontend/refs.rs",
