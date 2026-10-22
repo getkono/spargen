@@ -409,6 +409,40 @@ fn a_lone_xml_body_beside_a_bodyless_sibling_is_not_a_multi_body_xml_enum() {
     assert!(matches!(errors(None).error(), ErrorShape::Enum(_)));
     assert!(!errors(None).xml_in_multi_status());
     assert!(errors(Some(2)).xml_in_multi_status());
+
+    // Several bodies with no XML among them are no XML combination, on either side.
+    let json_only = Responses {
+        by_status: vec![
+            (StatusSpec::Exact(200), resp(Some(1))),
+            (StatusSpec::Exact(201), resp(Some(2))),
+            (StatusSpec::Exact(204), resp(None)),
+            (StatusSpec::Exact(404), resp(Some(3))),
+        ],
+        default: Some(resp(Some(4))),
+    };
+    assert!(matches!(json_only.success(), SuccessShape::Enum(_)));
+    assert!(matches!(json_only.error(), ErrorShape::Enum(_)));
+    assert!(!json_only.xml_in_multi_status());
+}
+
+/// Each sequential media maps to its own framing, and every other media to none.
+#[test]
+fn only_the_sequential_media_have_a_stream_framing() {
+    use super::{Framing, MediaType};
+    let cases = [
+        (MediaType::Json, None),
+        (MediaType::FormUrlEncoded, None),
+        (MediaType::Xml, None),
+        (MediaType::OctetStream, None),
+        (MediaType::Text, None),
+        (MediaType::Multipart, None),
+        (MediaType::EventStream, Some(Framing::Sse)),
+        (MediaType::Ndjson, Some(Framing::Ndjson)),
+        (MediaType::JsonSequence, Some(Framing::JsonSequence)),
+    ];
+    for (media, framing) in cases {
+        assert_eq!(media.stream_framing(), framing, "{media:?}");
+    }
 }
 
 #[test]
@@ -1051,6 +1085,25 @@ fn the_single_and_uninhabited_shapes_always_implement_it() {
     };
     assert_eq!(
         ErrorShape::Single(nullable).api_error_body(&graph),
+        Some(ApiErrorBodyImpl::Body(ty(0)))
+    );
+}
+
+/// `Body` names the definition, not the `Box` emission wraps a payload in: a boxed body, alone
+/// or as a multi-status payload, comes back unboxed.
+#[test]
+fn a_boxed_body_is_handed_back_unboxed() {
+    let graph = graph(vec![object()]);
+    let boxed = Ty {
+        boxed: true,
+        ..ty(0)
+    };
+    assert_eq!(
+        ErrorShape::Single(boxed).api_error_body(&graph),
+        Some(ApiErrorBodyImpl::Body(ty(0)))
+    );
+    assert_eq!(
+        two_bodies(&graph, boxed, boxed),
         Some(ApiErrorBodyImpl::Body(ty(0)))
     );
 }
