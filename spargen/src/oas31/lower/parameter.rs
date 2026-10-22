@@ -86,17 +86,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Report `message` (and `remedy`, when there is one) as `E010` at `parameter`, and refuse it.
+    /// `code` is always `E010`'s; it is the caller's argument so that each caller names the code
+    /// beside its own `// E010 case:` marker, which is how `spargen explain E010`'s case list is
+    /// held to the sites that report each case.
     fn reject_parameter<T>(
         &mut self,
+        code: Code,
         parameter: &ParameterObject,
         message: impl Into<String>,
         remedy: Option<String>,
     ) -> Option<T> {
-        let mut diagnostic = Diagnostic::error(
-            Code::UnsupportedParameterStyle,
-            parameter.provenance.clone(),
-        )
-        .message(message);
+        let mut diagnostic = Diagnostic::error(code, parameter.provenance.clone()).message(message);
         if let Some(remedy) = remedy {
             diagnostic = diagnostic.remedy(remedy);
         }
@@ -168,6 +168,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // parameter silently unsent.
         let Some((media_name, object)) = parameter.content.iter().next() else {
             return self.reject_parameter(
+                // E010 case: schema-rejected
+                Code::UnsupportedParameterStyle,
                 parameter,
                 "`in: querystring` requires one content media type with a schema",
                 None,
@@ -177,6 +179,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let media = lower_media_type(media_name, &parameter.provenance, self.diags)?;
         if !matches!(media, MediaType::Json | MediaType::FormUrlEncoded) {
             return self.reject_parameter(
+                // E010 case: querystring-content
+                Code::UnsupportedParameterStyle,
                 parameter,
                 format!(
                     "querystring media type `{media_name}` is not supported; use JSON or \
@@ -187,6 +191,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let Some(schema) = object.schema.as_ref() else {
             return self.reject_parameter(
+                // E010 case: querystring-content
+                Code::UnsupportedParameterStyle,
                 parameter,
                 "querystring content requires a schema for a typed client argument",
                 None,
@@ -200,6 +206,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             )
         {
             return self.reject_parameter(
+                // E010 case: querystring-content
+                Code::UnsupportedParameterStyle,
                 parameter,
                 "form-urlencoded querystring parameters require an object schema",
                 None,
@@ -240,6 +248,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
                 return self.reject_parameter(
+                    // E010 case: schema-rejected
+                    Code::UnsupportedParameterStyle,
                     parameter,
                     format!(
                         "parameter style `{style_name}` is not permitted for `{}` parameters",
@@ -256,6 +266,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
         if matches!(style, ParamStyle::Delimited(_)) && parameter.explode == Some(true) {
             return self.reject_parameter(
+                // E010 case: delimited-explode
+                Code::UnsupportedParameterStyle,
                 parameter,
                 format!("`style: {style_name}` with `explode: true` has no defined serialization"),
                 Some("set `explode: false`, which is the default for this style".to_owned()),
@@ -314,6 +326,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // codec that produces a single parameter token; anything else would fall through to
         // `simple` serialization and be sent in the wrong format.
         if !matches!(media, MediaType::Json | MediaType::Text) {
+            // E009 case: content-parameter
             Diagnostic::error(Code::UnsupportedMediaType, parameter.provenance.clone())
                 .message(format!(
                     "`content` parameter media type `{media_name}` has no single-token \
@@ -330,6 +343,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // would drop the parameter from the operation unreported (#699).
         let Some(schema) = object.schema.as_ref() else {
             return self.reject_parameter(
+                // E010 case: content-without-schema
+                Code::UnsupportedParameterStyle,
                 parameter,
                 format!(
                     "`content` parameter `{}` has no schema for its `{media_name}` entry, so the \
@@ -386,7 +401,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ),
                 ),
             };
-            return self.reject_parameter(parameter, message, Some(remedy));
+            return self.reject_parameter(
+                // E010 case: uninhabited-schema
+                Code::UnsupportedParameterStyle,
+                parameter,
+                message,
+                Some(remedy),
+            );
         }
         if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
             // Most often a `required` name no `properties` entry declares, which is a required
@@ -394,6 +415,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // arbitrary JSON value has no `key=value` token, and "nested arrays or objects"
             // would describe nothing the author wrote.
             return self.reject_parameter(
+                // E010 case: unconstrained-property
+                Code::UnsupportedParameterStyle,
                 parameter,
                 format!(
                     "parameter property `{property}` is unconstrained: no schema constrains its \
@@ -407,6 +430,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         if !parameter_shape_supported(&self.graph, ty) {
             return self.reject_parameter(
+                // E010 case: nested-value
+                Code::UnsupportedParameterStyle,
                 parameter,
                 "simple/form parameter serialization does not support nested arrays or objects",
                 None,

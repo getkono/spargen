@@ -31,6 +31,7 @@ fn media_type_not_supported(
     provenance: &crate::diag::Provenance,
     diags: &mut Diagnostics,
 ) {
+    // E009 case: no-codec
     Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
         .message(format!("media type `{spelling}` is not supported"))
         .emit(diags);

@@ -60,6 +60,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                     .emit(self.diags);
             } else {
+                // E009 case: positional-encoding
                 Diagnostic::error(Code::UnsupportedMediaType, at)
                     .message(format!(
                         "`{field}` describes positional parts of an array-shaped multipart body; \
@@ -93,6 +94,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Spargen generates one flat level, so a nested field is rejected rather than dropped.
         for (name, encoding) in &object.encoding {
             if let Some((field, at)) = encoding.nested.first() {
+                // E009 case: nested-encoding
                 Diagnostic::error(Code::UnsupportedMediaType, at.clone())
                     .message(format!(
                         "`encoding.{name}.{field}` describes a nested multipart part, which \
@@ -187,6 +189,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The document schema enumerates these four, so this is unreachable for a
             // validated document.
             _ => {
+                // E009 case: encoding-style
                 Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                     .message(format!(
                         "`encoding.{name}.style: {style_name}` is not a form style"
@@ -203,6 +206,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // already `E010`; without this an Encoding Object could declare it and have the
         // `explode` silently ignored.
         if explode && matches!(style, ParamStyle::Delimited(_)) {
+            // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                 .message(format!(
                     "`encoding.{name}.style: {style_name}` with `explode: true` is \
@@ -217,6 +221,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // its name in `Content-Disposition` and its value alone, so there is nowhere for
         // that syntax to go and no defined representation to fall back on.
         if media == MediaType::Multipart && style == ParamStyle::DeepObject {
+            // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                 .message(format!(
                     "`encoding.{name}.style: deepObject` is defined only for `in: query`; \
@@ -238,6 +243,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(TypeKind::Struct(_))
             )
         {
+            // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                 .message(format!(
                     "`encoding.{name}` selects RFC 6570 serialization for an object \
@@ -322,6 +328,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && self.natural_codec(field_ty) == MediaType::Json
             && classified != Some(MediaType::Json)
         {
+            // E009 case: non-json-structured
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 .message(if media == MediaType::Multipart {
                     format!(
@@ -349,6 +356,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A form field is a single URL-encoded string; raw bytes have no representation there.
         if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
+            // E009 case: form-binary
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 // Name what the document wrote: a declared `contentType` is the reason a string
                 // property is binary here, while a property whose own schema is binary defaulted to
@@ -392,6 +400,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Only the essence can be a range; a `*` in a parameter value is an ordinary
         // `tchar`.
         if media_essence(&first).contains('*') {
+            // E009 case: wildcard-content-type
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 .message(format!(
                     "`encoding.{name}.contentType: {first}` is a wildcard; a client must \
@@ -406,6 +415,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // otherwise fall through to the natural codec with nothing reported, and
         // fail only when a request is built.
         if !media_type_is_well_formed(media_essence(&first)) {
+            // E009 case: content-type-not-media
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 .message(format!(
                     "`encoding.{name}.contentType: {first}` is not a media type"
@@ -446,6 +456,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          parameter",
                     ),
                 };
+                // E009 case: content-type-parameter
                 Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                     .message(message)
                     .remedy(remedy)
@@ -555,6 +566,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // grammar refuses would otherwise generate and fail, or be dropped, only when a
                 // request is built.
                 Some(_) if !is_field_name(header_name) => {
+                    // E009 case: part-header
                     Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers` names `{}`, which is not an HTTP field \
@@ -567,6 +579,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     refused = true;
                 }
                 Some(value) if !is_field_value(&value) => {
+                    // E009 case: part-header
                     Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers.{header_name}` pins `{}`, which is not an \

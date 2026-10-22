@@ -516,6 +516,7 @@ pub(super) fn gate_xml_field_renames(
     }
     for (serialized_as_xml, provenance, what) in unsupported_reports {
         if serialized_as_xml {
+            // E009 case: xml-hint
             Diagnostic::error(Code::UnsupportedMediaType, provenance)
                 .message(format!(
                     "unsupported XML hint(s) {what}: this type is serialized as XML, and ignoring \

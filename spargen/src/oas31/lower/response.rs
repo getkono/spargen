@@ -118,6 +118,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     )
                 }
             } else if self.document.is_oas32 && object.schema.is_some() {
+                // E009 case: sequence-schema
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(
                                 "in OpenAPI 3.2, `schema` on sequential media describes the \
@@ -146,6 +147,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.warn_structural_default_ref(schema, "a response body schema");
         }
         if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+            // E009 case: form-response
             Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                         .message(format!(
                             "media type `{media_name}` is supported for request bodies, not response bodies"
@@ -166,6 +168,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         if let Some(ty) = ty {
             if !self.raw_body_compatible(media, ty) {
+                // E009 case: raw-schema
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(format!(
                                 "media type `{media_name}` requires a string-like or binary response schema"
@@ -180,6 +183,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `Option<String>` soundly, so it is not refused here, and neither is a
             // streamed item, which is framed and decoded element by element.
             if stream.is_none() && ty.nullable && self.is_bytes(ty) {
+                // E009 case: raw-null
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                     .message(format!(
                         "this `{media_name}` response body is read as raw bytes, whose \
