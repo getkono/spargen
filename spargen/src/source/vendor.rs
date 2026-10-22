@@ -461,14 +461,12 @@ pub(super) fn parse_scratch_local(path: &str, text: &str) -> Option<SpannedValue
 
 /// Parse a fetched document's text into a value tree for ref-scanning only, discarding parse
 /// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
-/// extension `Utf8Path::extension` reads from the last `/`-separated segment of `url`, with any
-/// `?` query or `#` fragment cut off first, as the vendored path the build reads drops them. A
-/// segment that is only a dot and an extension, such as `.json`, has none, as it has none to the
-/// build (#917).
+/// extension `Utf8Path::extension` reads from [`vendor_path_for_url`]'s path for `url`, which is
+/// the name the build parses the vendored copy by. That path drops a `?` query, a `#` fragment and
+/// any empty segment, so `api.json/` is read as JSON, as the build reads it (#918); a name that is
+/// only a dot and an extension, such as `.json`, has none, as it has none to the build (#917).
 pub(super) fn parse_scratch_remote(url: &str, text: &str) -> Option<SpannedValue> {
-    let stem = url.split(['?', '#']).next().unwrap_or(url);
-    let segment = stem.rsplit_once('/').map_or(stem, |(_, segment)| segment);
-    parse_scratch(Utf8Path::new(segment).extension(), text)
+    parse_scratch(Utf8Path::new(&vendor_path_for_url(url)).extension(), text)
 }
 
 fn parse_scratch(extension: Option<&str>, text: &str) -> Option<SpannedValue> {
