@@ -1269,9 +1269,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member: &SchemaOr,
         hint: &str,
     ) -> Option<(Ty, Option<String>)> {
-        let root = self.resolver.root_id();
         if let (Some(name), SchemaOr::Schema(schema)) =
-            (member_component_name(member, root), member)
+            (member_component_name(member, self.resolver), member)
         {
             let ty = if ref_siblings_bear_shape(schema) {
                 self.lower_schema_or(member, hint)?
