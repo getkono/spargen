@@ -356,6 +356,7 @@ impl Audit<'_, '_> {
         }
         let diags = &mut *self.diags;
         if !schema.validation.constrains_nothing() {
+            // W001 case: validation-keyword
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                 .message("validation-only schema keywords are not enforced at runtime")
                 .remedy("keep producer-side validation for these constraints")
@@ -368,6 +369,7 @@ impl Audit<'_, '_> {
         if (schema.content_media_type.is_some() || schema.content_schema.is_some())
             && !content_consumed
         {
+            // W001 case: content-annotation
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(
                 "`contentMediaType`/`contentSchema` are decoded only on an OpenAPI 3.2 SSE \
@@ -384,6 +386,7 @@ impl Audit<'_, '_> {
         // map captures every non-declared property regardless of the pattern, so the key regex is not
         // enforced. Acknowledge it as `W001` (never silent) — the value schemas still lower.
         if !schema.pattern_properties.is_empty() {
+            // W001 case: validation-keyword
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                 .message(
                     "`patternProperties` key patterns are not enforced: the generated typed map \

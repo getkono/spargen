@@ -88,6 +88,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     met.nullable || branches_accepting_null > 0
                 };
+                // W001 case: indistinguishable-branches
                 Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                     .message(format!(
                         "{} intersect to a union whose branches differ only in keywords the \
@@ -362,6 +363,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 variant
             })
             .collect();
+        // W001 case: indistinguishable-branches
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(format!(
                 "{} intersect to a union some of whose branches lower to the same generated type \

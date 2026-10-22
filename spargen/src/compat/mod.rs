@@ -405,6 +405,7 @@ fn emit_invalid_rule(
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
     let reject = |message: String, diags: &mut Diagnostics| {
+        // E020 case: required-root-field, no-root-member
         Diagnostic::error(
             Code::OmitCreatedInvalidDocument,
             Provenance::new(JsonPointer::root(), Some(root.span())),

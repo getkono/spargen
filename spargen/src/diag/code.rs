@@ -874,6 +874,50 @@ mod tests {
     /// The codes whose explain body enumerates the cases that reach them. See [`Code::explain`].
     const ENUMERATED_CASES: &[(Code, &[Case])] = &[
         (
+            Code::ValidationKeywordIgnored,
+            &[
+                Case {
+                    tag: "validation-keyword",
+                    stated_as: "The keyword affects runtime validation but not the static Rust \
+                                shape",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "content-annotation",
+                    stated_as: "`contentMediaType`/`contentSchema` are consumed without this \
+                                warning only on the string `data` property",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "untyped-one-of-variant",
+                    stated_as: "a `oneOf` decoded by trial matching that keeps a variant \
+                                lowering to `serde_json::Value`",
+                    reserved_wording: Some("`serde_json::Value`"),
+                },
+                Case {
+                    tag: "indistinguishable-branches",
+                    stated_as: "union branches lower to the same generated type, or to \
+                                identically structured ones",
+                    reserved_wording: None,
+                },
+            ],
+        ),
+        (
+            Code::OmitCreatedInvalidDocument,
+            &[
+                Case {
+                    tag: "required-root-field",
+                    stated_as: "a rule removed `openapi` or `info`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "no-root-member",
+                    stated_as: "the rules left none of `paths`, `components`, and `webhooks`",
+                    reserved_wording: None,
+                },
+            ],
+        ),
+        (
             Code::UnresolvedRef,
             &[
                 Case {

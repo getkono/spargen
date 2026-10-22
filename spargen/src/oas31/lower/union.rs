@@ -1171,6 +1171,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             (format!("{noun}s"), "lower")
         };
+        // W001 case: untyped-one-of-variant
         Diagnostic::warning(Code::ValidationKeywordIgnored, provenance.clone())
             .message(format!(
                 "{prefix} {noun} {} {verb} to `serde_json::Value`, which accepts every value, so \
@@ -1230,6 +1231,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             "each such set is one variant of the generated enum"
         };
+        // W001 case: indistinguishable-branches
         Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(format!(
                 "this `oneOf`'s {} lower to the same generated type or to identically structured \
