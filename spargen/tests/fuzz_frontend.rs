@@ -582,16 +582,19 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
             );
             if report.outcome() == Outcome::Generated {
                 generated.set(generated.get() + 1);
+                prop_assert!(
+                    !report
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == Code::InvalidInput),
+                    "a `Generated` run reported an E011 codegen failure: {report:#?}"
+                );
                 let code = std::fs::read_to_string(&out).unwrap();
                 if let Err(error) = syn::parse_file(&code) {
                     return Err(TestCaseError::fail(format!(
                         "a `Generated` run wrote unparseable Rust ({error})"
                     )));
                 }
-                prop_assert!(
-                    !code.contains("compile_error!"),
-                    "a `Generated` run wrote the codegen fallback stub"
-                );
                 let unexplained = oracles::unexplained_variants(&report, &code);
                 prop_assert!(
                     unexplained.is_empty(),

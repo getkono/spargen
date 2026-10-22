@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(codegen)* reject invalid generated Rust with `E011` instead of caching a `compile_error!` stub
+
 ## [0.5.0](https://github.com/getkono/spargen/compare/spargen-v0.4.0...spargen-v0.5.0) - 2026-09-24
 
 ### Added

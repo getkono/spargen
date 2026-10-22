@@ -3,8 +3,8 @@
 //! `generate`. Check/generate parity is a property of the harness rather than a remark about one
 //! case: every inline spec `generate` or `generate_with_code` runs is also run through `check`,
 //! which must reach the same accept/reject verdict and report the same sorted codes, and every
-//! `Generated` module must parse as Rust with no `compile_error!` fallback. `PARITY_FIXTURES` adds
-//! a named set a companion test keeps spanning rejections, warnings and clean runs.
+//! `Generated` run must contain no `E011` and emit a module that parses as Rust. `PARITY_FIXTURES`
+//! adds a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
 //! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413) and to a real location
@@ -198,8 +198,8 @@ fn stated_claim(message: &str) -> Option<OutcomeClaim> {
 
 /// `generate` on an inline spec, holding the run to the two oracles every fixture gets for free:
 /// `check` over the same document reaches the same accept/reject verdict and reports the same
-/// sorted codes ([`assert_check_agrees`]), and a `Generated` run wrote parseable Rust that is not
-/// the `compile_error!` stub codegen falls back to ([`assert_parseable`]).
+/// sorted codes ([`assert_check_agrees`]), and a `Generated` run has no `E011` diagnostic and wrote
+/// parseable Rust ([`assert_parseable`]).
 fn generate(spec: &str) -> Report {
     generate_with_code(spec).0
 }
@@ -222,7 +222,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let code = std::fs::read_to_string(out).unwrap_or_default();
     assert_check_agrees(&report, &run_check(&Spec::new(spec_path)));
     if report.outcome() == Outcome::Generated {
-        assert_parseable(&code);
+        assert_parseable(&report, &code);
     }
     (report, code)
 }
@@ -254,16 +254,15 @@ fn assert_check_agrees(generated: &Report, checked: &Report) {
     );
 }
 
-/// A `Generated` run's module parses as a Rust file and is not the `compile_error!` stub codegen
-/// emits when its own tokens fail to format, which keeps the outcome `Generated`.
-fn assert_parseable(code: &str) {
+/// A `Generated` run has no codegen failure diagnostic and its module parses as Rust.
+fn assert_parseable(report: &Report, code: &str) {
+    assert!(
+        !has_code(report, Code::InvalidInput),
+        "a `Generated` run reported an E011 failure: {report:#?}"
+    );
     if let Err(error) = syn::parse_file(code) {
         panic!("a `Generated` run wrote unparseable Rust ({error}):\n{code}");
     }
-    assert!(
-        !code.contains("compile_error!"),
-        "a `Generated` run wrote the codegen fallback stub:\n{code}"
-    );
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
@@ -766,7 +765,7 @@ fn generate_and_check_dir(dir: &camino::Utf8Path, root: &str) -> (Report, Report
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     assert_check_agrees(&generated, &checked);
     if generated.outcome() == Outcome::Generated {
-        assert_parseable(&code);
+        assert_parseable(&generated, &code);
     }
     (generated, checked, code)
 }
