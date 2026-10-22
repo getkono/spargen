@@ -738,6 +738,21 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
             "{field}"
         );
     }
+    // An ignored `retry` leaves the one an earlier line of the same event set.
+    for field in ["retry: 12a", "retry:"] {
+        let mut buf = format!("retry: 5\n{field}\ndata: 1\n\n").into_bytes();
+        assert_eq!(
+            next_frame(&mut buf, Framing::SseJsonData, false),
+            FramePoll::Item {
+                payload: b"1".to_vec(),
+                metadata: SseMetadata {
+                    id: None,
+                    retry: Some(5)
+                },
+            },
+            "{field}"
+        );
+    }
     // An event carrying only an ignored `retry` dispatches nothing at all.
     let mut buf = b"retry: soon\n\n".to_vec();
     assert_eq!(
@@ -778,6 +793,44 @@ fn an_sse_line_without_a_colon_is_a_field_with_an_empty_value() {
     assert_eq!(stream.last_event_id(), Some("one"));
     assert_eq!(poll_ready(stream.next()).unwrap().unwrap(), 2);
     assert_eq!(stream.last_event_id(), Some(""));
+}
+
+/// An SSE event that dispatches nothing is consumed and the same call frames the complete event
+/// buffered behind it, before EOF too, rather than asking for more bytes.
+#[test]
+fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
+    for at_eof in [false, true] {
+        let mut buf = b": keep-alive\n\ndata: 1\n\n".to_vec();
+        assert_eq!(
+            next_frame(&mut buf, Framing::SseJsonData, at_eof),
+            FramePoll::Item {
+                payload: b"1".to_vec(),
+                metadata: SseMetadata::default(),
+            },
+            "at_eof = {at_eof}"
+        );
+        assert!(buf.is_empty());
+    }
+}
+
+/// A reconnectable stream starts from the `Last-Event-ID` its prepared request already carries,
+/// before any event has been read.
+#[test]
+fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
+    let core = ClientCore::new("https://example.com").unwrap();
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .header("last-event-id", "evt-0")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response("data: 1\n\n"),
+        Framing::SseJsonData,
+        core,
+        Some(request),
+    );
+    assert_eq!(stream.last_event_id(), Some("evt-0"));
 }
 
 /// JSON text sequences: bytes before the first record separator are discarded, a buffer with

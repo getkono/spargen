@@ -29,6 +29,15 @@ exclude_re = [
   # `read_capped` entry above is.
   '^support-runtime/src/paginate\.rs:240:21: replace match guard respect_angles && !in_quote with true in split_outside$',
   '^support-runtime/src/paginate\.rs:240:36: replace && with \|\| in split_outside$',
+  # `support-runtime/src/stream.rs`, `json_sequence_next`'s `first > 0` to `>=`: the comparison
+  # admits `first == 0` only to drain `..0`, which removes nothing.
+  '^support-runtime/src/stream\.rs:512:18: replace > with >= in json_sequence_next$',
+  # `support-runtime/src/stream.rs`, `sse_next`'s `pos < buffer.len()` to `<=`: at
+  # `pos == buffer.len()` the field appended is the empty line, whose empty name matches no field,
+  # so `append_sse_field` leaves the event's fields as they were. Both stream entries are anchored
+  # on line and column like the ones above, so an edit that moves either fails the run instead of
+  # excluding another comparison of the same kind in the same function.
+  '^support-runtime/src/stream\.rs:594:20: replace < with <= in sse_next$',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
   # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
   # and no test or caller can observe what the body returns.

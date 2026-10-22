@@ -176,6 +176,31 @@ fn a_rel_value_is_unquoted_only_when_quotes_open_and_close_it() {
 }
 
 #[test]
+fn text_before_the_uri_reference_does_not_shift_it() {
+    // The URI-reference is whatever sits between the first `<` and the `>` after it, wherever
+    // that `<` falls in the entry.
+    assert_eq!(
+        next_of("junk <https://x/2>; rel=next"),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn parameters_are_read_from_just_past_the_closing_angle() {
+    // The parameter section starts right after `>`: the URI's last character is not part of
+    // it (a trailing `"` there would open a quoted string that hides the `;`), and the `>`
+    // itself is not either, so a first parameter written straight after it keeps its name.
+    assert_eq!(
+        next_of(r#"<https://x/2">; rel=next"#),
+        Some(r#"https://x/2""#.to_owned())
+    );
+    assert_eq!(
+        next_of("<https://x/2>rel=next"),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
 fn malformed_input_yields_none_without_panic() {
     assert_eq!(next_of("garbage without brackets; rel=next"), None);
     assert_eq!(next_of("<unterminated; rel=next"), None);
