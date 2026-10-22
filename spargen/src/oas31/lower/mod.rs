@@ -507,6 +507,7 @@ fn lower_pass(
         &ctx.meet_locations,
         &ctx.root_xml,
         &ctx.field_xml_sites,
+        document.is_oas32,
         ctx.diags,
     );
 

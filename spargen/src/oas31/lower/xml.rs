@@ -116,7 +116,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// on an unwrapped array, and a wrapped one is reported through its `wrapped`/`nodeType` hint. The
 /// hints that change the XML wire without a faithful quick-xml mapping are recorded here — an
 /// items' one under an `items.` prefix — and dispositioned in [`gate_xml_field_renames`], once it is
-/// known whether the owning type is ever serialized as XML at all.
+/// known whether the owning type is ever serialized as XML at all. Whether the property, or its
+/// items, is a `$ref` is recorded too ([`XmlField::by_reference`]): under OpenAPI 3.2 that field
+/// takes the referenced struct's element name, which is only known once the graph is final.
 pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     let SchemaOr::Schema(schema) = child else {
         return XmlField::default();
@@ -131,6 +133,7 @@ pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     if is_list(schema) {
         field.name = None;
     }
+    field.by_reference = field_items(schema).unwrap_or(schema).reference.is_some();
     if let Some(items) = field_items(schema) {
         if let Some(hints) = &items.xml {
             let (name, unsupported) = read_hints(items, hints, XmlNode::Items);
@@ -280,7 +283,9 @@ fn is_xml_name(name: &str) -> bool {
 /// whoever else uses the type, and the field name of an array property whose items are that struct
 /// (unless the items name their elements themselves); a component struct an XML body reaches with
 /// no root `xml.name` takes its component name as its XML root name, or reports it (`W006`) where
-/// it is no XML name; and every hint the codec cannot honour — a field's, an items', a root's, or
+/// it is no XML name; under OpenAPI 3.2 (`is_oas32`), a property that is a `$ref` to a struct, or
+/// an array property whose items are, takes that struct's XML root name as its field name; and
+/// every hint the codec cannot honour — a field's, an items', a root's, or
 /// one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is `E009` on a type an XML body reaches
 /// and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
@@ -289,6 +294,7 @@ pub(super) fn gate_xml_field_renames(
     meet_locations: &HashMap<TypeId, Provenance>,
     root_xml: &HashMap<XmlSite, RootXml>,
     field_xml_sites: &HashSet<XmlSite>,
+    is_oas32: bool,
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
@@ -482,6 +488,46 @@ pub(super) fn gate_xml_field_renames(
                      first, then letters, digits, `-`, `.`, `_` or `:`), or rename the component",
                 )
                 .emit(diags);
+        }
+    }
+    // OpenAPI 3.2 gives a `$ref` the node type `none`: it names no element, and the referenced
+    // schema's own element stands in its place — named by its root `xml.name`, or else by its
+    // component name. So a property that is a `$ref` to a struct, or an array property whose items
+    // are, takes that struct's XML root name as its field name, now that the inferred names above
+    // are set. OpenAPI 3.1 has no node types and names a property's element after the property, so
+    // there the field keeps its name (an array's items still follow an explicit root `xml.name`,
+    // above). A name the property or its items give themselves wins, and, as above, only an owner
+    // some XML body reaches takes it; on one a non-XML body also reaches it is suppressed below.
+    if is_oas32 {
+        let view: &TypeGraph = graph;
+        let ref_names: Vec<(TypeId, usize, String)> = view
+            .emitted()
+            .filter(|(id, _)| xml_reachable.contains(id))
+            .filter_map(|(id, def)| match &def.kind {
+                TypeKind::Struct(object) => Some((id, object)),
+                _ => None,
+            })
+            .flat_map(|(id, object)| {
+                object
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| {
+                        field.xml.by_reference && field.xml.name.is_none() && !field.xml.attribute
+                    })
+                    .filter_map(move |(index, field)| {
+                        let element = match &view.get(field.ty.id)?.kind {
+                            TypeKind::Array(item) => item.id,
+                            _ => field.ty.id,
+                        };
+                        Some((id, index, view.xml_root_name(element)?.to_owned()))
+                    })
+            })
+            .collect();
+        for (id, index, name) in ref_names {
+            if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+                object.fields[index].xml.name = Some(name);
+            }
         }
     }
     for (_, root, target, at) in ref_sites {
