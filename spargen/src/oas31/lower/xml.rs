@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
-use crate::ir::{MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
+use crate::ir::{Field, MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
 use crate::oas31::{JsonType, Schema, SchemaOr, XmlHints};
 
 use super::prune::reachable_types;
@@ -116,7 +116,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// on an unwrapped array, and a wrapped one is reported through its `wrapped`/`nodeType` hint. The
 /// hints that change the XML wire without a faithful quick-xml mapping are recorded here — an
 /// items' one under an `items.` prefix — and dispositioned in [`gate_xml_field_renames`], once it is
-/// known whether the owning type is ever serialized as XML at all.
+/// known whether the owning type is ever serialized as XML at all. Whether the property, or its
+/// items, is a `$ref` is recorded too ([`XmlField::by_reference`]): under OpenAPI 3.2 that field
+/// takes the referenced struct's element name, which is only known once the graph is final.
 pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     let SchemaOr::Schema(schema) = child else {
         return XmlField::default();
@@ -131,6 +133,16 @@ pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     if is_list(schema) {
         field.name = None;
     }
+    // Only a `$ref` whose node type is `none` (its default) defers to the referenced element: an
+    // explicit `nodeType: element` makes the reference itself an element, named after the property.
+    let node = field_items(schema).unwrap_or(schema);
+    let node_type = node
+        .xml
+        .as_ref()
+        .and_then(|hints| hints.node_type.as_deref());
+    field.by_reference =
+        node.reference.is_some() && node_type.is_none_or(|node_type| node_type == "none");
+    field.element_reference = node.reference.is_some() && node_type == Some("element");
     if let Some(items) = field_items(schema) {
         if let Some(hints) = &items.xml {
             let (name, unsupported) = read_hints(items, hints, XmlNode::Items);
@@ -193,8 +205,9 @@ fn read_hints(schema: &Schema, hints: &XmlHints, node: XmlNode) -> (Option<Strin
         // A field can be an attribute. A list element or a body's root element cannot.
         "attribute" => node == XmlNode::Property,
         // On an array this is precisely `wrapped: true` — it asks for an element wrapping the
-        // list, which is the representation quick-xml does not give us. On a `$ref` it names the
-        // element the referenced component already produces.
+        // list, which is the representation quick-xml does not give us. On a `$ref` it makes the
+        // reference an element of its own, named after the property rather than after the
+        // referenced component (`field_xml`), which a nested struct field already is.
         "element" => !is_array,
         "none" => defaults_to_none,
         _ => false,
@@ -280,7 +293,9 @@ fn is_xml_name(name: &str) -> bool {
 /// whoever else uses the type, and the field name of an array property whose items are that struct
 /// (unless the items name their elements themselves); a component struct an XML body reaches with
 /// no root `xml.name` takes its component name as its XML root name, or reports it (`W006`) where
-/// it is no XML name; and every hint the codec cannot honour — a field's, an items', a root's, or
+/// it is no XML name; under OpenAPI 3.2 (`is_oas32`), a property that is a `$ref` to a struct, or
+/// an array property whose items are, takes that struct's XML root name as its field name; and
+/// every hint the codec cannot honour — a field's, an items', a root's, or
 /// one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is `E009` on a type an XML body reaches
 /// and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
@@ -289,6 +304,7 @@ pub(super) fn gate_xml_field_renames(
     meet_locations: &HashMap<TypeId, Provenance>,
     root_xml: &HashMap<XmlSite, RootXml>,
     field_xml_sites: &HashSet<XmlSite>,
+    is_oas32: bool,
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
@@ -416,7 +432,9 @@ pub(super) fn gate_xml_field_renames(
     // reads its container rename there, so the root name becomes the field's, unless the items
     // already gave one. Only an owner some XML body reaches takes it: on any other, the rename is
     // derived rather than written and moves no wire, so it is not set at all. On an owner a non-XML
-    // body also reaches, it is a field rename like any other, suppressed below (`W006`).
+    // body also reaches, it is a field rename like any other, suppressed below (`W006`). Under 3.2,
+    // items that are a `$ref` declared `nodeType: element` are an element of their own, named after
+    // the property, so they take no root name either.
     let view: &TypeGraph = graph;
     let item_names: Vec<(TypeId, usize, String)> = view
         .emitted()
@@ -432,7 +450,11 @@ pub(super) fn gate_xml_field_renames(
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, field)| field.xml.name.is_none() && !field.xml.attribute)
+                .filter(|(_, field)| {
+                    field.xml.name.is_none()
+                        && !field.xml.attribute
+                        && !(is_oas32 && field.xml.element_reference)
+                })
                 .filter_map(move |(index, field)| {
                     let TypeKind::Array(item) = &view.get(field.ty.id)?.kind else {
                         return None;
@@ -441,9 +463,14 @@ pub(super) fn gate_xml_field_renames(
                 })
         })
         .collect();
+    // Every field rename derived here rather than written by the author, by owner and field index:
+    // checked for a clash with its siblings' element names below, and named as derived if the
+    // shared-type suppression withholds it.
+    let mut derived: HashSet<(TypeId, usize)> = HashSet::new();
     for (id, index, name) in item_names {
         if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
             object.fields[index].xml.name = Some(name);
+            derived.insert((id, index));
         }
     }
     // Without a root `xml.name`, OpenAPI infers a component schema's element name as the
@@ -483,6 +510,124 @@ pub(super) fn gate_xml_field_renames(
                 )
                 .emit(diags);
         }
+    }
+    // OpenAPI 3.2 gives a `$ref` the node type `none`: it names no element, and the referenced
+    // schema's own element stands in its place — named by its root `xml.name`, or else by its
+    // component name. So a property that is a `$ref` to a struct, or an array property whose items
+    // are, takes that struct's XML root name as its field name, now that the inferred names above
+    // are set. OpenAPI 3.1 has no node types and names a property's element after the property, so
+    // there the field keeps its name (an array's items still follow an explicit root `xml.name`,
+    // above). A name the property or its items give themselves wins, and, as above, only an owner
+    // some XML body reaches takes it; on one a non-XML body also reaches it is suppressed below.
+    if is_oas32 {
+        let view: &TypeGraph = graph;
+        let ref_names: Vec<(TypeId, usize, String)> = view
+            .emitted()
+            .filter(|(id, _)| xml_reachable.contains(id))
+            .filter_map(|(id, def)| {
+                let TypeKind::Struct(object) = &def.kind else {
+                    return None;
+                };
+                Some((id, object))
+            })
+            .flat_map(|(id, object)| {
+                object
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| {
+                        field.xml.by_reference && field.xml.name.is_none() && !field.xml.attribute
+                    })
+                    .filter_map(move |(index, field)| {
+                        // An array's items are each its element; anything else is the element.
+                        let element = if let TypeKind::Array(item) = &view.get(field.ty.id)?.kind {
+                            item.id
+                        } else {
+                            field.ty.id
+                        };
+                        Some((id, index, view.xml_root_name(element)?.to_owned()))
+                    })
+            })
+            .collect();
+        for (id, index, name) in ref_names {
+            if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+                object.fields[index].xml.name = Some(name);
+                derived.insert((id, index));
+            }
+        }
+    }
+    // A derived name can give two child elements of one struct the same name: two properties
+    // referencing one component, or a reference whose element name is another property's. serde
+    // would then read both fields from one element name, which quick-xml refuses as a duplicate
+    // field, so each derived name that clashes with a sibling's element name is withdrawn and
+    // reported (`W006`), and the field keeps its property name. Withdrawing one can expose another
+    // clash with a property name, so this runs until no derived name clashes. An owner a non-XML
+    // body also reaches is left to the suppression below, which withholds every rename on it.
+    let mut owners: Vec<TypeId> = derived
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !non_xml_reachable.contains(id))
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for id in owners {
+        let mut withdrawn: Vec<(String, String)> = Vec::new();
+        while let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+            let element = |field: &Field| {
+                field
+                    .xml
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| field.name.wire.clone())
+            };
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for field in object.fields.iter().filter(|field| !field.xml.attribute) {
+                *counts.entry(element(field)).or_default() += 1;
+            }
+            let clashing: Vec<usize> = (0..object.fields.len())
+                .filter(|index| derived.contains(&(id, *index)))
+                .filter(|index| {
+                    let field = &object.fields[*index];
+                    field.xml.name.is_some() && counts[&element(field)] > 1
+                })
+                .collect();
+            if clashing.is_empty() {
+                break;
+            }
+            for index in clashing {
+                let field = &mut object.fields[index];
+                if let Some(name) = field.xml.name.take() {
+                    withdrawn.push((field.name.wire.clone(), name));
+                }
+                derived.remove(&(id, index));
+            }
+        }
+        if withdrawn.is_empty() {
+            continue;
+        }
+        let Some(def) = graph.get(id) else {
+            continue;
+        };
+        let fields: Vec<String> = withdrawn
+            .iter()
+            .map(|(property, name)| format!("property `{property}` (`{name}`)"))
+            .collect();
+        Diagnostic::warning(
+            Code::XmlHintIgnored,
+            meet_locations.get(&id).unwrap_or(&def.provenance).clone(),
+        )
+        .message(format!(
+            "the element name derived from the referenced schema is not applied to {}: it is \
+             the name of another child element of this struct, and two fields read from one \
+             element name cannot be told apart, so each keeps its property name as its element \
+             name",
+            fields.join(", ")
+        ))
+        .remedy(
+            "give the properties distinct `xml.name`s, or give the referenced schemas distinct \
+             root `xml.name`s",
+        )
+        .emit(diags);
     }
     for (_, root, target, at) in ref_sites {
         unsupported_reports.push((
@@ -563,27 +708,60 @@ pub(super) fn gate_xml_field_renames(
             continue;
         };
         let provenance = meet_locations.get(&id).unwrap_or(&def.provenance).clone();
+        // A name derived from a referenced schema is no hint the author wrote, so the message
+        // names it as derived, and names the authored hints only where some field carries one.
+        let mut authored = false;
+        let mut derived_names: Vec<String> = Vec::new();
         if let TypeKind::Struct(object) = &mut def.kind {
-            for field in &mut object.fields {
+            for (index, field) in object.fields.iter_mut().enumerate() {
+                match &field.xml.name {
+                    Some(name) if derived.contains(&(id, index)) => {
+                        derived_names.push(format!("property `{}` (`{name}`)", field.name.wire))
+                    }
+                    Some(_) => authored = true,
+                    None => authored |= field.xml.attribute,
+                }
                 field.xml = XmlField::default();
             }
         }
-        let (message, remedy) = if shared_with_xml {
+        let shared_remedy = "declare a separate schema for the XML body if the rename is \
+                             required, so the two bodies stop sharing one generated type, or \
+                             accept the property's normal wire name";
+        let (message, remedy) = if !shared_with_xml {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
+                 so the hint cannot affect any wire format; the field keeps its normal wire name"
+                    .to_owned(),
+                "remove the `xml` hint, or use this schema as an XML body if the rename is \
+                 required",
+            )
+        } else if derived_names.is_empty() {
             (
                 "`xml.name`/`xml.attribute` not applied: this schema is shared between an XML body \
                  and a non-XML (e.g. JSON) body, and a serde rename applies to every format, so \
                  honoring the hint would rewrite the JSON wire name too. The field keeps its \
                  normal wire name — including in the XML body, whose element/attribute name is the \
-                 property name rather than the hint",
-                "declare a separate schema for the XML body if the rename is required, so the two \
-                 bodies stop sharing one generated type, or accept the property's normal wire name",
+                 property name rather than the hint"
+                    .to_owned(),
+                shared_remedy,
             )
         } else {
+            let hints = if authored {
+                "`xml.name`/`xml.attribute`, and "
+            } else {
+                ""
+            };
             (
-                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
-                 so the hint cannot affect any wire format; the field keeps its normal wire name",
-                "remove the `xml` hint, or use this schema as an XML body if the rename is \
-                 required",
+                format!(
+                    "{hints}the element name derived from the referenced schema for {} not \
+                     applied: this schema is shared between an XML body and a non-XML (e.g. JSON) \
+                     body, and a serde rename applies to every format, so applying it would \
+                     rewrite the JSON wire name too. The field keeps its normal wire name — \
+                     including in the XML body, whose element name is the property name rather \
+                     than the derived one",
+                    derived_names.join(", ")
+                ),
+                shared_remedy,
             )
         };
         Diagnostic::warning(Code::XmlHintIgnored, provenance)

@@ -651,8 +651,18 @@ pub(crate) struct Field {
 pub(crate) struct XmlField {
     /// The wire element (or attribute) name, overriding the property name: the property's
     /// `xml.name`, or for an array property, whose items are emitted directly under the parent,
-    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to.
+    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to; under
+    /// OpenAPI 3.2, also the XML root name of the struct a [`Self::by_reference`] field resolves to.
     pub(crate) name: Option<String>,
+    /// Whether the property's schema — or, for an array property, its `items` — is a `$ref` whose
+    /// node type is `none`, as OpenAPI 3.2 defaults it: the node names no element, and the
+    /// referenced schema's own element stands in its place. An explicit `xml.nodeType` other than
+    /// `none` on that node leaves this `false`.
+    pub(crate) by_reference: bool,
+    /// Whether that same node is a `$ref` with an explicit `xml.nodeType: element`: under OpenAPI
+    /// 3.2 the reference is then an element of its own, named after the property, so the field
+    /// takes no name from the struct it resolves to, not even an array item's root `xml.name`.
+    pub(crate) element_reference: bool,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub(crate) attribute: bool,
