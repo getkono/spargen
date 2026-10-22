@@ -58,6 +58,14 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
                 runtime: support::BlockingRuntime,
             }
 
+            /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
+            /// failure as the constructors' `RequestConstruction` error.
+            #cfg
+            fn new_runtime(
+            ) -> Result<support::BlockingRuntime, support::Error<std::convert::Infallible>> {
+                support::BlockingRuntime::new().map_err(support::Error::request_construction)
+            }
+
             #cfg
             #[forbid(unsafe_code)]
             #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
@@ -65,8 +73,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
             /// Build a blocking client over a fresh default `reqwest::Client`.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::new(base_url)?;
-                let runtime = support::BlockingRuntime::new()
-                    .map_err(support::Error::request_construction)?;
+                let runtime = new_runtime()?;
                 Ok(Self { inner, runtime })
             }
 
@@ -76,8 +83,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
                 base_url: &str,
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::with_client(client, base_url)?;
-                let runtime = support::BlockingRuntime::new()
-                    .map_err(support::Error::request_construction)?;
+                let runtime = new_runtime()?;
                 Ok(Self { inner, runtime })
             }
 
@@ -87,8 +93,7 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
                 base_url: &str,
             ) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::with_backend(backend, base_url)?;
-                let runtime = support::BlockingRuntime::new()
-                    .map_err(support::Error::request_construction)?;
+                let runtime = new_runtime()?;
                 Ok(Self { inner, runtime })
             }
 

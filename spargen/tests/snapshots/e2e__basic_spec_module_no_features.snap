@@ -10877,6 +10877,15 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         inner: Client,
         runtime: support::BlockingRuntime,
     }
+    /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
+    /// failure as the constructors' `RequestConstruction` error.
+    #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+    fn new_runtime() -> Result<
+        support::BlockingRuntime,
+        support::Error<std::convert::Infallible>,
+    > {
+        support::BlockingRuntime::new().map_err(support::Error::request_construction)
+    }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     #[forbid(unsafe_code)]
     #[allow(
@@ -10892,8 +10901,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::new(base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied `reqwest::Client`.
@@ -10902,8 +10910,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_client(client, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied transport backend.
@@ -10912,8 +10919,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_backend(backend, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Borrow the wrapped async client.
