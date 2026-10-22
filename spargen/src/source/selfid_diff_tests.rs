@@ -1,8 +1,6 @@
 //! `spargen lock` and the build each keep their own reading of a document's `$self`, their own
 //! choice of parse format, and their own `http`/`https` predicate. These tables drive both copies
-//! over one set of URLs and paths and hold them to agreement row by row. A row where the copies
-//! disagree today records each side's current answer and names the bug issue filed for it, so the
-//! disagreement can neither widen nor close without this file changing.
+//! over one set of URLs and paths and hold them to agreement row by row.
 //!
 //! The lock walk is reachable only under `remote-fetch`, which gates this module as it gates
 //! `vendor`.
@@ -42,8 +40,6 @@ enum Expect<T: 'static> {
     Agree,
     /// Both copies give this answer.
     Both(T),
-    /// The copies disagree today: each side's current answer, and the bug issue filed for it.
-    Disagree { lock: T, build: T, bug: u32 },
 }
 
 impl<T: std::fmt::Debug + PartialEq> Expect<T> {
@@ -53,15 +49,11 @@ impl<T: std::fmt::Debug + PartialEq> Expect<T> {
         let met = match self {
             Expect::Agree => got.0 == got.1,
             Expect::Both(both) => got.0 == *both && got.1 == *both,
-            Expect::Disagree { lock, build, .. } => got.0 == *lock && got.1 == *build,
         };
         if !met {
             let want = match self {
                 Expect::Agree => "agreement".to_owned(),
                 Expect::Both(both) => format!("agreement on {both:?}"),
-                Expect::Disagree { lock, build, bug } => {
-                    format!("({lock:?}, {build:?}), the disagreement #{bug} records")
-                }
             };
             failures.push(format!("{row}: (lock, build) = {got:?}, want {want}"));
         }
@@ -212,11 +204,8 @@ fn build_format(name: &str, remote: bool) -> Format {
 
 #[test]
 fn the_lock_and_the_build_parse_every_document_alike() {
-    use Expect::{Both, Disagree};
+    use Expect::Both;
     use Format::{Either, Json, Yaml};
-    // The lock reads a remote URL's suffix through a trailing `/`; the build reads the vendored
-    // path, which drops the empty last segment.
-    const SLASH_BUG: u32 = 918;
     let local: &[(&str, Expect<Format>)] = &[
         ("specs/api.json", Both(Json)),
         ("specs/api.yaml", Both(Yaml)),
@@ -258,14 +247,9 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("https://h.example/api.JSON", Both(Json)),
         ("https://h.example/api.Yaml", Both(Yaml)),
         // A trailing slash.
-        (
-            "https://h.example/api.json/",
-            Disagree {
-                lock: Either,
-                build: Json,
-                bug: SLASH_BUG,
-            },
-        ),
+        ("https://h.example/api.json/", Both(Json)),
+        ("https://h.example/api.yaml/", Both(Yaml)),
+        ("https://h.example/api.json//", Both(Json)),
         // A name that is only a dot and an extension.
         ("https://h.example/.json", Both(Either)),
     ];
