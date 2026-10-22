@@ -233,6 +233,10 @@ fn split_outside(text: &str, delim: u8, respect_angles: bool) -> Vec<&str> {
                 i += 1;
             }
             b'<' if respect_angles && !in_quote => in_angle = true,
+            // Mutation testing: replacing this guard with `true`, or its `&&` with `||`, survives
+            // every test and is declared rather than killed. Whenever the guard is false,
+            // `in_angle` is already false: only the `<` arm sets it, which needs `respect_angles`,
+            // a quoted string opens only while `in_angle` is false, and inside one `<` sets nothing.
             b'>' if respect_angles && !in_quote => in_angle = false,
             b'"' if !in_angle => in_quote = !in_quote,
             byte if byte == delim && !in_angle && !in_quote => {

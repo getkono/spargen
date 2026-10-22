@@ -506,6 +506,9 @@ fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             }
             return FramePoll::NeedMore;
         };
+        // Mutation testing: replacing `>` with `>=` survives every test and is declared rather
+        // than killed: the comparison admits `first == 0` only to drain `..0`, which removes
+        // nothing.
         if first > 0 {
             buffer.drain(..first);
         }
@@ -585,6 +588,9 @@ fn sse_next(buffer: &mut Vec<u8>, at_eof: bool, output: SseOutput) -> FramePoll 
             if !at_eof {
                 return FramePoll::NeedMore;
             }
+            // Mutation testing: replacing `<` with `<=` survives every test and is declared rather
+            // than killed: at `pos == buffer.len()` the field appended is the empty line, whose
+            // empty name matches no field, so `append_sse_field` leaves `fields` as it was.
             if pos < buffer.len() {
                 append_sse_field(trim_cr(&buffer[pos..]), &mut fields);
             }
