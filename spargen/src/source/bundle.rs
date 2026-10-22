@@ -224,14 +224,10 @@ impl InputBundle {
         }
     }
 
-    /// The filesystem paths of every loaded document: the root spec, each relative-file `$ref`
-    /// target reachable from it, and each vendored remote copy. Used for build invalidation and
-    /// macro dependency tracking. Order follows load order (root first).
-    pub(crate) fn source_paths(&self) -> impl Iterator<Item = &Utf8Path> {
-        self.files.values().map(|file| file.path.as_path())
-    }
-
-    /// Every loaded document and the exact bytes used to parse it.
+    /// Every loaded document and the exact bytes used to parse it: the root spec, each
+    /// relative-file `$ref` target reachable from it, and each vendored remote copy. The build
+    /// cache's input fingerprint and the macro's dependency tracking read it. Order follows load
+    /// order (root first).
     pub(crate) fn source_inputs(&self) -> impl Iterator<Item = (&Utf8Path, &[u8])> {
         self.files
             .values()
@@ -726,7 +722,10 @@ mod tests {
                     bundle.file_ids().count(),
                     1,
                     "root `{root}`, ref `{reference}`: the root was loaded again: {:?}",
-                    bundle.source_paths().collect::<Vec<_>>()
+                    bundle
+                        .source_inputs()
+                        .map(|(path, _)| path)
+                        .collect::<Vec<_>>()
                 );
                 let target = bundle.reference_target(
                     &format!("{reference}#/components/schemas/Node"),
@@ -739,7 +738,10 @@ mod tests {
                 );
                 // The root keeps the spelling it was given: build invalidation and the paths omit
                 // rules name files by read it.
-                assert_eq!(bundle.source_paths().next(), Some(root.as_path()));
+                assert_eq!(
+                    bundle.source_inputs().next().map(|(path, _)| path),
+                    Some(root.as_path())
+                );
             }
         }
     }
@@ -769,7 +771,10 @@ mod tests {
             bundle.file_ids().count(),
             3,
             "{:?}",
-            bundle.source_paths().collect::<Vec<_>>()
+            bundle
+                .source_inputs()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
         );
         let file = |reference: &str| {
             bundle
