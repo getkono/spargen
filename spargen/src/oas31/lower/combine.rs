@@ -541,7 +541,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_REMOTE_MEMBER);
             }
-            let ty = self.ensure_remote(reference)?;
+            let ty = self.ensure_remote(reference, &schema.provenance)?;
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
                 RefMember {
