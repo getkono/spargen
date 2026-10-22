@@ -10,7 +10,7 @@ use crate::source::is_remote_ref;
 
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
 /// One of a reservation frame's two memos: a key to its root id and nullability.
@@ -176,9 +176,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // note on a def, and an alias has no def to carry it, so it is reported as `W005` in the
         // parser's words for the bare `$ref`+`default` spelling rather than dropped silently.
         if let Some(reference) = schema.reference.as_deref() {
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            if !schema_has_shape_constraint(&sibling) {
+            if !ref_siblings_bear_shape(schema) {
                 // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
                 self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
@@ -517,9 +515,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let target = only.reference.as_deref()?;
         // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
         // siblings, which is an intersection and not an alias.
-        let mut member_without_ref = only.clone();
-        member_without_ref.reference = None;
-        if schema_has_shape_constraint(&member_without_ref) {
+        if ref_siblings_bear_shape(only) {
             return None;
         }
         let (id, target_nullable) = self.open_reservation_for_ref(target, &only.provenance)?;

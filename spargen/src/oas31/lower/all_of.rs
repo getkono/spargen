@@ -8,9 +8,10 @@ use crate::diag::Provenance;
 use crate::ir::{Ty, TypeKind, UnionVariant};
 use crate::oas31::{Schema, SchemaOr};
 
-use super::combine::{schema_has_union, take_refiners, Contribution};
+use super::combine::{take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
+use super::shape::schema_has_union;
 use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
 
 /// A union an `allOf` meet met with its other members, for

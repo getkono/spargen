@@ -10,12 +10,12 @@ use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::all_of::MetUnionMember;
-use super::combine::{schema_has_union, sole_union_member};
+use super::combine::sole_union_member;
 use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{schema_has_shape_constraint, schema_has_union};
 use super::{LowerCtx, MetUnion, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -215,7 +215,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else {
                 referenced
             };
-            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            let has_union_sibling = schema_has_union(schema);
             // Beside a union sibling and no `type`, the untyped target leaves `null` to the
             // union, as the same target written as an `allOf` member beside it does
             // ([`Self::composition_takes_union_null`], #586): where a branch admits `null` itself
@@ -366,7 +366,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_all_of(schema, hint);
         }
 
-        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+        if schema_has_union(schema) {
             return self.lower_union(schema, hint);
         }
 

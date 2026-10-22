@@ -9,6 +9,7 @@ use crate::oas31::discriminator::{
 };
 use crate::oas31::{Schema, SchemaOr};
 
+use super::shape::schema_has_union;
 use super::{DiscriminatorMembers, LowerCtx};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -105,7 +106,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(discriminator) = &schema.discriminator else {
             return;
         };
-        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+        if schema_has_union(schema) {
             return;
         }
         resolve_discriminator_targets(self.resolver, self.diags, discriminator);

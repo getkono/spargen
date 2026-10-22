@@ -8,9 +8,11 @@ use crate::ir::{Ty, TypeId, TypeKind, Union};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
-use super::combine::{schema_has_union, schema_is_object_like, Contribution};
+use super::combine::Contribution;
 use super::refiner::{implied_applicator_category, ImpliedCategory};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{
+    ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
+};
 use super::strategy::retain_strategy;
 use super::{memoised_answer, memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -560,9 +562,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return false;
         };
         // A `$ref` with siblings of its own is an intersection this does not read.
-        let mut sibling = member.as_ref().clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| {
@@ -632,9 +632,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let category = if let Some(reference) = member.reference.as_deref() {
                         // A `$ref` member with siblings of its own is an intersection this does
                         // not read.
-                        let mut sibling = member.as_ref().clone();
-                        sibling.reference = None;
-                        if schema_has_shape_constraint(&sibling) {
+                        if ref_siblings_bear_shape(member) {
                             None
                         } else {
                             self.ref_target_body(reference, &member.provenance)
@@ -774,9 +772,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(reference) = member.reference.as_deref() else {
             return self.schema_is_untyped_shape(member, depth);
         };
-        let mut sibling = member.as_ref().clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| {
@@ -805,9 +801,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(reference) = member.reference.as_deref() else {
             return lists_null(member);
         };
-        let mut sibling = member.clone();
-        sibling.reference = None;
-        !schema_has_shape_constraint(&sibling)
+        !ref_siblings_bear_shape(member)
             && self
                 .ref_target_body(reference, &member.provenance)
                 .is_some_and(|target| lists_null(&target))
@@ -856,9 +850,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(reference) => {
                     // A `$ref` member with siblings of its own is an intersection this does not
                     // read.
-                    let mut sibling = member.clone();
-                    sibling.reference = None;
-                    !schema_has_shape_constraint(&sibling)
+                    !ref_siblings_bear_shape(member)
                         && self
                             .ref_target_body(reference, &member.provenance)
                             .is_some_and(|body| {
@@ -954,9 +946,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(next) = &target.reference else {
                 return Some(target);
             };
-            let mut sibling = target.as_ref().clone();
-            sibling.reference = None;
-            if schema_has_shape_constraint(&sibling) {
+            if ref_siblings_bear_shape(&target) {
                 return Some(target);
             }
             reference.clone_from(next);
@@ -983,7 +973,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `null` is not split either (#450). The meets inserted since `mark` reach nothing the null
     /// type refers to, so they are discarded, and the null type is the final graph insert.
     ///
-    /// [`schema_is_object_like`]: super::combine::schema_is_object_like
+    /// [`schema_is_object_like`]: super::shape::schema_is_object_like
     pub(super) fn null_only_all_of(
         &mut self,
         schema: &Schema,
@@ -1177,9 +1167,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 let target = match member.reference.as_deref() {
                     Some(reference) => {
-                        let mut sibling = member.clone();
-                        sibling.reference = None;
-                        if schema_has_shape_constraint(&sibling) {
+                        if ref_siblings_bear_shape(member) {
                             return None;
                         }
                         self.ref_target_body(reference, &member.provenance)?
@@ -1212,11 +1200,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// Whether `schema` composes constraints whose `null` its own `type` alone does not settle: an
 /// `allOf`, a `oneOf` or `anyOf`, a `$ref` with shape-bearing siblings, or an `enum` or `const`.
 fn schema_is_composed(schema: &Schema) -> bool {
-    let ref_with_siblings = schema.reference.is_some() && {
-        let mut sibling = schema.clone();
-        sibling.reference = None;
-        schema_has_shape_constraint(&sibling)
-    };
+    let ref_with_siblings = schema.reference.is_some() && ref_siblings_bear_shape(schema);
     ref_with_siblings
         || (schema.reference.is_none()
             && (!schema.all_of.is_empty()

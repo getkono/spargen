@@ -15,7 +15,7 @@ use super::prune::{kind_edges, reachable_types};
 use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
-use super::shape::schema_has_shape_constraint;
+use super::shape::ref_siblings_bear_shape;
 use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -1273,9 +1273,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let (Some(name), SchemaOr::Schema(schema)) =
             (member_component_name(member, root), member)
         {
-            let mut sibling = schema.as_ref().clone();
-            sibling.reference = None;
-            let ty = if schema_has_shape_constraint(&sibling) {
+            let ty = if ref_siblings_bear_shape(schema) {
                 self.lower_schema_or(member, hint)?
             } else {
                 // The member itself never reaches `lower_schema_inner`, which reports this.

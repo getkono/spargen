@@ -6,10 +6,11 @@ use indexmap::IndexMap;
 use crate::ir::{Docs, JsonCategory, Prim, Ty, TypeGraph, TypeId, TypeKind, Union, UnionVariant};
 use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 
-use super::combine::schema_is_object_like;
 use super::meet::{same_ty, value_category, NoMeet};
 use super::nullability::non_nullable;
-use super::shape::schema_has_shape_constraint;
+use super::shape::{
+    ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
+};
 use super::strategy::retain_strategy;
 use super::{CategoryMask, LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling};
 
@@ -570,8 +571,7 @@ pub(super) fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCate
         || schema.enum_values.is_some()
         || schema.const_value.is_some()
         || !schema.all_of.is_empty()
-        || !schema.one_of.is_empty()
-        || !schema.any_of.is_empty()
+        || schema_has_union(schema)
         || schema.content_encoding.is_some()
         || schema.format.as_deref() == Some("binary");
     if establishes_elsewhere {
@@ -629,9 +629,7 @@ impl LowerCtx<'_, '_> {
         let Some(reference) = member.reference.as_deref() else {
             return false;
         };
-        let mut rest = member.as_ref().clone();
-        rest.reference = None;
-        if schema_has_shape_constraint(&rest) {
+        if ref_siblings_bear_shape(member) {
             return false;
         }
         let Some(target) = self.ref_target_body(reference, &member.provenance) else {
