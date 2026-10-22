@@ -10,7 +10,7 @@
 //!
 //! The crate is internally partitioned into subsystems with a declared dependency DAG. Each
 //! subsystem module records its allowed dependencies in a machine-readable `//! layer-deps:`
-//! header; `spargen/tests/layering.rs` diffs those declarations against the actual inter-module
+//! header; `spargen/tests/layering/` diffs those declarations against the actual inter-module
 //! `use` edges and fails on any edge not in the table below.
 //!
 //! | Subsystem | May depend on |
@@ -36,6 +36,8 @@
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
 //! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
+//! `test_support`, compiled only into the test build, holds helpers the subsystems' in-crate tests
+//! share; the lint admits it by name as neither.
 
 mod diag;
 
@@ -51,6 +53,8 @@ mod runtime_contract;
 mod source;
 mod support;
 mod surface;
+#[cfg(test)]
+mod test_support;
 
 use std::str::FromStr;
 

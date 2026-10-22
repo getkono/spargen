@@ -57,7 +57,7 @@ run = [
 [tasks.deny]
 # CI's `deny` job runs this command byte for byte, on the cargo-deny version `[tools]` pins
 # above (`every_mise_task_runs_exactly_what_its_ci_job_runs` and
-# `ci_installs_exactly_the_tool_versions_mise_pins` in spargen/tests/corpus_manifest.rs). `--all-features` is load-bearing: rustls enters the graph
+# `ci_installs_exactly_the_tool_versions_mise_pins` in spargen/tests/repo_gates/). `--all-features` is load-bearing: rustls enters the graph
 # only under it, so without it an advisory against rustls is clean here and failing there (#141).
 # `--locked` audits the committed `Cargo.lock`: without it a skewed lockfile was silently rewritten,
 # and a missing one written, and the rewrite was what got audited (#146).
@@ -235,7 +235,7 @@ run = [
 description = "Verify the published crates stay self-contained"
 # CI's `package` job also runs `cargo publish --dry-run -p spargen-macro` against the workspace
 # `spargen`, but only outside release-plz PRs; that step stays CI-only (see the `package` row of
-# `PAIRINGS` in spargen/tests/corpus_manifest.rs). `cargo publish --dry-run` refuses a dirty tree,
+# `PAIRINGS` in spargen/tests/repo_gates/pairing.rs). `cargo publish --dry-run` refuses a dirty tree,
 # as it would in CI's fresh checkout.
 run = [
   "cargo publish --dry-run -p spargen",

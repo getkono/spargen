@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::{ChangeKind, Impact};
+use crate::test_support::{read_repo_file, repo_root};
 
 /// Every change kind, produced by an exhaustive match so a new variant does not compile until
 /// it is listed — which is what makes the coverage assertions below closed over the enum.
@@ -382,33 +383,6 @@ fn skip_string(bytes: &[u8], open: usize, hashes: usize) -> usize {
             Some(_) => at += 1,
         }
     }
-}
-
-/// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
-/// carries no workspace manifest. Gating on the *workspace marker* rather than on the file
-/// under inspection is deliberate: inside the repository a missing `tests/diff.rs` must fail
-/// the test, not silently skip it.
-fn repo_root() -> Option<std::path::PathBuf> {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    manifest.contains("[workspace]").then_some(root)
-}
-
-/// Read a file the repository must carry, failing — never skipping — when it is absent.
-/// Only call this under [`repo_root`], which is what decides whether the file must exist.
-fn read_repo_file(root: &std::path::Path, relative: &str) -> String {
-    std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
-        panic!("{relative} must exist in the repository, and reading it failed: {error}")
-    })
-}
-
-/// Once the workspace gate has passed, a missing input is a failure: a skip keyed on the file
-/// itself turned a renamed `tests/diff.rs` into a silent pass (#409).
-#[test]
-#[should_panic(expected = "must exist in the repository")]
-fn a_missing_repository_file_fails_rather_than_skips() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    read_repo_file(root, "tests/no-such-suite.rs");
 }
 
 /// One node of a synthetic type tree: every [`crate::ir::TypeKind`] `canon_ty` renders, with

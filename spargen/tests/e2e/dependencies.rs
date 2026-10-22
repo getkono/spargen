@@ -233,7 +233,7 @@ fn workspace_graph_package_names(features: &[&str]) -> std::collections::BTreeSe
 
 /// The `deny` gate audits under `--all-features` because that is what puts a TLS stack in the
 /// audited graph, and TLS advisories (RUSTSEC-2026-0285) are found only through one that is
-/// there. `the_deny_gate_states_the_feature_scope_it_audits` in `corpus_manifest.rs` pins the
+/// there. `the_deny_gate_states_the_feature_scope_it_audits` in `repo_gates/supply_chain.rs` pins the
 /// flag; this pins the property the flag stands for. Restructuring `remote-fetch`, dropping
 /// reqwest's `rustls-tls`, or removing the `rustls` floor would otherwise leave the flag in place
 /// and the TLS advisory audit vacuous with every gate green (#227).
