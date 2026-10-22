@@ -10,7 +10,7 @@ use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind
 use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
-use super::meet::{carries_key, merge_field_default, NoMeet};
+use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::{
@@ -370,11 +370,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if required.contains(&field.name.wire) {
                 field.required = true;
             }
-            if field.required {
-                if let Some(default) = &mut field.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(field);
         }
 
         // A property repeated by three or more members is met pair by pair, and each meet replaces

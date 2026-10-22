@@ -396,11 +396,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         existing.required = existing.required || field.required;
         Some(intersection.map(|met| {
             existing.ty = met;
-            if existing.required {
-                if let Some(default) = &mut existing.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(existing);
         }))
     }
 
@@ -681,12 +677,19 @@ pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
         *existing = other.clone();
     }
     existing.required = required;
-    if required {
-        if let Some(default) = &mut existing.default {
+    drop_applied_default_if_required(existing);
+    true
+}
+
+/// Keep a required field consistent with its default: a serde default fires only for an absent
+/// optional field, so a required field drops its applied `default`, which stays documented in
+/// rustdoc.
+pub(super) fn drop_applied_default_if_required(field: &mut Field) {
+    if field.required {
+        if let Some(default) = &mut field.default {
             default.applied = None;
         }
     }
-    true
 }
 
 /// The `default` the merged field of an intersection keeps for a repeated property, given every
