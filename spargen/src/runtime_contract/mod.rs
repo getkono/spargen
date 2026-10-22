@@ -217,9 +217,9 @@ fn audit_in(
 ) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
-    // The file every diagnostic below names, absolutized so the reader can open it. A report whose
-    // text never said which manifest was read could not be told apart from one about the right
-    // file (#71, #339): a discovery mismatch then reads as a specific, wrong complaint.
+    // The file every diagnostic below names, absolutized so the reader can open it. Naming it is
+    // what tells a report about the wrong manifest apart from one about the right file (#71,
+    // #339), so a discovery mismatch does not read as a specific, wrong complaint.
     let audited = absolutized(manifest_path);
     let audited = audited.as_path();
     let manifest = match read_toml(manifest_path, "consumer manifest") {
@@ -376,8 +376,8 @@ const AUDITED_MANIFEST: &str = "; audited manifest: ";
 ///
 /// It is the only constructor, so no message can leave out which file it is about. It rides on the
 /// message rather than the `help:` remedy because `generate_api!` reports only code, message, and
-/// pointer: the macro path is where a manifest-discovery mismatch hid (#71), and a remedy would
-/// never have reached that report. A message that already names this file in its own clause (a
+/// pointer: a manifest-discovery mismatch shows on the macro path (#71), and a remedy does not
+/// reach that report. A message that already names this file in its own clause (a
 /// read failure of the consumer manifest, or a self-rooted workspace declaring no entry) still
 /// carries the suffix: the clause names the file in its role there, and the suffix names it in the
 /// same shape on every message.

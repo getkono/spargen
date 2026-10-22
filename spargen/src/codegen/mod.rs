@@ -77,8 +77,8 @@ pub(crate) struct GeneratedCode {
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
 /// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
-/// `W003`, lower to typed per-operation response enums).
+/// lowering, so it takes no `Diagnostics` (multi-status responses lower to typed per-operation
+/// response enums).
 pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> GeneratedCode {
     let uses_streams = api.uses_streams();
     // The date mapping is off when the `time` knob is, in which case those primitives stay `String`

@@ -253,8 +253,8 @@ fn check_native_target(
         return;
     }
 
-    // With one counting table every message reads exactly as it always has; with several, each
-    // says which table it is about.
+    // With one counting table a message names no table; with several, each says which table it
+    // is about.
     let several = counting.len() > 1;
     let mut resolved = Vec::new();
     let mut all_resolved = true;
@@ -335,9 +335,8 @@ fn check_declaration<'v>(
         })
         .flatten();
     if inherited && workspace_declaration.is_none() {
-        // Name where the lookup actually went. The original report of this diagnostic could not
-        // tell "the workspace has no such entry" from "spargen never found the workspace", and the
-        // remedies for those are opposite.
+        // Name where the lookup actually went, so the message tells "the workspace has no such
+        // entry" from "spargen never found the workspace": the remedies for those are opposite.
         let origin = match check.origin {
             WorkspaceOrigin::Resolved(path) => {
                 format!("`{path}` declares no `{}` there", dependency.name)
@@ -420,7 +419,7 @@ fn check_declaration<'v>(
             dependency.name
         )));
     }
-    // The mirror of the rule above, and the one that was missing: generated code names these
+    // The mirror of the rule above: generated code names these
     // crates unconditionally, with no `cfg` to hide behind. Declaring one `optional = true` — even
     // wired into `default` — leaves a feature resolution (`--no-default-features`, or a dependent
     // that turns defaults off) in which the generated module references a crate that is not in the

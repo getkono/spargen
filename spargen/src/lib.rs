@@ -428,7 +428,8 @@ fn prepend(diagnostics: &mut Vec<Diagnostic>, leading: &[Diagnostic]) {
 ///
 /// When called from a build script, this also runs the consumer-manifest dependency audit, so
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
-/// package to audit — `spargen deps` prints the required `[dependencies]` block instead.
+/// package to audit — `spargen deps` prints the dependency tables generated output
+/// requires instead.
 pub fn check(spec: &Spec) -> Report {
     let result = run_mode(spec, PipelineMode::Requirements);
     let mut report = result.report;
