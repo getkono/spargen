@@ -18,7 +18,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// replaces the type its schema lowered to passes that lowering too: a `format: binary`
     /// parameter's bytes type, which the client takes as a `String` copy, and a response header
     /// `W011` skips (#927); a union's sole real member, which the union re-emits under its own
-    /// name; and every `patternProperties` value after the first, whose type the map takes (#926).
+    /// name; each member of a union left one variant, and its sibling keywords' own lowering,
+    /// when the union re-emits that variant's kind (#987); and every `patternProperties` value
+    /// after the first, whose type the map takes (#926).
     ///
     /// Unlike the meets' own inserts ([`Self::elide_meet_intermediates`]), these come from lowering
     /// a schema, so a memo may hold one: a component, remote or bundle target a branch `$ref`s and

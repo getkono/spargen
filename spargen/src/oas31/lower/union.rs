@@ -120,10 +120,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let union = self.lower_union_with_sibling(schema, hint, members, mode, sibling);
         // A multi-category `type` array lowers to the union it synthesizes only to be met with each
         // branch, so that union and its branches are emitted only where a meet kept one of them as
-        // it is (#677).
-        if multi_category_types(schema).is_some()
-            && union.is_some_and(|union| !sibling_lowered.contains(&union.id.0))
-        {
+        // it is (#677). A union left one variant is that variant's kind, re-emitted under this
+        // schema's name, so the sibling keywords' own lowering (`…Constraint`) is emitted only
+        // where that kind reaches it too (#987).
+        let left_one_variant = |ctx: &Self, union: Ty| {
+            ctx.graph
+                .get(union.id)
+                .is_some_and(|def| !matches!(def.kind, TypeKind::Union(_)))
+        };
+        if union.is_some_and(|union| {
+            !sibling_lowered.contains(&union.id.0)
+                && (multi_category_types(schema).is_some() || left_one_variant(self, union))
+        }) {
             self.elide_unused_union_lowering(sibling_lowered);
         }
         union
@@ -498,6 +506,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
         // a `oneOf` drops them where `null` matches another branch too (#657).
         let mut own_nulls: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
+        // The ids each member's own lowering inserted, whether or not it stays a variant: a union
+        // left one variant re-emits that variant's kind, and leaves them unused unless it reaches
+        // them (#987).
+        let mut member_lowerings: Vec<std::ops::Range<u32>> = Vec::new();
         // Whether `null` satisfies a branch met with the sibling, by the one decision
         // ([`Self::null_admission`]): for a meet that lowered empty, and for the branches a
         // `oneOf` counts `null` in.
@@ -512,6 +524,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
             let lowered = lowered_from..self.graph_mark();
+            member_lowerings.push(lowered.clone());
             // A variant that is a back-edge to *this* union — the member's type is the very
             // reservation this schema will occupy — is the whole union, so it constrains nothing and
             // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
@@ -893,8 +906,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut ty = self.insert_schema_type(schema, hint, kind);
             // So is the sole variant's own type, whose kind the union now is, unless something
             // else names it, as a union the one decision collapses to one variant leaves it
-            // ([`Self::settle_null_admission`]).
+            // ([`Self::settle_null_admission`]). So is every member's own lowering, the
+            // `…Variant<N>` types with whatever they built on the way (`…Item`), whether its
+            // member is the surviving variant, one the sibling excluded, or one the merge folded
+            // into it (#987).
             self.elide_unused_union_lowering(inner.id.0..inner.id.0 + 1);
+            for lowered in member_lowerings {
+                self.elide_unused_union_lowering(lowered);
+            }
             ty.nullable = inner.nullable || nullable;
             ty.boxed = inner.boxed;
             return Some(ty);
