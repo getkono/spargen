@@ -716,10 +716,13 @@ components:
 "##;
 
 /// Whether the `wasm32-unknown-unknown` target's std is installed, so the wasm gate can run. When
-/// `rustup` reports the installed targets and it is absent, the gate self-skips rather than failing
-/// on a toolchain gap; without `rustup` we assume the target is present (CI installs it).
+/// `rustup` reports the installed targets and it is absent, the gate self-skips on a developer's
+/// machine rather than failing on a toolchain gap; without `rustup` we assume the target is
+/// present. Under CI (`CI` set, as GitHub Actions sets it) an absent target panics instead: every
+/// job that runs a wasm gate installs the target, so a skip there would report a gate that never
+/// ran as passed.
 fn wasm32_target_installed() -> bool {
-    match Command::new("rustup")
+    let installed = match Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
     {
@@ -727,5 +730,11 @@ fn wasm32_target_installed() -> bool {
             .lines()
             .any(|line| line.trim() == "wasm32-unknown-unknown"),
         _ => true,
-    }
+    };
+    assert!(
+        installed || std::env::var_os("CI").is_none(),
+        "`CI` is set but the `wasm32-unknown-unknown` target is not installed, so the wasm gate \
+         cannot run: add `targets: wasm32-unknown-unknown` to this job's toolchain step"
+    );
+    installed
 }
