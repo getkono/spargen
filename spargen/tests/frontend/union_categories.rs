@@ -307,3 +307,69 @@ fn a_type_array_naming_integer_narrows_a_number_branch() {
         );
     }
 }
+
+/// A branch that is itself a union with a variant accepting `null` is restated by a `type` array
+/// only where the array lists `null` too. `X` is a `$ref`-sibling `oneOf` whose two `maxLength: 0`
+/// branches merge into one variant that `null` matches through the untyped one alone, so that
+/// variant is `Option<_>` (as `ref_siblings` pins for the same branches in a property), and `X`, a
+/// component, keeps it. Beside `[string, integer]`, which admits no `null`, `X` is met with the
+/// array rather than kept: the branch's payload is a union of the meet's own, none of whose
+/// variants is `Option<_>`, so `Pick` admits no `null` through it. Beside
+/// `[string, integer, 'null']` the array restates `X`: the payload is `X` itself, with its one
+/// `Option<_>` variant.
+#[test]
+fn a_type_array_without_null_meets_a_branch_whose_variant_admits_it() {
+    // (the array, the union keyword, how many variants of the branch's payload are `Option<_>`)
+    let rows = [
+        ("[string, integer]", "anyOf", 0),
+        ("[string, integer]", "oneOf", 0),
+        ("[string, integer, 'null']", "anyOf", 1),
+        ("[string, integer, 'null']", "oneOf", 1),
+    ];
+    for (array, keyword, nullable_variants) in rows {
+        let schemas = format!(
+            "    Pick: {{ type: {array}, {keyword}: [ {{ $ref: '#/components/schemas/X' }}, {{ \
+             type: integer }} ] }}\n    X: {{ $ref: '#/components/schemas/NS', oneOf: [ {{ \
+             maxLength: 0 }}, {{ type: string, maxLength: 0 }}, {{ enum: [abc] }} ] }}\n    NS: \
+             {{ type: [string, 'null'] }}\n"
+        );
+        let (report, code) = generate_with_code(&with_schemas("3.1.0", &schemas));
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schemas}: {report:#?}"
+        );
+        let types = types_module(&code);
+        let variants = enum_variants(&types, "Pick");
+        let branch = variants
+            .first()
+            .and_then(|variant| variant.split_once("(Box<"))
+            .map(|(_, payload)| payload.trim_end_matches(">)").to_owned())
+            .unwrap_or_else(|| panic!("{schemas}: no boxed `Pick` variant: {variants:?}"));
+        // `X` itself is a union with an `Option<_>` variant, whichever array is beside it.
+        assert_eq!(
+            enum_variants(&types, "X")
+                .iter()
+                .filter(|variant| variant.contains("(Option<"))
+                .count(),
+            1,
+            "{schemas}:\n{types}"
+        );
+        // Restated, the branch is `X` itself; met, it is a union of the meet's own.
+        assert_eq!(
+            branch == "X",
+            nullable_variants == 1,
+            "{schemas}: the branch is `{branch}`:\n{types}"
+        );
+        let payload = enum_variants(&types, &branch);
+        assert_eq!(payload.len(), 2, "{schemas}: `{branch}`:\n{types}");
+        assert_eq!(
+            payload
+                .iter()
+                .filter(|variant| variant.contains("(Option<"))
+                .count(),
+            nullable_variants,
+            "{schemas}: `{branch}` is {payload:?}:\n{types}"
+        );
+    }
+}

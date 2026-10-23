@@ -1,7 +1,11 @@
 use crate::diag::{JsonPointer, Span};
 
-/// A JSON/YAML number. Preserved as one of three concrete kinds; arbitrary precision is not
-/// supported. Out-of-range wire values surface later as Decode errors, never silent wraps.
+/// A JSON/YAML number, held as one of three concrete kinds. Both parsers classify an integer
+/// literal as `Int` when it fits `i64`, else `UInt` when it fits `u64`, else `Float`; a literal with
+/// a fraction or exponent is a `Float`, and so is a YAML scalar with an explicit `!!float` tag,
+/// integer text included (`!!float 5` is `Float(5.0)`). A literal that overflows to a non-finite
+/// `f64` (`1e999`) is rejected as out of range, and a wide integer stored as a `Float` keeps only
+/// `f64` precision.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Number {
     /// A signed integer that fits `i64`.
@@ -104,7 +108,10 @@ impl SpannedValue {
         Some(current)
     }
 
-    /// Remove the value at `pointer`, returning it when it existed.
+    /// Remove the value at `pointer`, returning it when it existed. `None` when `pointer` is the
+    /// root (empty), lacks a leading `/`, holds an invalid `~` escape, or addresses nothing: a
+    /// missing parent, a parent that is neither object nor array, an absent key, or an array index
+    /// that is not a number or is out of bounds. Of duplicate keys, the first is removed.
     pub(crate) fn remove_pointer(&mut self, pointer: &JsonPointer) -> Option<SpannedValue> {
         if pointer.as_str().is_empty() {
             return None;

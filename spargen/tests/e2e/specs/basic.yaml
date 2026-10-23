@@ -1,0 +1,1684 @@
+
+openapi: 3.1.0
+info:
+  title: Basic
+  version: 1.0.0
+servers:
+  - url: https://example.com/api
+  # A templated server whose URL splits into single-character literal segments (`:` and `/`).
+  # Rendering one of those with `push_str` trips `clippy::single_char_add_str`, and generated code
+  # must pass `-D warnings` in the consuming crate — which the clippy gate below enforces.
+  - url: https://{host}:{port}/{stage}
+    variables:
+      host: { default: api.example.com }
+      port: { default: "443" }
+      stage:
+        default: v1
+        enum: [v1, v2]
+paths:
+  /files:
+    get:
+      operationId: readFile
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  # Required parameters reserve their natural identifiers before generator-owned bindings are
+  # allocated. This compile-verifies collisions with every request-building local plus the fixed
+  # optional-params and request-body arguments; `/files` above pins the wire behavior.
+  /binding-collisions:
+    get:
+      operationId: bindingCollisions
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema: { type: string }
+        - name: url
+          in: query
+          required: true
+          schema: { type: string }
+        - name: request
+          in: header
+          required: true
+          schema: { type: string }
+        - name: cookies
+          in: cookie
+          required: true
+          schema: { type: string }
+        - name: optional
+          in: query
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  /signature-binding-collisions:
+    post:
+      operationId: signatureBindingCollisions
+      parameters:
+        - name: body
+          in: query
+          required: true
+          schema: { type: string }
+        - name: params
+          in: query
+          required: true
+          schema: { type: string }
+        - name: optional
+          in: query
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollisionPayload"
+      responses:
+        "204": { description: No Content }
+  /params/{ids}:
+    get:
+      operationId: serializeParams
+      parameters:
+        - name: ids
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: array
+            items: { type: integer }
+        - name: workflow_id
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/WorkflowId"
+        - name: X-Flags
+          in: header
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: labels
+          in: query
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: compact
+          in: query
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: session
+          in: cookie
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
+  # The payload shape `MissingCredential` carries is `Vec<Vec<&str>>` rather than a flat list
+  # because OpenAPI `security` is a disjunction of conjunctions: "A and B, or C" and "A, B, or C"
+  # flatten to the same three names while demanding different credentials. This operation is the
+  # only place in the repository where a *generated* client is asked to produce that shape — a
+  # two-scheme conjunction, a single-scheme alternative, and an alternative whose other member is
+  # `mutualTLS` and so must be omitted from the report.
+  /conjunction:
+    get:
+      operationId: getConjunction
+      security:
+        - tenant: []
+          bearer: []
+        - apiKey: []
+        - mtls: []
+          tenant: []
+      responses:
+        "204": { description: No Content }
+  /users/{id}:
+    get:
+      operationId: getUser
+      security:
+        - bearer: []
+        - apiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        # Optional nullable query param: `type: [integer, "null"]` lowers to a nullable
+        # `Ty`, which `ty_tokens` renders as `Option<i64>`. The params struct must NOT wrap it again
+        # (`Option<Option<i64>>` would not serialize — `Option<i64>: !Display`).
+        - name: filter
+          in: query
+          schema:
+            type: [integer, "null"]
+        # Rust-keyword-named param: must escape to `r#type` (field, arg, setter, wire name `type`),
+        # not a bare `type` keyword token (which failed to parse -> a compile_error! safety net).
+        - name: type
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+  # Multi-status responses: TWO success statuses (200/201) with different bodies lower
+  # to a typed `GetMultiResponse` enum, and TWO error statuses (404/409) with different bodies to a
+  # typed `GetMultiError` enum — no `serde_json::Value`, no `serde(untagged)`. Decode dispatches by
+  # HTTP status. Here we compile-verify the enums and construct/deserialize their variants.
+  /multi:
+    get:
+      operationId: getMulti
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        # A documented bodyless success alongside 2+ bodied successes → a payload-free unit variant
+        # not silently dropped, decoded without reading a body.
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+  # Two error statuses sharing ONE body schema plus a documented bodyless 401 → a `GetSharedError`
+  # enum whose bodied variants agree on `types::Problem`, so it gets `body()` and implements
+  # `ApiErrorBody` (the unit variant answers `None`). `getMulti` above is the heterogeneous
+  # counterpart and gets neither.
+  /shared:
+    get:
+      operationId: getShared
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape over a NULLABLE component, plus a bodied `default`: every bodied variant is
+  # `Option<Box<types::MaybeProblem>>`, `body()` answers `None` for a `null` payload, and the
+  # `Default` variant is reached like any other status.
+  /maybe:
+    get:
+      operationId: getMaybe
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+  # Two bodied successes AND a bodied `default`. `default` is never a success variant: the success
+  # enum is exactly `Status200`/`Status201` (an exhaustive match in `tests/blocking.rs` fails to
+  # compile if another appears), an undocumented 2xx is `Error::UnexpectedStatus` rather than a
+  # `default` decode, and the `default` body is the sole error body, so the error type is the
+  # single-body newtype `GetMultiDefaultError(types::Problem)`.
+  /multi-default:
+    get:
+      operationId: getMultiDefault
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The other two success shapes beside the same bodied `default` (issue #151): one bodied success
+  # is the plain `MultiOk`, and one bodyless success is `()`. Neither shape names a status, so an
+  # undeclared 2xx is that one success — decoded as `MultiOk`, or `()` with the body discarded —
+  # never a `default` decode, exactly as the enum shape above never decodes one.
+  /plain-default:
+    get:
+      operationId: getPlainDefault
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /unit-default:
+    get:
+      operationId: getUnitDefault
+      responses:
+        "204":
+          description: No Content
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # A BODYLESS `default` beside one bodied error (issues #127, #204): two error entries, so the
+  # error type is the enum `GetBodylessDefaultError { Status404(_), Default }`, and a `500` is the
+  # unit `Default` variant — never a `Problem` decoded from whatever body it carried.
+  /bodyless-default:
+    get:
+      operationId: getBodylessDefault
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          description: Anything else
+  # The same bodyless `default` beside two bodied errors: now an enum, in which the `default`
+  # survives as the trailing unit variant `Default`, so a `500` is `Error::Api` with no body parse.
+  /bodyless-default-multi:
+    get:
+      operationId: getBodylessDefaultMulti
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          description: Anything else
+  # Issue #204: a bodyless `403` beside one bodied `404` is its own unit variant of
+  # `GetBodylessSiblingError`, where the single-body newtype dropped it and a real `403` arrived as
+  # `Error::UnexpectedStatus`.
+  /bodyless-sibling:
+    get:
+      operationId: getBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape with the one error body in XML: the enum arm decodes it through the XML codec
+  # (`support::decode_xml_body`), since a lone XML error body is not the rejected two-XML-bodies
+  # shape.
+  /xml-bodyless-sibling:
+    get:
+      operationId: getXmlBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/xml-receipt"
+  # A bodyless `304` beside a bodied `default` and no success status: the `304` is its own unit
+  # variant ahead of `Default`, where it once matched `default` and had its empty body decoded.
+  /conditional:
+    get:
+      operationId: getConditional
+      responses:
+        "304":
+          description: Not Modified
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
+  # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
+  # `GetMaybeError` alike.
+  /maybe-single:
+    get:
+      operationId: getMaybeSingle
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+  # Two error statuses whose bodies are different schemas generating the SAME Rust type: a `$ref`
+  # to a string component and an inline string. Their type ids differ, but both are `String`, so
+  # `GetAliasSharedError` still gets `body()` and implements `ApiErrorBody`.
+  /alias-shared:
+    get:
+      operationId: getAliasShared
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlainMessage"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                type: string
+  # multipart/form-data request body: the body is an object whose properties are the form
+  # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
+  # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
+  # generated method builds a `reqwest::multipart::Form` (compile-verifies the multipart emit AND that
+  # the synthesized Cargo.toml enabled reqwest's `multipart` feature and bytes' `serde` feature).
+  /upload:
+    post:
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, caption]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                caption:
+                  type: string
+                count:
+                  type: integer
+                tags:
+                  type: array
+                  items:
+                    type: string
+            # A pinned part header: sent on `caption`'s part, beside its default `text/plain`.
+            encoding:
+              caption:
+                headers:
+                  X-Part-Kind:
+                    schema: { type: string, const: caption text }
+      responses:
+        "204":
+          description: No Content
+  # Binary in parameter / non-multipart body positions (regression guard): `format: binary`
+  # on a param has no faithful byte rendering, so it is represented as `String` (remapped) and stays
+  # renderable via `to_string()`; a `format: binary` text/plain body lowers to `bytes::Bytes` and is
+  # sent as a raw byte body (`request.body(body.clone())`), never `.to_string()` (`Bytes: !Display`).
+  # Compile-verified: without the fixes these positions generate with zero diagnostics yet fail to
+  # compile (the forbidden silent non-compile).
+  /blob/{token}:
+    get:
+      operationId: getBlob
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            format: binary
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            format: binary
+      responses:
+        "204":
+          description: No Content
+  /raw:
+    post:
+      operationId: postRaw
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: No Content
+  # A byte string that admits `null` (#104), in every position where `null` has a representation:
+  # a JSON member, both ways, and a multipart part become `Option<bytes::Bytes>` whichever way the
+  # `null` is spelled, and a query parameter an `Option<String>` (the binary parameter remap). The
+  # `type: [string, 'null']` spelling used to lose its `null` here; a *raw* body admitting `null`
+  # is rejected instead (`E009`, pinned in `frontend/bodies_binary.rs`).
+  /nullable-bytes:
+    post:
+      operationId: postNullableBytes
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: [string, 'null'], format: binary }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [digest, previous]
+              properties:
+                digest: { type: [string, 'null'], contentEncoding: base64 }
+                previous: { oneOf: [ { type: string, contentEncoding: base64 }, { type: 'null' } ] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [digest]
+                properties:
+                  digest: { type: [string, 'null'], contentEncoding: base64 }
+  /nullable-parts:
+    post:
+      operationId: postNullableParts
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: [string, 'null'], format: binary }
+                thumb: { oneOf: [ { type: string, format: binary }, { type: 'null' } ] }
+      responses:
+        "204":
+          description: No Content
+  # Raw textual/vendor and binary response codecs: these bodies are not JSON documents. The
+  # generated dispatch must decode UTF-8 text through a JSON string value (preserving typed string
+  # schemas) and return binary bodies as bytes without attempting serde_json parsing.
+  /render:
+    get:
+      operationId: renderHtml
+      responses:
+        "200":
+          description: rendered HTML
+          content:
+            text/html:
+              schema: { type: string }
+  /octocat:
+    get:
+      operationId: getOctocat
+      responses:
+        "200":
+          description: octocat art
+          content:
+            application/octocat-stream:
+              schema: { type: string }
+  /download:
+    get:
+      operationId: downloadRaw
+      responses:
+        "200":
+          description: raw bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  # The OpenAPI 3.1 spelling of the same thing: `format: binary` is gone, so an empty (always-true)
+  # Schema Object — and an absent one — say "any octets", as do media ranges naming a binary family.
+  # All of them must reach `bytes::Bytes`, and the alternatives here decode identically so no `W014`
+  # is reported. `Content-Range` is documented with `content:` rather than `schema:`, which is how a
+  # ranged response routinely spells it and which must still produce a typed accessor.
+  /ranged:
+    put:
+      operationId: putRanged
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: {} }
+      responses:
+        "206":
+          description: partial content
+          headers:
+            Content-Range:
+              content:
+                text/plain: { schema: { type: string } }
+          content:
+            video/*: { schema: {} }
+            audio/*: {}
+            application/octet-stream: { schema: {} }
+  # The shape from #82: an image proxy whose only honest key is the family, and an upload that
+  # names its exact type. Both are `bytes::Bytes`; the upload goes out as `Content-Type: image/png`.
+  /artwork/{id}:
+    get:
+      operationId: getArtwork
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: the image
+          content:
+            image/*: { schema: {} }
+    put:
+      operationId: putArtwork
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: {} }
+      responses:
+        "204": { description: stored }
+  /text-error:
+    get:
+      operationId: getTextError
+      deprecated: true
+      responses:
+        "204": { description: success }
+        "400":
+          description: textual failure
+          content:
+            text/plain:
+              schema: { type: string }
+  /raw-multi:
+    get:
+      operationId: getRawMulti
+      responses:
+        "200":
+          description: text success
+          content:
+            text/plain:
+              schema: { type: string }
+        "201":
+          description: binary success
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400":
+          description: text error
+          content:
+            text/plain:
+              schema: { type: string }
+        "409":
+          description: binary error
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  # XML request + response bodies: both lower to typed structs and are
+  # serialized/decoded through the embedded quick-xml codec — compile-verifies that the synthesized
+  # Cargo.toml enabled quick-xml (the `xml` feature) and that the embedded `support::xml` helpers
+  # (`to_xml`, `decode_success_xml`) compile. `id` carries `xml.attribute` (serde `@id`) and `code`
+  # an `xml.name` rename; both are honored, an unsupported `xml.namespace` on `note` warns (W006).
+  /xml/order:
+    post:
+      operationId: submitOrder
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema:
+              $ref: "#/components/schemas/XmlOrder"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/xml-receipt"
+  # Request bodies whose media key is not their codec's canonical name: a JSON Merge Patch body is
+  # serialized as JSON and a `text/xml` body as XML, and each goes out under the `Content-Type` it
+  # declares rather than `application/json` / `application/xml`.
+  /merge-patch/{id}:
+    patch:
+      operationId: patchMergeDocument
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/JsonMeta"
+      responses:
+        "204": { description: patched }
+  /xml/legacy-order:
+    post:
+      operationId: submitLegacyOrder
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema:
+              $ref: "#/components/schemas/XmlOrder"
+      responses:
+        "204": { description: accepted }
+  # JSON body carrying `xml` metadata (regression guard): the schema has `xml.attribute`
+  # and `xml.name` hints but is used only by a JSON operation. The format-agnostic serde rename must
+  # NOT be applied (it would corrupt JSON), so `JsonMeta` keeps its `id`/`sku` wire names — the
+  # suppression is acknowledged as W006. Round-trip is compile+run verified below.
+  /json/meta:
+    post:
+      operationId: postJsonMeta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonMeta"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonMeta"
+  # Streaming response: a `text/event-stream` success response lowers to a streaming
+  # operation whose method returns `support::EventStream<ChatChunk>` instead of `ResponseValue<T>`.
+  # Compile-verifies both the streaming method signature and the embedded runtime `EventStream`
+  # (framing + standard Stream plus inherent async `next`) and conditional stream dependencies.
+  /chat/stream:
+    get:
+      operationId: streamChat
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
+  # The two non-SSE stream framings, JSON Lines and RFC 7464 JSON Text Sequences, so the
+  # `support::Framing::Ndjson` and `support::Framing::JsonSequence` arms the generator emits are
+  # compiled and linted in the consumer crate like the SSE one above.
+  /chat/lines:
+    get:
+      operationId: streamChatLines
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
+  /chat/sequence:
+    get:
+      operationId: streamChatSequence
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json-seq:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
+  # The scheme kinds `/conjunction` leaves out: HTTP Basic and an API key carried in the query
+  # string or in a cookie, as three alternatives, so every `support::AuthKind` the generator emits
+  # is compiled and linted in the consumer crate.
+  /alternate-auth:
+    get:
+      operationId: getAlternateAuth
+      security:
+        - basic: []
+        - queryKey: []
+        - cookieKey: []
+      responses:
+        "204": { description: No Content }
+  # The complete RFC 6570 style table on ONE request, so the wire test below can assert every
+  # style, `explode` setting, and `allowReserved` in a single request line. The invariant under
+  # test: a style's delimiters are emitted literally while every data byte is percent-encoded, so a
+  # joining `,` stays distinguishable from a `,` inside a value.
+  /styles/{matrix}/{label}/{raw}:
+    get:
+      operationId: serializeStyles
+      parameters:
+        - name: matrix
+          in: path
+          required: true
+          style: matrix
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: label
+          in: path
+          required: true
+          style: label
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        # A path value carrying every character that would change the route if it were spliced in
+        # raw: a segment separator, a query separator, a fragment separator, and a stray percent.
+        - name: raw
+          in: path
+          required: true
+          schema: { type: string }
+        - name: space
+          in: query
+          style: spaceDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: pipe
+          in: query
+          style: pipeDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: deep
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            $ref: "#/components/schemas/DeepFilter"
+        # `allowReserved: true` means reserved characters pass through unencoded — the one place a
+        # `/` in a query value is NOT `%2F`.
+        - name: reserved
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  # `content:`-typed path and header parameters, one per codec. A path value is rendered through its
+  # media codec and then percent-encoded as one opaque segment, so a `/`, `?`, or `#` inside it (a
+  # JSON string member included) can never re-target the request; a header value is sent verbatim,
+  # as every header value is.
+  /content-params/{text}/{json}:
+    get:
+      operationId: serializeContentParams
+      parameters:
+        - name: text
+          in: path
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: json
+          in: path
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+        - name: X-Text
+          in: header
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: X-Json
+          in: header
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+      responses:
+        "204": { description: No Content }
+  # An `application/x-www-form-urlencoded` body with an Encoding Object per property. `tags` opts
+  # into RFC 6570 mode (`style` present ⇒ `contentType` is inert); `blob` stays in media-type mode
+  # and is JSON-encoded because its declared content type says so.
+  /forms:
+    post:
+      operationId: submitForm
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [name, tags, blob]
+              properties:
+                name: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                blob:
+                  $ref: "#/components/schemas/DeepFilter"
+            encoding:
+              tags:
+                style: pipeDelimited
+                explode: false
+              blob:
+                contentType: application/json
+      responses:
+        "204": { description: No Content }
+  # Typed `additionalProperties` on form-urlencoded and multipart bodies (#697): the overflow
+  # members are sent after the declared properties, each in its type's default encoding, as the
+  # JSON codec sends them. The form overflow is a string (a text field); the multipart overflow is
+  # an integer array (a JSON part under `application/json`).
+  /forms/additional:
+    post:
+      operationId: submitFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [a]
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  # A nullable form body with a typed overflow: the overflow map's length is read through the
+  # `Option`, so this compiles only if that branch of the generated call does.
+  /form/additional/nullable:
+    post:
+      operationId: submitNullableFormAdditional
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: [object, 'null']
+              properties:
+                a: { type: string }
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: No Content }
+  /upload/additional:
+    post:
+      operationId: uploadAdditional
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [caption]
+              properties:
+                caption: { type: string }
+              additionalProperties:
+                type: array
+                items: { type: integer }
+      responses:
+        "204": { description: No Content }
+  # Documented response headers whose schemas are NAMED components. The generated header struct
+  # lives beside `Client`, not inside `types`, so an unqualified type path here does not resolve —
+  # a bug that only a named (non-primitive) header schema exposes, and only at compile time.
+  /documented-headers:
+    get:
+      operationId: documentedHeaders
+      responses:
+        "204":
+          description: No Content
+          headers:
+            X-Rate-Limit:
+              required: true
+              description: Requests remaining in the current window.
+              schema:
+                $ref: "#/components/schemas/WorkflowId"
+            X-Trace-Ids:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Mode"
+  # No success status declared, only a `404` and a bodied `default` (issue #115): `default` is then
+  # the only documentation of a 2xx, so it types the success side (`DeepFilter`) as well as the
+  # error enum's catch-all, instead of the success side collapsing to `()` and dropping the body.
+  /no-success:
+    get:
+      operationId: getNoSuccess
+      responses:
+        "404":
+          description: Not Found
+          content:
+            text/plain:
+              schema: { type: string }
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeepFilter"
+  # One bodied success beside a documented bodyless `204` (issue #121): two outcomes, so the success
+  # type is `GetMaybeEmptyResponse` with a `Status204` unit variant rather than a plain `MultiOk`
+  # that would decode the `204`'s empty body as a malformed `MultiOk`.
+  /maybe-empty:
+    get:
+      operationId: getMaybeEmpty
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "204":
+          description: No Content
+  # The same shape over an XML body: the enum arm decodes it through the XML codec.
+  /xml/maybe-empty:
+    get:
+      operationId: getXmlMaybeEmpty
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/xml-receipt"
+        "204":
+          description: No Content
+  # An exact `200` beside an overlapping `2XX` range, each with its own body: dispatch is exact
+  # before range, so a `200` is `Status200` and any other 2xx is `Status2xx`.
+  /exact-or-range:
+    get:
+      operationId: getRanged
+      responses:
+        "2XX":
+          description: Any other success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+  # The error-side counterpart of `getRanged`: an exact `409` beside an overlapping `4XX` range,
+  # each with its own body, declared range first so the emitted precedence cannot be declaration
+  # order. A `409` is `Status409`, any other 4xx is `Status4xx`, and a 5xx is undocumented.
+  /error-exact-or-range:
+    get:
+      operationId: getErrorRanged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "4XX":
+          description: Any other client error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    tenant:
+      type: apiKey
+      in: header
+      name: X-Tenant
+    mtls:
+      type: mutualTLS
+    basic:
+      type: http
+      scheme: basic
+    queryKey:
+      type: apiKey
+      in: query
+      name: api_key
+    cookieKey:
+      type: apiKey
+      in: cookie
+      name: session
+  schemas:
+    # A flat object, so `deepObject` is defined for it (the specification leaves nested objects
+    # and arrays inside a deepObject value undefined, and spargen rejects those).
+    DeepFilter:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        limit: { type: integer }
+    CollisionPayload:
+      type: string
+    BlankDocs:
+      description: ""
+      type: string
+    MarkdownDocs:
+      description: |-
+        *   A list item
+        continuation text
+
+        > A quoted warning
+        continuation text
+      type: string
+    WorkflowId:
+      description: "Workflow identifier\taccepted as a numeric id or file name."
+      oneOf:
+        - type: integer
+        - type: string
+    Refined:
+      allOf:
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: number }
+            status: { type: string }
+            marker: { type: [string, "null"] }
+            labels:
+              type: array
+              items: { type: [string, "null"] }
+            steps:
+              type: array
+              items: { type: [object, "null"] }
+            empty_only:
+              type: array
+              items: { type: string }
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: integer }
+            status: { type: string, enum: [queued, complete] }
+            marker: { type: "null" }
+            labels:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+            empty_only:
+              type: array
+              items: { type: "null" }
+    # An optional property whose member types cannot meet is typed uninhabited, and the applied
+    # `default` one member declares for it must not survive: a serde default provider returning
+    # `Some("a")` for an uninhabited field does not compile. Both spellings of the conjunction —
+    # inline `allOf` members, and a `$ref` with sibling `properties` — are held here.
+    ConflictDefaultTarget:
+      type: object
+      properties:
+        x: { type: string, default: a }
+    ConflictDefault:
+      allOf:
+        - type: object
+          properties:
+            x: { type: string, default: a }
+        - type: object
+          properties:
+            x: { type: integer }
+    ConflictDefaultSibling:
+      $ref: "#/components/schemas/ConflictDefaultTarget"
+      properties:
+        x: { type: integer }
+    # Issue #404: a meet that narrows an optional property re-types the default a member wrote for
+    # the wider type. `valid` becomes the enum's variant and `ratio` an integer; `bad` and
+    # `fraction` are no value of the narrowed type and lose their default (`W005`). A provider
+    # returning `"a".to_owned()` for an enum field, or `2.5` for an `i64`, does not compile.
+    NarrowDefaultBase:
+      type: object
+      properties:
+        valid: { type: string, default: a }
+        bad: { type: string, default: zzz }
+        ratio: { type: number, default: 3 }
+        fraction: { type: number, default: 2.5 }
+    NarrowDefaultEnum:
+      type: object
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    NarrowDefault:
+      allOf:
+        - $ref: "#/components/schemas/NarrowDefaultBase"
+        - $ref: "#/components/schemas/NarrowDefaultEnum"
+    NarrowDefaultSibling:
+      $ref: "#/components/schemas/NarrowDefaultBase"
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    # Issue #432: a meet keeps the default either side declares, whichever side comes first, and
+    # two different defaults keep the same one in either order (`hello`; `world` is `W005`).
+    MergedDefaultNarrow:
+      type: object
+      properties:
+        p: { type: string }
+    MergedDefaultBase:
+      type: object
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultOther:
+      type: object
+      properties:
+        p: { type: string, default: world }
+    MergedDefault:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultNarrow"
+        - $ref: "#/components/schemas/MergedDefaultBase"
+    MergedDefaultSibling:
+      $ref: "#/components/schemas/MergedDefaultNarrow"
+      properties:
+        p: { type: string, default: hello }
+    MergedDefaultClash:
+      allOf:
+        - $ref: "#/components/schemas/MergedDefaultOther"
+        - $ref: "#/components/schemas/MergedDefaultBase"
+    # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
+    # only valid form, `null` included among the rejected values.
+    ForbiddenProperty:
+      type: object
+      properties:
+        x: false
+    # A nullable union over `false`: `null` is the one value it admits, so here the `Option` itself
+    # is the type and `{"x": null}` must still decode.
+    NullOnlyProperty:
+      type: object
+      properties:
+        x:
+          anyOf:
+            - false
+            - type: "null"
+    # Optional, non-nullable properties of every kind of type. A present `null` is a value none of
+    # these schemas admits, so it is rejected wherever the property's own type rejects it rather
+    # than decoding as absent; absence still decodes as `None`. The untyped `anything` admits
+    # `null` and keeps it as a present value, and the nullable `maybe` keeps collapsing `null`.
+    OptionalFields:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer }
+        flag: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+        mode: { $ref: "#/components/schemas/Mode" }
+        nested: { $ref: "#/components/schemas/ForbiddenProperty" }
+        choice:
+          oneOf:
+            - type: string
+            - type: integer
+        colour: { type: string, default: red }
+        anything: {}
+        maybe: { type: [string, "null"] }
+    StringLiteral:
+      type: string
+      enum: [special]
+    AnyString:
+      anyOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    AnyNumber:
+      anyOf:
+        - type: number
+        - type: integer
+    OneOverlap:
+      oneOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    BroadOwner:
+      type: object
+    DetailedOwner:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+    AnyOwner:
+      anyOf:
+        - $ref: "#/components/schemas/BroadOwner"
+        - $ref: "#/components/schemas/DetailedOwner"
+    ContentFile:
+      type: object
+      required: [type, content]
+      properties:
+        type: { type: string, enum: [file] }
+        content: { type: string }
+    ContentLink:
+      type: object
+      required: [type, target]
+      properties:
+        type: { type: string, enum: [symlink] }
+        target: { type: string }
+    MixedContent:
+      oneOf:
+        - type: array
+          items: { type: string }
+        - $ref: "#/components/schemas/ContentFile"
+        - $ref: "#/components/schemas/ContentLink"
+      discriminator:
+        propertyName: type
+        mapping:
+          file: "#/components/schemas/ContentFile"
+          symlink: "#/components/schemas/ContentLink"
+    User:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        external_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        name:
+          type: string
+        tree:
+          $ref: "#/components/schemas/TreeNode"
+        category:
+          $ref: "#/components/schemas/Category"
+        dict:
+          $ref: "#/components/schemas/Dict"
+        alias_node:
+          $ref: "#/components/schemas/AliasNode"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        # Discriminated union: an internally-tagged enum over object `$ref` variants.
+        pet:
+          $ref: "#/components/schemas/Pet"
+        animal:
+          $ref: "#/components/schemas/LooseAnimal"
+        # Undiscriminated but provably-disjoint union (string vs array JSON category): an enum with a
+        # content-inspecting custom Deserialize/Serialize — no wrapper on the wire.
+        alias:
+          $ref: "#/components/schemas/StringOrList"
+        # Nullable union variant: the string variant is `{type: [string, null]}`;
+        # its nullability is HOISTED to the union so this field is `Option<...>` and a `null` payload
+        # resolves to `None` rather than erroring in the custom Deserialize.
+        notes:
+          $ref: "#/components/schemas/StringListOrNull"
+        refined:
+          $ref: "#/components/schemas/Refined"
+        any_string:
+          $ref: "#/components/schemas/AnyString"
+        any_number:
+          $ref: "#/components/schemas/AnyNumber"
+        one_overlap:
+          $ref: "#/components/schemas/OneOverlap"
+        any_owner:
+          $ref: "#/components/schemas/AnyOwner"
+        mixed_content:
+          $ref: "#/components/schemas/MixedContent"
+    # Discriminated union: `petType` selects the object variant. Cat DECLARES `petType` as a required
+    # property (the shape that broke serde internal tagging — "missing field petType"); the custom
+    # buffer-to-Value Deserialize hands the WHOLE value to the variant, so Cat keeps its own tag.
+    Cat:
+      type: object
+      required: [petType, name]
+      properties:
+        petType:
+          type: string
+        name:
+          type: string
+    # Dog does NOT declare `petType`; on serialize the custom Serialize re-inserts the tag.
+    Dog:
+      type: object
+      required: [bark]
+      properties:
+        bark:
+          type: boolean
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+      discriminator:
+        propertyName: petType
+        # Two keys name `Cat`; `cat`, the first, is the one serialization writes.
+        mapping:
+          cat: "#/components/schemas/Cat"
+          dog: "#/components/schemas/Dog"
+          kitty: Cat
+    # An inline member no mapping entry names has no discriminator value (W011); Cat and Dog keep
+    # their implicit tags, and the inline member is tried only when the tag names neither.
+    LooseAnimal:
+      anyOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+        - type: object
+          required: [petType, fins]
+          properties:
+            petType: { type: string }
+            fins: { type: integer }
+      discriminator:
+        propertyName: petType
+    # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
+    # or wrapper — the active variant's inner value is emitted directly.
+    StringOrList:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+    # Nullable-variant union: the string member is nullable, hoisted to make the whole union nullable.
+    StringListOrNull:
+      oneOf:
+        - type: [string, "null"]
+        - type: array
+          items:
+            type: string
+    # Self-recursive: `parent` is a direct back-edge (→ Option<Box<TreeNode>>) and `children`
+    # recurses through an array (→ Vec<TreeNode>; the Vec supplies the indirection). Without
+    # boxing the direct `parent` back-edge the
+    # generated struct would have infinite size and fail to compile.
+    TreeNode:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+        parent:
+          $ref: "#/components/schemas/TreeNode"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeNode"
+    # Mutually recursive: Category <-> Item. One of the two edges in the cycle is boxed.
+    Category:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        item:
+          $ref: "#/components/schemas/Item"
+    Item:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+        category:
+          $ref: "#/components/schemas/Category"
+    # Mutual recursion through a nullable **alias** component: `AliasNode.parent` refers to
+    # `MaybeAliasNode`, whose whole body is "`AliasNode`, or null" and which therefore names no
+    # shape of its own. The alias resolves to its target's still-open reservation, so the back-edge
+    # must be BOXED — `Option<Box<AliasNode>>`. `Option<AliasNode>` is an infinitely sized type and
+    # does not compile, and this suite is the only one in the repository that compiles generated
+    # output: a `frontend/` string assertion over the emitted source cannot be relied on to notice
+    # the difference, because the embedded runtime supplies `Option<Box<…>>` of its own. Two
+    # separate mistakes in the alias's target selection each emitted that type with every other
+    # suite green, which is why the shape lives here rather than only there.
+    AliasNode:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+        parent:
+          $ref: "#/components/schemas/MaybeAliasNode"
+    MaybeAliasNode:
+      oneOf:
+        - $ref: "#/components/schemas/AliasNode"
+        - type: "null"
+    # Self-recursive through additionalProperties (→ BTreeMap<String, Dict>; the map supplies
+    # the indirection).
+    Dict:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/Dict"
+    # Null-mixed enum: the `null` member is stripped and the remaining homogeneous string
+    # scalars lower as a real Rust enum; the `"null"` in the type array makes every use nullable, so
+    # a field of this type is emitted as `Option<Priority>`. An absent or `null` value deserializes
+    # to `None`; a string value to the matching variant.
+    Priority:
+      type: [string, "null"]
+      enum: [low, medium, high, null]
+    # Propagation of component nullability through `$ref`: a REQUIRED field whose type is
+    # the nullable `Priority` component must still be `Option<Priority>` (present, but may be `null`),
+    # and an array of the component must be `Vec<Option<Priority>>` (a null element is accepted).
+    # Before propagation these emitted `Priority` / `Vec<Priority>` and rejected a conforming `null`.
+    Ticket:
+      type: object
+      required: [priority, history]
+      properties:
+        priority:
+          $ref: "#/components/schemas/Priority"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/Priority"
+    # `default` on the component schema itself → documented on the generated `Mode` type.
+    Mode:
+      type: string
+      enum: [auto, manual]
+      default: auto
+    # Exercises schema `default`: representable scalar defaults on optional fields are wired via
+    # generated serde providers; a required field's default is rustdoc-only.
+    Settings:
+      type: object
+      required: [retries]
+      properties:
+        color:
+          type: string
+          default: red
+        enabled:
+          type: boolean
+          default: true
+        ratio:
+          type: number
+          default: 1.5
+        retries:
+          type: integer
+          default: 3
+        # Out-of-range for i32: must NOT be serde-wired (rustdoc-only, W005). If a regression wired
+        # `Some(5000000000)` into `Option<i32>`, the generated crate's `cargo check` would fail.
+        wide:
+          type: integer
+          format: int32
+          default: 5000000000
+        mode:
+          $ref: "#/components/schemas/Mode"
+          default: auto
+    # `patternProperties` composed with an explicit property: the declared `host` field plus a typed
+    # overflow map (`#[serde(flatten)] BTreeMap<String, String>`) for the pattern-matched keys. The
+    # key regex is validation-only (W001) and not enforced by the map.
+    Headers:
+      type: object
+      properties:
+        host:
+          type: string
+      patternProperties:
+        "^x-": { type: string }
+    # Object-ness comes *only* from `patternProperties` (no `type`, no `properties`): still a struct
+    # with empty fields and a typed overflow map, not an untyped `Any`.
+    Tags:
+      patternProperties:
+        "^tag-": { type: string }
+    # A declared property literally named `additional` alongside a typed overflow map: the synthetic
+    # flatten field must be allocated in the field scope and disambiguated, or two `pub additional:`
+    # fields would collide and the generated crate would fail to compile.
+    Bag:
+      type: object
+      properties:
+        additional:
+          type: string
+      patternProperties:
+        "^x-": { type: integer }
+    # allOf merge: `Account` flattens a `$ref` base (id, required), an inline member
+    # (label, required) and the enclosing schema's own sibling property (owner, optional) into ONE
+    # struct. All fields must be present and correctly typed in the generated `Account` type.
+    AccountBase:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+    Account:
+      type: object
+      properties:
+        owner:
+          type: string
+      allOf:
+        - $ref: "#/components/schemas/AccountBase"
+        - type: object
+          required: [label]
+          properties:
+            label:
+              type: string
+    # Distinct bodies for the multi-status `getMulti` operation.
+    MultiOk:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: string
+    MultiCreated:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: integer
+    NotFoundError:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+    ConflictError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+    # The one body shared by every documented error status of `getShared`.
+    Problem:
+      type: object
+      required: [title, detail]
+      properties:
+        title:
+          type: string
+        detail:
+          type: string
+    # A nullable error body: `getMaybe` and `getMaybeSingle` reference it, so every use is
+    # `Option<MaybeProblem>` and a `null` payload is a documented, body-less answer.
+    MaybeProblem:
+      type: [object, "null"]
+      required: [title]
+      properties:
+        title:
+          type: string
+    # A string component `getAliasShared` pairs with an inline string body: two schemas, one
+    # generated body type.
+    PlainMessage:
+      type: string
+    # Streamed item type for the `/chat/stream` SSE operation.
+    ChatChunk:
+      type: object
+      required: [delta]
+      properties:
+        delta:
+          type: string
+    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element, and the
+    # root `xml.name` names the element the body serializes as (a serde container rename).
+    XmlOrder:
+      type: object
+      xml: { name: order }
+      required: [id, sku]
+      properties:
+        id:
+          type: integer
+          xml: { attribute: true }
+        sku:
+          type: string
+    # XML response body: `code` renamed via `xml.name`; `note` carries an unsupported
+    # `xml.namespace` hint (→ W006, still generates). With no root `xml.name`, the component name,
+    # which is no Rust identifier, names the root element of the `XmlReceipt` struct.
+    xml-receipt:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          xml: { name: "ReceiptCode" }
+        note:
+          type: string
+    # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as
+    # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
+    # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
+    # hint genuinely has no effect, so it warns rather than rejecting. Its root `xml.name` is
+    # applied all the same: a container rename reaches no JSON wire.
+    JsonMeta:
+      type: object
+      xml: { name: meta }
+      required: [id, sku]
+      properties:
+        id:
+          type: integer
+          xml: { attribute: true }
+        sku:
+          type: string
+          xml: { name: "ProductSku" }
+        note:
+          type: string
+          xml: { namespace: "urn:example:receipt" }

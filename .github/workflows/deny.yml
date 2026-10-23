@@ -27,9 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
-      # The cargo-deny and cargo-audit versions `[tools]` pins in mise.toml, not the copy an action bundles: the
-      # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
-      # inputs composed an argv this repository could only partly state (#229).
+      # The cargo-deny and cargo-audit versions `[tools]` pins in mise.toml, installed here rather
+      # than run through an action, whose bundled version moves with its ref and whose inputs
+      # compose an argv this file would not state.
       # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
       - uses: taiki-e/install-action@v2
         with:

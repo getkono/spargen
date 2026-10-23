@@ -268,6 +268,65 @@ fn the_macro_tracks_the_config_file_it_applied() {
     assert_eq!(preview.source_files, [spec_path, config]);
 }
 
+/// Each `[[omit]]` entry here sets a well-spelled key that the kind its other keys select does
+/// not use: the key, and the kind its presence dispatch picks.
+const FOREIGN_OMIT_KEYS: &[(&str, &str, &str)] = &[
+    ("path = \"/pets\"\nfile = \"extra.yaml\"\n", "file", "path"),
+    ("path = \"/pets\"\nname = \"Pet\"\n", "name", "path"),
+    (
+        "method = \"get\"\npath = \"/pets\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "operation",
+    ),
+    (
+        "method = \"get\"\npath = \"/pets\"\nname = \"Pet\"\n",
+        "name",
+        "operation",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nmethod = \"get\"\n",
+        "method",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\npath = \"/pets\"\n",
+        "path",
+        "component",
+    ),
+    (
+        "component = \"schema\"\nname = \"Pet\"\nfile = \"extra.yaml\"\n",
+        "file",
+        "component",
+    ),
+    (
+        "pointer = \"/components/schemas/Pet\"\nname = \"Pet\"\n",
+        "name",
+        "pointer",
+    ),
+];
+
+#[test]
+fn an_omit_entry_with_a_key_its_kind_does_not_use_is_rejected() {
+    // Presence dispatch once dropped these keys silently, so `file` beside `path` omitted the
+    // root document's path rather than failing (#730).
+    let temp = tempfile::tempdir().unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let config = root.join("spargen.toml");
+    for (entry, key, kind) in FOREIGN_OMIT_KEYS {
+        std::fs::write(&config, format!("[[omit]]\n{entry}")).unwrap();
+        let error = spargen::Spec::new(root.join("openapi.yaml"))
+            .config_file(&config)
+            .expect_err(&format!("`{key}` beside a {kind} rule must not load"))
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "omit rule #1: `{key}` does not apply to a {kind} rule"
+            )),
+            "{entry}: {error}"
+        );
+    }
+}
+
 #[cfg(feature = "cli")]
 fn knobs_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -447,8 +506,8 @@ fn diff(dir: &Path, old: &Path, new: &Path, extra: &[&str]) -> Output {
 #[test]
 fn open_narrowing_is_a_flag_and_a_config_key() {
     // What it changes in emitted code is pinned by
-    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in `e2e.rs`. Here the
-    // change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
+    // `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed` in
+    // `e2e/open_narrowing.rs`. Here the change is read off `diff`, which discovers each spec's `spargen.toml` beside it: the same
     // document in two directories, only the new one's config opening the narrowing.
     let temp = tempfile::tempdir().unwrap();
     let (closed_dir, open_dir) = (temp.path().join("closed"), temp.path().join("open"));
@@ -756,7 +815,7 @@ fn deps_reports_a_rejection_instead_of_a_block() {
 //
 // `W012`, `W013`, and `E024` are the facade's own diagnostics rather than the frontend's, so they
 // have no inline-spec fixture in `frontend/`. `W013` and `E024` are reachable from any plain
-// process; `W012` needs a real build script and lives in `e2e.rs` for that reason.
+// process; `W012` needs a real build script and lives in `e2e/manifest_audit.rs` for that reason.
 
 /// Generating outside a build script emits no rebuild triggers and skips the dependency audit.
 /// Under `Auto` that is a degradation worth saying out loud, not a silent one.

@@ -4,9 +4,10 @@
 //!
 //! ## Bring-your-own timing (no async timer in the runtime)
 //!
-//! The runtime has no async timer of its own and never pulls in `tokio`, so the *wait* between
-//! attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff as a boxed
-//! `Future` that the caller builds with their own runtime's timer (e.g. `tokio::time::sleep`).
+//! The runtime has no async timer of its own, and the retry path never pulls in `tokio`, so the
+//! *wait* between attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff
+//! as a boxed `Future` that the caller builds with their own runtime's timer (e.g.
+//! `tokio::time::sleep`).
 //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
 //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
 //! exponential backoff needs no runtime support either.
@@ -50,6 +51,7 @@ use std::time::Duration;
 
 use reqwest::{Request, Response, StatusCode};
 
+use crate::error::is_transient_status;
 use crate::transport::{ExecuteFuture, HttpBackend};
 use crate::{MaybeSend, MaybeSync, TransportError};
 
@@ -126,10 +128,7 @@ impl<'a> RetryOutcome<'a> {
     pub fn is_transient(&self) -> bool {
         match self {
             RetryOutcome::Transport(error) => error.is_transient(),
-            RetryOutcome::Response(response) => {
-                let status = response.status();
-                status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-            }
+            RetryOutcome::Response(response) => is_transient_status(response.status()),
         }
     }
 }
@@ -139,7 +138,7 @@ impl<'a> RetryOutcome<'a> {
 /// [`RetryBackend`] calls [`retry`](RetryPolicy::retry) after each attempt. Returning
 /// `Some(future)` means "retry after awaiting this future"; the future carries the backoff delay,
 /// built with the caller's own async timer (e.g. `tokio::time::sleep`) — this is how timing stays
-/// caller-owned and the runtime avoids a `tokio` dependency. Returning `None` stops retrying and the
+/// caller-owned and the retry path avoids a `tokio` dependency. Returning `None` stops retrying and the
 /// last outcome is returned.
 pub trait RetryPolicy: MaybeSend + MaybeSync {
     /// Called after attempt `attempt` (0-based) produced `outcome`. Return `Some(wait)` to retry

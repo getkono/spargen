@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
-use crate::ir::{MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
+use crate::ir::{Field, MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
 use crate::oas31::{JsonType, Schema, SchemaOr, XmlHints};
 
 use super::prune::reachable_types;
@@ -24,10 +24,15 @@ pub(super) struct RootXml {
     name: Option<String>,
     /// The hints with no faithful quick-xml mapping, as [`XmlField::unsupported`] spells them.
     unsupported: Vec<String>,
-    /// For a `$ref` whose siblings bear no shape, the type it resolved to and where the `$ref` was
-    /// written: such a schema inserts no definition of its own, so its site names none, and the
-    /// type is shared with every other use of the target.
-    target: Option<(TypeId, Provenance)>,
+    /// For a `$ref` whose siblings bear no shape, the type it resolved to: such a schema inserts
+    /// no definition of its own, so its site names none, and the type is shared with every other
+    /// use of the target.
+    target: Option<TypeId>,
+    /// The schema carrying the `xml` object, where its reports point.
+    at: Provenance,
+    /// For a composition member read by its keywords ([`LowerCtx::record_member_xml`]), the site
+    /// of the composition it was gathered into, where its merged type is looked for first.
+    holder: Option<XmlSite>,
 }
 
 /// The position an `xml` object is read in, which decides what its node type may be.
@@ -48,14 +53,72 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn record_root_xml(&mut self, schema: &Schema, hints: &XmlHints) {
         let (name, unsupported) = read_hints(schema, hints, XmlNode::Root);
         let site = self.xml_site(&schema.provenance);
+        let holder = self
+            .root_xml
+            .get(&site)
+            .and_then(|root| root.holder.clone());
         self.root_xml.insert(
             site,
             RootXml {
                 name,
                 unsupported,
                 target: None,
+                at: schema.provenance.clone(),
+                holder,
             },
         );
+    }
+
+    /// Read the `xml` object of `schema`, a composition member gathered by its keywords into the
+    /// composition [`Self::xml_holders`] names last. Such a member inserts no definition of its
+    /// own, so [`gate_xml_field_renames`] reports each of its hints against the type its
+    /// composition lowered to. A definition later lowered from the same schema reads it as a
+    /// root instead ([`Self::record_root_xml`]), keeping the holder.
+    pub(super) fn record_member_xml(&mut self, schema: &Schema) {
+        let Some(hints) = &schema.xml else {
+            return;
+        };
+        let (name, mut unsupported) = read_hints(schema, hints, XmlNode::Root);
+        // A `$ref` defaults to the node type `none`, under which `read_hints` gives no name; a
+        // name beside a member's `$ref` would still rename neither the target nor the merge.
+        if schema.reference.is_some() && name.is_none() && hints.name.is_some() {
+            unsupported.push("name".to_owned());
+        }
+        let site = self.xml_site(&schema.provenance);
+        let holder = self.xml_holders.last().cloned();
+        self.root_xml.entry(site).or_insert(RootXml {
+            name,
+            unsupported,
+            target: None,
+            at: schema.provenance.clone(),
+            holder,
+        });
+    }
+
+    /// Run `gather` with `schema` as the composition [`Self::record_member_xml`] attributes the
+    /// members it gathers to.
+    pub(super) fn with_xml_holder<T>(
+        &mut self,
+        schema: &Schema,
+        gather: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let site = self.xml_site(&schema.provenance);
+        self.xml_holders.push(site);
+        let result = gather(self);
+        self.xml_holders.pop();
+        result
+    }
+
+    /// Note that the composition [`Self::xml_holders`] names last merges `ty`, the type a `$ref`
+    /// member resolved to, so a member merged into `ty` is judged by that composition's type too.
+    pub(super) fn record_xml_merger(&mut self, ty: TypeId) {
+        let Some(holder) = self.xml_holders.last().cloned() else {
+            return;
+        };
+        let mergers = self.xml_mergers.entry(ty).or_default();
+        if !mergers.contains(&holder) {
+            mergers.push(holder);
+        }
     }
 
     /// Read the `xml` object of `schema`, a `$ref` whose siblings bear no shape and so resolved to
@@ -76,7 +139,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             RootXml {
                 name: None,
                 unsupported,
-                target: Some((target, schema.provenance.clone())),
+                target: Some(target),
+                at: schema.provenance.clone(),
+                holder: None,
             },
         );
     }
@@ -116,7 +181,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// on an unwrapped array, and a wrapped one is reported through its `wrapped`/`nodeType` hint. The
 /// hints that change the XML wire without a faithful quick-xml mapping are recorded here — an
 /// items' one under an `items.` prefix — and dispositioned in [`gate_xml_field_renames`], once it is
-/// known whether the owning type is ever serialized as XML at all.
+/// known whether the owning type is ever serialized as XML at all. Whether the property, or its
+/// items, is a `$ref` is recorded too ([`XmlField::by_reference`]): under OpenAPI 3.2 that field
+/// takes the referenced struct's element name, which is only known once the graph is final.
 pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     let SchemaOr::Schema(schema) = child else {
         return XmlField::default();
@@ -131,6 +198,16 @@ pub(super) fn field_xml(child: &SchemaOr) -> XmlField {
     if is_list(schema) {
         field.name = None;
     }
+    // Only a `$ref` whose node type is `none` (its default) defers to the referenced element: an
+    // explicit `nodeType: element` makes the reference itself an element, named after the property.
+    let node = field_items(schema).unwrap_or(schema);
+    let node_type = node
+        .xml
+        .as_ref()
+        .and_then(|hints| hints.node_type.as_deref());
+    field.by_reference =
+        node.reference.is_some() && node_type.is_none_or(|node_type| node_type == "none");
+    field.element_reference = node.reference.is_some() && node_type == Some("element");
     if let Some(items) = field_items(schema) {
         if let Some(hints) = &items.xml {
             let (name, unsupported) = read_hints(items, hints, XmlNode::Items);
@@ -193,8 +270,9 @@ fn read_hints(schema: &Schema, hints: &XmlHints, node: XmlNode) -> (Option<Strin
         // A field can be an attribute. A list element or a body's root element cannot.
         "attribute" => node == XmlNode::Property,
         // On an array this is precisely `wrapped: true` — it asks for an element wrapping the
-        // list, which is the representation quick-xml does not give us. On a `$ref` it names the
-        // element the referenced component already produces.
+        // list, which is the representation quick-xml does not give us. On a `$ref` it makes the
+        // reference an element of its own, named after the property rather than after the
+        // referenced component (`field_xml`), which a nested struct field already is.
         "element" => !is_array,
         "none" => defaults_to_none,
         _ => false,
@@ -231,7 +309,87 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
     )
 }
 
-/// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.
+/// The component name of a schema at `pointer` directly under `components.schemas`, unescaped: the
+/// element name OpenAPI infers for it. A schema anywhere else has none.
+fn component_name(pointer: &JsonPointer) -> Option<String> {
+    match pointer.tokens().as_slice() {
+        [components, schemas, name] if components == "components" && schemas == "schemas" => {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The emitted definitions a merged member's `xml` object at `site` is reported against: those at
+/// its composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any,
+/// in the same document; and, for each of those a `$ref` member of another composition merged
+/// ([`LowerCtx::record_xml_merger`]), that composition's, transitively. None where no definition
+/// encloses it.
+fn merged_into(
+    site: &XmlSite,
+    root: &RootXml,
+    emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+    xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
+) -> Vec<TypeId> {
+    let mut owners = match &root.holder {
+        Some((document, pointer)) => enclosing_emitted(document, Some(pointer), emitted_sites),
+        None => enclosing_emitted(&site.0, site.1.parent().as_ref(), emitted_sites),
+    };
+    let mut next = 0;
+    while let Some(&id) = owners.get(next) {
+        next += 1;
+        for (document, pointer) in xml_mergers.get(&id).into_iter().flatten() {
+            for merger in enclosing_emitted(document, Some(pointer), emitted_sites) {
+                if !owners.contains(&merger) {
+                    owners.push(merger);
+                }
+            }
+        }
+    }
+    owners
+}
+
+/// The emitted definitions at `pointer` in `document`, else at the nearest pointer above it that
+/// has any; none where no definition encloses it.
+fn enclosing_emitted(
+    document: &str,
+    pointer: Option<&JsonPointer>,
+    emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+) -> Vec<TypeId> {
+    let mut pointer = pointer.cloned();
+    while let Some(at) = pointer {
+        if let Some(ids) = emitted_sites.get(&(document.to_owned(), at.clone())) {
+            return ids.clone();
+        }
+        pointer = at.parent();
+    }
+    Vec::new()
+}
+
+/// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
+/// holds every element name it writes to. A component key is not held to it: `[a-zA-Z0-9._-]+`
+/// admits a leading digit, `-` or `.`.
+fn is_xml_name(name: &str) -> bool {
+    fn is_start(ch: char) -> bool {
+        matches!(ch,
+            ':' | 'A'..='Z' | '_' | 'a'..='z'
+            | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+            | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+            | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+    }
+    fn is_char(ch: char) -> bool {
+        is_start(ch)
+            || matches!(ch,
+                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+    }
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_start) && chars.all(is_char)
+}
+
+/// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on
+/// any type that is not XML-dedicated (`W006`), apply root `xml.name`s, and report each hint the
+/// codec cannot honour (`E009` on a type an XML body reaches, `W006` elsewhere).
 ///
 /// A serde `rename` applies to every serde format, so honoring an `xml.name`/`xml.attribute` hint on
 /// a struct field also rewrites that field's JSON wire name. That is only safe when the owning type
@@ -244,14 +402,23 @@ fn names_its_own_element(pointer: &JsonPointer) -> bool {
 /// It also settles each schema's root `xml` object (`root_xml`, less the sites a field reads): a
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
 /// whoever else uses the type, and the field name of an array property whose items are that struct
-/// (unless the items name their elements themselves), and every hint the codec cannot honour — a field's, an items', or a
-/// root's — is `E009` on a type an XML body reaches and `W006` elsewhere.
+/// (unless the items name their elements themselves); a component struct an XML body reaches with
+/// no root `xml.name` takes its component name as its XML root name, or reports it (`W006`) where
+/// it is no XML name; under OpenAPI 3.2 (`is_oas32`), a property that is a `$ref` to a struct, or
+/// an array property whose items are, takes that struct's XML root name as its field name; and
+/// every hint the codec cannot honour — a field's, an items', a root's, one beside a `$ref`
+/// ([`LowerCtx::record_ref_xml`]), or any on a composition member the merge consumed
+/// ([`LowerCtx::record_member_xml`], judged by the type the merge produced) — is `E009` on a type
+/// an XML body reaches and `W006` elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
     meet_locations: &HashMap<TypeId, Provenance>,
     root_xml: &HashMap<XmlSite, RootXml>,
     field_xml_sites: &HashSet<XmlSite>,
+    xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
+    is_oas32: bool,
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
@@ -280,18 +447,38 @@ pub(super) fn gate_xml_field_renames(
     }
     // A `$ref` with nothing but annotations beside it names its target's type, not a definition
     // of its own; ordered by site, which a hash map does not keep.
-    let mut ref_sites: Vec<(&XmlSite, &RootXml, TypeId, &Provenance)> = root_xml
+    let mut ref_sites: Vec<(&XmlSite, &RootXml, TypeId)> = root_xml
         .iter()
         .filter(|(site, _)| !field_xml_sites.contains(*site))
         .filter_map(|(site, root)| {
-            let (target, at) = root.target.as_ref()?;
-            (!root.unsupported.is_empty()).then_some((site, root, *target, at))
+            let target = root.target?;
+            (!root.unsupported.is_empty()).then_some((site, root, target))
         })
         .collect();
     ref_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
-    if !any_hint && root_sites.is_empty() && ref_sites.is_empty() {
-        return;
+    // A schema whose `xml` object no emitted definition keeps: a composition member merged into
+    // another type (an `allOf` member read by its keywords, a union branch merged away). It names
+    // no element of its own, so each of its hints, a name included, is reported against the type
+    // the merge produced: the nearest emitted definition at its composition's site or above it.
+    let mut emitted_sites: HashMap<XmlSite, Vec<TypeId>> = HashMap::new();
+    for (id, def) in graph.emitted() {
+        let site = (def.document.clone(), def.provenance.pointer.clone());
+        emitted_sites.entry(site).or_default().push(id);
     }
+    let mut merged_sites: Vec<(&XmlSite, &RootXml, Vec<TypeId>)> = root_xml
+        .iter()
+        .filter(|(site, root)| {
+            root.target.is_none()
+                && !field_xml_sites.contains(*site)
+                && !emitted_sites.contains_key(*site)
+                && (root.name.is_some() || !root.unsupported.is_empty())
+        })
+        .map(|(site, root)| {
+            let owners = merged_into(site, root, &emitted_sites, xml_mergers);
+            (site, root, owners)
+        })
+        .collect();
+    merged_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
 
     let mut xml_roots: Vec<TypeId> = Vec::new();
     let mut non_xml_roots: Vec<TypeId> = Vec::new();
@@ -317,6 +504,15 @@ pub(super) fn gate_xml_field_renames(
         for param in &operation.params {
             non_xml_roots.push(param.ty.id);
         }
+    }
+    // Cheap guard: no hint to settle and no XML body whose root element a component names.
+    if !any_hint
+        && root_sites.is_empty()
+        && ref_sites.is_empty()
+        && merged_sites.is_empty()
+        && xml_roots.is_empty()
+    {
+        return;
     }
 
     let xml_reachable = reachable_types(graph, &xml_roots);
@@ -372,15 +568,34 @@ pub(super) fn gate_xml_field_renames(
             ),
         ));
     }
+    for (_, root, owners) in merged_sites {
+        let mut unsupported = root.unsupported.clone();
+        if root.name.is_some() {
+            unsupported.push("name".to_owned());
+        }
+        unsupported_reports.push((
+            owners.iter().any(|id| xml_reachable.contains(id)),
+            root.at.clone(),
+            format!(
+                "`{}` on the `xml` object of a composition member merged into another type, which \
+                 names no element of its own",
+                unsupported.join("`, `")
+            ),
+        ));
+    }
     // A struct with an XML root name, reached as the items of an array property, is each element
     // of that list: OpenAPI 3.2 has a `$ref` item (node type `none`) produce the referenced
     // schema's own element. quick-xml writes a nested struct under the field's name and never
     // reads its container rename there, so the root name becomes the field's, unless the items
-    // already gave one. It is then a field rename like any other, suppressed below (`W006`) on an
-    // owner that is not exclusively XML.
+    // already gave one. Only an owner some XML body reaches takes it: on any other, the rename is
+    // derived rather than written and moves no wire, so it is not set at all. On an owner a non-XML
+    // body also reaches, it is a field rename like any other, suppressed below (`W006`). Under 3.2,
+    // items that are a `$ref` declared `nodeType: element` are an element of their own, named after
+    // the property, so they take no root name either.
     let view: &TypeGraph = graph;
     let item_names: Vec<(TypeId, usize, String)> = view
         .emitted()
+        .filter(|(id, _)| xml_reachable.contains(id))
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
                 return None;
@@ -392,7 +607,11 @@ pub(super) fn gate_xml_field_renames(
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(_, field)| field.xml.name.is_none() && !field.xml.attribute)
+                .filter(|(_, field)| {
+                    field.xml.name.is_none()
+                        && !field.xml.attribute
+                        && !(is_oas32 && field.xml.element_reference)
+                })
                 .filter_map(move |(index, field)| {
                     let TypeKind::Array(item) = &view.get(field.ty.id)?.kind else {
                         return None;
@@ -401,15 +620,176 @@ pub(super) fn gate_xml_field_renames(
                 })
         })
         .collect();
+    // Every field rename derived here rather than written by the author, by owner and field index:
+    // checked for a clash with its siblings' element names below, and named as derived if the
+    // shared-type suppression withholds it.
+    let mut derived: HashSet<(TypeId, usize)> = HashSet::new();
     for (id, index, name) in item_names {
         if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
             object.fields[index].xml.name = Some(name);
+            derived.insert((id, index));
         }
     }
-    for (_, root, target, at) in ref_sites {
+    // Without a root `xml.name`, OpenAPI infers a component schema's element name as the
+    // component's own name ("XML Node Names"), where quick-xml would write the Rust type's name.
+    // So a struct lowered from a schema directly under `components.schemas` takes that name as its
+    // XML root name; codegen writes it only where it differs from the struct's identifier. Only a
+    // struct some XML body reaches takes it: on any other, the name moves no wire. It is set after
+    // the item names above, which follow an explicit root `xml.name` only. A component key that is
+    // no XML name would make quick-xml refuse every serialization of the body at run time, so it
+    // is reported (`W006`) and not applied, and the struct keeps its Rust name.
+    let inferred: Vec<(TypeId, String, Provenance)> = graph
+        .emitted()
+        .filter(|(id, def)| {
+            xml_reachable.contains(id)
+                && matches!(def.kind, TypeKind::Struct(_))
+                && graph.xml_root_name(*id).is_none()
+        })
+        .filter_map(|(id, def)| {
+            let name = component_name(&def.provenance.pointer)?;
+            let at = meet_locations.get(&id).unwrap_or(&def.provenance).clone();
+            Some((id, name, at))
+        })
+        .collect();
+    for (id, name, at) in inferred {
+        if is_xml_name(&name) {
+            graph.set_xml_root_name(id, name);
+        } else {
+            Diagnostic::warning(Code::XmlHintIgnored, at)
+                .message(format!(
+                    "component name `{name}` is not an XML name, so the element name OpenAPI \
+                     infers from it is not applied: an XML body serializes this struct under its \
+                     generated Rust type name instead"
+                ))
+                .remedy(
+                    "give the schema a root `xml.name` that is an XML name (a letter, `_` or `:` \
+                     first, then letters, digits, `-`, `.`, `_` or `:`), or rename the component",
+                )
+                .emit(diags);
+        }
+    }
+    // OpenAPI 3.2 gives a `$ref` the node type `none`: it names no element, and the referenced
+    // schema's own element stands in its place — named by its root `xml.name`, or else by its
+    // component name. So a property that is a `$ref` to a struct, or an array property whose items
+    // are, takes that struct's XML root name as its field name, now that the inferred names above
+    // are set. OpenAPI 3.1 has no node types and names a property's element after the property, so
+    // there the field keeps its name (an array's items still follow an explicit root `xml.name`,
+    // above). A name the property or its items give themselves wins, and, as above, only an owner
+    // some XML body reaches takes it; on one a non-XML body also reaches it is suppressed below.
+    if is_oas32 {
+        let view: &TypeGraph = graph;
+        let ref_names: Vec<(TypeId, usize, String)> = view
+            .emitted()
+            .filter(|(id, _)| xml_reachable.contains(id))
+            .filter_map(|(id, def)| {
+                let TypeKind::Struct(object) = &def.kind else {
+                    return None;
+                };
+                Some((id, object))
+            })
+            .flat_map(|(id, object)| {
+                object
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| {
+                        field.xml.by_reference && field.xml.name.is_none() && !field.xml.attribute
+                    })
+                    .filter_map(move |(index, field)| {
+                        // An array's items are each its element; anything else is the element.
+                        let element = if let TypeKind::Array(item) = &view.get(field.ty.id)?.kind {
+                            item.id
+                        } else {
+                            field.ty.id
+                        };
+                        Some((id, index, view.xml_root_name(element)?.to_owned()))
+                    })
+            })
+            .collect();
+        for (id, index, name) in ref_names {
+            if let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+                object.fields[index].xml.name = Some(name);
+                derived.insert((id, index));
+            }
+        }
+    }
+    // A derived name can give two child elements of one struct the same name: two properties
+    // referencing one component, or a reference whose element name is another property's. serde
+    // would then read both fields from one element name, which quick-xml refuses as a duplicate
+    // field, so each derived name that clashes with a sibling's element name is withdrawn and
+    // reported (`W006`), and the field keeps its property name. Withdrawing one can expose another
+    // clash with a property name, so this runs until no derived name clashes. An owner a non-XML
+    // body also reaches is left to the suppression below, which withholds every rename on it.
+    let mut owners: Vec<TypeId> = derived
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !non_xml_reachable.contains(id))
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for id in owners {
+        let mut withdrawn: Vec<(String, String)> = Vec::new();
+        while let Some(TypeKind::Struct(object)) = graph.get_mut(id).map(|def| &mut def.kind) {
+            let element = |field: &Field| {
+                field
+                    .xml
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| field.name.wire.clone())
+            };
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for field in object.fields.iter().filter(|field| !field.xml.attribute) {
+                *counts.entry(element(field)).or_default() += 1;
+            }
+            let clashing: Vec<usize> = (0..object.fields.len())
+                .filter(|index| derived.contains(&(id, *index)))
+                .filter(|index| {
+                    let field = &object.fields[*index];
+                    field.xml.name.is_some() && counts[&element(field)] > 1
+                })
+                .collect();
+            if clashing.is_empty() {
+                break;
+            }
+            for index in clashing {
+                let field = &mut object.fields[index];
+                if let Some(name) = field.xml.name.take() {
+                    withdrawn.push((field.name.wire.clone(), name));
+                }
+                derived.remove(&(id, index));
+            }
+        }
+        if withdrawn.is_empty() {
+            continue;
+        }
+        let Some(def) = graph.get(id) else {
+            continue;
+        };
+        let fields: Vec<String> = withdrawn
+            .iter()
+            .map(|(property, name)| format!("property `{property}` (`{name}`)"))
+            .collect();
+        Diagnostic::warning(
+            Code::XmlHintIgnored,
+            meet_locations.get(&id).unwrap_or(&def.provenance).clone(),
+        )
+        .message(format!(
+            "the element name derived from the referenced schema is not applied to {}: it is \
+             the name of another child element of this struct, and two fields read from one \
+             element name cannot be told apart, so each keeps its property name as its element \
+             name",
+            fields.join(", ")
+        ))
+        .remedy(
+            "give the properties distinct `xml.name`s, or give the referenced schemas distinct \
+             root `xml.name`s",
+        )
+        .emit(diags);
+    }
+    for (_, root, target) in ref_sites {
         unsupported_reports.push((
             xml_reachable.contains(&target),
-            at.clone(),
+            root.at.clone(),
             format!(
                 "`{}` on the `xml` object beside a `$ref`, whose type every use of the target \
                  shares",
@@ -438,6 +818,7 @@ pub(super) fn gate_xml_field_renames(
     }
     for (serialized_as_xml, provenance, what) in unsupported_reports {
         if serialized_as_xml {
+            // E009 case: xml-hint
             Diagnostic::error(Code::UnsupportedMediaType, provenance)
                 .message(format!(
                     "unsupported XML hint(s) {what}: this type is serialized as XML, and ignoring \
@@ -461,10 +842,8 @@ pub(super) fn gate_xml_field_renames(
     // Two quite different situations reach the same suppression, and a consumer needs to tell them
     // apart. A type that is never reached from an XML body carries an inert hint: nothing on any
     // wire moves. A type reached from an XML body *and* a non-XML one is genuinely shared, and
-    // suppressing its hint changes what the XML body puts on the wire. The second became reachable
-    // for a sub-file schema only once one target started generating one type; before that the two
-    // uses were two types and the XML one kept its rename. Same code, same count — so the message
-    // has to carry the distinction or there is nothing to compare across an upgrade.
+    // suppressing its hint changes what the XML body puts on the wire. Both are one `W006` each,
+    // so the message carries the distinction.
     let to_suppress: Vec<(TypeId, bool)> = graph
         .emitted()
         .filter_map(|(id, def)| {
@@ -486,27 +865,60 @@ pub(super) fn gate_xml_field_renames(
             continue;
         };
         let provenance = meet_locations.get(&id).unwrap_or(&def.provenance).clone();
+        // A name derived from a referenced schema is no hint the author wrote, so the message
+        // names it as derived, and names the authored hints only where some field carries one.
+        let mut authored = false;
+        let mut derived_names: Vec<String> = Vec::new();
         if let TypeKind::Struct(object) = &mut def.kind {
-            for field in &mut object.fields {
+            for (index, field) in object.fields.iter_mut().enumerate() {
+                match &field.xml.name {
+                    Some(name) if derived.contains(&(id, index)) => {
+                        derived_names.push(format!("property `{}` (`{name}`)", field.name.wire))
+                    }
+                    Some(_) => authored = true,
+                    None => authored |= field.xml.attribute,
+                }
                 field.xml = XmlField::default();
             }
         }
-        let (message, remedy) = if shared_with_xml {
+        let shared_remedy = "declare a separate schema for the XML body if the rename is \
+                             required, so the two bodies stop sharing one generated type, or \
+                             accept the property's normal wire name";
+        let (message, remedy) = if !shared_with_xml {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
+                 so the hint cannot affect any wire format; the field keeps its normal wire name"
+                    .to_owned(),
+                "remove the `xml` hint, or use this schema as an XML body if the rename is \
+                 required",
+            )
+        } else if derived_names.is_empty() {
             (
                 "`xml.name`/`xml.attribute` not applied: this schema is shared between an XML body \
                  and a non-XML (e.g. JSON) body, and a serde rename applies to every format, so \
                  honoring the hint would rewrite the JSON wire name too. The field keeps its \
                  normal wire name — including in the XML body, whose element/attribute name is the \
-                 property name rather than the hint",
-                "declare a separate schema for the XML body if the rename is required, so the two \
-                 bodies stop sharing one generated type, or accept the property's normal wire name",
+                 property name rather than the hint"
+                    .to_owned(),
+                shared_remedy,
             )
         } else {
+            let hints = if authored {
+                "`xml.name`/`xml.attribute`, and "
+            } else {
+                ""
+            };
             (
-                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
-                 so the hint cannot affect any wire format; the field keeps its normal wire name",
-                "remove the `xml` hint, or use this schema as an XML body if the rename is \
-                 required",
+                format!(
+                    "{hints}the element name derived from the referenced schema for {} not \
+                     applied: this schema is shared between an XML body and a non-XML (e.g. JSON) \
+                     body, and a serde rename applies to every format, so applying it would \
+                     rewrite the JSON wire name too. The field keeps its normal wire name — \
+                     including in the XML body, whose element name is the property name rather \
+                     than the derived one",
+                    derived_names.join(", ")
+                ),
+                shared_remedy,
             )
         };
         Diagnostic::warning(Code::XmlHintIgnored, provenance)

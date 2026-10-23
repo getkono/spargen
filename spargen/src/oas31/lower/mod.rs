@@ -40,12 +40,15 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
-    Api, Docs, Info, JsonCategory, Operation, OperationId, ParamLoc, PathSegment, Ty, TypeGraph,
-    TypeId,
+    Api, Docs, Info, JsonCategory, Method, Operation, OperationId, ParamLoc, PathSegment, SchemeId,
+    SecuritySchemeDef, Ty, TypeGraph, TypeId,
 };
 use crate::name::synth_operation_id;
 
-use super::{Document, JsonType, ParameterObject, Resolver, ResponseObject, Schema, SchemaOr};
+use super::{
+    Document, JsonType, OperationObject, ParameterObject, PathItem, Resolver, ResponseObject,
+    Schema,
+};
 
 use combine::{Gathering, RecordedContribution};
 use defaults::retype_field_defaults;
@@ -79,19 +82,9 @@ fn resolved_identity(provenance: &Provenance) -> Option<String> {
 }
 
 /// `decide` of `target`, read once per [`resolved_identity`] in `memo` and replayed at every later
-/// use. `true` (deciding) is recorded before `decide` runs, so a walk that loops back to `target`
-/// ends there. A target with no span has no identity to key on and is decided un-memoised; the
-/// caller's depth bound still bounds it.
-fn memoised_decision(
-    memo: &RefCell<HashMap<String, bool>>,
-    target: &Schema,
-    decide: impl FnOnce() -> bool,
-) -> bool {
-    memoised_answer(memo, target, true, decide)
-}
-
-/// [`memoised_decision`] with `provisional` as the answer a walk that loops back to `target` reads
-/// while `target` is still being answered.
+/// use. `provisional` is recorded before `decide` runs, so a walk that loops back to `target` reads
+/// it there and ends. A target with no span has no identity to key on and is decided un-memoised;
+/// the caller's depth bound still bounds it.
 fn memoised_answer<T: Copy>(
     memo: &RefCell<HashMap<String, T>>,
     target: &Schema,
@@ -229,10 +222,9 @@ fn lower_pass(
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
+        union_member_stack: Vec::new(),
         gatherings: Vec::new(),
-        target_decides_null_memo: RefCell::new(HashMap::new()),
-        resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
-        admits_null_undecided_memo: RefCell::new(HashMap::new()),
+        wraps_union_memo: RefCell::new(HashMap::new()),
         null_admission_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
@@ -244,14 +236,16 @@ fn lower_pass(
         meet_locations: HashMap::new(),
         root_xml: HashMap::new(),
         field_xml_sites: HashSet::new(),
+        xml_holders: Vec::new(),
+        xml_mergers: HashMap::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        untyped_beside_null_member: None,
-        stated_nothing_took_null: None,
         held_untyped_warnings: None,
-        scalar_meet_value_variants: HashSet::new(),
+        scalar_meet_union: None,
+        scalar_meet_unmerged: HashSet::new(),
         union_variant_members: HashMap::new(),
         variant_meets: Vec::new(),
+        deferred_map_values: Vec::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -266,225 +260,22 @@ fn lower_pass(
         let Some(item) = resolve_path_item(item, resolver, ctx.diags) else {
             continue;
         };
-        let item = &item;
         for (method, operation) in &item.operations {
-            let path_template = parse_path_template(path);
-            let id = operation
-                .operation_id
-                .clone()
-                .unwrap_or_else(|| synth_operation_id(method, &path_template));
-            if !operation_ids.insert(id.clone()) {
-                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                    .message(format!(
-                        "operationId `{id}` is not unique within the API description"
-                    ))
-                    .emit(ctx.diags);
-            }
-
-            let mut params = Vec::new();
-            let mut merged_parameters: IndexMap<(String, String), ParameterObject> =
-                IndexMap::new();
-            for parameter in &item.parameters {
-                if let Some(parameter) = ctx.resolve_parameter(parameter) {
-                    let key = (parameter.location.clone(), parameter.name.clone());
-                    if merged_parameters.insert(key, parameter).is_some() {
-                        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                            .message("path-item parameters contain a duplicate name/location pair")
-                            .emit(ctx.diags);
-                    }
-                }
-            }
-            let mut operation_parameter_keys = HashSet::new();
-            for parameter in &operation.parameters {
-                if let Some(parameter) = ctx.resolve_parameter(parameter) {
-                    let key = (parameter.location.clone(), parameter.name.clone());
-                    if !operation_parameter_keys.insert(key.clone()) {
-                        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                            .message("operation parameters contain a duplicate name/location pair")
-                            .emit(ctx.diags);
-                    }
-                    // Operation-level parameters override the matching path-item parameter.
-                    merged_parameters.insert(key, parameter);
-                }
-            }
-            for parameter in merged_parameters.values() {
-                if let Some(parameter) = ctx.lower_parameter(parameter) {
-                    params.push(parameter);
-                }
-            }
-            let placeholders: HashSet<&str> = path_template
-                .segments
-                .iter()
-                .filter_map(|segment| match segment {
-                    PathSegment::Param(name) => Some(name.as_str()),
-                    PathSegment::Literal(_) => None,
-                })
-                .collect();
-            let path_parameters: HashSet<&str> = params
-                .iter()
-                .filter(|parameter| parameter.location == ParamLoc::Path)
-                .map(|parameter| parameter.name.as_str())
-                .collect();
-            if placeholders != path_parameters {
-                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                    .message(format!(
-                        "path template parameters {placeholders:?} do not match declared path \
-                         parameters {path_parameters:?}"
-                    ))
-                    .emit(ctx.diags);
-            }
-            let querystrings = params
-                .iter()
-                .filter(|parameter| parameter.location == ParamLoc::QueryString)
-                .count();
-            let named_queries = params
-                .iter()
-                .any(|parameter| parameter.location == ParamLoc::Query);
-            if querystrings > 1 || (querystrings == 1 && named_queries) {
-                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                    .message(
-                        "an operation may declare at most one `in: querystring` parameter and may \
-                         not combine it with `in: query` parameters",
-                    )
-                    .emit(ctx.diags);
-            }
-
-            let request_body = operation
-                .request_body
-                .as_ref()
-                .and_then(|body| ctx.resolve_request_body(body))
-                .and_then(|body| ctx.lower_request_body(&body));
-
-            let responses = ctx.lower_responses(&operation.responses);
-            // XML decode is scoped to the single-body success/error paths. An XML body beside a
-            // second bodied status on the same side — a response enum that decodes two or more
-            // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
-            // A lone XML success body beside a bodyless status is still that one body.
-            if responses.xml_in_multi_status() {
-                Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
-                    .message(
-                        "an application/xml (or text/xml) response body is only supported as an \
-                         operation's single bodied success or single bodied error response \
-                         (bodyless statuses beside it are fine); it cannot share a response enum \
-                         with a second bodied success or error status",
-                    )
-                    .remedy(
-                        "give the operation a single XML-bodied success/error response, use JSON \
-                         for the other bodied responses, or omit this API segment with \
-                         spargen::omit!",
-                    )
-                    .emit(ctx.diags);
-            }
-            // Streaming decode is scoped to the single bodied success (`EventStream<T>`). A stream
-            // anywhere else — an error status, a `default` (which is always offered to the error
-            // side), or a success enum beside a second bodied success — would be decoded as one
-            // whole JSON body, so it is rejected (narrowed `E009`) rather than misread on the wire.
-            if responses.stream_outside_single_success() {
-                Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
-                    .message(
-                        "a streaming (text/event-stream, application/x-ndjson, or JSON Text \
-                         Sequence) response body is only supported as an operation's single success body; on an error \
-                         status, on a `default` response (which also documents error statuses), \
-                         or beside a second bodied success status it would be decoded as one \
-                         whole body",
-                    )
-                    .remedy(
-                        "declare the stream under an explicit 2xx status as the operation's only \
-                         bodied success, document error bodies with a whole-body media type, or \
-                         omit this API segment with spargen::omit!",
-                    )
-                    .emit(ctx.diags);
-            }
-
-            let security: Vec<crate::ir::SecurityRequirement> = operation
-                .security
-                .as_ref()
-                .unwrap_or(&document.security)
-                .iter()
-                .map(lower_security_requirement)
-                .collect();
-            // Codegen builds per-operation credential tables from the scheme map, so every
-            // referenced scheme must have lowered; an undeclared or unsupported scheme would
-            // otherwise silently generate an unauthenticated call.
-            for requirement in &security {
-                for (scheme, _) in &requirement.0 {
-                    if !security_schemes.contains_key(scheme) {
-                        Diagnostic::error(
-                            Code::UnknownSecurityScheme,
-                            operation.provenance.clone(),
-                        )
-                        .message(format!(
-                            "security requirement references undeclared or unsupported \
-                             scheme `{}`",
-                            scheme.0
-                        ))
-                        .remedy(
-                            "declare the scheme under components.securitySchemes as http \
-                             bearer/basic, apiKey, oauth2, or openIdConnect",
-                        )
-                        .emit(ctx.diags);
-                    }
-                }
-            }
-
-            let mut operation_description = operation.description.clone();
-            // A Path Item's `summary`/`description` apply to every operation on the path. They are
-            // additional context rather than a replacement, so the operation's own documentation
-            // stays first and these follow it.
-            for text in [item.summary.as_ref(), item.description.as_ref()]
-                .into_iter()
-                .flatten()
-            {
-                append_text(&mut operation_description, text.clone());
-            }
-            if !operation.tags.is_empty() {
-                append_text(
-                    &mut operation_description,
-                    format!("Tags: {}.", operation.tags.join(", ")),
-                );
-            }
-            for (status, response) in &operation.responses.by_status {
-                if let Some(response) = ctx.resolve_response(response) {
-                    append_response_docs(&mut operation_description, status, &response);
-                }
-            }
-            if let Some(response) = operation
-                .responses
-                .default
-                .as_ref()
-                .and_then(|response| ctx.resolve_response(response))
-            {
-                append_response_docs(&mut operation_description, "default", &response);
-            }
-
-            // Operation `servers` override the path item's, which override the document's. The
-            // document's is the client's base URL, so "no override" is the common case.
-            let server = if operation.servers.is_empty() {
-                lower_server_override(&item.servers, ctx.diags)
-            } else {
-                lower_server_override(&operation.servers, ctx.diags)
-            };
-
-            operations.push(Operation {
-                id: OperationId(id),
-                method: method.clone(),
-                path: path_template,
-                params,
-                request_body,
-                responses,
-                security,
-                deprecated: operation.deprecated,
-                docs: Docs {
-                    title: None,
-                    summary: operation.summary.clone(),
-                    description: operation_description,
-                    deprecated: operation.deprecated,
-                },
-                server,
-                provenance: operation.provenance.clone(),
-            });
+            operations.push(lower_operation(
+                &mut ctx,
+                path,
+                &item,
+                method,
+                operation,
+                &security_schemes,
+                &mut operation_ids,
+            ));
         }
     }
+
+    // Every reservation is filled now, so the map-value comparisons a reservation held back can
+    // be decided.
+    ctx.check_deferred_map_values();
 
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
@@ -500,9 +291,264 @@ fn lower_pass(
         &ctx.meet_locations,
         &ctx.root_xml,
         &ctx.field_xml_sites,
+        &ctx.xml_mergers,
+        document.is_oas32,
         ctx.diags,
     );
 
+    let servers = document
+        .servers
+        .iter()
+        .filter_map(|server| lower_server(server, ctx.diags))
+        .collect();
+    let revisions = std::mem::take(&mut ctx.revisions);
+    let api = Api {
+        info: Info {
+            title: document.info.title.clone(),
+            version: document.info.version.clone(),
+            description: api_description(document),
+        },
+        servers,
+        operations,
+        types: ctx.graph,
+        security_schemes,
+    };
+    (ctx.diags.result(api), revisions)
+}
+
+/// Lower the `operation` declared under `method` on the path item `item` of the template `path`:
+/// its merged parameters, request body, responses, security requirements, documentation and
+/// server override. Its id joins `operation_ids`, and a duplicate, a malformed parameter set, a
+/// response it cannot decode where it stands, or a security requirement naming no lowered scheme
+/// in `security_schemes` is reported; the operation is returned regardless, and the pass's
+/// result carries the rejection.
+fn lower_operation(
+    ctx: &mut LowerCtx<'_, '_>,
+    path: &str,
+    item: &PathItem,
+    method: &Method,
+    operation: &OperationObject,
+    security_schemes: &IndexMap<SchemeId, SecuritySchemeDef>,
+    operation_ids: &mut HashSet<String>,
+) -> Operation {
+    let path_template = parse_path_template(path);
+    let id = operation
+        .operation_id
+        .clone()
+        .unwrap_or_else(|| synth_operation_id(method, &path_template));
+    if !operation_ids.insert(id.clone()) {
+        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+            .message(format!(
+                "operationId `{id}` is not unique within the API description"
+            ))
+            .emit(ctx.diags);
+    }
+
+    let mut params = Vec::new();
+    let mut merged_parameters: IndexMap<(String, String), ParameterObject> = IndexMap::new();
+    for parameter in &item.parameters {
+        if let Some(parameter) = ctx.resolve_parameter(parameter) {
+            let key = (parameter.location.clone(), parameter.name.clone());
+            if merged_parameters.insert(key, parameter).is_some() {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message("path-item parameters contain a duplicate name/location pair")
+                    .emit(ctx.diags);
+            }
+        }
+    }
+    let mut operation_parameter_keys = HashSet::new();
+    for parameter in &operation.parameters {
+        if let Some(parameter) = ctx.resolve_parameter(parameter) {
+            let key = (parameter.location.clone(), parameter.name.clone());
+            if !operation_parameter_keys.insert(key.clone()) {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message("operation parameters contain a duplicate name/location pair")
+                    .emit(ctx.diags);
+            }
+            // Operation-level parameters override the matching path-item parameter.
+            merged_parameters.insert(key, parameter);
+        }
+    }
+    for parameter in merged_parameters.values() {
+        if let Some(parameter) = ctx.lower_parameter(parameter) {
+            params.push(parameter);
+        }
+    }
+    let placeholders: HashSet<&str> = path_template
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            PathSegment::Param(name) => Some(name.as_str()),
+            PathSegment::Literal(_) => None,
+        })
+        .collect();
+    let path_parameters: HashSet<&str> = params
+        .iter()
+        .filter(|parameter| parameter.location == ParamLoc::Path)
+        .map(|parameter| parameter.name.as_str())
+        .collect();
+    if placeholders != path_parameters {
+        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+            .message(format!(
+                "path template parameters {placeholders:?} do not match declared path \
+                         parameters {path_parameters:?}"
+            ))
+            .emit(ctx.diags);
+    }
+    let querystrings = params
+        .iter()
+        .filter(|parameter| parameter.location == ParamLoc::QueryString)
+        .count();
+    let named_queries = params
+        .iter()
+        .any(|parameter| parameter.location == ParamLoc::Query);
+    if querystrings > 1 || (querystrings == 1 && named_queries) {
+        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+            .message(
+                "an operation may declare at most one `in: querystring` parameter and may \
+                         not combine it with `in: query` parameters",
+            )
+            .emit(ctx.diags);
+    }
+
+    let request_body = operation
+        .request_body
+        .as_ref()
+        .and_then(|body| ctx.resolve_request_body(body))
+        .and_then(|body| ctx.lower_request_body(&body));
+
+    let responses = ctx.lower_responses(&operation.responses);
+    // XML decode is scoped to the single-body success/error paths. An XML body beside a
+    // second bodied status on the same side — a response enum that decodes two or more
+    // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
+    // A lone XML success body beside a bodyless status is still that one body.
+    if responses.xml_in_multi_status() {
+        // E009 case: xml-multi-body
+        Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
+            .message(
+                "an application/xml (or text/xml) response body is only supported as an \
+                         operation's single bodied success or single bodied error response \
+                         (bodyless statuses beside it are fine); it cannot share a response enum \
+                         with a second bodied success or error status",
+            )
+            .remedy(
+                "give the operation a single XML-bodied success/error response, use JSON \
+                         for the other bodied responses, or omit this API segment with \
+                         spargen::omit!",
+            )
+            .emit(ctx.diags);
+    }
+    // Streaming decode is scoped to the single bodied success (`EventStream<T>`). A stream
+    // anywhere else — an error status, a `default` (which is always offered to the error
+    // side), or a success enum beside a second bodied success — would be decoded as one
+    // whole JSON body, so it is rejected (narrowed `E009`) rather than misread on the wire.
+    if responses.stream_outside_single_success() {
+        // E009 case: streaming-response-position
+        Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
+                    .message(
+                        "a streaming (text/event-stream, application/x-ndjson, or JSON Text \
+                         Sequence) response body is only supported as an operation's single success body; on an error \
+                         status, on a `default` response (which also documents error statuses), \
+                         or beside a second bodied success status it would be decoded as one \
+                         whole body",
+                    )
+                    .remedy(
+                        "declare the stream under an explicit 2xx status as the operation's only \
+                         bodied success, document error bodies with a whole-body media type, or \
+                         omit this API segment with spargen::omit!",
+                    )
+                    .emit(ctx.diags);
+    }
+
+    let security: Vec<crate::ir::SecurityRequirement> = operation
+        .security
+        .as_ref()
+        .unwrap_or(&ctx.document.security)
+        .iter()
+        .map(lower_security_requirement)
+        .collect();
+    // Codegen builds per-operation credential tables from the scheme map, so every
+    // referenced scheme must have lowered; an undeclared or unsupported scheme would
+    // otherwise silently generate an unauthenticated call.
+    for requirement in &security {
+        for (scheme, _) in &requirement.0 {
+            if !security_schemes.contains_key(scheme) {
+                Diagnostic::error(Code::UnknownSecurityScheme, operation.provenance.clone())
+                    .message(format!(
+                        "security requirement references undeclared or unsupported \
+                             scheme `{}`",
+                        scheme.0
+                    ))
+                    .remedy(
+                        "declare the scheme under components.securitySchemes as http \
+                             bearer/basic, apiKey, oauth2, openIdConnect, or mutualTLS",
+                    )
+                    .emit(ctx.diags);
+            }
+        }
+    }
+
+    let mut operation_description = operation.description.clone();
+    // A Path Item's `summary`/`description` apply to every operation on the path. They are
+    // additional context rather than a replacement, so the operation's own documentation
+    // stays first and these follow it.
+    for text in [item.summary.as_ref(), item.description.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        append_text(&mut operation_description, text.clone());
+    }
+    if !operation.tags.is_empty() {
+        append_text(
+            &mut operation_description,
+            format!("Tags: {}.", operation.tags.join(", ")),
+        );
+    }
+    for (status, response) in &operation.responses.by_status {
+        if let Some(response) = ctx.resolve_response(response) {
+            append_response_docs(&mut operation_description, status, &response);
+        }
+    }
+    if let Some(response) = operation
+        .responses
+        .default
+        .as_ref()
+        .and_then(|response| ctx.resolve_response(response))
+    {
+        append_response_docs(&mut operation_description, "default", &response);
+    }
+
+    // Operation `servers` override the path item's, which override the document's. The
+    // document's is the client's base URL, so "no override" is the common case.
+    let server = if operation.servers.is_empty() {
+        lower_server_override(&item.servers, ctx.diags)
+    } else {
+        lower_server_override(&operation.servers, ctx.diags)
+    };
+
+    Operation {
+        id: OperationId(id),
+        method: method.clone(),
+        path: path_template,
+        params,
+        request_body,
+        responses,
+        security,
+        deprecated: operation.deprecated,
+        docs: Docs {
+            title: None,
+            summary: operation.summary.clone(),
+            description: operation_description,
+            deprecated: operation.deprecated,
+        },
+        server,
+        provenance: operation.provenance.clone(),
+    }
+}
+
+/// The API's own documentation: `info`'s summary and description, its contact, license and
+/// external documentation, and the document's tags.
+fn api_description(document: &Document) -> Option<String> {
     let mut api_description = document.info.summary.clone();
     if let Some(description) = &document.info.description {
         append_text(&mut api_description, description.clone());
@@ -542,24 +588,7 @@ fn lower_pass(
             .join("; ");
         append_text(&mut api_description, format!("Tags: {tags}."));
     }
-    let servers = document
-        .servers
-        .iter()
-        .filter_map(|server| lower_server(server, ctx.diags))
-        .collect();
-    let revisions = std::mem::take(&mut ctx.revisions);
-    let api = Api {
-        info: Info {
-            title: document.info.title.clone(),
-            version: document.info.version.clone(),
-            description: api_description,
-        },
-        servers,
-        operations,
-        types: ctx.graph,
-        security_schemes,
-    };
-    (ctx.diags.result(api), revisions)
+    api_description
 }
 
 fn append_text(target: &mut Option<String>, text: String) {
@@ -686,25 +715,13 @@ struct ScopeReach {
     uncategorised: bool,
 }
 
-/// What the meet a union is held back for ([`LowerCtx::unmerged_union`]) does with the conjunct's
-/// `null` it hands the union's branches that state nothing and lower to `Value` (`true`, `{}`),
-/// whose `null` the union settled before the meet (#592, #597). `Value` is the identity of the
-/// meet, so the meet gives each such branch that `null` again ([`LowerCtx::clear_counted_null`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum StatedNothingNull {
-    /// The branches with these variant hints took `null` that an `anyOf` hoisted, or that a
-    /// `oneOf` counted beside another branch `null` matches, so the meet's copy is cleared.
-    Counted(Vec<String>),
-    /// A `oneOf` counted one such branch as the only branch `null` matches, so the meet's copy is
-    /// that branch's answer: kept in the variant where the meet leaves a union, and on the
-    /// position where it narrows the union to that branch alone.
-    Sole,
-}
-
 /// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
 /// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
 /// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
-/// types, that meet decides which of those variants are still `Value` (#660).
+/// replaces, the warning names only the variants the meet carries as `Value` (#660, #675). It is
+/// reported as raised where the gathering or the meet fails, where the meet does not replace the
+/// union (its lowering is still named, or the meet is a reservation), and for every warning a
+/// union other than such a member raised.
 #[derive(Clone, Debug)]
 struct HeldUntypedWarning {
     /// The union the warning is raised at.
@@ -716,8 +733,16 @@ struct HeldUntypedWarning {
 /// The three spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
 /// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
 /// the union as its sibling, an `allOf` with the union beside it on one schema (#419), and an
-/// `allOf` with the union as one of its members (#463). Only the wording of the diagnostics they
-/// report differs.
+/// `allOf` with the union as one of its members (#463). The spelling decides three things:
+///
+/// * the wording of the diagnostics the meet reports ([`Self::subject`], and the messages
+///   [`LowerCtx::reject_all_of_union_meet`] and [`LowerCtx::meet_union_with_all_of`] pick), with
+///   the `$ref` remedy rather than the `allOf` one for [`MetUnion::RefSibling`];
+/// * the hint the meet is inserted under, and so the names its generated types take
+///   ([`Self::meet_suffix`]): `ReferenceIntersection` for a `$ref` sibling, `Intersection` for
+///   either `allOf` spelling;
+/// * which conjunct a branch the meet excludes is read against: the `allOf`'s other members for
+///   [`MetUnion::AllOfMember`], the schema's own sibling keywords for the other two.
 #[derive(Clone, Copy)]
 enum MetUnion {
     RefSibling,
@@ -813,19 +838,19 @@ struct LowerCtx<'a, 'doc> {
     /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
     /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
     /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
-    /// referencing a shared type, and without this memo it re-expanded the target at every use — a
-    /// branching reuse graph cost work and generated types exponential in its depth. The target is
+    /// referencing a shared type, and re-expanding the target at every use would cost a branching
+    /// reuse graph work and generated types exponential in its depth. The target is
     /// expanded once and its contribution replayed at every later use, so the types its body lowers
     /// to are shared exactly as a root component member's are through [`Self::push_ref_member`].
     ///
     /// A contribution is recorded only once its expansion succeeds; one that failed re-expands, and
-    /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
+    /// reports again, at its next use. What is replayed is a copy the enclosing
     /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
     ///
     /// Each recorded contribution carries the nested bundle target it came from (`None`: the
     /// target's own), so a replay adds each target's contribution to a composition once, however
-    /// many paths reach it ([`Self::gatherings`]). Replaying every copy doubled a target's record
-    /// at each level of a branching graph, which the memo alone left exponential (#616).
+    /// many paths reach it ([`Self::gatherings`]). Replaying every copy would double a target's
+    /// record at each level of a branching graph, leaving it exponential despite the memo (#616).
     resolved_contributions: HashMap<String, Vec<RecordedContribution>>,
     /// The bundle-`$ref` `allOf` member targets being expanded right now, outermost first, each
     /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`
@@ -836,34 +861,29 @@ struct LowerCtx<'a, 'doc> {
     /// reservation, and a target reached through one sits on the stack of the type it was
     /// reached from only.
     resolved_member_stack: Vec<(String, bool)>,
+    /// The root components whose union bodies are being lowered inline right now as a `$ref`
+    /// `allOf` member's union ([`Self::lower_all_of_with_union_member`]), outermost first. The
+    /// expansion reserves nothing, so [`Self::sole_union_member`] reads this stack to leave a
+    /// `$ref` to one of them to the ordinary gather, which lowers the component through its
+    /// reservation and so meets the recursion there. Emptied for each reserved body, as
+    /// [`Self::resolved_member_stack`] is.
+    union_member_stack: Vec<String>,
     /// One [`Gathering`] per composition being gathered right now, innermost last: each `allOf`
     /// lowering opens one, and so does each bundle-`$ref` target expansion
     /// [`Self::gather_ref_target`] records, so the record does not depend on the use that first
     /// reached it. `allOf` is idempotent under a repeated conjunct, so a bundle target whose
     /// contribution the innermost gathering already holds adds nothing more to it.
     gatherings: Vec<Gathering>,
-    /// [`Self::ref_target_decides_null_within`]'s answer for each `$ref` target `allOf` body it
-    /// has read, keyed by the body's own `file#pointer` ([`resolved_identity`]). That read and
-    /// [`Self::all_of_decides_null`] call each other through every `$ref` an `allOf` names, so
-    /// without this a reuse graph that branches (`C<i>: allOf [$ref C<i+1>, $ref C<i+1>]`) is
-    /// re-read once per path, in time exponential in its depth. A body being read records `true`
-    /// (deciding) before its members are ([`memoised_decision`]), so a loop through it ends there,
-    /// with the answer the depth bound gave it before. The document is fixed for the pass, so an
-    /// answer never goes stale.
-    target_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// The same memo for [`Self::all_of_decides_null`]'s read of a bundle-`$ref` member's resolved
-    /// target, which it reads as a whole schema rather than as a `$ref` target body.
-    resolved_all_of_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// [`Self::all_of_wraps_undecided_union`]'s answer for each `$ref` member's target body, keyed
-    /// as [`Self::target_decides_null_memo`] is: a reuse graph of wrappers that branches (`W<i>:
-    /// allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time exponential
-    /// in its depth. A body being read records `false` (admits nothing undecided) before its
+    /// [`Self::all_of_wraps_union`]'s answer for each `$ref` member's target body, keyed by the
+    /// body's own `file#pointer` ([`resolved_identity`]): a reuse graph of wrappers that branches
+    /// (`W<i>: allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time
+    /// exponential in its depth. A body being read records `false` (wraps no union) before its
     /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
-    /// end it.
-    admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
+    /// end it. The document is fixed for the pass, so an answer never goes stale.
+    wraps_union_memo: RefCell<HashMap<String, bool>>,
     /// [`Self::null_admission`]'s answer for each `$ref` target body it has read, keyed as
-    /// [`Self::target_decides_null_memo`] is, so a reuse graph that branches is read once per
-    /// target. A body being read records [`NullAdmission::Undecided`] before its keywords are
+    /// [`Self::wraps_union_memo`] is, so a reuse graph that branches is read once per target. A
+    /// body being read records [`NullAdmission::Undecided`] before its keywords are
     /// ([`memoised_answer`]), so a loop through it ends there.
     ///
     /// [`NullAdmission::Undecided`]: nullability::NullAdmission::Undecided
@@ -906,6 +926,14 @@ struct LowerCtx<'a, 'doc> {
     /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
     /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
     field_xml_sites: HashSet<XmlSite>,
+    /// The sites of the compositions being gathered, innermost last
+    /// ([`Self::with_xml_holder`]): a member [`Self::record_member_xml`] reads is attributed to
+    /// the last.
+    xml_holders: Vec<XmlSite>,
+    /// For each type a `$ref` member contributed to a composition, the sites of the compositions
+    /// that merged it ([`Self::record_xml_merger`]): a member merged into that type is merged into
+    /// theirs too.
+    xml_mergers: HashMap<TypeId, Vec<XmlSite>>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the
@@ -918,36 +946,25 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, where it is a `oneOf` of a `null` member beside
-    /// one untyped member (#563). The meet it is held back for gives that member `null` exactly
-    /// where it keeps the `null` member's, so `null` is in both branches or neither, and the
-    /// caller makes the meet non-nullable. An untyped type accepts `null` whatever its
-    /// [`Ty::nullable`] says, so the lowered union cannot carry this itself.
-    untyped_beside_null_member: Option<Provenance>,
-    /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
-    /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
-    /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
-    /// `anyOf`, as an untyped object branch's is (#567), or counted by a `oneOf` that the count
-    /// makes refuse `null`. `Value` is the identity of the meet, so the meet hands the branch the
-    /// conjunct's `null` a second time, and the caller clears it there
-    /// ([`Self::clear_counted_null`]) so `null` is counted once per branch. A `oneOf` whose only
-    /// branch `null` matches is one of these records that too ([`StatedNothingNull::Sole`]), so
-    /// a meet that narrows the union to that branch keeps the `null` it gave it (#597).
-    stated_nothing_took_null: Option<(Provenance, StatedNothingNull)>,
     /// The `W001`s inline `oneOf`s raise for their `serde_json::Value` variants while an `allOf`
     /// gathers its members, held back where `Some` ([`HeldUntypedWarning`]). A union member the
     /// `allOf`'s scalar meet meets lowers on its own first, where a branch that states nothing
     /// (`{}`, `true`) is `Value`; the meet then gives it the other members' type, so the warning
     /// is raised for the variants the meet leaves `Value` alone (#660).
     held_untyped_warnings: Option<Vec<HeldUntypedWarning>>,
-    /// The variant hints of the `Value` variants of the union members an `allOf`'s scalar meet
-    /// meets, whose `null` the `allOf` decided by the union's own count
-    /// ([`Self::union_members_take_scalar_null`]) rather than by a branch that states `null`
-    /// (beside which the copy is a second branch `null` matches, and stays). `Value` is the
-    /// identity of the meet, so the meet hands each the other members' `null` a second time;
-    /// [`Self::combine_all_of`] clears that copy before it collapses the met `oneOf`, so `null`
-    /// is counted once (#660).
-    scalar_meet_value_variants: HashSet<String>,
+    /// The union member of an `allOf` being lowered as an input to the `allOf`'s scalar meet
+    /// ([`LowerCtx::lower_scalar_meet_union`]). [`Self::lower_union_closed`] leaves its
+    /// indistinguishable variants unmerged, as it leaves [`Self::unmerged_union`]'s, so the meet
+    /// still tells apart the branches it excludes (`W011`), and records the union in
+    /// [`Self::scalar_meet_unmerged`] for [`Self::collapse_met_one_ofs`] to merge after the meet
+    /// (#678). Unlike [`Self::unmerged_union`] it changes nothing else about the union's lowering:
+    /// its `null` and its `W001` for `serde_json::Value` variants are the scalar meet's to settle,
+    /// as they are for a union lowered there on its own.
+    scalar_meet_union: Option<Provenance>,
+    /// The unions lowered as [`Self::scalar_meet_union`], whose indistinguishable variants
+    /// [`Self::collapse_met_one_ofs`] merges, with `W001`, wherever a scalar meet reaches them,
+    /// though the meet's own inserts begin after them.
+    scalar_meet_unmerged: HashSet<TypeId>,
     /// For each union [`Self::lower_union_closed`] lowered to an enum of two or more variants, the
     /// members each variant came from (more than one where indistinguishable branches merged), by
     /// their positions among the union's real members (the positions a `W011` names). Kept aligned
@@ -959,6 +976,11 @@ struct LowerCtx<'a, 'doc> {
     /// meet made to report, as `W011`, a union member's branch it kept nowhere
     /// ([`Self::warn_excluded_union_member_branches`]).
     variant_meets: Vec<(TypeId, usize, bool)>,
+    /// The `patternProperties`/`additionalProperties` value types whose one-map homogeneity
+    /// [`Self::lower_pattern_additional`] could not decide because a value reached a reservation,
+    /// with the object's provenance, in source order; [`Self::check_deferred_map_values`] decides
+    /// them once lowering has filled every reservation.
+    deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
 }
 
 /// The options that change what lowering produces.
@@ -969,22 +991,23 @@ pub(crate) struct LowerOptions {
 }
 
 /// Append a note as a trailing rustdoc paragraph on a type's [`Docs`], used to surface a
-/// component-root `default` on the generated named type.
+/// component-root `default` on the generated named type. An empty description counts as absent,
+/// as in [`append_text`].
 fn append_doc_note(docs: &mut Docs, note: String) {
-    match &mut docs.description {
-        Some(description) => {
-            description.push_str("\n\n");
-            description.push_str(&note);
-        }
-        None => docs.description = Some(note),
-    }
+    append_text(&mut docs.description, note);
 }
 
-/// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
-/// document root for a bare boolean member that carries none.
-fn member_provenance(member: &SchemaOr) -> crate::diag::Provenance {
-    match member {
-        SchemaOr::Schema(schema) => schema.provenance.clone(),
-        SchemaOr::Bool(_) => crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
-    }
+/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
+/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
+/// is written in, with the span of the node written there when the file holds one.
+fn all_of_entry_provenance(
+    resolver: &Resolver<'_>,
+    holder: &Provenance,
+    index: usize,
+) -> Provenance {
+    let pointer = holder.pointer.push("allOf").index(index);
+    let span = resolver
+        .node_at(resolver.written_in(holder), &pointer)
+        .map(|node| node.span);
+    Provenance::new(pointer, span)
 }

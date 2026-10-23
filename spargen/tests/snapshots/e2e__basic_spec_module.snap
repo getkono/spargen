@@ -23,8 +23,8 @@ pub use support::{
 };
 #[allow(unused_imports)]
 pub use support::{Date, DateParseError, DateTime};
-/// The freestanding runtime embedded verbatim into this output; no spargen crate exists
-/// at runtime.
+/// The freestanding runtime embedded into this output; no spargen crate is a runtime
+/// dependency.
 #[forbid(unsafe_code)]
 #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
 mod support {
@@ -141,7 +141,8 @@ mod support {
             /// An `apiKey` sent as the named cookie.
             ApiKeyCookie(&'static str),
             /// `mutualTLS`. Satisfied by the client certificate configured on the injected
-            /// `reqwest::Client`, so the request carries nothing extra and no credential is registered.
+            /// `reqwest::Client`, so the request carries nothing extra and any credential registered under
+            /// its scheme is never read.
             MutualTls,
         }
         /// One scheme reference inside an operation's security requirement: the `securitySchemes` key the
@@ -383,13 +384,28 @@ mod support {
             /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
             ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
             ///   silently.
-            /// - One path is **not** capped at all: `EventStream`'s per-frame decode, which retains one
-            ///   frame drawn from a frame buffer that is itself unbounded.
+            /// - One path is **not** capped by it: `EventStream`'s per-frame decode, which retains the
+            ///   whole frame. That frame is bounded instead by [`Self::max_stream_frame`].
             pub max_error_body: usize,
+            /// Maximum bytes `EventStream` buffers for one item whose terminator has not arrived yet
+            /// (default 16 MiB): an SSE event before its blank line, an ndjson line before its newline, a
+            /// JSON text sequence record before the next separator.
+            ///
+            /// Once more than this many bytes of such an item are buffered, the stream yields
+            /// [`Error::Decode`] retaining at most `max_error_body` bytes of them, with `truncated` set,
+            /// and then ends, without consulting a reconnect policy. Complete items read in the same
+            /// chunk ahead of the over-limit one are yielded first. Bytes arrive a chunk at a time, so the
+            /// buffer may hold up to one chunk more than this limit before the check runs, and an item
+            /// whose terminator arrives in the same chunk that takes it past the limit is framed
+            /// normally.
+            pub max_stream_frame: usize,
         }
         impl Default for ClientConfig {
             fn default() -> Self {
-                Self { max_error_body: 64 * 1024 }
+                Self {
+                    max_error_body: 64 * 1024,
+                    max_stream_frame: 16 * 1024 * 1024,
+                }
             }
         }
         /// The shared core every generated `Client` wraps: the `reqwest::Client` used to BUILD requests
@@ -400,10 +416,8 @@ mod support {
         /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
         /// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
         ///
-        /// The generated `Client` exposes `Client::new(base_url)`,
-        /// `Client::with_client(reqwest::Client, base_url)`, and
-        /// `Client::with_backend(Arc<dyn HttpBackend>, base_url)`, plus one `#[inline]` method per operation
-        /// that delegates to the non-generic dispatch routines.
+        /// The generated `Client` wraps one of these and documents its own constructors; each of its
+        /// operation methods delegates to the shared dispatch routines.
         #[derive(Debug, Clone)]
         pub struct ClientCore {
             http: reqwest::Client,
@@ -493,33 +507,28 @@ mod support {
         }
     }
     mod dispatch {
-        //! The small set of dispatch routines shared within a generated client: build URL →
-        //! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
-        //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
+        //! The dispatch routines every operation of a generated client shares: build URL → attach auth
+        //! (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated
+        //! client (not via a shared crate).
         //!
-        //! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
-        //! distinct body type — the one place monomorphization is unavoidable.
+        //! URL building and sending are non-generic. The success decoders are generic over the body type
+        //! and the error classifiers over the operation's error type `E`; each takes the body codec as a
+        //! closure over the shared `decode_success_with` / `classify_with` routine, so one copy of each
+        //! is monomorphized per distinct body or error type.
         use std::convert::Infallible;
         use bytes::Bytes;
         use reqwest::{Request, Response, Url};
         use serde::de::DeserializeOwned;
         use super::{ClientCore, Error, ResponseValue};
-        /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-        /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+        /// Build a request URL from the base URL, or an optional per-operation server override, and a
+        /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
+        /// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
+        /// runtime regex. Non-generic.
         ///
         /// `query` holds complete `name=value` fragments that the parameter helpers have already
         /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
         /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
         /// a `,` inside one of them.
-        pub fn build_url(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_on(core, None, path, query)
-        }
-        /// As [`build_url`], but against an optional per-operation server override. An absolute override
-        /// replaces the client's base URL; a relative one is joined onto it.
         pub fn build_url_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -603,28 +612,21 @@ mod support {
         }
         /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
         fn append_query(url: &mut Url, query: &[String]) {
-            if query.is_empty() {
-                return;
+            if !query.is_empty() {
+                append_query_text(url, &query.join("&"));
             }
+        }
+        /// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
+        fn append_query_text(url: &mut Url, text: &str) {
             let joined = match url.query() {
-                Some(existing) if !existing.is_empty() => {
-                    format!("{existing}&{}", query.join("&"))
-                }
-                _ => query.join("&"),
+                Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
+                _ => text.to_owned(),
             };
             url.set_query(Some(&joined));
         }
-        /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-        /// Both forms replace any query embedded in the selected server URL.
-        pub fn build_url_with_query_string(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-            query_string: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_with_query_string_on(core, None, path, query, query_string)
-        }
-        /// As [`build_url_with_query_string`], but against an optional per-operation server override.
+        /// As [`build_url_on`], for a URL whose entire query string is owned by an OpenAPI 3.2
+        /// `in: querystring` parameter. With or without a query string, it replaces any query embedded in
+        /// the selected server URL.
         pub fn build_url_with_query_string_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -636,13 +638,7 @@ mod support {
             url.set_query(None);
             append_query(&mut url, query);
             if let Some(query_string) = query_string {
-                let joined = match url.query() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{existing}&{query_string}")
-                    }
-                    _ => query_string.to_owned(),
-                };
-                url.set_query(Some(&joined));
+                append_query_text(&mut url, query_string);
             }
             Ok(url)
         }
@@ -729,13 +725,10 @@ mod support {
         /// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
         /// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
         pub async fn decode_success_bytes(
-            _core: &ClientCore,
+            core: &ClientCore,
             response: Response,
         ) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.bytes().await.map_err(Error::from_reqwest)?;
-            Ok(ResponseValue::new(status, headers, body))
+            decode_success_with(core, response, |body| Ok(body.clone())).await
         }
         /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
         /// multi-status response variants use exactly the same textual codec as single-body responses.
@@ -821,6 +814,8 @@ mod support {
                 .await
         }
         /// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
+        /// A documented body that is not UTF-8, or whose text `E` rejects, is [`Error::Decode`]; an empty
+        /// body is decoded like any other, as [`decode_text_body`] describes.
         pub async fn classify_error_text<E>(
             core: &ClientCore,
             response: Response,
@@ -829,17 +824,24 @@ mod support {
         where
             E: DeserializeOwned,
         {
-            classify_with(core, response, documented, decode_text_body::<E>).await
+            classify_with(
+                    core,
+                    response,
+                    documented,
+                    |body| { decode_text_body::<E>(body) },
+                )
+                .await
         }
         /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
         /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
         /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
-        /// [`Error::UnexpectedStatus`] with the raw body preserved.
+        /// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
+        /// a raw binary error body keeps it without a copy.
         pub(crate) async fn classify_with<E>(
             core: &ClientCore,
             response: Response,
             documented: &[StatusSpec],
-            decode: impl FnOnce(&[u8]) -> Result<E, String>,
+            decode: impl FnOnce(&Bytes) -> Result<E, String>,
         ) -> Error<E> {
             let status = response.status();
             let headers = response.headers().clone();
@@ -881,22 +883,8 @@ mod support {
             response: Response,
             documented: &[StatusSpec],
         ) -> Error<E> {
-            let status = response.status();
-            let headers = response.headers().clone();
-            match read_capped(core, response).await {
-                Ok((body, _truncated)) => {
-                    if documented.iter().any(|spec| spec.matches(status)) {
-                        Error::Api(ResponseValue::new(status, headers, E::from(body)))
-                    } else {
-                        Error::UnexpectedStatus {
-                            status,
-                            headers,
-                            body,
-                        }
-                    }
-                }
-                Err(error) => error,
-            }
+            classify_with(core, response, documented, |body| Ok(E::from(body.clone())))
+                .await
         }
         /// Wrap a non-success response as [`Error::UnexpectedStatus`] (#7) for operations that document no
         /// error body at all, retaining at most `max_error_body` bytes.
@@ -904,18 +892,7 @@ mod support {
             core: &ClientCore,
             response: Response,
         ) -> Error<E> {
-            let status = response.status();
-            let headers = response.headers().clone();
-            match read_capped(core, response).await {
-                Ok((body, _truncated)) => {
-                    Error::UnexpectedStatus {
-                        status,
-                        headers,
-                        body,
-                    }
-                }
-                Err(error) => error,
-            }
+            classify_with(core, response, &[], |_| Err(String::new())).await
         }
         /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
         /// Returns the retained bytes and whether any were dropped.
@@ -986,8 +963,9 @@ mod support {
         /// The closed error taxonomy shared by every spargen-generated client. `E` is the
         /// operation's typed error body (an enum when several error statuses are documented).
         ///
-        /// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
-        /// guarantee, not a variant (see the crate docs). Every variant implements [`std::error::Error`]
+        /// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
+        /// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
+        /// standard HTTP semantics. Every variant implements [`std::error::Error`]
         /// with full source chains, and `Debug` never leaks secrets.
         ///
         /// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new
@@ -1072,15 +1050,17 @@ mod support {
                 path: String,
                 /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
                 ///
-                /// One path does not reach the cap and retains more than it: `EventStream`'s per-frame
-                /// decode retains one frame, already detached by the framer. The cap does not apply
-                /// because the bound there is the frame, not the response — but the frame buffer itself
-                /// is unbounded, so this is a real gap, not a safe exemption.
+                /// One path does not reach the cap and can retain more than it: `EventStream`'s
+                /// per-frame decode retains one whole frame, already detached by the framer. The bound
+                /// there is the frame, not the response: `ClientConfig::max_stream_frame` limits the
+                /// bytes buffered for an item before its terminator arrives. An item that passes that
+                /// limit is itself reported here, retaining at most `max_error_body` bytes of it.
                 body: Bytes,
                 /// Whether bytes were dropped from `body` to meet the cap.
                 ///
-                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the path
-                /// above nothing is dropped because nothing is capped.
+                /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the
+                /// per-frame decode path above nothing is dropped because nothing is capped. An item past
+                /// `max_stream_frame` always sets it.
                 truncated: bool,
             },
             /// #9 — the connection dropped mid-stream on a streamed response.
@@ -1158,15 +1138,9 @@ mod support {
                     Error::Transport(_)
                     | Error::Timeout(_)
                     | Error::InterruptedBody(_) => true,
-                    Error::Api(value) => {
-                        value.status() == StatusCode::TOO_MANY_REQUESTS
-                            || value.status().is_server_error()
-                    }
+                    Error::Api(value) => is_transient_status(value.status()),
                     Error::UnexpectedStatus { status, .. }
-                    | Error::Decode { status, .. } => {
-                        *status == StatusCode::TOO_MANY_REQUESTS
-                            || status.is_server_error()
-                    }
+                    | Error::Decode { status, .. } => is_transient_status(*status),
                     Error::RequestConstruction(_)
                     | Error::Protocol(_)
                     | Error::Redirect(_) => false,
@@ -1190,6 +1164,12 @@ mod support {
                     | Error::InterruptedBody(_) => None,
                 }
             }
+        }
+        /// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
+        /// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
+        /// response.
+        pub(crate) fn is_transient_status(status: StatusCode) -> bool {
+            status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
         }
         impl Error<std::convert::Infallible> {
             /// Widen a never-typed failure into any operation's error type. Dispatch routines that cannot
@@ -1391,20 +1371,28 @@ mod support {
                     }
                     Error::Decode { status, path, .. } => {
                         write!(f, "response decode failed ({status}) at ")?;
-                        for c in path.chars() {
-                            if c.is_control() {
-                                write!(f, "{}", c.escape_debug())?;
-                            } else {
-                                write!(f, "{c}")?;
-                            }
-                        }
-                        Ok(())
+                        write_escaped(f, path)
                     }
                     Error::InterruptedBody(_) => {
                         f.write_str("response body was interrupted")
                     }
                 }
             }
+        }
+        /// Write `text` with each control character replaced by its `escape_debug` form, so text quoted
+        /// from a server (a LF, CR or tab included) cannot break or forge the line it is written into.
+        pub(crate) fn write_escaped(
+            f: &mut std::fmt::Formatter<'_>,
+            text: &str,
+        ) -> std::fmt::Result {
+            for c in text.chars() {
+                if c.is_control() {
+                    write!(f, "{}", c.escape_debug())?;
+                } else {
+                    write!(f, "{c}")?;
+                }
+            }
+            Ok(())
         }
         impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
             fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
@@ -1699,6 +1687,7 @@ mod support {
         use reqwest::header::HeaderMap;
         use serde::de::DeserializeOwned;
         use serde_json::Value;
+        use super::error::write_escaped;
         /// The wire shape a documented header value is parsed as.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum HeaderShape {
@@ -1706,7 +1695,9 @@ mod support {
             Scalar,
             /// A comma-separated list.
             Array,
-            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set.
+            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
+            /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
+            /// without an error.
             Object,
             /// A `content`-typed header carrying JSON.
             Json,
@@ -1754,14 +1745,7 @@ mod support {
                             formatter,
                             "response header `{name}` did not match its documented type: "
                         )?;
-                        for c in message.chars() {
-                            if c.is_control() {
-                                write!(formatter, "{}", c.escape_debug())?;
-                            } else {
-                                write!(formatter, "{c}")?;
-                            }
-                        }
-                        Ok(())
+                        write_escaped(formatter, message)
                     }
                 }
             }
@@ -1770,7 +1754,11 @@ mod support {
         /// Parse one documented response header, or `Ok(None)` when it is absent.
         ///
         /// Repeated occurrences are joined with `,` first, which is the RFC 9110 field-list rule and the
-        /// same shape a non-exploded array is written in.
+        /// same shape a non-exploded array is written in. [`HeaderShape::SetCookie`] is the exception:
+        /// each occurrence is decoded as one list item and none are joined.
+        ///
+        /// An occurrence that is not valid UTF-8 is [`HeaderError::NotUtf8`], and a value that does not
+        /// deserialize into `T` is [`HeaderError::Parse`].
         pub fn parse_header<T: DeserializeOwned>(
             headers: &HeaderMap,
             name: &'static str,
@@ -1786,39 +1774,47 @@ mod support {
                 parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
             }
             if shape == HeaderShape::SetCookie {
-                let lines = |scalars| Value::Array(
-                    parts.iter().map(|part| scalar(part, scalars)).collect(),
-                );
-                if let Ok(value) = serde_json::from_value(lines(Scalars::Text)) {
-                    return Ok(Some(value));
-                }
-                return serde_json::from_value(lines(Scalars::Json))
-                    .map(Some)
-                    .map_err(|error| HeaderError::Parse {
+                return text_then_json(
                         name,
-                        message: error.to_string(),
-                    });
+                        |scalars| {
+                            Value::Array(
+                                parts.iter().map(|part| scalar(part, scalars)).collect(),
+                            )
+                        },
+                    )
+                    .map(Some);
             }
             let raw = parts.join(",");
             if shape == HeaderShape::Json {
                 return serde_json::from_str(&raw)
                     .map(Some)
-                    .map_err(|error| HeaderError::Parse {
-                        name,
-                        message: error.to_string(),
-                    });
+                    .map_err(|error| parse_error(name, &error));
             }
-            let textual = reconstruct(&raw, shape, explode, Scalars::Text);
-            if let Ok(value) = serde_json::from_value(textual) {
-                return Ok(Some(value));
-            }
-            let typed = reconstruct(&raw, shape, explode, Scalars::Json);
-            serde_json::from_value(typed)
+            text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars))
                 .map(Some)
-                .map_err(|error| HeaderError::Parse {
-                    name,
-                    message: error.to_string(),
-                })
+        }
+        /// Deserialize the value `build` rebuilds from header text, reading every token as text first.
+        ///
+        /// `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the number
+        /// 1 — the encoding cannot tell them apart. The target type can: the text-only reading is tried
+        /// first, and the JSON reading only if that does not deserialize. The error reported is the
+        /// JSON-flavored one, which is the more informative of the two.
+        fn text_then_json<T: DeserializeOwned>(
+            name: &'static str,
+            build: impl Fn(Scalars) -> Value,
+        ) -> Result<T, HeaderError> {
+            if let Ok(value) = serde_json::from_value(build(Scalars::Text)) {
+                return Ok(value);
+            }
+            serde_json::from_value(build(Scalars::Json))
+                .map_err(|error| parse_error(name, &error))
+        }
+        /// The [`HeaderError::Parse`] for header `name`, carrying serde's message.
+        fn parse_error(name: &'static str, error: &serde_json::Error) -> HeaderError {
+            HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            }
         }
         /// How a bare header token is interpreted when rebuilding a JSON value.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1846,9 +1842,8 @@ mod support {
             scalars: Scalars,
         ) -> Value {
             match shape {
-                HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => {
-                    scalar(raw, scalars)
-                }
+                HeaderShape::Scalar => scalar(raw, scalars),
+                HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
                 HeaderShape::Array => {
                     Value::Array(
                         raw.split(',').map(|part| scalar(part, scalars)).collect(),
@@ -2065,7 +2060,7 @@ mod support {
         //! assembled here rather than through `url`'s `query_pairs_mut`, which would encode both alike.
         use std::fmt;
         use serde::Serialize;
-        use serde_json::Value;
+        use serde_json::{Map, Value};
         /// Which characters survive unencoded when a serialized value is placed on the wire.
         ///
         /// The variant is chosen by codegen from the parameter's location, style, and `allowReserved`;
@@ -2118,7 +2113,10 @@ mod support {
             Serialize(serde_json::Error),
             /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
             NestedValue,
-            /// A style defined only for objects (`deepObject`) received a non-object value.
+            /// A value that must be an object was not one. Three emitters return it: a `deepObject` query
+            /// parameter over a non-object value ([`serialize_deep_object`]), a form-urlencoded body that
+            /// does not serialize to a JSON object ([`serialize_form_body`]), and a multipart part asked for
+            /// the query-only `deepObject` style ([`serialize_multipart_values`]).
             ExpectedObject,
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
@@ -2246,26 +2244,9 @@ mod support {
                 Value::Null => Ok(String::new()),
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding),
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join(","))
+                    Ok(object_pairs(&values, encoding)?.join(","))
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(parts.join(","))
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding),
                 value => scalar(&value, encoding),
             }
         }
@@ -2297,25 +2278,15 @@ mod support {
                     )
                 }
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    ";{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.concat())
+                    Ok(
+                        object_pairs(&values, encoding)?
+                            .iter()
+                            .map(|pair| format!(";{pair}"))
+                            .collect(),
+                    )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(format!(";{name}={}", parts.join(",")))
+                    Ok(format!(";{name}={}", object_flat(& values, ",", encoding) ?))
                 }
                 value => Ok(format!(";{name}={}", scalar(& value, encoding) ?)),
             }
@@ -2337,26 +2308,9 @@ mod support {
                 }
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join("."))?
+                    object_pairs(&values, encoding)?.join(".")
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    parts.join(",")
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding)?,
                 value => scalar(&value, encoding)?,
             };
             Ok(format!(".{rendered}"))
@@ -2390,25 +2344,13 @@ mod support {
                         ],
                     )
                 }
-                Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect()
-                }
+                Value::Object(values) if explode => object_pairs(&values, encoding),
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(","))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, ",", encoding) ?)
+                        ],
+                    )
                 }
                 value => Ok(vec![format!("{name}={}", scalar(& value, encoding) ?)]),
             }
@@ -2416,7 +2358,7 @@ mod support {
         /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
         ///
         /// Both styles are defined only for arrays and objects with `explode: false`, and any other value
-        /// is refused with [`ParameterError::ExpectedComposite`]. Generation rejects `explode: true` and a
+        /// is refused with `ParameterError::ExpectedComposite`. Generation rejects `explode: true` and a
         /// schema that admits a scalar, or `null` on a required parameter, so a generated call never
         /// receives that error.
         pub fn serialize_delimited<T: Serialize>(
@@ -2436,12 +2378,12 @@ mod support {
                     )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(delimiter.as_str()))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, delimiter
+                            .as_str(), encoding) ?)
+                        ],
+                    )
                 }
                 _ => Err(ParameterError::ExpectedComposite),
             }
@@ -2453,7 +2395,7 @@ mod support {
         /// specification itself acknowledges as inherent to the style.
         ///
         /// The style is defined only for objects, and any other value is refused with
-        /// [`ParameterError::ExpectedObject`]. Generation rejects a schema that admits a non-object, or
+        /// `ParameterError::ExpectedObject`. Generation rejects a schema that admits a non-object, or
         /// `null` on a required parameter, so a generated call never receives that error.
         pub fn serialize_deep_object<T: Serialize>(
             name: &str,
@@ -2519,56 +2461,118 @@ mod support {
         /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
         /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
         /// value is JSON `null` is omitted entirely rather than sent empty.
+        ///
+        /// `additional` is the body's typed `additionalProperties` overflow: the resolved mode of its
+        /// members (the default for their type, since no Encoding Object can name them) and how many
+        /// members the overflow map holds, which a generated struct serializes after its declared fields.
+        /// When it is `Some`, those members follow the declared ones, ordered by key, rendered in that
+        /// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
+        /// whose key repeats a declared property's name is never sent: the declared property's own value
+        /// is, or nothing when that property is absent, as in a multipart body.
+        ///
+        /// A `value` that does not serialize to a JSON object is refused with
+        /// `ParameterError::ExpectedObject`.
         pub fn serialize_form_body<T: Serialize>(
             value: &T,
             properties: &[FormProperty],
+            additional: Option<(FormMode, usize)>,
         ) -> Result<String, ParameterError> {
-            let Value::Object(members) = serde_json::to_value(value)? else {
+            let text = serde_json::to_vec(value)?;
+            if text.first() != Some(&b'{') {
                 return Err(ParameterError::ExpectedObject);
-            };
+            }
+            let OrderedMembers(members) = serde_json::from_slice(&text)?;
+            let overflow_len = additional.map_or(0, |(_, len)| len);
+            let (declared, overflow) = members
+                .split_at(members.len().saturating_sub(overflow_len));
             let mut fragments: Vec<String> = Vec::new();
             for property in properties {
-                let Some(member) = members.get(property.name) else {
-                    continue;
-                };
-                if member.is_null() {
-                    continue;
+                if let Some((_, member)) = declared
+                    .iter()
+                    .find(|(name, _)| name == property.name)
+                {
+                    push_form_member(
+                        &mut fragments,
+                        property.name,
+                        member,
+                        property.mode,
+                    )?;
                 }
-                match property.mode {
-                    FormMode::Text => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    scalar(member, PercentEncoding::Form) ?
-                                ),
-                            )
-                    }
-                    FormMode::Json => {
-                        fragments
-                            .push(
-                                format!(
-                                    "{}={}", encode(property.name, PercentEncoding::Form),
-                                    encode(& serde_json::to_string(member) ?,
-                                    PercentEncoding::Form)
-                                ),
-                            )
-                    }
-                    FormMode::Style { style, explode, encoding } => {
-                        fragments
-                            .extend(
-                                style_fragments(
-                                    property.name,
-                                    member,
-                                    style,
-                                    explode,
-                                    encoding,
-                                )?,
-                            )
+            }
+            if let Some((mode, _)) = additional {
+                for (name, member) in overflow {
+                    if !properties.iter().any(|property| property.name == name) {
+                        push_form_member(&mut fragments, name, member, mode)?;
                     }
                 }
             }
             Ok(fragments.join("&"))
+        }
+        /// A JSON object's members in the order they were written, a repeated key kept each time it
+        /// appears.
+        struct OrderedMembers(Vec<(String, Value)>);
+        impl<'de> serde::Deserialize<'de> for OrderedMembers {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Self, D::Error> {
+                struct MembersVisitor;
+                impl<'de> serde::de::Visitor<'de> for MembersVisitor {
+                    type Value = OrderedMembers;
+                    fn expecting(
+                        &self,
+                        formatter: &mut fmt::Formatter<'_>,
+                    ) -> fmt::Result {
+                        formatter.write_str("a JSON object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<OrderedMembers, A::Error> {
+                        let mut members = Vec::new();
+                        while let Some(member) = map.next_entry::<String, Value>()? {
+                            members.push(member);
+                        }
+                        Ok(OrderedMembers(members))
+                    }
+                }
+                deserializer.deserialize_map(MembersVisitor)
+            }
+        }
+        /// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+        fn push_form_member(
+            fragments: &mut Vec<String>,
+            name: &str,
+            member: &Value,
+            mode: FormMode,
+        ) -> Result<(), ParameterError> {
+            if member.is_null() {
+                return Ok(());
+            }
+            match mode {
+                FormMode::Text => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), scalar(member,
+                                PercentEncoding::Form) ?
+                            ),
+                        )
+                }
+                FormMode::Json => {
+                    fragments
+                        .push(
+                            format!(
+                                "{}={}", encode(name, PercentEncoding::Form), encode(&
+                                serde_json::to_string(member) ?, PercentEncoding::Form)
+                            ),
+                        )
+                }
+                FormMode::Style { style, explode, encoding } => {
+                    fragments
+                        .extend(style_fragments(name, member, style, explode, encoding)?)
+                }
+            }
+            Ok(())
         }
         /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
         ///
@@ -2586,7 +2590,8 @@ mod support {
         ///
         /// Object values never reach here: the specification defines no part representation for them, so
         /// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
-        /// style) rather than guessing at one.
+        /// style) rather than guessing at one. A `deepObject` `style` is refused with
+        /// `ParameterError::ExpectedObject`.
         pub fn serialize_multipart_values<T: Serialize>(
             value: &T,
             style: FormStyle,
@@ -2638,6 +2643,37 @@ mod support {
                 .map(|value| scalar(value, encoding))
                 .collect::<Result<Vec<_>, ParameterError>>()
                 .map(|parts| parts.join(separator))
+        }
+        /// An object's members as `key,value` alternating in one `separator`-joined value: the
+        /// `explode: false` shape every style but `deepObject` shares.
+        fn object_flat(
+            values: &Map<String, Value>,
+            separator: &str,
+            encoding: PercentEncoding,
+        ) -> Result<String, ParameterError> {
+            let mut parts = Vec::with_capacity(values.len() * 2);
+            for (key, value) in values {
+                parts.push(encode(key, encoding));
+                parts.push(scalar(value, encoding)?);
+            }
+            Ok(parts.join(separator))
+        }
+        /// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
+        /// style then prefixes or joins.
+        fn object_pairs(
+            values: &Map<String, Value>,
+            encoding: PercentEncoding,
+        ) -> Result<Vec<String>, ParameterError> {
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(
+                        format!(
+                            "{}={}", encode(key, encoding), scalar(value, encoding) ?
+                        ),
+                    )
+                })
+                .collect()
         }
         fn scalar(
             value: &Value,
@@ -2708,10 +2744,8 @@ mod support {
         //! }
         //! ```
         //!
-        //! No generic closure/future combinator is provided for this: Rust closures returning futures are
-        //! awkward to type, and the plain loop over the already-public [`super::send`] /
-        //! [`super::decode_success`] primitives (which the generated methods use) is clearer and fully
-        //! typed. The loop pattern above is the supported shape.
+        //! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
+        //! type, and a plain loop over the generated operation method is clearer and fully typed.
         use std::convert::Infallible;
         use std::marker::PhantomData;
         use reqwest::header::HeaderMap;
@@ -2769,8 +2803,10 @@ mod support {
             ///
             /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
             /// relative target against the fetched URL) to arm the following page, then decodes the body as
-            /// `T`. Three things terminate the paginator (subsequent calls return `None`):
+            /// `T`. Four things terminate the paginator (subsequent calls return `None`):
             ///
+            /// * a request for the `next` URL that cannot be built →
+            ///   `Some(Err(Error::RequestConstruction(..)))`;
             /// * a **transport failure** → `Some(Err(..))`;
             /// * a **non-success HTTP status** (anything outside `2xx`) → `Some(Err(Error::UnexpectedStatus))`
             ///   — the body is *never* decoded as `T`, so an error payload can't masquerade as a page. The
@@ -2845,7 +2881,7 @@ mod support {
                 let Ok(field) = value.to_str() else {
                     continue;
                 };
-                for entry in split_link_entries(field) {
+                for entry in split_outside(field, b',', true) {
                     if let Some((uri, true)) = parse_link_entry(entry) {
                         return Some(uri);
                     }
@@ -2853,11 +2889,14 @@ mod support {
             }
             None
         }
-        /// Split one `Link` header field value into its comma-separated entries, treating commas inside the
-        /// `<…>` URI-reference or inside a quoted parameter string as literal (not separators).
-        fn split_link_entries(field: &str) -> Vec<&str> {
-            let bytes = field.as_bytes();
-            let mut entries = Vec::new();
+        /// Split `text` on `delim`, treating a delimiter inside a quoted string as literal (a backslash
+        /// escapes the next character there). With `respect_angles`, a delimiter inside a `<…>`
+        /// URI-reference is literal too, and a quote inside one opens no quoted string. A `Link` field
+        /// value splits into entries on `,` with angles respected; an entry's parameter section splits on
+        /// `;` without.
+        fn split_outside(text: &str, delim: u8, respect_angles: bool) -> Vec<&str> {
+            let bytes = text.as_bytes();
+            let mut parts = Vec::new();
             let mut start = 0;
             let mut in_angle = false;
             let mut in_quote = false;
@@ -2867,19 +2906,19 @@ mod support {
                     b'\\' if in_quote => {
                         i += 1;
                     }
-                    b'<' if !in_quote => in_angle = true,
-                    b'>' if !in_quote => in_angle = false,
+                    b'<' if respect_angles && !in_quote => in_angle = true,
+                    b'>' if respect_angles && !in_quote => in_angle = false,
                     b'"' if !in_angle => in_quote = !in_quote,
-                    b',' if !in_angle && !in_quote => {
-                        entries.push(&field[start..i]);
+                    byte if byte == delim && !in_angle && !in_quote => {
+                        parts.push(&text[start..i]);
                         start = i + 1;
                     }
                     _ => {}
                 }
                 i += 1;
             }
-            entries.push(&field[start..]);
-            entries
+            parts.push(&text[start..]);
+            parts
         }
         /// Parse a single `Link` entry into its URI-reference plus whether its `rel` names `next`. Returns
         /// `None` if no `<…>` URI is present.
@@ -2892,7 +2931,7 @@ mod support {
                 return None;
             }
             let mut is_next = false;
-            for param in split_params(&entry[close + 1..]) {
+            for param in split_outside(&entry[close + 1..], b';', false) {
                 let param = param.trim();
                 let Some(eq) = param.find('=') else {
                     continue;
@@ -2909,28 +2948,6 @@ mod support {
                 }
             }
             Some((uri, is_next))
-        }
-        /// Split an entry's parameter section on `;`, treating semicolons inside a quoted string as literal.
-        fn split_params(text: &str) -> Vec<&str> {
-            let bytes = text.as_bytes();
-            let mut parts = Vec::new();
-            let mut start = 0;
-            let mut in_quote = false;
-            let mut i = 0;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'\\' if in_quote => i += 1,
-                    b'"' => in_quote = !in_quote,
-                    b';' if !in_quote => {
-                        parts.push(&text[start..i]);
-                        start = i + 1;
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            parts.push(&text[start..]);
-            parts
         }
     }
     mod response {
@@ -2982,9 +2999,10 @@ mod support {
         //!
         //! ## Bring-your-own timing (no async timer in the runtime)
         //!
-        //! The runtime has no async timer of its own and never pulls in `tokio`, so the *wait* between
-        //! attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff as a boxed
-        //! `Future` that the caller builds with their own runtime's timer (e.g. `tokio::time::sleep`).
+        //! The runtime has no async timer of its own, and the retry path never pulls in `tokio`, so the
+        //! *wait* between attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff
+        //! as a boxed `Future` that the caller builds with their own runtime's timer (e.g.
+        //! `tokio::time::sleep`).
         //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
         //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
         //! exponential backoff needs no runtime support either.
@@ -3025,6 +3043,7 @@ mod support {
         use std::sync::Arc;
         use std::time::Duration;
         use reqwest::{Request, Response, StatusCode};
+        use super::error::is_transient_status;
         use super::transport::{ExecuteFuture, HttpBackend};
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
@@ -3095,9 +3114,7 @@ mod support {
                 match self {
                     RetryOutcome::Transport(error) => error.is_transient(),
                     RetryOutcome::Response(response) => {
-                        let status = response.status();
-                        status == StatusCode::TOO_MANY_REQUESTS
-                            || status.is_server_error()
+                        is_transient_status(response.status())
                     }
                 }
             }
@@ -3107,7 +3124,7 @@ mod support {
         /// [`RetryBackend`] calls [`retry`](RetryPolicy::retry) after each attempt. Returning
         /// `Some(future)` means "retry after awaiting this future"; the future carries the backoff delay,
         /// built with the caller's own async timer (e.g. `tokio::time::sleep`) — this is how timing stays
-        /// caller-owned and the runtime avoids a `tokio` dependency. Returning `None` stops retrying and the
+        /// caller-owned and the retry path avoids a `tokio` dependency. Returning `None` stops retrying and the
         /// last outcome is returned.
         pub trait RetryPolicy: MaybeSend + MaybeSync {
             /// Called after attempt `attempt` (0-based) produced `outcome`. Return `Some(wait)` to retry
@@ -3200,7 +3217,7 @@ mod support {
         //!
         //! The seam is a `dyn`-able trait ([`HttpBackend`]) so the generated `Client` stays non-generic:
         //! [`super::ClientCore`] holds an `Arc<dyn HttpBackend>` rather than a type parameter. The async
-        //! method returns a manually boxed future (`Pin<Box<dyn Future + Send + '_>>`) instead of using
+        //! method returns a manually boxed future ([`ExecuteFuture`], `Send` off wasm) instead of using
         //! `async-trait`, so std's `Future`/`Pin`/`Box` carry the abstraction.
         //!
         //! The currency is reqwest's own types: the trait abstracts *how* a `reqwest::Request` runs, not a
@@ -3290,9 +3307,9 @@ mod support {
         //! unchanged — the abstraction collapses away off wasm.
         //!
         //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so those
-        //! aliases (`ExecuteFuture`, `RetryWait`, `TokenFuture`, `TokenProvider`) are instead `cfg`-gated to
-        //! carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
+        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
+        //! boxed future, stream, and callback alias in the runtime, public or private, is instead
+        //! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
         //! source that builds on both targets.
         /// `Send` on native targets; a vacuous marker on `wasm32`.
         ///
@@ -3318,8 +3335,9 @@ mod support {
         impl<T: ?Sized> MaybeSync for T {}
     }
     mod stream {
-        //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`) or
-        //! newline-delimited JSON (`application/x-ndjson`). A streaming operation returns an
+        //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`),
+        //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
+        //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
         //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
         //! `next().await` convenience method. Reqwest's body stream keeps delivery incremental on native
         //! and browser targets; dropping `EventStream` drops that body stream and cancels the transfer.
@@ -3339,8 +3357,8 @@ mod support {
         use reqwest::{Request, Response, StatusCode};
         use serde::de::DeserializeOwned;
         use super::{
-            send, unexpected_status, ClientCore, Error, MaybeSend, MaybeSync,
-            TransportError,
+            send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend,
+            MaybeSync, TransportError,
         };
         /// The failure yielded by a streaming response after its initial HTTP response was accepted.
         pub type StreamError = Error<Infallible>;
@@ -3405,7 +3423,8 @@ mod support {
             /// RFC 7464 JSON Text Sequences (`application/json-seq` / `application/*+json-seq`).
             JsonSequence,
         }
-        /// A typed async stream of items decoded from a streaming response body (SSE or ndjson).
+        /// A typed async stream of items decoded from a streaming response body (SSE, ndjson, or a JSON
+        /// Text Sequence).
         ///
         /// Yielded by generated operation methods whose success response is a streaming media type, in
         /// place of the usual `ResponseValue<T>`. Drive it manually:
@@ -3428,6 +3447,11 @@ mod support {
             headers: HeaderMap,
             /// Bytes read but not yet framed into a complete item. Partial frames live here between chunks.
             buffer: Vec<u8>,
+            /// `ClientConfig::max_stream_frame`: the most bytes `buffer` may hold for an item whose
+            /// terminator has not arrived before the stream fails.
+            max_frame: usize,
+            /// `ClientConfig::max_error_body`: the bytes of an over-limit item its error retains.
+            max_error_body: usize,
             /// The framing mode for this body.
             framing: Framing,
             last_event_id: Option<String>,
@@ -3456,14 +3480,18 @@ mod support {
         }
         impl<T> EventStream<T> {
             /// Wrap a streaming response with the framing mode chosen for its media type. The response is
-            /// consumed lazily — no bytes are read until the first [`Self::next`] call.
+            /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
+            /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
             /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
             pub(crate) fn new(response: Response, framing: Framing) -> Self {
+                let config = ClientConfig::default();
                 Self {
                     status: response.status(),
                     headers: response.headers().clone(),
                     state: StreamState::Body(Box::pin(response.bytes_stream())),
                     buffer: Vec::new(),
+                    max_frame: config.max_stream_frame,
+                    max_error_body: config.max_error_body,
                     framing,
                     last_event_id: None,
                     reconnect_delay: None,
@@ -3493,6 +3521,8 @@ mod support {
                             .map(str::to_owned)
                     });
                 Self {
+                    max_frame: core.config().max_stream_frame,
+                    max_error_body: core.config().max_error_body,
                     last_event_id,
                     reconnect: request
                         .map(|request| ReconnectContext {
@@ -3505,6 +3535,9 @@ mod support {
                 }
             }
             /// Enable automatic reconnects using a caller-owned policy and timer.
+            ///
+            /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
+            /// because the operation's request could not be cloned (a streaming request body, for example).
             pub fn with_reconnect(
                 mut self,
                 policy: Arc<dyn ReconnectPolicy>,
@@ -3536,7 +3569,9 @@ mod support {
             /// stream (subsequent calls return `None`). A per-frame decode failure also surfaces as
             /// `Some(Err(Error::Decode { .. }))` rather than being silently skipped, but does NOT terminate
             /// the stream — the next call resumes framing the following items, so a single malformed event
-            /// does not abandon the rest.
+            /// does not abandon the rest. The exception is an item that passes
+            /// `ClientConfig::max_stream_frame` before its terminator arrives: it is also reported as
+            /// `Error::Decode`, and it does end the stream, without consulting a reconnect policy.
             ///
             /// The item type `T` is decoded per-frame with `serde_json::from_slice`.
             pub async fn next(&mut self) -> Option<Result<T, StreamError>> {
@@ -3574,6 +3609,9 @@ mod support {
                             this.state = StreamState::Done;
                             this.buffer.clear();
                             return Poll::Ready(None);
+                        }
+                        FramePoll::NeedMore if this.buffer.len() > this.max_frame => {
+                            return Poll::Ready(Some(Err(this.frame_overflow())));
                         }
                         FramePoll::NeedMore => {}
                     }
@@ -3659,6 +3697,25 @@ mod support {
             }
         }
         impl<T> EventStream<T> {
+            /// End the stream over an item that passed `max_frame` before its terminator, returning the
+            /// `Decode` error that reports it. The connection is dropped with the body stream, and no
+            /// reconnect is attempted: the server that sent the item is likely to send it again.
+            fn frame_overflow(&mut self) -> StreamError {
+                self.state = StreamState::Done;
+                let retained = self.buffer.len().min(self.max_error_body);
+                let body = Bytes::copy_from_slice(&self.buffer[..retained]);
+                self.buffer = Vec::new();
+                Error::Decode {
+                    status: self.status,
+                    headers: self.headers.clone(),
+                    path: format!(
+                        "stream item exceeds max_stream_frame ({} bytes) before its terminator",
+                        self.max_frame
+                    ),
+                    body,
+                    truncated: true,
+                }
+            }
             fn apply_metadata(&mut self, metadata: SseMetadata) {
                 if let Some(id) = metadata.id {
                     self.last_event_id = Some(id);
@@ -3674,18 +3731,10 @@ mod support {
                 reason: OwnedReconnectReason,
             ) -> Option<StreamError> {
                 let Some(reconnect) = self.reconnect.as_mut() else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 let Some(policy) = reconnect.policy.as_ref() else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 let reason_ref = match &reason {
                     OwnedReconnectReason::EndOfStream => ReconnectReason::EndOfStream,
@@ -3695,16 +3744,21 @@ mod support {
                 };
                 let Some(wait) = policy
                     .reconnect(reconnect.attempt, reason_ref, self.reconnect_delay) else {
-                    self.state = StreamState::Done;
-                    return match reason {
-                        OwnedReconnectReason::EndOfStream => None,
-                        OwnedReconnectReason::Failure(error) => Some(error),
-                    };
+                    return self.stop(reason);
                 };
                 reconnect.attempt = reconnect.attempt.saturating_add(1);
                 self.buffer.clear();
                 self.state = StreamState::Waiting(wait);
                 None
+            }
+            /// End the stream without reconnecting: a clean end of stream yields nothing further, and a
+            /// failure is handed back to be yielded.
+            fn stop(&mut self, reason: OwnedReconnectReason) -> Option<StreamError> {
+                self.state = StreamState::Done;
+                match reason {
+                    OwnedReconnectReason::EndOfStream => None,
+                    OwnedReconnectReason::Failure(error) => Some(error),
+                }
             }
             fn reconnect_future(&self) -> Option<ReconnectFuture> {
                 let reconnect = self.reconnect.as_ref()?;
@@ -3765,11 +3819,7 @@ mod support {
         fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             loop {
                 if let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
-                    let mut end = nl;
-                    if end > 0 && buffer[end - 1] == b'\r' {
-                        end -= 1;
-                    }
-                    let line = buffer[..end].to_vec();
+                    let line = trim_cr(&buffer[..nl]).to_vec();
                     buffer.drain(..=nl);
                     if line.is_empty() {
                         continue;
@@ -3777,11 +3827,7 @@ mod support {
                     return frame_item(line);
                 }
                 if at_eof {
-                    let mut end = buffer.len();
-                    if end > 0 && buffer[end - 1] == b'\r' {
-                        end -= 1;
-                    }
-                    let line = buffer[..end].to_vec();
+                    let line = trim_cr(buffer).to_vec();
                     buffer.clear();
                     if line.is_empty() {
                         return FramePoll::NeedMore;
@@ -3795,37 +3841,41 @@ mod support {
         /// separator (or EOF). Newlines are record terminators/formatting and are trimmed around the JSON
         /// text, while embedded newlines remain valid JSON whitespace.
         fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
-            let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
-                if at_eof {
-                    buffer.clear();
+            loop {
+                let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
+                    if at_eof {
+                        buffer.clear();
+                    }
+                    return FramePoll::NeedMore;
+                };
+                if first > 0 {
+                    buffer.drain(..first);
                 }
-                return FramePoll::NeedMore;
-            };
-            if first > 0 {
-                buffer.drain(..first);
+                let end = buffer[1..]
+                    .iter()
+                    .position(|byte| *byte == 0x1e)
+                    .map(|index| index + 1);
+                let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
+                    return FramePoll::NeedMore;
+                };
+                let mut payload = buffer[1..end].to_vec();
+                while payload.last().is_some_and(u8::is_ascii_whitespace) {
+                    payload.pop();
+                }
+                let start = payload
+                    .iter()
+                    .position(|byte| !byte.is_ascii_whitespace())
+                    .unwrap_or(payload.len());
+                payload.drain(..start);
+                if end == buffer.len() {
+                    buffer.clear();
+                } else {
+                    buffer.drain(..end);
+                }
+                if !payload.is_empty() {
+                    return frame_item(payload);
+                }
             }
-            let end = buffer[1..]
-                .iter()
-                .position(|byte| *byte == 0x1e)
-                .map(|index| index + 1);
-            let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
-                return FramePoll::NeedMore;
-            };
-            let mut payload = buffer[1..end].to_vec();
-            while payload.last().is_some_and(u8::is_ascii_whitespace) {
-                payload.pop();
-            }
-            let start = payload
-                .iter()
-                .position(|byte| !byte.is_ascii_whitespace())
-                .unwrap_or(payload.len());
-            payload.drain(..start);
-            if end == buffer.len() {
-                buffer.clear();
-            } else {
-                buffer.drain(..end);
-            }
-            if payload.is_empty() { FramePoll::NeedMore } else { frame_item(payload) }
         }
         fn frame_item(payload: Vec<u8>) -> FramePoll {
             FramePoll::Item {
@@ -3871,11 +3921,7 @@ mod support {
                         return FramePoll::NeedMore;
                     }
                     if pos < buffer.len() {
-                        let mut line = &buffer[pos..];
-                        if line.last() == Some(&b'\r') {
-                            line = &line[..line.len() - 1];
-                        }
-                        append_sse_field(line, &mut fields);
+                        append_sse_field(trim_cr(&buffer[pos..]), &mut fields);
                     }
                     buffer.clear();
                 } else {
@@ -3985,11 +4031,11 @@ mod support {
         fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
             let rest = &buf[from..];
             let nl = rest.iter().position(|&b| b == b'\n')?;
-            let mut line = &rest[..nl];
-            if line.last() == Some(&b'\r') {
-                line = &line[..line.len() - 1];
-            }
-            Some((line, from + nl + 1))
+            Some((trim_cr(&rest[..nl]), from + nl + 1))
+        }
+        /// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n`.
+        fn trim_cr(line: &[u8]) -> &[u8] {
+            line.strip_suffix(b"\r").unwrap_or(line)
         }
         /// Decode one framed JSON payload into `T`. A parse failure becomes [`Error::Decode`] carrying the
         /// status and headers of the response the frame was read from, the serde path, and the raw frame —
@@ -4064,7 +4110,7 @@ mod support {
                     core,
                     response,
                     documented,
-                    decode_xml_body::<E>,
+                    |body| { decode_xml_body::<E>(body) },
                 )
                 .await
         }
@@ -4242,27 +4288,42 @@ mod support {
             /// `YYYY-MM-DD`, matching `Serialize` for the reason given on [`DateTime`]'s `Display`, with the
             /// same fallback for a year RFC 3339's four-digit `full-date` cannot express.
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let year = self.0.year();
-                if !(0..=9999).contains(&year) {
-                    return write!(formatter, "{}", self.0);
+                match full_date(self.0) {
+                    Some(text) => formatter.write_str(&text),
+                    None => write!(formatter, "{}", self.0),
                 }
-                write!(
-                    formatter, "{year:04}-{:02}-{:02}", u8::from(self.0.month()), self.0
-                    .day()
-                )
             }
+        }
+        /// `date` as an RFC 3339 `full-date` (`YYYY-MM-DD`), or `None` for a year outside `0..=9999`,
+        /// which the format's four-digit year cannot express.
+        fn full_date(date: time::Date) -> Option<String> {
+            let year = date.year();
+            (0..=9999)
+                .contains(&year)
+                .then(|| {
+                    format!("{year:04}-{:02}-{:02}", u8::from(date.month()), date.day())
+                })
         }
         impl FromStr for Date {
             type Err = DateParseError;
             /// Parses exactly `YYYY-MM-DD`. The length and separator positions are checked first so that a
             /// longer string (an accidental full `date-time`, say) is rejected rather than silently
-            /// truncated to its date part.
+            /// truncated to its date part. Every other byte must be an ASCII digit, because integer
+            /// `FromStr` would otherwise accept a sign (`2023-+1-+4`, or year -1 from `-001-01-02`).
             fn from_str(text: &str) -> Result<Self, Self::Err> {
                 let invalid = || DateParseError {
                     expected: "full-date (YYYY-MM-DD)",
                 };
                 let bytes = text.as_bytes();
-                if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+                if bytes.len() != 10
+                    || !bytes
+                        .iter()
+                        .enumerate()
+                        .all(|(index, byte)| match index {
+                            4 | 7 => *byte == b'-',
+                            _ => byte.is_ascii_digit(),
+                        })
+                {
                     return Err(invalid());
                 }
                 let year: i32 = text[0..4].parse().map_err(|_| invalid())?;
@@ -4279,23 +4340,16 @@ mod support {
                 &self,
                 serializer: S,
             ) -> Result<S::Ok, S::Error> {
-                let year = self.0.year();
-                if !(0..=9999).contains(&year) {
-                    return Err(
+                let text = full_date(self.0)
+                    .ok_or_else(|| {
                         serde::ser::Error::custom(
                             format!(
-                                "date year {year} has no RFC 3339 full-date representation"
+                                "date year {} has no RFC 3339 full-date representation",
+                                self.0.year()
                             ),
-                        ),
-                    );
-                }
-                serializer
-                    .serialize_str(
-                        &format!(
-                            "{year:04}-{:02}-{:02}", u8::from(self.0.month()), self.0
-                            .day()
-                        ),
-                    )
+                        )
+                    })?;
+                serializer.serialize_str(&text)
             }
         }
         impl<'de> Deserialize<'de> for Date {
@@ -4316,9 +4370,9 @@ mod support {
         //! and drives the generated async operation futures to completion on it — the blocking client is a
         //! thin shim that reuses every line of the async dispatch, adding no logic of its own.
         //!
-        //! This module is compiled only under the `blocking` feature, which pulls in `tokio` with just the
-        //! `rt` feature. A client built without the feature carries no tokio dependency and no blocking
-        //! client at all.
+        //! This module is compiled only under the `blocking` feature on a non-wasm32 target, and pulls in
+        //! `tokio` with just the `rt` feature. A client built without the feature, or for wasm32, carries
+        //! no tokio dependency and no blocking client at all.
         //!
         //! # Nested-runtime caveat
         //!
@@ -4358,11 +4412,10 @@ mod support {
     };
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
-        build_url, build_url_on, build_url_with_query_string,
-        build_url_with_query_string_on, classify_error, classify_error_bytes,
-        classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-        decode_success_with, decode_text_body, read_error_body, send, unexpected_status,
-        StatusSpec,
+        build_url_on, build_url_with_query_string_on, classify_error,
+        classify_error_bytes, classify_error_text, decode_success, decode_success_bytes,
+        decode_success_text, decode_success_with, decode_text_body, read_error_body,
+        send, unexpected_status, StatusSpec,
     };
     pub use error::{
         ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError,
@@ -4374,7 +4427,7 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, ParameterError, PercentEncoding,
+        FormStyle, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use response::ResponseValue;
@@ -4393,7 +4446,7 @@ mod support {
     pub use blocking::BlockingRuntime;
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, deprecated, unused_imports)]
 pub mod types {
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
@@ -5065,32 +5118,6 @@ pub mod types {
     pub struct NullOnlyProperty {
         #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
         pub x: Option<NullOnlyPropertyx>,
-    }
-    #[derive(Debug, Clone)]
-    pub enum NullOnlyPropertyx84222325 {}
-    impl<'de> serde::Deserialize<'de> for NullOnlyPropertyx84222325 {
-        fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            Err(
-                serde::de::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
-    }
-    impl serde::Serialize for NullOnlyPropertyx84222325 {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(
-                serde::ser::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
     }
     #[derive(Debug, Clone)]
     pub enum NullOnlyPropertyx {}
@@ -6459,6 +6486,7 @@ pub mod types {
     pub type XmlOrderid = i64;
     pub type XmlOrdersku = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "xml-receipt")]
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptcode,
@@ -6540,15 +6568,11 @@ pub mod types {
         )]
         pub tags: Option<RequestBodytags0d6778a5>,
     }
-    pub type Token = bytes::Bytes;
     pub type Token84222325 = String;
-    pub type Cursor = bytes::Bytes;
     pub type Cursor84222325 = String;
     pub type RequestBody43755b84 = bytes::Bytes;
-    pub type Cursor394a9248 = bytes::Bytes;
     pub type Cursor842223252 = String;
     pub type RequestBodydigest = bytes::Bytes;
-    pub type RequestBodypreviousC67f70f9 = bytes::Bytes;
     pub type RequestBodyprevious = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
@@ -6564,7 +6588,6 @@ pub mod types {
         pub digest: Option<ResponseBodydigest>,
     }
     pub type RequestBodyfile = bytes::Bytes;
-    pub type RequestBodythumb1536c7fa = bytes::Bytes;
     pub type RequestBodythumb = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody20d50470 {
@@ -6588,6 +6611,7 @@ pub mod types {
     pub type ResponseBody6bf58d24 = bytes::Bytes;
     pub type ResponseBody48bb7a8a = String;
     pub type ResponseBodyDbe5ca3a = bytes::Bytes;
+    pub type Id3e6bacfe = String;
     pub type MatrixItem = String;
     pub type Matrix = Vec<MatrixItem>;
     pub type LabelItem = String;
@@ -6612,16 +6636,49 @@ pub mod types {
         #[serde(rename = "blob")]
         pub blob: DeepFilter,
     }
+    pub type RequestBodya = String;
+    pub type RequestBodyAdditional = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody3c5761a3 {
+        #[serde(rename = "a")]
+        pub a: RequestBodya,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditional>,
+    }
+    pub type RequestBodyaF8000e9c = String;
+    pub type RequestBodyAdditionalAba279dd = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBodyE2940da4 {
+        #[serde(
+            rename = "a",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub a: Option<RequestBodyaF8000e9c>,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalAba279dd>,
+    }
+    pub type RequestBodycaption820ffb52 = String;
+    pub type RequestBodyAdditionalItem = i64;
+    pub type RequestBodyAdditionalB504903e = Vec<RequestBodyAdditionalItem>;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RequestBody1654af29 {
+        #[serde(rename = "caption")]
+        pub caption: RequestBodycaption820ffb52,
+        #[serde(flatten)]
+        pub additional: BTreeMap<String, RequestBodyAdditionalB504903e>,
+    }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl BindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -6630,13 +6687,13 @@ impl BindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SignatureBindingCollisionsParams {
     #[serde(rename = "optional", skip_serializing_if = "Option::is_none")]
     pub optional: Option<types::Optional5db2f3f3>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SignatureBindingCollisionsParams {
     ///Set the `optional` parameter.
     #[must_use]
@@ -6645,7 +6702,7 @@ impl SignatureBindingCollisionsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeParamsParams {
     #[serde(rename = "labels", skip_serializing_if = "Option::is_none")]
@@ -6655,7 +6712,7 @@ pub struct SerializeParamsParams {
     #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
     pub session: Option<types::Session>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SerializeParamsParams {
     ///Set the `labels` parameter.
     #[must_use]
@@ -6676,7 +6733,7 @@ impl SerializeParamsParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetUserParams {
     ///Default: `1`.
@@ -6687,7 +6744,7 @@ pub struct GetUserParams {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<types::Type>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl GetUserParams {
     ///Set the `page` parameter.
     #[must_use]
@@ -6708,13 +6765,13 @@ impl GetUserParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct GetBlobParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor84222325>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl GetBlobParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -6723,13 +6780,13 @@ impl GetBlobParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PostNullableBytesParams {
     #[serde(rename = "cursor", skip_serializing_if = "Option::is_none")]
     pub cursor: Option<types::Cursor842223252>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl PostNullableBytesParams {
     ///Set the `cursor` parameter.
     #[must_use]
@@ -6738,7 +6795,7 @@ impl PostNullableBytesParams {
         self
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SerializeStylesParams {
     #[serde(rename = "space", skip_serializing_if = "Option::is_none")]
@@ -6750,7 +6807,7 @@ pub struct SerializeStylesParams {
     #[serde(rename = "reserved", skip_serializing_if = "Option::is_none")]
     pub reserved: Option<types::Reserved>,
 }
-#[allow(dead_code, clippy::wrong_self_convention)]
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
 impl SerializeStylesParams {
     ///Set the `space` parameter.
     #[must_use]
@@ -6789,7 +6846,7 @@ pub type SerializeParamsError = std::convert::Infallible;
 pub type GetConjunctionError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetUserError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiError {
     Status404(Box<types::NotFoundError>),
@@ -6815,7 +6872,7 @@ impl support::ApiErrorProblem for GetMultiError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetSharedError {
     Status401,
@@ -6844,7 +6901,7 @@ impl support::ApiErrorProblem for GetSharedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetSharedError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6857,13 +6914,14 @@ impl GetSharedError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetSharedError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetSharedError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeError {
     Status404(Option<Box<types::MaybeProblem>>),
@@ -6892,7 +6950,7 @@ impl support::ApiErrorProblem for GetMaybeError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMaybeError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -6905,6 +6963,7 @@ impl GetMaybeError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMaybeError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -6912,18 +6971,19 @@ impl support::ApiErrorBody for GetMaybeError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMultiDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMultiDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMultiDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetMultiDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -6935,11 +6995,13 @@ impl std::ops::DerefMut for GetMultiDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetMultiDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetMultiDefaultError> for types::Problem {
     fn from(outer: GetMultiDefaultError) -> Self {
         outer.0
@@ -6951,6 +7013,7 @@ impl std::fmt::Display for GetMultiDefaultError {
     }
 }
 impl std::error::Error for GetMultiDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMultiDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -6963,18 +7026,19 @@ impl support::ApiErrorProblem for GetMultiDefaultError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetPlainDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetPlainDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetPlainDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetPlainDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -6986,11 +7050,13 @@ impl std::ops::DerefMut for GetPlainDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetPlainDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetPlainDefaultError> for types::Problem {
     fn from(outer: GetPlainDefaultError) -> Self {
         outer.0
@@ -7002,6 +7068,7 @@ impl std::fmt::Display for GetPlainDefaultError {
     }
 }
 impl std::error::Error for GetPlainDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetPlainDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -7014,18 +7081,19 @@ impl support::ApiErrorProblem for GetPlainDefaultError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetUnitDefaultError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetUnitDefaultError(pub types::Problem);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetUnitDefaultError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::Problem {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetUnitDefaultError {
     type Target = types::Problem;
     fn deref(&self) -> &Self::Target {
@@ -7037,11 +7105,13 @@ impl std::ops::DerefMut for GetUnitDefaultError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::Problem> for GetUnitDefaultError {
     fn from(inner: types::Problem) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetUnitDefaultError> for types::Problem {
     fn from(outer: GetUnitDefaultError) -> Self {
         outer.0
@@ -7053,6 +7123,7 @@ impl std::fmt::Display for GetUnitDefaultError {
     }
 }
 impl std::error::Error for GetUnitDefaultError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetUnitDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -7064,7 +7135,7 @@ impl support::ApiErrorProblem for GetUnitDefaultError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultError {
     Status404(Box<types::Problem>),
@@ -7094,7 +7165,7 @@ impl support::ApiErrorProblem for GetBodylessDefaultError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessDefaultError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7106,13 +7177,14 @@ impl GetBodylessDefaultError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessDefaultError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessDefaultMultiError {
     Status404(Box<types::Problem>),
@@ -7151,7 +7223,7 @@ impl support::ApiErrorProblem for GetBodylessDefaultMultiError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessDefaultMultiError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7164,13 +7236,14 @@ impl GetBodylessDefaultMultiError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessDefaultMultiError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessDefaultMultiError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetBodylessSiblingError {
     Status403,
@@ -7200,7 +7273,7 @@ impl support::ApiErrorProblem for GetBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetBodylessSiblingError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7212,13 +7285,14 @@ impl GetBodylessSiblingError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetBodylessSiblingError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
         GetBodylessSiblingError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetXmlBodylessSiblingError {
     Status403,
@@ -7250,7 +7324,7 @@ impl support::ApiErrorProblem for GetXmlBodylessSiblingError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetXmlBodylessSiblingError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7262,13 +7336,14 @@ impl GetXmlBodylessSiblingError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetXmlBodylessSiblingError {
     type Body = types::XmlReceipt;
     fn body(&self) -> Option<&types::XmlReceipt> {
         GetXmlBodylessSiblingError::body(self)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetConditionalError {
     Status304,
@@ -7296,7 +7371,7 @@ impl support::ApiErrorProblem for GetConditionalError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetConditionalError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7308,6 +7383,7 @@ impl GetConditionalError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetConditionalError {
     type Body = types::Problem;
     fn body(&self) -> Option<&types::Problem> {
@@ -7315,18 +7391,19 @@ impl support::ApiErrorBody for GetConditionalError {
     }
 }
 ///The documented error body of this operation, wrapped so `Error<GetMaybeSingleError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetMaybeSingleError(pub Option<types::MaybeProblem>);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetMaybeSingleError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> Option<types::MaybeProblem> {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetMaybeSingleError {
     type Target = Option<types::MaybeProblem>;
     fn deref(&self) -> &Self::Target {
@@ -7338,11 +7415,13 @@ impl std::ops::DerefMut for GetMaybeSingleError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<Option<types::MaybeProblem>> for GetMaybeSingleError {
     fn from(inner: Option<types::MaybeProblem>) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetMaybeSingleError> for Option<types::MaybeProblem> {
     fn from(outer: GetMaybeSingleError) -> Self {
         outer.0
@@ -7354,6 +7433,7 @@ impl std::fmt::Display for GetMaybeSingleError {
     }
 }
 impl std::error::Error for GetMaybeSingleError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetMaybeSingleError {
     type Body = types::MaybeProblem;
     fn body(&self) -> Option<&types::MaybeProblem> {
@@ -7365,7 +7445,7 @@ impl support::ApiErrorProblem for GetMaybeSingleError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetAliasSharedError {
     Status404(Box<types::PlainMessage>),
@@ -7395,7 +7475,7 @@ impl support::ApiErrorProblem for GetAliasSharedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetAliasSharedError {
     /// The documented error body, whichever status carried it; `None` for a
     /// documented bodyless status. The status is on the `ResponseValue` that
@@ -7407,6 +7487,7 @@ impl GetAliasSharedError {
         }
     }
 }
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetAliasSharedError {
     type Body = types::PlainMessage;
     fn body(&self) -> Option<&types::PlainMessage> {
@@ -7436,18 +7517,19 @@ pub type GetArtworkError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type PutArtworkError = std::convert::Infallible;
 ///The documented error body of this operation, wrapped so `Error<GetTextErrorError>` is a `std::error::Error`. Derefs and converts to the inner type.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 pub struct GetTextErrorError(pub types::ResponseBodyD00b95d0);
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 impl GetTextErrorError {
     /// Unwrap to the documented error body.
     pub fn into_inner(self) -> types::ResponseBodyD00b95d0 {
         self.0
     }
 }
+#[allow(deprecated)]
 impl std::ops::Deref for GetTextErrorError {
     type Target = types::ResponseBodyD00b95d0;
     fn deref(&self) -> &Self::Target {
@@ -7459,11 +7541,13 @@ impl std::ops::DerefMut for GetTextErrorError {
         &mut self.0
     }
 }
+#[allow(deprecated)]
 impl From<types::ResponseBodyD00b95d0> for GetTextErrorError {
     fn from(inner: types::ResponseBodyD00b95d0) -> Self {
         Self(inner)
     }
 }
+#[allow(deprecated)]
 impl From<GetTextErrorError> for types::ResponseBodyD00b95d0 {
     fn from(outer: GetTextErrorError) -> Self {
         outer.0
@@ -7475,6 +7559,7 @@ impl std::fmt::Display for GetTextErrorError {
     }
 }
 impl std::error::Error for GetTextErrorError {}
+#[allow(deprecated)]
 impl support::ApiErrorBody for GetTextErrorError {
     type Body = types::ResponseBodyD00b95d0;
     fn body(&self) -> Option<&types::ResponseBodyD00b95d0> {
@@ -7486,7 +7571,7 @@ impl support::ApiErrorProblem for GetTextErrorError {
         support::ProblemDetails::of(&self.0)
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiError {
     Status400(Box<types::ResponseBody48bb7a8a>),
@@ -7515,6 +7600,10 @@ impl support::ApiErrorProblem for GetRawMultiError {
 #[allow(dead_code)]
 pub type SubmitOrderError = std::convert::Infallible;
 #[allow(dead_code)]
+pub type PatchMergeDocumentError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type SubmitLegacyOrderError = std::convert::Infallible;
+#[allow(dead_code)]
 pub type PostJsonMetaError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type StreamChatError = std::convert::Infallible;
@@ -7531,8 +7620,14 @@ pub type SerializeContentParamsError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type SubmitFormError = std::convert::Infallible;
 #[allow(dead_code)]
-pub type DocumentedHeadersError = std::convert::Infallible;
+pub type SubmitFormAdditionalError = std::convert::Infallible;
 #[allow(dead_code)]
+pub type SubmitNullableFormAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type UploadAdditionalError = std::convert::Infallible;
+#[allow(dead_code)]
+pub type DocumentedHeadersError = std::convert::Infallible;
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetNoSuccessError {
     Status404(Box<types::ResponseBody2a32723f>),
@@ -7566,7 +7661,7 @@ pub type GetMaybeEmptyError = std::convert::Infallible;
 pub type GetXmlMaybeEmptyError = std::convert::Infallible;
 #[allow(dead_code)]
 pub type GetRangedError = std::convert::Infallible;
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetErrorRangedError {
     Status409(Box<types::ConflictError>),
@@ -7596,45 +7691,45 @@ impl support::ApiErrorProblem for GetErrorRangedError {
         }
     }
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiDefaultResponse {
     Status200(Box<types::MultiOk>),
     Status201(Box<types::MultiCreated>),
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRawMultiResponse {
     Status200(Box<types::ResponseBody4450a524>),
     Status201(Box<types::ResponseBody6bf58d24>),
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMaybeEmptyResponse {
     Status200(Box<types::MultiOk>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetXmlMaybeEmptyResponse {
     Status200(Box<types::XmlReceipt>),
     Status204,
 }
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetRangedResponse {
     Status200(Box<types::MultiOk>),
     Status2xx(Box<types::MultiCreated>),
 }
 ///Documented response headers for `putRanged` `Status206`.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub struct PutRangedStatus206Headers {
     pub content_range: Option<types::HeaderContentRange>,
@@ -7662,7 +7757,7 @@ impl PutRangedStatus206Headers {
     }
 }
 ///Documented response headers for `documentedHeaders` `Status204`.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub struct DocumentedHeadersStatus204Headers {
     pub x_trace_ids: Option<types::HeaderXTraceIds>,
@@ -7790,7 +7885,7 @@ pub struct Client {
     core: support::ClientCore,
 }
 #[forbid(unsafe_code)]
-#[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+#[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
 impl Client {
     pub fn new(
         base_url: &str,
@@ -7831,13 +7926,13 @@ impl Client {
     ///
     /// Registration checks nothing; each operation matches its `security` requirement
     /// against the registered credentials when it is called, and fails before anything is
-    /// sent, as `support::Error::RequestConstruction`, when no alternative has every scheme
+    /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
     /// registered (`RequestError::MissingCredential`), when the selected alternative has a
     /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
     /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
     /// `Credential::Basic`), or when its token provider fails
-    /// (`RequestError::CredentialProvider`). `support::Credential`'s documentation lists
-    /// which variant each kind of scheme accepts.
+    /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+    /// variant each kind of scheme accepts.
     ///
     ///# Declared schemes
     ///
@@ -8062,7 +8157,11 @@ impl Client {
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body_07e95c71);
+        let body_07e95c71 = serde_json::to_vec(body_07e95c71)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body_07e95c71);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -9501,7 +9600,11 @@ Response `409`: Conflict*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -9946,6 +10049,81 @@ Response `409`: binary error*/
             )
         }
     }
+    ///Response `204`: patched
+    #[inline]
+    pub async fn patch_merge_document(
+        &self,
+        id: impl Into<types::Id3e6bacfe>,
+        body: &types::JsonMeta,
+    ) -> Result<support::ResponseValue<()>, support::Error<PatchMergeDocumentError>> {
+        let id: types::Id3e6bacfe = id.into();
+        let mut path = "/merge-patch/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::PATCH, url);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/merge-patch+json")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    PatchMergeDocumentError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: accepted
+    #[inline]
+    pub async fn submit_legacy_order(
+        &self,
+        body: &types::XmlOrder,
+    ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
+        let mut path = "/xml/legacy-order".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let body = support::to_xml(body).map_err(support::Error::widen)?;
+        request = request.header(reqwest::header::CONTENT_TYPE, "text/xml").body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitLegacyOrderError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
     ///Response `200`: OK
     #[inline]
     pub async fn post_json_meta(
@@ -9960,7 +10138,11 @@ Response `409`: binary error*/
         let url = support::build_url_on(&self.core, None, &path, &query)
             .map_err(support::Error::widen)?;
         let mut request = self.core.http().request(reqwest::Method::POST, url);
-        request = request.json(body);
+        let body = serde_json::to_vec(body)
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let request = request.build().map_err(support::Error::request_construction)?;
         let response = support::send(&self.core, request)
             .await
@@ -10343,7 +10525,7 @@ Response `409`: binary error*/
                 mode: support::FormMode::Json,
             },
         ];
-        let body = support::serialize_form_body(body, FORM_PROPERTIES)
+        let body = support::serialize_form_body(body, FORM_PROPERTIES, None)
             .map_err(support::Error::request_construction)?;
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -10359,6 +10541,144 @@ Response `409`: binary error*/
         } else {
             Err(
                 support::unexpected_status::<SubmitFormError>(&self.core, response).await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_form_additional(
+        &self,
+        body: &types::RequestBody3c5761a3,
+    ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormAdditionalError>> {
+        let mut path = "/forms/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((support::FormMode::Text, body.additional.len())),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn submit_nullable_form_additional(
+        &self,
+        body: &Option<types::RequestBodyE2940da4>,
+    ) -> Result<
+        support::ResponseValue<()>,
+        support::Error<SubmitNullableFormAdditionalError>,
+    > {
+        let mut path = "/form/additional/nullable".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        const FORM_PROPERTIES: &[support::FormProperty] = &[
+            support::FormProperty {
+                name: "a",
+                mode: support::FormMode::Text,
+            },
+        ];
+        let body = support::serialize_form_body(
+                body,
+                FORM_PROPERTIES,
+                Some((
+                    support::FormMode::Text,
+                    body.as_ref().map_or(0, |body| body.additional.len()),
+                )),
+            )
+            .map_err(support::Error::request_construction)?;
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<
+                    SubmitNullableFormAdditionalError,
+                >(&self.core, response)
+                    .await,
+            )
+        }
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn upload_additional(
+        &self,
+        body: &types::RequestBody1654af29,
+    ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+        let mut path = "/upload/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::POST, url);
+        let mut form = reqwest::multipart::Form::new();
+        let mut part = reqwest::multipart::Part::text(body.caption.to_string());
+        part = part
+            .mime_str("text/plain")
+            .map_err(support::Error::request_construction)?;
+        form = form.part("caption", part);
+        for (name, value) in &body.additional {
+            if matches!(name.as_str(), "caption") {
+                continue;
+            }
+            let mut part = reqwest::multipart::Part::text(
+                serde_json::to_string(value)
+                    .map_err(support::Error::request_construction)?,
+            );
+            part = part
+                .mime_str("application/json")
+                .map_err(support::Error::request_construction)?;
+            form = form.part(name.clone(), part);
+        }
+        request = request.multipart(form);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(
+                support::unexpected_status::<UploadAdditionalError>(&self.core, response)
+                    .await,
             )
         }
     }
@@ -10737,7 +11057,7 @@ Response `409`: Conflict*/
 mod __spargen_blocking {
     use super::*;
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-    /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it.
+    /**A synchronous client: owns the async `Client` plus a current-thread tokio runtime and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it compiles only on a non-wasm32 target.
 
 Must NOT be constructed or called from inside another async runtime — tokio's `block_on` panics when nested. Build one on a plain thread (e.g. `std::thread` or `tokio::task::spawn_blocking`).*/
     #[derive(Debug)]
@@ -10746,17 +11066,32 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         inner: Client,
         runtime: support::BlockingRuntime,
     }
+    /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
+    /// failure as the constructors' `RequestConstruction` error.
+    #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+    #[allow(clippy::result_large_err)]
+    fn new_runtime() -> Result<
+        support::BlockingRuntime,
+        support::Error<std::convert::Infallible>,
+    > {
+        support::BlockingRuntime::new().map_err(support::Error::request_construction)
+    }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     #[forbid(unsafe_code)]
-    #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+    #[allow(
+        dead_code,
+        deprecated,
+        unused_mut,
+        unused_variables,
+        clippy::result_large_err
+    )]
     impl BlockingClient {
         /// Build a blocking client over a fresh default `reqwest::Client`.
         pub fn new(
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::new(base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied `reqwest::Client`.
@@ -10765,8 +11100,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_client(client, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied transport backend.
@@ -10775,8 +11109,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_backend(backend, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Borrow the wrapped async client.
@@ -10804,7 +11137,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn read_file(
             &self,
@@ -10813,7 +11145,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime.block_on(self.inner.read_file(path))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn binding_collisions(
             &self,
@@ -10829,7 +11160,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn signature_binding_collisions(
             &self,
@@ -10854,7 +11184,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_params(
             &self,
@@ -10867,7 +11196,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 .block_on(self.inner.serialize_params(ids, workflow_id, x_flags, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_conjunction(
             &self,
@@ -10875,7 +11203,6 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime.block_on(self.inner.get_conjunction())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn get_user(
             &self,
@@ -10893,7 +11220,6 @@ Response `204`: No Content
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_multi(
             &self,
@@ -10910,7 +11236,6 @@ Response `401`: Unauthorized
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_shared(
             &self,
@@ -10924,7 +11249,6 @@ Response `404`: Not Found
 Response `409`: Conflict
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe(
             &self,
@@ -10936,7 +11260,6 @@ Response `default`: Anything else*/
 Response `201`: Created
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_multi_default(
             &self,
@@ -10949,7 +11272,6 @@ Response `default`: Anything else*/
         /**Response `200`: OK
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_plain_default(
             &self,
@@ -10962,7 +11284,6 @@ Response `default`: Anything else*/
         /**Response `204`: No Content
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_unit_default(
             &self,
@@ -10974,7 +11295,6 @@ Response `default`: Anything else*/
 Response `404`: Not Found
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_default(
             &self,
@@ -10991,7 +11311,6 @@ Response `404`: Not Found
 Response `409`: Conflict
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_default_multi(
             &self,
@@ -11006,7 +11325,6 @@ Response `default`: Anything else*/
 Response `403`: Forbidden
 
 Response `404`: Not Found*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_bodyless_sibling(
             &self,
@@ -11021,7 +11339,6 @@ Response `404`: Not Found*/
 Response `403`: Forbidden
 
 Response `404`: Not Found*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_xml_bodyless_sibling(
             &self,
@@ -11034,7 +11351,6 @@ Response `404`: Not Found*/
         /**Response `304`: Not Modified
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_conditional(
             &self,
@@ -11047,7 +11363,6 @@ Response `default`: Anything else*/
         /**Response `204`: No Content
 
 Response `400`: Bad Request*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe_single(
             &self,
@@ -11059,7 +11374,6 @@ Response `400`: Bad Request*/
 Response `404`: Not Found
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_alias_shared(
             &self,
@@ -11067,7 +11381,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_alias_shared())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn upload_file(
             &self,
@@ -11076,7 +11389,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.upload_file(body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_blob(
             &self,
@@ -11086,7 +11398,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_blob(token, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn post_raw(
             &self,
@@ -11095,7 +11406,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_raw(body))
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn post_nullable_bytes(
             &self,
@@ -11108,7 +11418,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_nullable_bytes(params, body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn post_nullable_parts(
             &self,
@@ -11117,7 +11426,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.post_nullable_parts(body))
         }
         ///Response `200`: rendered HTML
-        #[allow(deprecated)]
         #[inline]
         pub fn render_html(
             &self,
@@ -11128,7 +11436,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.render_html())
         }
         ///Response `200`: octocat art
-        #[allow(deprecated)]
         #[inline]
         pub fn get_octocat(
             &self,
@@ -11139,7 +11446,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_octocat())
         }
         ///Response `200`: raw bytes
-        #[allow(deprecated)]
         #[inline]
         pub fn download_raw(
             &self,
@@ -11150,7 +11456,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.download_raw())
         }
         ///Response `206`: partial content
-        #[allow(deprecated)]
         #[inline]
         pub fn put_ranged(
             &self,
@@ -11162,7 +11467,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.put_ranged(body))
         }
         ///Response `200`: the image
-        #[allow(deprecated)]
         #[inline]
         pub fn get_artwork(
             &self,
@@ -11174,7 +11478,6 @@ Response `409`: Conflict*/
             self.runtime.block_on(self.inner.get_artwork(id))
         }
         ///Response `204`: stored
-        #[allow(deprecated)]
         #[inline]
         pub fn put_artwork(
             &self,
@@ -11187,7 +11490,6 @@ Response `409`: Conflict*/
 
 Response `400`: textual failure*/
         #[deprecated]
-        #[allow(deprecated)]
         #[inline]
         pub fn get_text_error(
             &self,
@@ -11201,7 +11503,6 @@ Response `201`: binary success
 Response `400`: text error
 
 Response `409`: binary error*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_raw_multi(
             &self,
@@ -11212,7 +11513,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.get_raw_multi())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn submit_order(
             &self,
@@ -11223,8 +11523,27 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_order(body))
         }
+        ///Response `204`: patched
+        #[inline]
+        pub fn patch_merge_document(
+            &self,
+            id: impl Into<types::Id3e6bacfe>,
+            body: &types::JsonMeta,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<PatchMergeDocumentError>,
+        > {
+            self.runtime.block_on(self.inner.patch_merge_document(id, body))
+        }
+        ///Response `204`: accepted
+        #[inline]
+        pub fn submit_legacy_order(
+            &self,
+            body: &types::XmlOrder,
+        ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
+            self.runtime.block_on(self.inner.submit_legacy_order(body))
+        }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn post_json_meta(
             &self,
@@ -11236,7 +11555,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.post_json_meta(body))
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat(
             &self,
@@ -11247,7 +11565,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat_lines(
             &self,
@@ -11258,7 +11575,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat_lines())
         }
         ///Response `200`: OK
-        #[allow(deprecated)]
         #[inline]
         pub fn stream_chat_sequence(
             &self,
@@ -11269,7 +11585,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.stream_chat_sequence())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn get_alternate_auth(
             &self,
@@ -11277,7 +11592,6 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.get_alternate_auth())
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_styles(
             &self,
@@ -11290,7 +11604,6 @@ Response `409`: binary error*/
                 .block_on(self.inner.serialize_styles(matrix, label, raw, params))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn serialize_content_params(
             &self,
@@ -11308,7 +11621,6 @@ Response `409`: binary error*/
                 )
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
         #[inline]
         pub fn submit_form(
             &self,
@@ -11317,7 +11629,36 @@ Response `409`: binary error*/
             self.runtime.block_on(self.inner.submit_form(body))
         }
         ///Response `204`: No Content
-        #[allow(deprecated)]
+        #[inline]
+        pub fn submit_form_additional(
+            &self,
+            body: &types::RequestBody3c5761a3,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[inline]
+        pub fn submit_nullable_form_additional(
+            &self,
+            body: &Option<types::RequestBodyE2940da4>,
+        ) -> Result<
+            support::ResponseValue<()>,
+            support::Error<SubmitNullableFormAdditionalError>,
+        > {
+            self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
+        }
+        ///Response `204`: No Content
+        #[inline]
+        pub fn upload_additional(
+            &self,
+            body: &types::RequestBody1654af29,
+        ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
+            self.runtime.block_on(self.inner.upload_additional(body))
+        }
+        ///Response `204`: No Content
         #[inline]
         pub fn documented_headers(
             &self,
@@ -11327,7 +11668,6 @@ Response `409`: binary error*/
         /**Response `404`: Not Found
 
 Response `default`: Anything else*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_no_success(
             &self,
@@ -11340,7 +11680,6 @@ Response `default`: Anything else*/
         /**Response `200`: OK
 
 Response `204`: No Content*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_maybe_empty(
             &self,
@@ -11353,7 +11692,6 @@ Response `204`: No Content*/
         /**Response `200`: OK
 
 Response `204`: No Content*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_xml_maybe_empty(
             &self,
@@ -11366,7 +11704,6 @@ Response `204`: No Content*/
         /**Response `2XX`: Any other success
 
 Response `200`: OK*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_ranged(
             &self,
@@ -11381,7 +11718,6 @@ Response `200`: OK*/
 Response `4XX`: Any other client error
 
 Response `409`: Conflict*/
-        #[allow(deprecated)]
         #[inline]
         pub fn get_error_ranged(
             &self,

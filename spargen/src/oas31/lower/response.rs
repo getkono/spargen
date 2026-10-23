@@ -2,7 +2,7 @@
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{Docs, MediaType, Response, ResponseHeader, Responses, StatusSpec, Ty, TypeKind};
-use crate::oas31::media::media_object_is_opaque;
+use crate::oas31::media::{is_cbor, media_essence, media_object_is_opaque};
 use crate::oas31::{MediaTypeObject, ResponseObject};
 
 use super::content::{choose_media, lower_media_type, BodyPosition, ChosenMedia};
@@ -18,7 +18,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(status) = parse_status(status) {
                 if let Some(response) = self
                     .resolve_response(response)
-                    .and_then(|r| self.lower_response(&r))
+                    .map(|r| self.lower_response(&r))
                 {
                     by_status.push((status, response));
                 }
@@ -28,11 +28,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .default
             .as_ref()
             .and_then(|response| self.resolve_response(response))
-            .and_then(|response| self.lower_response(&response));
+            .map(|response| self.lower_response(&response));
         Responses { by_status, default }
     }
 
-    fn lower_response(&mut self, response: &ResponseObject) -> Option<Response> {
+    fn lower_response(&mut self, response: &ResponseObject) -> Response {
         let body = choose_media(
             &response.content,
             &response.provenance,
@@ -54,21 +54,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if let Some(narrowing) = narrowing {
                     self.diags.emit(narrowing);
                 }
-                Some(lowered)
+                // A CBOR body is read as opaque octets, so its key is announced in `Accept`: the
+                // media type is the only place the response's representation is stated.
+                let essence = media_essence(media_name);
+                let accept = is_cbor(essence).then(|| essence.to_owned());
+                Some((lowered, accept))
             },
         );
+        let (body, accept) = match body {
+            Some((body, accept)) => (Some(body), accept),
+            None => (None, None),
+        };
         // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
         // framing; the body is then the streamed item type `T`. A whole-body response has no
         // framing. Framing is recorded in every response position; streaming only takes effect when
         // this is the operation's single success body (see `Responses::stream_success`), and a
         // bodied stream anywhere else rejects the operation (`Responses::stream_outside_single_success`).
         let headers = self.lower_response_headers(response);
-        Some(Response {
+        Response {
             media: body.map(|(media, _, _)| media),
             body: body.and_then(|(_, ty, _)| ty),
             stream: body.and_then(|(_, _, stream)| stream),
+            accept,
             headers,
-        })
+        }
     }
 
     /// Lower the response body entry [`Self::lower_response`] selected into its media, type, and
@@ -81,6 +90,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<(MediaType, Option<Ty>, Option<crate::ir::Framing>)> {
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &response.provenance, self.diags)?;
+        // The whole-body `schema`, lowered only on the paths that read it.
+        let lower_whole_body = |ctx: &mut Self| {
+            object
+                .schema
+                .as_ref()
+                .and_then(|schema| ctx.lower_schema_ref(schema, "ResponseBody"))
+        };
         // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
         // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
         // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
@@ -111,6 +127,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     )
                 }
             } else if self.document.is_oas32 && object.schema.is_some() {
+                // E009 case: sequence-schema
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(
                                 "in OpenAPI 3.2, `schema` on sequential media describes the \
@@ -120,13 +137,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .emit(self.diags);
                 return None;
             } else {
-                (
-                    object
-                        .schema
-                        .as_ref()
-                        .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                    Some(framing),
-                )
+                (lower_whole_body(self), Some(framing))
             }
         } else {
             if object.item_schema.is_some() {
@@ -137,13 +148,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     )
                     .emit(self.diags);
             }
-            (
-                object
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                None,
-            )
+            (lower_whole_body(self), None)
         };
         if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
             self.warn_structural_default_ref(schema, "a response body schema");
@@ -151,6 +156,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.warn_structural_default_ref(schema, "a response body schema");
         }
         if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+            // E009 case: form-response
             Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                         .message(format!(
                             "media type `{media_name}` is supported for request bodies, not response bodies"
@@ -171,6 +177,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         if let Some(ty) = ty {
             if !self.raw_body_compatible(media, ty) {
+                // E009 case: raw-schema
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(format!(
                                 "media type `{media_name}` requires a string-like or binary response schema"
@@ -185,6 +192,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `Option<String>` soundly, so it is not refused here, and neither is a
             // streamed item, which is framed and decoded element by element.
             if stream.is_none() && ty.nullable && self.is_bytes(ty) {
+                // E009 case: raw-null
                 Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                     .message(format!(
                         "this `{media_name}` response body is read as raw bytes, whose \
@@ -204,9 +212,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower a response's documented headers into typed accessors.
     ///
-    /// A header that cannot be represented is skipped with a diagnostic rather than failing the
-    /// whole operation: the body is what the call returns, and refusing an otherwise-generatable
-    /// operation over an unreadable header would be a poor trade.
+    /// A header with no typed accessor is skipped, and what is reported depends on why. A
+    /// documented `Content-Type`, a shape `simple` serialization cannot express, a `content` media
+    /// type that is not JSON or text, a `content` entry without a schema, and a textual one that
+    /// is not a single value are warnings (`W011`): the body is what the call returns, and
+    /// refusing an otherwise-generatable operation over an unreadable header would be a poor trade.
+    /// A defect in the document itself still rejects it, with the error reported where it is
+    /// found: a reference that resolves to nothing, a `content` key spargen does not classify
+    /// (`E009`), or a schema that fails to lower.
+    ///
+    /// A header skipped after its schema was lowered has the types that lowering inserted
+    /// [elided](Self::elide_unused_union_lowering) where nothing else reaches them, so they are
+    /// not emitted as public types nothing refers to (#927); a component the header `$ref`s stays,
+    /// since its memo holds it.
     fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
         let mut headers = Vec::new();
         for (name, header) in &response.headers {
@@ -228,10 +246,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let header = &header;
             // A Header Object may only use `simple`; the document schema already enforces that.
             let (ty, shape) = if let Some(schema) = &header.schema {
+                let mark = self.graph_mark();
                 let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
                 let Some(shape) = self.header_shape(ty) else {
+                    let lowered = mark..self.graph_mark();
+                    self.elide_unused_union_lowering(lowered);
                     // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
@@ -285,6 +306,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                     continue;
                 };
+                let mark = self.graph_mark();
                 let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
@@ -295,6 +317,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // representable: a list or an object under `text/plain` says nothing about how
                     // the value is framed, and `simple` is not that framing.
                     let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
+                        let lowered = mark..self.graph_mark();
+                        self.elide_unused_union_lowering(lowered);
                         // W011 case: response-header-untyped
                         Diagnostic::warning(
                             Code::DeclarationHasNoEffect,

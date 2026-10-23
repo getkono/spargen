@@ -5,38 +5,95 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{MediaType, Operation, ParamLoc, Ty};
-use crate::name::Names;
+use crate::name::{Names, OperationBindings};
 
 use super::docs::normalize_rustdoc;
-use super::operation::param_ident;
+use super::idents::{param_ident, params_struct_ident};
 use super::ty::ty_tokens;
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
 /// `allowReserved`.
 ///
-/// This is the single place that mapping exists. Headers and OpenAPI 3.2's `style: cookie` are
-/// sent verbatim — the specification says values there must not be percent-encoded, and that
-/// escaping is the caller's job. `in: cookie` with `style: form` *does* encode: Appendix D
-/// describes that pairing as the way to opt into automatic encoding, with `allowReserved` as its
-/// escape hatch.
+/// Headers and OpenAPI 3.2's `style: cookie` are sent verbatim — the specification says values
+/// there must not be percent-encoded, and that escaping is the caller's job. `in: cookie` with
+/// `style: form` *does* encode: Appendix D describes that pairing as the way to opt into automatic
+/// encoding, with `allowReserved` as its escape hatch. Every other location but the path takes
+/// [`query_encoding_tokens`].
 fn percent_encoding_tokens(param: &crate::ir::Parameter) -> TokenStream {
-    let variant = if param.location == ParamLoc::Header
-        || matches!(param.style, crate::ir::ParamStyle::Cookie)
-    {
-        "Passthrough"
+    if param.location == ParamLoc::Header || matches!(param.style, crate::ir::ParamStyle::Cookie) {
+        encoding_variant_tokens("Passthrough")
     } else if param.location == ParamLoc::Path {
-        if param.allow_reserved {
+        encoding_variant_tokens(if param.allow_reserved {
             "ReservedPath"
         } else {
             "Unreserved"
-        }
-    } else if param.allow_reserved {
-        "Reserved"
+        })
     } else {
-        "Form"
-    };
+        query_encoding_tokens(param.allow_reserved)
+    }
+}
+
+/// The percent-encoding set of a query-style value — a query or `style: form` cookie parameter,
+/// a whole-query value, or an RFC 6570-mode form or multipart body property: reserved expansion
+/// under `allowReserved`, the `form-urlencoded` set otherwise.
+pub(super) fn query_encoding_tokens(allow_reserved: bool) -> TokenStream {
+    encoding_variant_tokens(if allow_reserved { "Reserved" } else { "Form" })
+}
+
+/// The `support::PercentEncoding` variant named `variant`.
+fn encoding_variant_tokens(variant: &str) -> TokenStream {
     let ident = proc_macro2::Ident::new(variant, proc_macro2::Span::call_site());
     quote! { support::PercentEncoding::#ident }
+}
+
+/// The statements serializing every `location` parameter of `operation`, required ones first and
+/// then optional ones, each in declaration order. `serialize` renders one parameter from the
+/// expression its value is borrowed through: `&ident`, the method argument, for a required one, and
+/// `value` for an optional one, whose statement runs only when the caller set it in the
+/// optional-parameters bundle.
+pub(super) fn location_statements(
+    operation: &Operation,
+    names: &Names,
+    bindings: &OperationBindings,
+    location: ParamLoc,
+    serialize: impl Fn(&crate::ir::Parameter, TokenStream) -> TokenStream,
+) -> Vec<TokenStream> {
+    let at_location = |required: bool| {
+        operation
+            .params
+            .iter()
+            .filter(move |param| param.required == required && param.location == location)
+    };
+    let required = at_location(true).map(|param| {
+        let ident = param_ident(names, operation, param);
+        serialize(param, quote! { &#ident })
+    });
+    let optional = at_location(false).map(|param| {
+        let ident = param_ident(names, operation, param);
+        optional_param_guard(bindings, ident, serialize(param, quote! { value }))
+    });
+    required.chain(optional).collect()
+}
+
+/// The statement that runs `body` with `value` bound to an optional parameter's value, when the
+/// caller supplied the optional-parameters bundle and set `ident` in it.
+fn optional_param_guard(
+    bindings: &OperationBindings,
+    ident: &crate::name::Ident,
+    body: TokenStream,
+) -> TokenStream {
+    let params_binding = bindings
+        .params
+        .as_ref()
+        .expect("optional parameters argument allocated");
+    quote! {
+        if let Some(value) = #params_binding
+            .as_ref()
+            .and_then(|params| params.#ident.as_ref())
+        {
+            #body
+        }
+    }
 }
 
 /// The runtime `Delimiter` for a non-RFC 6570 query style.
@@ -47,8 +104,10 @@ pub(super) fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
     }
 }
 
-/// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
-/// their declared OpenAPI style; `content`-typed parameters retain their media codec.
+/// Render a parameter value from a borrowed expression: a path or header parameter of any style,
+/// or a `content`-typed parameter in any location. Schema-typed parameters use their declared
+/// style (`matrix`, `label`, and `simple` for every other); `content`-typed parameters retain
+/// their media codec.
 ///
 /// Path values are percent-encoded here, at serialization time, whether schema- or
 /// `content`-typed. Splicing a raw value into the path template would let a value containing `/`,
@@ -65,10 +124,13 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
             },
             // Text is the only other media a `content` parameter may carry; lowering rejects the
             // rest, so this arm never sees a codec it cannot render.
-            _ => quote! {
-                support::serialize_simple(#value, false, support::PercentEncoding::Passthrough)
-                    .map_err(support::Error::request_construction)?
-            },
+            _ => {
+                let passthrough = encoding_variant_tokens("Passthrough");
+                quote! {
+                    support::serialize_simple(#value, false, #passthrough)
+                        .map_err(support::Error::request_construction)?
+                }
+            }
         };
         if param.location != ParamLoc::Path {
             return rendered;
@@ -99,7 +161,8 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
 
 /// Emit serialization of one query parameter into the operation's fragment vector.
 ///
-/// Fragments arrive at `build_url` already percent-encoded, so the style's delimiters stay
+/// Fragments arrive at `support::build_url_on` (or `build_url_with_query_string_on`, beside a
+/// whole-query value) already percent-encoded, so the style's delimiters stay
 /// literal and remain distinguishable from the same character inside a value.
 pub(super) fn query_param_tokens(
     param: &crate::ir::Parameter,
@@ -110,13 +173,7 @@ pub(super) fn query_param_tokens(
     let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
-            let explode = param.explode;
-            quote! {
-                #query_binding.extend(
-                    support::serialize_form(#name, #value, #explode, #encoding)
-                        .map_err(support::Error::request_construction)?,
-                );
-            }
+            form_fragments_tokens(query_binding, name, value, param.explode, &encoding)
         }
         crate::ir::ParamStyle::Delimited(delimiter) => {
             let delimiter = delimiter_tokens(*delimiter);
@@ -151,10 +208,11 @@ pub(super) fn query_param_tokens(
 
 /// A JSON whole-query value: one opaque, fully-encoded token.
 pub(super) fn json_querystring_tokens(value: TokenStream) -> TokenStream {
+    let encoding = query_encoding_tokens(false);
     quote! {
         support::encode(
             &serde_json::to_string(#value).map_err(support::Error::request_construction)?,
-            support::PercentEncoding::Form,
+            #encoding,
         )
     }
 }
@@ -172,13 +230,32 @@ pub(super) fn querystring_param_tokens(
             let encoded = json_querystring_tokens(value);
             quote! { #raw_query_binding = Some(#encoded); }
         }
-        crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
-            #query_binding.extend(
-                support::serialize_form("", #value, true, support::PercentEncoding::Form)
-                    .map_err(support::Error::request_construction)?,
-            );
-        },
+        crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => form_fragments_tokens(
+            query_binding,
+            "",
+            value,
+            true,
+            &query_encoding_tokens(false),
+        ),
         _ => quote! {},
+    }
+}
+
+/// The statement extending `binding` with the `name=value` fragments `support::serialize_form`
+/// renders for `value`: a `form`-style query or cookie parameter, or a form-encoded whole-query
+/// value (whose empty `name` makes each member its own pair).
+fn form_fragments_tokens(
+    binding: &crate::name::Ident,
+    name: &str,
+    value: TokenStream,
+    explode: bool,
+    encoding: &TokenStream,
+) -> TokenStream {
+    quote! {
+        #binding.extend(
+            support::serialize_form(#name, #value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?,
+        );
     }
 }
 
@@ -194,13 +271,7 @@ pub(super) fn cookie_param_tokens(
     let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
-            let explode = param.explode;
-            quote! {
-                #cookies_binding.extend(
-                    support::serialize_form(#name, #value, #explode, #encoding)
-                        .map_err(support::Error::request_construction)?,
-                );
-            }
+            form_fragments_tokens(cookies_binding, name, value, param.explode, &encoding)
         }
         crate::ir::ParamStyle::Content(_) => {
             let rendered = param_value_tokens(param, value);
@@ -218,10 +289,7 @@ pub(super) fn cookie_param_tokens(
 /// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
 /// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
 pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenStream {
-    let ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
+    let ident = params_struct_ident(operation, names);
     let optional: Vec<&crate::ir::Parameter> = operation
         .params
         .iter()
@@ -234,9 +302,12 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         let wire = &param.name;
         // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
         // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
-        // again when it did not — otherwise a nullable optional param becomes `Option<Option<T>>`
-        // and the query/header `value.to_string()` serialization would not compile
-        // (`Option<T>: !Display`). Absent and `null` both collapse to `None`.
+        // again when it did not, so absent and `null` both collapse to `None` and a `None` field
+        // is omitted. A schema-styled serialization (`style`/`explode`) has no token that tells
+        // an explicit `null` from an absent value, so `Option<Option<T>>` would ask the caller
+        // for a distinction the wire cannot carry. A `content` parameter of `application/json`
+        // does carry one, the text `null` (a required nullable one sends it for `None`), but
+        // its optional field takes the same single `Option`, so it never sends `null`.
         let ty = if param.ty.nullable {
             ty_tokens(param.ty, names, true)
         } else {
@@ -286,7 +357,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         }
     });
     quote! {
-        #[allow(dead_code)]
+        #[allow(dead_code, deprecated)]
         #[derive(Debug, Clone, Default, serde::Serialize)]
         pub struct #ident {
             #(#fields)*
@@ -294,7 +365,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
 
         // Setters named after fields can trip `wrong_self_convention` when a param is named
         // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
-        #[allow(dead_code, clippy::wrong_self_convention)]
+        #[allow(dead_code, deprecated, clippy::wrong_self_convention)]
         impl #ident {
             #(#setters)*
         }

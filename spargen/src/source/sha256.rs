@@ -1,8 +1,10 @@
-//! A dependency-free SHA-256, used to hash-pin vendored remote `$ref` documents.
+//! A dependency-free SHA-256, used to hash-pin vendored remote `$ref` documents (and to derive
+//! their vendor paths) and, in `cache.rs`, to fingerprint build inputs and generated output.
 //!
-//! Pinning must be reproducible and add no supply-chain surface to the published crate, so the
-//! digest is computed in-tree rather than via a hashing dependency. The implementation follows
-//! FIPS 180-4; it is small, allocation-light, and covered by the standard NIST test vectors.
+//! Digests must be reproducible and add no supply-chain surface to the published crate, so they
+//! are computed in-tree rather than via a hashing dependency. The implementation follows
+//! FIPS 180-4; it copies its input once to pad it, and is covered by the standard NIST test
+//! vectors.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -88,6 +90,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::sha256_hex;
+    use crate::test_support::{read_repo_file, repo_root};
 
     #[test]
     fn nist_vectors() {
@@ -115,13 +118,16 @@ mod tests {
         );
     }
 
-    /// Every corpus case in `corpus/manifest.toml` records the `sha256` of its pinned file, and
-    /// nothing verified it — so a corpus file could be edited, or an LFS fetch could return the
-    /// wrong revision, and every corpus expectation would silently be about a different document.
-    /// This lives here because `sha256_hex` is crate-private; it doubles as a check of the
-    /// hand-rolled hasher against multi-megabyte real-world inputs.
+    /// The hand-rolled hasher agrees with the `sha2` crate on every pinned corpus file: real-world
+    /// inputs, the largest over ten megabytes, far longer than the vectors above. That each file
+    /// still hashes to the `sha256` its manifest case pins is
+    /// `every_pinned_spec_matches_the_hash_the_manifest_declares` in
+    /// `spargen/tests/corpus_manifest.rs`; this test lives here only because `sha256_hex` is
+    /// crate-private.
     #[test]
-    fn the_pinned_corpus_files_still_hash_to_their_manifest_sha256() {
+    fn the_hasher_agrees_with_sha2_on_every_pinned_corpus_file() {
+        use sha2::{Digest, Sha256};
+
         // A packaged `.crate` ships no corpus, so the check is skipped there — gated on the
         // workspace marker, not on the file, so that inside the repository a missing or renamed
         // manifest fails instead of passing with a line on stderr nobody reads.
@@ -132,62 +138,27 @@ mod tests {
         let root = root.as_path();
         let manifest = read_repo_file(root, "corpus/manifest.toml");
 
-        // The manifest is a list of `[[case]]` tables; `path` and `sha256` are the two keys here.
-        fn value(line: &str) -> &str {
-            line.split_once('=')
-                .map(|(_, value)| value.trim().trim_matches('"'))
-                .expect("a key line carries a value")
-        }
-
+        // The manifest is a list of `[[case]]` tables; `path` is the one key read here.
         let mut checked = 0usize;
-        let mut path: Option<&str> = None;
         for line in manifest.lines() {
-            if line.starts_with("path = ") {
-                path = Some(value(line));
-            } else if line.starts_with("sha256 = ") {
-                let expected = value(line);
-                let relative = path.take().expect("`path` precedes `sha256` in each case");
-                let file = root.join("corpus").join(relative);
-                let bytes = std::fs::read(&file)
-                    .unwrap_or_else(|error| panic!("{} is missing: {error}", file.display()));
-                assert_eq!(
-                    sha256_hex(&bytes),
-                    expected,
-                    "`{relative}` no longer matches the sha256 pinned in corpus/manifest.toml"
-                );
-                checked += 1;
-            }
+            let Some(relative) = line.strip_prefix("path = ") else {
+                continue;
+            };
+            let relative = relative.trim().trim_matches('"');
+            let file = root.join("corpus").join(relative);
+            let bytes = std::fs::read(&file)
+                .unwrap_or_else(|error| panic!("{} is missing: {error}", file.display()));
+            assert_eq!(
+                sha256_hex(&bytes),
+                format!("{:x}", Sha256::digest(&bytes)),
+                "the hasher disagrees with `sha2` on `{relative}` ({} bytes)",
+                bytes.len()
+            );
+            checked += 1;
         }
         assert!(
             checked >= 9,
-            "expected every manifest case to carry a sha256; checked {checked}"
+            "expected every manifest case to name its pinned file; checked {checked}"
         );
-    }
-
-    /// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
-    /// carries neither the workspace manifest nor the corpus. Gating on the *workspace marker*
-    /// rather than on the file under inspection is deliberate: inside the repository a missing
-    /// `corpus/manifest.toml` must fail the test, not silently skip it.
-    fn repo_root() -> Option<std::path::PathBuf> {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
-        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-        manifest.contains("[workspace]").then_some(root)
-    }
-
-    /// Read a file the repository must carry, failing — never skipping — when it is absent.
-    /// Only call this under [`repo_root`], which is what decides whether the file must exist.
-    fn read_repo_file(root: &std::path::Path, relative: &str) -> String {
-        std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
-            panic!("{relative} must exist in the repository, and reading it failed: {error}")
-        })
-    }
-
-    /// Once the workspace gate has passed, a missing input is a failure: a skip keyed on the file
-    /// itself turned a renamed `corpus/manifest.toml` into a silent pass (#409).
-    #[test]
-    #[should_panic(expected = "must exist in the repository")]
-    fn a_missing_repository_file_fails_rather_than_skips() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        read_repo_file(root, "no-such-dir/no-such-manifest.toml");
     }
 }

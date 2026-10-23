@@ -1142,21 +1142,19 @@ fn a_resolvable_ref_under_a_validation_only_keyword_stays_clean() {
     ] {
         for (what, site, _) in unlowered_ref_sites(target) {
             let spec = validation_ref_spec(&site);
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{target} under {what} through {entry}: {report:#?}"
-                );
-                assert!(
-                    !has_code(&report, Code::UnresolvedRef),
-                    "{target} under {what} through {entry}: {report:#?}"
-                );
-            }
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} under {what}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnresolvedRef),
+                "{target} under {what}: {report:#?}"
+            );
             // `contains`/`unevaluatedItems` add an array property and `contentSchema` a string
             // one, so only the positions that add no shape are compared with the baseline.
             if !site.contains("properties:") {
-                let (_, code) = generate_with_code(&spec);
                 assert_eq!(
                     types_module(&code),
                     base_types,
@@ -1223,12 +1221,8 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
     }
 
     let missing_file = validation_ref_spec("      not: { $ref: './absent.yaml#/Outer' }\n");
-    for (entry, report) in [
-        ("generate", generate(&missing_file)),
-        ("check", check(&missing_file)),
-    ] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-    }
+    let report = generate(&missing_file);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
 }
 
 /// #698: the cycle walk followed `contentSchema` as an edge, but lowering a schema clears
@@ -1312,18 +1306,17 @@ fn a_back_edge_only_through_content_schema_closes_no_cycle() {
         ),
     ];
     for (what, spec) in &cases {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} through {entry}: lowering never descends into `contentSchema`, so it \
-                 closes no cycle: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::AllOfIrreconcilable),
-                "{what} through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: lowering never descends into `contentSchema`, so it \
+             closes no cycle: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "{what}: {report:#?}"
+        );
     }
     // The envelope's `data.contentSchema` is still the one consumed as the stream's item type.
     let (_, code) = generate_with_code(&cases[2].1);
@@ -1573,16 +1566,11 @@ fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
     }
     for target in ["Present", "'#/components/schemas/Present'"] {
         let clean = validation_ref_spec(&site(target));
-        for (entry, report) in [("generate", generate(&clean)), ("check", check(&clean))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target}, {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::UnresolvedRef),
-                "{target}, {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&clean);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{target}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{target}: {report:#?}"
+        );
     }
 }

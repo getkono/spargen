@@ -9,8 +9,7 @@ use reqwest::RequestBuilder;
 use crate::{ClientCore, Error, RequestError};
 
 // Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
-// redacts `Debug`, and it is already a near-universal transitive dependency of rustls-based
-// stacks. Re-exported so generated code and consumers use one vocabulary.
+// redacts `Debug`. Re-exported so generated code and consumers use one vocabulary.
 pub use secrecy::{ExposeSecret, SecretString};
 
 /// A failure from an async token provider.
@@ -122,7 +121,8 @@ pub enum AuthKind {
     /// An `apiKey` sent as the named cookie.
     ApiKeyCookie(&'static str),
     /// `mutualTLS`. Satisfied by the client certificate configured on the injected
-    /// `reqwest::Client`, so the request carries nothing extra and no credential is registered.
+    /// `reqwest::Client`, so the request carries nothing extra and any credential registered under
+    /// its scheme is never read.
     MutualTls,
 }
 

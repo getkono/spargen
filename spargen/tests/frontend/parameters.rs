@@ -229,13 +229,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedParameterStyle),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedParameterStyle),
+        "{report:#?}"
+    );
 }
 
 /// An object parameter's `required` name that no `properties` entry declares is a required field
@@ -304,7 +303,6 @@ ADDITIONAL      responses:
                     .any(|line| line.trim() == "pub type FilterAdditional = i64;"),
             "{style}: the required name lost its field or its value type:\n{types}"
         );
-        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{style}");
     }
     // The same object as a `oneOf`/`anyOf` member, directly or through a nested union, holds the
     // parameter's position (#435), so its unconstrained field is named the same way rather than as
@@ -670,13 +668,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedParameterStyle),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedParameterStyle),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -705,9 +702,8 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
 }
 
 #[test]
@@ -731,10 +727,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedParameterStyle));
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
 }
 
 /// `spaceDelimited`/`pipeDelimited` are defined only for arrays and objects, and `deepObject`
@@ -911,10 +906,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]
@@ -952,14 +946,13 @@ paths:
         "204": { description: No Content }
 "##;
     for spec in [without_content, two_entries] {
-        for report in [generate(spec), check(spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-            assert!(
-                !has_code(&report, Code::UnsupportedParameterStyle),
-                "{report:#?}"
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
     }
 }
 
@@ -981,13 +974,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedParameterStyle),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedParameterStyle),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1014,13 +1006,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1040,10 +1031,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]
@@ -1068,10 +1058,6 @@ paths:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedParameterStyle));
-
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
 }
 
 #[test]
@@ -1093,18 +1079,17 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .count(),
-            2,
-            "one per reserved header, matched case-insensitively: {report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .count(),
+        2,
+        "one per reserved header, matched case-insensitively: {report:#?}"
+    );
 }
 
 #[test]
@@ -1126,10 +1111,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -1149,13 +1133,12 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]

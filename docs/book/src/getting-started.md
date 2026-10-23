@@ -3,7 +3,10 @@
 This walkthrough installs spargen, generates a client from a spec, and shows the shape of the
 generated API. The complete, runnable version is
 [`examples/petstore`](https://github.com/getkono/spargen/tree/master/examples/petstore) — it
-drives every generated feature against a local mock server.
+drives the generated client against a local mock server: path, query, header and `deepObject`
+parameters, JSON and multipart bodies, a multi-status response enum, typed servers and response
+headers, bearer auth, typed and undocumented error statuses, RFC 9457 problems, and the retry
+adapter. Its README lists exactly what each step exercises.
 
 ## Install
 
@@ -13,8 +16,8 @@ two compilation-time paths:
 - Add `spargen` under `[build-dependencies]` and call `spargen::generate` from `build.rs`.
 - Add `spargen-macro` under `[dependencies]` and invoke `generate_api!` in a Rust module.
 
-Both crates are host/build-time only. The optional CLI provides analysis and vendoring tools; it
-does not generate clients.
+Both crates are host/build-time only. The optional [CLI](./cli.md) provides analysis and vendoring
+tools; it has no `generate` subcommand.
 
 ## Generate a client
 
@@ -165,15 +168,9 @@ Key points of the surface:
   and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
   all compile.
 - `Client::with_credential(scheme, credential)` registers static secrets (via `secrecy`) or async
-  token providers. Operation `security` requirements pick the first satisfiable alternative and
-  attach bearer/basic/apiKey credentials; a missing required credential is a
-  request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential; a credential of a kind its
-  scheme cannot carry as `RequestError::CredentialMismatch`; and a failed token provider as
-  `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
-  alternative never falls through to a later one; `Client::without_credential(scheme)`
-  unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
-  selects the next fully registered alternative.
+  token providers, which operation `security` requirements attach; the README's
+  [Generated surface](https://github.com/getkono/spargen#generated-surface) states how an
+  alternative is selected and how each credential failure is typed.
 - A closed error taxonomy, `Error<E>`, identical across all spargen output; every generated error
   type is a `std::error::Error`. The README's
   [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant

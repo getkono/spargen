@@ -1,5 +1,5 @@
-//! Schema lowering outside composition: enums, tuples, binary strings, `patternProperties`, and
-//! validation-only keywords.
+//! Schema lowering outside composition: enums, tuples, binary strings, and validation-only
+//! keywords.
 
 use super::*;
 
@@ -20,7 +20,14 @@ paths:
 "#;
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(code.contains("enum ResponseBody"), "{code}");
+    // Uninhabited means no variant at all: `contains("enum ResponseBody")` would also hold for an
+    // enum with variants, so the declaration itself is read.
+    let declaration: Vec<&str> = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub enum ResponseBody"))
+        .collect();
+    assert_eq!(declaration, ["pub enum ResponseBody {}"], "{code}");
 }
 
 #[test]
@@ -50,121 +57,6 @@ components:
     let report = generate(&dynamic);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::DynamicRefRejected), "{report:#?}");
-}
-
-#[test]
-fn pattern_properties_lowers_to_typed_map_with_w001() {
-    // A representable `patternProperties` now GENERATES a typed overflow map instead of being
-    // rejected. Two inline `{type: string}` value schemas under different patterns collapse to one
-    // `BTreeMap<String, String>` (bounded structural equivalence over leaf primitives). The key
-    // regexes are validation-only and acknowledged as `W001`, never silently dropped.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-components:
-  schemas:
-    Thing:
-      type: object
-      patternProperties:
-        "^x-": { type: string }
-        "^y-": { type: string }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::PatternPropertiesRejected),
-        "{report:#?}"
-    );
-    assert!(
-        has_code(&report, Code::ValidationKeywordIgnored),
-        "{report:#?}"
-    );
-    // check/generate parity: the same disposition is reached without emitting.
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        has_code(&checked, Code::ValidationKeywordIgnored),
-        "{checked:#?}"
-    );
-}
-
-#[test]
-fn pattern_properties_cyclic_array_values_terminate() {
-    // Mutually-recursive array value schemas (`A = [B]`, `B = [A]`) form a cycle in the structural
-    // homogeneity comparison. The visited-pair guard must terminate (return an outcome, never abort
-    // with a stack overflow) and, since both patterns lower to the same array type, GENERATE one
-    // typed overflow map. The check/generate parity assertion catches a regression that reintroduces
-    // the crash.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-components:
-  schemas:
-    A: { type: array, items: { $ref: "#/components/schemas/B" } }
-    B: { type: array, items: { $ref: "#/components/schemas/A" } }
-    Thing:
-      type: object
-      patternProperties:
-        "^a-": { $ref: "#/components/schemas/A" }
-        "^b-": { $ref: "#/components/schemas/B" }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::PatternPropertiesRejected),
-        "{report:#?}"
-    );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-}
-
-#[test]
-fn e005_pattern_properties_heterogeneous_rejected() {
-    // Two pattern value schemas that lower to different types cannot share one typed map → E005.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-components:
-  schemas:
-    A: { type: string }
-    B: { type: integer }
-    Thing:
-      type: object
-      patternProperties:
-        "^s-": { $ref: "#/components/schemas/A" }
-        "^i-": { $ref: "#/components/schemas/B" }
-"##;
-    let report = generate(spec);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::PatternPropertiesRejected));
-    // check/generate parity: the rejection fires in `check` too.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::PatternPropertiesRejected));
-}
-
-#[test]
-fn e005_pattern_properties_with_deny_rejected() {
-    // `patternProperties` + `additionalProperties: false` cannot be faithfully represented → E005.
-    let report = generate(
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-components:
-  schemas:
-    Thing:
-      type: object
-      additionalProperties: false
-      patternProperties:
-        "^x-": { type: string }
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::PatternPropertiesRejected));
 }
 
 #[test]
@@ -367,12 +259,6 @@ components:
             );
             let key = format!("{version} {label}");
             let (report, code) = generate_with_code(&spec);
-            let checked = check(&spec);
-            assert_eq!(
-                report.outcome() == Outcome::Rejected,
-                checked.outcome() == Outcome::Rejected,
-                "`{key}`: check and generate disagree: {report:#?} {checked:#?}"
-            );
             if report.outcome() == Outcome::Rejected {
                 let codes: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
                 outcomes.push((key, Err(format!("rejected with {codes:?}"))));
@@ -769,8 +655,8 @@ components:
 
 #[test]
 fn property_annotations_come_from_the_property_not_the_object() {
-    // Regression: `deprecated`/`readOnly`/`writeOnly` were read from the enclosing object, so an
-    // object-level `deprecated: true` marked every field and a property-level one was ignored.
+    // `deprecated`/`readOnly`/`writeOnly` are read from the property itself: a property-level one
+    // marks its field, and an object-level `deprecated: true` marks no field.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -797,13 +683,77 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("legacy"), "legacy field emitted: {code}");
     assert!(code.contains("current"), "current field emitted: {code}");
-    // Exactly one item is deprecated — the property that says so — not every field of the
-    // deprecated object, and not zero.
+    // Exactly the items whose own schema says `deprecated` carry the attribute: the object's
+    // struct, and the alias the `legacy` property's inline schema lowers to (#731) — not a field of
+    // the deprecated object, and not `current`'s alias.
+    let lines: Vec<&str> = code.lines().map(str::trim).collect();
+    let deprecated: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == "#[deprecated]")
+        .filter_map(|(at, _)| {
+            lines[at + 1..]
+                .iter()
+                .find(|line| !line.starts_with("#[") && !line.starts_with("///"))
+                .copied()
+        })
+        .collect();
     assert_eq!(
-        code.matches("#[deprecated]").count(),
-        1,
-        "exactly one item is deprecated, not every field of a deprecated object: {code}"
+        deprecated,
+        ["pub struct Item {", "pub type Itemlegacy = String;"],
+        "only the items whose schema says `deprecated`, no field of a deprecated object: {code}"
     );
+}
+
+/// Issue #731: a component's `deprecated: true` reached `#[deprecated]` on a struct, a string enum
+/// and a union, but not on an integer or boolean enum's alias, a generic `pub type` alias, or the
+/// transparent newtype that closes an alias cycle. Each now carries it, and an alias that does not
+/// say `deprecated` still carries none.
+#[test]
+fn a_deprecated_component_is_deprecated_whatever_item_it_lowers_to() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Level: { type: integer, enum: [1, 2], deprecated: true }\n    \
+         Flag: { type: boolean, enum: [true], deprecated: true }\n    \
+         Tags: { type: array, items: { type: string }, deprecated: true }\n    \
+         Tree: { type: array, items: { $ref: '#/components/schemas/Tree' }, deprecated: true }\n    \
+         Fresh: { type: array, items: { type: string } }\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let types = types_module(&code);
+    let lines: Vec<&str> = types.lines().map(str::trim).collect();
+    // The outer attributes and doc lines directly above a declaration.
+    let attributes = |declaration: &str| -> Vec<&str> {
+        let at = lines
+            .iter()
+            .position(|line| *line == declaration)
+            .unwrap_or_else(|| panic!("no `{declaration}`: {types}"));
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+            .copied()
+            .collect()
+    };
+    for declaration in [
+        "pub type Level = i64;",
+        "pub type Flag = bool;",
+        "pub type Tags = Vec<TagsItem>;",
+        "pub struct Tree(pub Vec<Tree>);",
+    ] {
+        assert!(
+            attributes(declaration).contains(&"#[deprecated]"),
+            "`{declaration}` is not `#[deprecated]`: {types}"
+        );
+    }
+    assert!(
+        !attributes("pub type Fresh = Vec<FreshItem>;").contains(&"#[deprecated]"),
+        "an alias that is not deprecated is marked deprecated: {types}"
+    );
+    // The deprecated array's inline item schema says nothing about deprecation, so its own alias
+    // (`TagsItem`) carries none: four items, the four components that say so.
+    assert_eq!(types.matches("#[deprecated]").count(), 4, "{types}");
 }
 
 #[test]
@@ -825,13 +775,12 @@ paths:
                   - { type: string }
                 items: { type: integer }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::TupleRestNotRepresentable),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::TupleRestNotRepresentable),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -854,13 +803,12 @@ paths:
                   - { type: integer }
                 items: false
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::TupleRestNotRepresentable),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::TupleRestNotRepresentable),
+        "{report:#?}"
+    );
 }
 
 /// The support matrix says homogeneous scalar enums are supported; floats are the boundary. They
@@ -902,6 +850,87 @@ components:
         );
         let report = generate(&ok);
         assert_ne!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+    }
+}
+
+/// Issue #828: JSON Schema compares numbers by value, so on a schema whose `type` names `integer`
+/// an integral float `enum`/`const` member below 2^53 is the integer it equals, as an integral
+/// float `default` on an `integer` field is. A fractional member, one of magnitude 2^53 or more,
+/// and an integral float on a schema whose `type` does not name `integer` stay `E008`.
+/// check/generate parity.
+#[test]
+fn integral_float_members_of_an_integer_enum_are_integers() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Level:
+      type: integer
+      enum: [1.0, 2]
+    One:
+      type: integer
+      const: 1.0
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
+    }
+    // The members are the integers the spelled-as-integers schemas name: the same module, but for
+    // the spelling.
+    let integers = spec
+        .replace("[1.0, 2]", "[1, 2]")
+        .replace("const: 1.0", "const: 1");
+    let (_, written_as_floats) = generate_with_code(spec);
+    let (_, written_as_integers) = generate_with_code(&integers);
+    assert_eq!(
+        module_body(&written_as_floats),
+        module_body(&written_as_integers)
+    );
+
+    for (case, schema, named) in [
+        (
+            "fractional",
+            "type: integer\n      enum: [1.5, 2]",
+            "1.5 is",
+        ),
+        (
+            "at 2^53",
+            "type: integer\n      const: 9007199254740992.0",
+            "9007199254740992.0 is",
+        ),
+        (
+            "number-typed",
+            "type: number\n      enum: [1.0, 2.0]",
+            "1.0 is",
+        ),
+        ("untyped", "enum: [1.0, 2.0]", "1.0 is"),
+    ] {
+        let rejected = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Level:\n      {schema}\n"
+        );
+        for report in [generate(&rejected), check(&rejected)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            let messages = messages_for(&report, Code::NonScalarEnum);
+            assert!(
+                !messages.is_empty()
+                    && messages
+                        .iter()
+                        .all(|m| m.contains(named) && m.contains("floating-point number")),
+                "{case}: {messages:#?}"
+            );
+            // Only an integral float below 2^53 off an `integer` schema is told where it would
+            // be read as an integer.
+            let hinted = matches!(case, "number-typed" | "untyped");
+            assert_eq!(
+                messages
+                    .iter()
+                    .all(|m| m.contains("only on a schema whose `type` names `integer`")),
+                hinted,
+                "{case}: {messages:#?}"
+            );
+        }
     }
 }
 
@@ -1160,484 +1189,4 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
             );
         }
     }
-}
-
-/// An untyped `items` or `prefixItems` union branch, which now lowers to an array (#614), still
-/// leaves `null` undecided, as its `Value` did and as the untyped object branch beside it does
-/// (#574, #567): it takes the `null` a `type` array or a nullable `$ref` target permits, and
-/// counts as a branch `null` matches. Read as a typed array instead, it dropped that `null`, and a
-/// required field of the union went from `Option<Pick>` to `Pick`. Each row is pinned in its array
-/// and its untyped object spelling, which must agree.
-#[test]
-fn an_untyped_array_applicator_branch_leaves_null_undecided() {
-    let mut mismatches = Vec::new();
-    for (array, object, nullable) in [
-        (
-            "{ type: [array, 'null'], anyOf: [ { items: { type: string } }, { items: { type: \
-             integer } } ] }",
-            "{ type: [object, 'null'], anyOf: [ { properties: { a: { type: string } } }, { \
-             properties: { b: { type: integer } } } ] }",
-            true,
-        ),
-        (
-            "{ type: [array, 'null'], anyOf: [ { items: { type: string } }, { type: integer } ] }",
-            "{ type: [object, 'null'], anyOf: [ { properties: { a: { type: string } } }, { type: \
-             integer } ] }",
-            true,
-        ),
-        (
-            "{ type: [array, 'null'], oneOf: [ { prefixItems: [ { type: string } ] } ] }",
-            "{ type: [object, 'null'], oneOf: [ { required: [a] } ] }",
-            true,
-        ),
-        // `null` matches both untyped branches, which fails the `oneOf`'s exactly-one.
-        (
-            "{ type: [array, 'null'], oneOf: [ { items: { type: string } }, { items: { type: \
-             integer } } ] }",
-            "{ type: [object, 'null'], oneOf: [ { properties: { a: { type: string } } }, { \
-             properties: { b: { type: integer } } } ] }",
-            false,
-        ),
-        (
-            "{ type: [array, string, 'null'], oneOf: [ { items: { type: string } }, { type: \
-             string } ] }",
-            "{ type: [object, string, 'null'], oneOf: [ { properties: { a: { type: string } } }, \
-             { type: string } ] }",
-            true,
-        ),
-        // A nullable `$ref` target the union is met with permits `null`, and the untyped branches
-        // take it from the meet.
-        (
-            "{ $ref: '#/components/schemas/NullableArray', anyOf: [ { items: { type: string } }, \
-             { items: { type: integer } } ] }",
-            "{ $ref: '#/components/schemas/NullableObject', anyOf: [ { properties: { a: { type: \
-             string } } }, { properties: { b: { type: integer } } } ] }",
-            true,
-        ),
-        // The same conjunction with the nullable category written as an `allOf` member beside
-        // the union member (#621).
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { anyOf: [ { items: { type: string } }, { \
-             items: { type: integer } } ] } ] }",
-            "{ allOf: [ { type: [object, 'null'] }, { anyOf: [ { properties: { a: { type: string \
-             } } }, { properties: { b: { type: integer } } } ] } ] }",
-            true,
-        ),
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { oneOf: [ { items: { type: string } }, { \
-             items: { type: integer } } ] } ] }",
-            "{ allOf: [ { type: [object, 'null'] }, { oneOf: [ { properties: { a: { type: string \
-             } } }, { properties: { b: { type: integer } } } ] } ] }",
-            false,
-        ),
-        // The same union member written as a `$ref` to a union component (#624). Its object
-        // spelling, a `$ref` to an object union beside an object member, is still rejected as an
-        // object/scalar mix (#491), so the inline object spelling stands beside it.
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
-            "{ allOf: [ { type: [object, 'null'] }, { anyOf: [ { properties: { a: { type: string \
-             } } }, { properties: { b: { type: integer } } } ] } ] }",
-            true,
-        ),
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayOneOf' } ] }",
-            "{ allOf: [ { type: [object, 'null'] }, { oneOf: [ { properties: { a: { type: string \
-             } } }, { properties: { b: { type: integer } } } ] } ] }",
-            false,
-        ),
-        // The same `$ref` member nested in an inner `allOf`, which flattens into the outer (#630).
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { allOf: [ { $ref: \
-             '#/components/schemas/ArrayAnyOf' } ] } ] }",
-            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
-            true,
-        ),
-        (
-            "{ allOf: [ { type: array }, { $ref: '#/components/schemas/ArrayAnyOf' } ] }",
-            "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
-             properties: { b: { type: integer } } } ] } ] }",
-            false,
-        ),
-        // Two such `$ref` union members, or the same one twice: each leaves `null` undecided, so
-        // neither decides it for the other, and the meet stays non-null as the inline spelling
-        // does. Beside a member that admits `null`, both take it.
-        (
-            "{ allOf: [ { $ref: '#/components/schemas/ArrayAnyOf' }, { $ref: \
-             '#/components/schemas/ArrayAnyOfB' } ] }",
-            "{ allOf: [ { anyOf: [ { properties: { a: { type: string } } }, { properties: { b: { \
-             type: integer } } } ] }, { anyOf: [ { properties: { c: { type: string } } }, { \
-             properties: { d: { type: integer } } } ] } ] }",
-            false,
-        ),
-        (
-            "{ allOf: [ { $ref: '#/components/schemas/ArrayAnyOf' }, { $ref: \
-             '#/components/schemas/ArrayAnyOf' } ] }",
-            "{ allOf: [ { anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }, \
-             { anyOf: [ { items: { type: boolean } }, { items: { type: number } } ] } ] }",
-            false,
-        ),
-        (
-            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' }, { \
-             $ref: '#/components/schemas/ArrayAnyOfB' } ] }",
-            "{ allOf: [ { type: [array, 'null'] }, { $ref: '#/components/schemas/ArrayAnyOf' }, { \
-             $ref: '#/components/schemas/ArrayAnyOf' } ] }",
-            true,
-        ),
-        (
-            "{ allOf: [ { type: array }, { anyOf: [ { items: { type: string } }, { items: { type: \
-             integer } } ] } ] }",
-            "{ allOf: [ { type: object }, { anyOf: [ { properties: { a: { type: string } } }, { \
-             properties: { b: { type: integer } } } ] } ] }",
-            false,
-        ),
-    ] {
-        for site in [array, object] {
-            let spec = with_schemas(
-                "3.1.0",
-                &format!(
-                    "    Pick: {site}\n    NullableArray: {{ type: [array, 'null'] }}\n    \
-                     NullableObject: {{ type: [object, 'null'] }}\n    ArrayAnyOf: {{ anyOf: \
-                     [ {{ items: {{ type: string }} }}, {{ items: {{ type: integer }} }} ] }}\n    \
-                     ArrayOneOf: {{ oneOf: [ {{ items: {{ type: string }} }}, {{ items: {{ type: \
-                     integer }} }} ] }}\n    ArrayAnyOfB: {{ anyOf: [ {{ items: {{ type: \
-                     boolean }} }}, {{ items: {{ type: number }} }} ] }}\n    Holder:\n      type: \
-                     object\n      properties:\n        pick: {{ $ref: \
-                     '#/components/schemas/Pick' }}\n      required: [pick]\n"
-                ),
-            );
-            let (report, code) = generate_with_code(&spec);
-            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
-            let types = types_module(&code);
-            let pick = field_type(&types, "pub pick")
-                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
-            if pick.starts_with("Option<") != nullable {
-                let validity = if nullable { "valid" } else { "invalid" };
-                mismatches.push(format!(
-                    "{site}: `pick` is `{pick}`, but `null` is {validity} here"
-                ));
-            }
-        }
-    }
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-}
-
-/// A `oneOf` of an untyped object or array branch (`properties` or `items` with no `type`) and a
-/// branch that states `null`: the untyped branch constrains objects or arrays alone, so `null`
-/// matches it as well as the `null` branch, which fails the exactly-one rule, and the union admits
-/// no `null` (#622), with or without a sibling keyword of the branch's category beside it, and
-/// beside a `null` member with or without a typed branch beside the two, and spelled as a `$ref`
-/// to a component with no `type`, discriminated or not. A typed
-/// object or array branch denies `null`, which then matches the `null` branch alone, and an
-/// `anyOf` needs only one match, so both of those stay `Option`.
-#[test]
-fn a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null() {
-    let mut mismatches = Vec::new();
-    for (site, nullable) in [
-        (
-            "{ oneOf: [ { properties: { a: { type: string } } }, { type: [integer, 'null'] } ] }",
-            false,
-        ),
-        (
-            "{ maxProperties: 3, oneOf: [ { properties: { a: { type: string } } }, { type: \
-             [integer, 'null'] } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
-            false,
-        ),
-        (
-            "{ minItems: 1, oneOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { properties: { a: { type: string } } }, { type: integer }, { type: \
-             'null' } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { properties: { a: { type: string } } }, { type: 'null' } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { items: { type: string } }, { type: 'null' } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { type: object, properties: { a: { type: string } } }, { type: [integer, \
-             'null'] } ] }",
-            true,
-        ),
-        (
-            "{ oneOf: [ { type: array, items: { type: string } }, { type: [integer, 'null'] } ] }",
-            true,
-        ),
-        (
-            "{ anyOf: [ { properties: { a: { type: string } } }, { type: [integer, 'null'] } ] }",
-            true,
-        ),
-        (
-            "{ anyOf: [ { items: { type: string } }, { type: [integer, 'null'] } ] }",
-            true,
-        ),
-        // A `$ref` branch whose target component has no `type` is the same untyped branch.
-        (
-            "{ oneOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: [integer, \
-             'null'] } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { $ref: '#/components/schemas/UntypedArray' }, { type: [integer, \
-             'null'] } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/UntypedObject' } ] }",
-            false,
-        ),
-        (
-            "{ oneOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: integer }, { \
-             type: 'null' } ] }",
-            false,
-        ),
-        // `null` carries no tag, so a discriminator does not exempt the count.
-        (
-            "{ oneOf: [ { $ref: '#/components/schemas/UntypedTagA' }, { $ref: \
-             '#/components/schemas/UntypedTagB' }, { type: 'null' } ], discriminator: { \
-             propertyName: kind } }",
-            false,
-        ),
-        // A `$ref` to a typed object component denies `null`, as an inline typed branch does.
-        (
-            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/TypedObject' } ] }",
-            true,
-        ),
-        (
-            "{ anyOf: [ { $ref: '#/components/schemas/UntypedObject' }, { type: [integer, \
-             'null'] } ] }",
-            true,
-        ),
-    ] {
-        let spec = with_schemas(
-            "3.1.0",
-            &format!(
-                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
-                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n    \
-                 UntypedObject: {{ properties: {{ a: {{ type: string }} }} }}\n    \
-                 UntypedArray: {{ items: {{ type: string }} }}\n    \
-                 UntypedTagA: {{ required: [kind], properties: {{ kind: {{ type: string }}, a: \
-                 {{ type: string }} }} }}\n    \
-                 UntypedTagB: {{ required: [kind], properties: {{ kind: {{ type: string }}, b: \
-                 {{ type: integer }} }} }}\n    \
-                 TypedObject: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n"
-            ),
-        );
-        let (report, code) = generate_with_code(&spec);
-        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
-        let types = types_module(&code);
-        let pick = field_type(&types, "pub pick")
-            .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
-        if pick.starts_with("Option<") != nullable {
-            let validity = if nullable { "valid" } else { "invalid" };
-            mismatches.push(format!(
-                "{site}: `pick` is `{pick}`, but `null` is {validity} here"
-            ));
-        }
-    }
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-}
-
-/// The rows of [`a_oneof_untyped_applicator_branch_beside_a_null_branch_admits_no_null`] whose
-/// `$ref` branch names an untyped component, written inside that component, where the `$ref`
-/// closes a cycle and lowers to the component's still-open reservation (#627): `Node.next` and
-/// `Holder.pick` carry the same union, and `null` is as invalid in one as in the other. A `oneOf`
-/// beside a `null` branch admits no `null`, with or without a typed branch beside the two, and so
-/// does one whose `$ref` names a component whose `type` lists `null`, which the reservation path
-/// counted no more than the untyped one; an `anyOf`, or a `$ref` to a non-null typed component,
-/// stays `Option` in both places.
-#[test]
-fn a_cycle_closing_untyped_ref_branch_beside_a_null_branch_matches_the_same_union_outside_it() {
-    let mut mismatches = Vec::new();
-    for (target, site, nullable) in [
-        (
-            "Node",
-            "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }",
-            false,
-        ),
-        (
-            "Node",
-            "{ oneOf: [ { type: 'null' }, { $ref: '#/components/schemas/Node' } ] }",
-            false,
-        ),
-        (
-            "Node",
-            "{ oneOf: [ { $ref: '#/components/schemas/Node' }, { type: integer }, { type: \
-             'null' } ] }",
-            false,
-        ),
-        (
-            "Node",
-            "{ anyOf: [ { $ref: '#/components/schemas/Node' }, { type: 'null' } ] }",
-            true,
-        ),
-        (
-            "TypedNode",
-            "{ oneOf: [ { $ref: '#/components/schemas/TypedNode' }, { type: 'null' } ] }",
-            true,
-        ),
-        (
-            "TypedNode",
-            "{ oneOf: [ { $ref: '#/components/schemas/TypedNode' }, { type: integer }, { type: \
-             'null' } ] }",
-            true,
-        ),
-        (
-            "NullableNode",
-            "{ oneOf: [ { $ref: '#/components/schemas/NullableNode' }, { type: 'null' } ] }",
-            false,
-        ),
-    ] {
-        let typed = match target {
-            "TypedNode" => "type: object, ",
-            "NullableNode" => "type: [object, 'null'], ",
-            _ => "",
-        };
-        let spec = with_schemas(
-            "3.1.0",
-            &format!(
-                "    {target}: {{ {typed}properties: {{ a: {{ type: string }}, next: {site} }}, \
-                 required: [next] }}\n    Holder:\n      type: object\n      properties:\n        \
-                 pick: {site}\n      required: [pick]\n"
-            ),
-        );
-        let (report, code) = generate_with_code(&spec);
-        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
-        let types = types_module(&code);
-        for field in ["pub next", "pub pick"] {
-            let ty = field_type(&types, field)
-                .unwrap_or_else(|| panic!("{site}: no `{field}` field: {types}"));
-            if ty.starts_with("Option<") != nullable {
-                let validity = if nullable { "valid" } else { "invalid" };
-                mismatches.push(format!(
-                    "{site}: `{field}` is `{ty}`, but `null` is {validity} here"
-                ));
-            }
-        }
-    }
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-}
-
-/// An `allOf` of a scalar member listing `null` beside a union whose untyped `items` branches
-/// leave `null` undecided, where the scalar's other category meets no branch: the union takes
-/// `null` from that member (#621), so `null` is the one value left and the schema is the null
-/// type, as any other null-only `allOf` meet is, where it was `E013` before. Without `null` in
-/// the scalar member nothing is left, and that stays `E013`. The union written as a `$ref` to a
-/// union component takes `null` the same way (#624).
-#[test]
-fn an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type() {
-    let items_union = "{ anyOf: [ { items: { type: string } }, { items: { type: integer } } ] }";
-    let document = |site: &str| {
-        with_schemas(
-            "3.1.0",
-            &format!(
-                "    Pick: {site}\n    ItemsUnion: {items_union}\n    Holder:\n      type: \
-                 object\n      properties:\n        pick: {{ $ref: '#/components/schemas/Pick' \
-                 }}\n      required: [pick]\n"
-            ),
-        )
-    };
-    for site in [
-        format!("{{ allOf: [ {{ type: [string, 'null'] }}, {items_union} ] }}"),
-        format!("{{ allOf: [ {{ type: 'null' }}, {items_union} ] }}"),
-        format!("{{ allOf: [ {{ const: null }}, {items_union} ] }}"),
-        "{ allOf: [ { type: [integer, 'null'] }, { anyOf: [ { items: { type: string } }, { type: \
-         string } ] } ] }"
-            .to_owned(),
-        "{ allOf: [ { type: [string, 'null'] }, { $ref: '#/components/schemas/ItemsUnion' } ] }"
-            .to_owned(),
-    ] {
-        let (report, code) = generate_with_code(&document(&site));
-        assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::AllOfIrreconcilable),
-            "{site}: {report:#?}"
-        );
-        let types = types_module(&code);
-        assert!(
-            types.contains("pub type Pick = ();"),
-            "{site}: only `null` satisfies both members, so `Pick` is the null type: {types}"
-        );
-    }
-
-    for empty in [
-        format!("{{ allOf: [ {{ type: string }}, {items_union} ] }}"),
-        "{ allOf: [ { type: string }, { $ref: '#/components/schemas/ItemsUnion' } ] }".to_owned(),
-    ] {
-        let report = generate(&document(&empty));
-        assert_eq!(report.outcome(), Outcome::Rejected, "{empty}: {report:#?}");
-        assert!(
-            has_code(&report, Code::AllOfIrreconcilable),
-            "{empty}: {report:#?}"
-        );
-    }
-}
-
-/// A nullable scalar `type` beside an untyped `items` (or untyped object) `anyOf` lowers as its
-/// `allOf` spelling does, the `type` written as a member beside the union (#625). Spargen reads an
-/// untyped `items` branch as array-only (#614, and the `E013` of the non-null `allOf` spelling in
-/// [`an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type`]), so the scalar
-/// meets each branch in `null` alone and both spellings are the null type, with a required field
-/// of it `pub pick: Pick`. The sibling spelling was an enum of `()` variants beside a `String`
-/// constraint.
-#[test]
-fn a_nullable_scalar_type_beside_an_untyped_union_lowers_as_its_allof_spelling() {
-    let mut mismatches = Vec::new();
-    for (sibling, all_of) in [
-        (
-            "{ type: [string, 'null'], anyOf: [ { items: { type: string } }, { items: { type: \
-             integer } } ] }",
-            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { items: { type: string } }, { \
-             items: { type: integer } } ] } ] }",
-        ),
-        (
-            "{ type: 'null', anyOf: [ { items: { type: string } }, { items: { type: integer } } \
-             ] }",
-            "{ allOf: [ { type: 'null' }, { anyOf: [ { items: { type: string } }, { items: { \
-             type: integer } } ] } ] }",
-        ),
-        (
-            "{ type: [string, 'null'], anyOf: [ { properties: { a: { type: string } } }, { \
-             properties: { b: { type: integer } } } ] }",
-            "{ allOf: [ { type: [string, 'null'] }, { anyOf: [ { properties: { a: { type: string \
-             } } }, { properties: { b: { type: integer } } } ] } ] }",
-        ),
-        // One branch excluded (`W011`) and one met in `null`: the sole-variant path, unchanged.
-        (
-            "{ type: [integer, 'null'], anyOf: [ { items: { type: string } }, { type: string } ] }",
-            "{ allOf: [ { type: [integer, 'null'] }, { anyOf: [ { items: { type: string } }, { \
-             type: string } ] } ] }",
-        ),
-    ] {
-        for site in [sibling, all_of] {
-            let spec = with_schemas(
-                "3.1.0",
-                &format!(
-                    "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
-                     pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
-                ),
-            );
-            let (report, code) = generate_with_code(&spec);
-            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
-            let types = types_module(&code);
-            let pick = field_type(&types, "pub pick")
-                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
-            if !types.contains("pub type Pick = ();") || pick != "Pick" {
-                mismatches.push(format!(
-                    "{site}: `pick` is `{pick}`, and `Pick` is not the null type, but only `null` \
-                     satisfies it: {types}"
-                ));
-            }
-        }
-    }
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

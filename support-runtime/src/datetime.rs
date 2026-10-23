@@ -175,17 +175,20 @@ impl fmt::Display for Date {
     /// `YYYY-MM-DD`, matching `Serialize` for the reason given on [`DateTime`]'s `Display`, with the
     /// same fallback for a year RFC 3339's four-digit `full-date` cannot express.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let year = self.0.year();
-        if !(0..=9999).contains(&year) {
-            return write!(formatter, "{}", self.0);
+        match full_date(self.0) {
+            Some(text) => formatter.write_str(&text),
+            None => write!(formatter, "{}", self.0),
         }
-        write!(
-            formatter,
-            "{year:04}-{:02}-{:02}",
-            u8::from(self.0.month()),
-            self.0.day()
-        )
     }
+}
+
+/// `date` as an RFC 3339 `full-date` (`YYYY-MM-DD`), or `None` for a year outside `0..=9999`,
+/// which the format's four-digit year cannot express.
+fn full_date(date: time::Date) -> Option<String> {
+    let year = date.year();
+    (0..=9999)
+        .contains(&year)
+        .then(|| format!("{year:04}-{:02}-{:02}", u8::from(date.month()), date.day()))
 }
 
 impl FromStr for Date {
@@ -193,13 +196,19 @@ impl FromStr for Date {
 
     /// Parses exactly `YYYY-MM-DD`. The length and separator positions are checked first so that a
     /// longer string (an accidental full `date-time`, say) is rejected rather than silently
-    /// truncated to its date part.
+    /// truncated to its date part. Every other byte must be an ASCII digit, because integer
+    /// `FromStr` would otherwise accept a sign (`2023-+1-+4`, or year -1 from `-001-01-02`).
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let invalid = || DateParseError {
             expected: "full-date (YYYY-MM-DD)",
         };
         let bytes = text.as_bytes();
-        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        if bytes.len() != 10
+            || !bytes.iter().enumerate().all(|(index, byte)| match index {
+                4 | 7 => *byte == b'-',
+                _ => byte.is_ascii_digit(),
+            })
+        {
             return Err(invalid());
         }
         let year: i32 = text[0..4].parse().map_err(|_| invalid())?;
@@ -214,17 +223,13 @@ impl FromStr for Date {
 
 impl Serialize for Date {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let year = self.0.year();
-        if !(0..=9999).contains(&year) {
-            return Err(serde::ser::Error::custom(format!(
-                "date year {year} has no RFC 3339 full-date representation"
-            )));
-        }
-        serializer.serialize_str(&format!(
-            "{year:04}-{:02}-{:02}",
-            u8::from(self.0.month()),
-            self.0.day()
-        ))
+        let text = full_date(self.0).ok_or_else(|| {
+            serde::ser::Error::custom(format!(
+                "date year {} has no RFC 3339 full-date representation",
+                self.0.year()
+            ))
+        })?;
+        serializer.serialize_str(&text)
     }
 }
 

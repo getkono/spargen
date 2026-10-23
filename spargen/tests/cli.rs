@@ -230,9 +230,9 @@ fn explain_rejects_an_unresolvable_code() {
     // an unresolvable code is a *usage* error — the user mistyped an argument — and `--format`
     // governs diagnostic *reports*. `check` and `diff` route their reports through `emit`, which
     // honours the flag; `config_error` renders usage errors as plain text everywhere, and the
-    // `Explain` arm renders its own the same way at `run.rs:103` — by convention, not by calling
-    // `config_error`, which no `Explain` path reaches. Pinned in both directions so the choice is
-    // recorded rather than merely current.
+    // `Command::Explain` arm's error branch in `cli/run.rs` renders its own the same way — by
+    // convention, not by calling `config_error`, which no `Explain` path reaches. Pinned in both
+    // directions so the choice is recorded rather than merely current.
     let as_json = Command::new(spargen_bin())
         .args(["explain", "E999", "--format", "json"])
         .output()
@@ -524,6 +524,58 @@ fn check_exits_one_on_a_rejected_spec() {
         ("rejected", vec!["E001"]),
         "{stdout}"
     );
+}
+
+/// A diagnostic raised inside a `$ref`'d file names that file, not only a line and column the
+/// reader cannot attach to any document of the bundle (#727): the human rendering prints
+/// `--> <path>:<line>:<col>`, and the JSON report carries the same path beside the span.
+#[test]
+fn check_names_the_referenced_file_a_diagnostic_lies_in() {
+    let temp = tempfile::tempdir().unwrap();
+    write_spec(
+        temp.path(),
+        "openapi.yaml",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+         schemas:\n    Pet:\n      $ref: './schemas.yaml#/Pet'\n",
+    );
+    // The mixed-kind enum (`E008`) sits on line 7, column 11, of the referenced file.
+    write_spec(
+        temp.path(),
+        "schemas.yaml",
+        "# padding\n\nPet:\n  type: object\n  properties:\n    kind:\n      enum: [1, \"a\"]\n",
+    );
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["check", "openapi.yaml"]);
+    assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
+    assert!(stderr.contains("E008"), "{stderr}");
+    let location = stderr
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("--> "))
+        .unwrap_or_else(|| panic!("the diagnostic carries a location: {stderr}"));
+    // The path as the bundle loaded it: the `$ref` resolved against the directory of the spec
+    // path given on the command line.
+    assert_eq!(
+        location, "./schemas.yaml:7:11",
+        "the location names the referenced file: {stderr}"
+    );
+
+    let (status, stdout, stderr) =
+        spargen(temp.path(), &["check", "openapi.yaml", "--format", "json"]);
+    assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
+    let report = json(&stdout);
+    assert_eq!(
+        outcome_and_codes(&report),
+        ("rejected", vec!["E008"]),
+        "{stdout}"
+    );
+    let diagnostic = &report["diagnostics"][0];
+    assert_eq!(
+        diagnostic["file"].as_str(),
+        Some("./schemas.yaml"),
+        "the JSON diagnostic names the referenced file: {stdout}"
+    );
+    assert_eq!(diagnostic["span"]["start"]["line"], 7, "{stdout}");
+    assert_eq!(diagnostic["span"]["start"]["col"], 11, "{stdout}");
 }
 
 #[test]

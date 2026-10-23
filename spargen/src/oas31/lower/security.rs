@@ -4,7 +4,8 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::{ApiKeyLoc, HttpScheme, SchemeId, SecurityScheme, SecuritySchemeDef};
-use crate::oas31::{Document, RefOr, Resolver, SecurityRequirement};
+use crate::oas31::{Document, RefOr, Resolver, SecurityRequirement, SecuritySchemeObject};
+use crate::source::security_requirement_key_reference;
 
 pub(super) fn lower_security_requirement(
     requirement: &SecurityRequirement,
@@ -47,35 +48,31 @@ pub(super) fn resolve_external_security_schemes(
         }
         // Only a name that looks like a reference is worth resolving; a plain unknown name is an
         // ordinary undeclared-scheme error, reported at the requirement site.
-        let reference = match name.strip_prefix("./") {
-            Some(rest) => rest.to_owned(),
-            None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
-            None => continue,
+        // Lowering also reads a key containing `:` as a reference; the loader does not.
+        let Some(reference) = security_requirement_key_reference(&name, true) else {
+            continue;
         };
         let from = resolver.written_in(&at);
         let Ok(object) = resolver.resolve_component(
-            &reference,
+            reference,
             from,
             crate::oas31::deserialize::parse_security_scheme,
             diags,
         ) else {
             continue;
         };
-        let mut resolved = IndexMap::new();
-        resolved.insert(name.clone(), RefOr::Item(object));
-        let mut document = document.clone();
-        document.components.security_schemes = resolved;
-        for (id, scheme) in lower_security_schemes(&document, diags) {
-            schemes.insert(id, scheme);
+        if let Some(scheme) = lower_security_scheme(&name, &object, diags) {
+            schemes.insert(SchemeId(name), scheme);
         }
     }
 }
 
 /// Lower `components.securitySchemes`.
 ///
-/// Every declared scheme gets a disposition here rather than only when something references it: a
-/// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the
-/// requirement site, naming a scheme the document plainly declares.
+/// Every declared scheme gets a disposition here rather than only when something references it, so
+/// a scheme spargen cannot lower is reported where it is declared rather than surfacing — if at
+/// all — as a confusing `E012` at the requirement site, naming a scheme the document plainly
+/// declares.
 pub(super) fn lower_security_schemes(
     document: &Document,
     diags: &mut Diagnostics,
@@ -130,73 +127,80 @@ pub(super) fn lower_security_schemes(
                 }
             }
         };
-        let lowered = match scheme.scheme_type.as_str() {
-            // OpenAPI makes the authentication scheme name case-insensitive, as RFC 9110 does.
-            "http" => match scheme.scheme.as_deref() {
-                Some(value) if value.eq_ignore_ascii_case("bearer") => {
-                    SecurityScheme::Http(HttpScheme::Bearer)
-                }
-                Some(value) if value.eq_ignore_ascii_case("basic") => {
-                    SecurityScheme::Http(HttpScheme::Basic)
-                }
-                other => {
-                    // `digest`, `negotiate`, and friends need a challenge/response exchange that a
-                    // statically-attached credential cannot perform.
-                    Diagnostic::error(Code::UnknownSecurityScheme, scheme.provenance.clone())
-                        .message(format!(
-                            "`http` security scheme `{}` uses authentication scheme `{}`, which \
-                             spargen cannot attach",
-                            name,
-                            other.unwrap_or("<missing>")
-                        ))
-                        .remedy(
-                            "use `bearer` or `basic` (in any letter case), or omit this API \
-                             segment with spargen::omit!",
-                        )
-                        .emit(diags);
-                    continue;
-                }
-            },
-            "apiKey" => {
-                let location = match scheme.location.as_deref() {
-                    Some("header") => ApiKeyLoc::Header,
-                    Some("query") => ApiKeyLoc::Query,
-                    Some("cookie") => ApiKeyLoc::Cookie,
-                    // The document schema requires a valid `in` for `apiKey`.
-                    _ => continue,
-                };
-                SecurityScheme::ApiKey {
-                    location,
-                    name: scheme.name.clone().unwrap_or_else(|| name.clone()),
-                }
-            }
-            "oauth2" => SecurityScheme::OAuth2,
-            "openIdConnect" => SecurityScheme::OpenIdConnect,
-            "mutualTLS" => {
-                // W011 case: mutual-tls
-                Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
-                    .message(format!(
-                        "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
-                         injected `reqwest::Client`, so no credential is registered for it"
-                    ))
-                    .remedy(
-                        "configure the certificate on the client passed to `Client::with_client`",
-                    )
-                    .emit(diags);
-                SecurityScheme::MutualTls
-            }
-            // The document schema closes the `type` enum.
-            _ => continue,
-        };
-        schemes.insert(
-            SchemeId(name.clone()),
-            SecuritySchemeDef {
-                kind: lowered,
-                docs: security_scheme_docs(name, scheme),
-            },
-        );
+        if let Some(lowered) = lower_security_scheme(name, scheme, diags) {
+            schemes.insert(SchemeId(name.clone()), lowered);
+        }
     }
     schemes
+}
+
+/// Lower one Security Scheme Object, declared as `name`, or `None` once it is reported as one
+/// spargen cannot attach (or is one the document schema already refuses).
+fn lower_security_scheme(
+    name: &str,
+    scheme: &SecuritySchemeObject,
+    diags: &mut Diagnostics,
+) -> Option<SecuritySchemeDef> {
+    let lowered = match scheme.scheme_type.as_str() {
+        // OpenAPI makes the authentication scheme name case-insensitive, as RFC 9110 does.
+        "http" => match scheme.scheme.as_deref() {
+            Some(value) if value.eq_ignore_ascii_case("bearer") => {
+                SecurityScheme::Http(HttpScheme::Bearer)
+            }
+            Some(value) if value.eq_ignore_ascii_case("basic") => {
+                SecurityScheme::Http(HttpScheme::Basic)
+            }
+            other => {
+                // `digest`, `negotiate`, and friends need a challenge/response exchange that a
+                // statically-attached credential cannot perform.
+                Diagnostic::error(Code::UnknownSecurityScheme, scheme.provenance.clone())
+                    .message(format!(
+                        "`http` security scheme `{}` uses authentication scheme `{}`, which \
+                             spargen cannot attach",
+                        name,
+                        other.unwrap_or("<missing>")
+                    ))
+                    .remedy(
+                        "use `bearer` or `basic` (in any letter case), or omit this API \
+                             segment with spargen::omit!",
+                    )
+                    .emit(diags);
+                return None;
+            }
+        },
+        "apiKey" => {
+            let location = match scheme.location.as_deref() {
+                Some("header") => ApiKeyLoc::Header,
+                Some("query") => ApiKeyLoc::Query,
+                Some("cookie") => ApiKeyLoc::Cookie,
+                // The document schema requires a valid `in` for `apiKey`.
+                _ => return None,
+            };
+            SecurityScheme::ApiKey {
+                location,
+                name: scheme.name.clone().unwrap_or_else(|| name.to_owned()),
+            }
+        }
+        "oauth2" => SecurityScheme::OAuth2,
+        "openIdConnect" => SecurityScheme::OpenIdConnect,
+        "mutualTLS" => {
+            // W011 case: mutual-tls
+            Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
+                .message(format!(
+                    "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
+                         injected `reqwest::Client`, so no credential is registered for it"
+                ))
+                .remedy("configure the certificate on the client passed to `Client::with_client`")
+                .emit(diags);
+            SecurityScheme::MutualTls
+        }
+        // The document schema closes the `type` enum.
+        _ => return None,
+    };
+    Some(SecuritySchemeDef {
+        kind: lowered,
+        docs: security_scheme_docs(name, scheme),
+    })
 }
 
 /// Render the documentation a Security Scheme Object carries into rustdoc lines.
@@ -204,7 +208,7 @@ pub(super) fn lower_security_schemes(
 /// A caller of `Client::with_credential` needs exactly this to know what to register: the token
 /// format, where a token is obtained, and whether the scheme is on its way out. None of it changes
 /// a byte on the wire, which is why it is documentation rather than lowered structure.
-fn security_scheme_docs(name: &str, scheme: &crate::oas31::SecuritySchemeObject) -> Vec<String> {
+fn security_scheme_docs(name: &str, scheme: &SecuritySchemeObject) -> Vec<String> {
     let mut docs = Vec::new();
     let kind = match scheme.scheme_type.as_str() {
         "http" => match scheme.scheme.as_deref() {

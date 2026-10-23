@@ -3,10 +3,11 @@
 //! The names a generated client re-exports are written down in three places: the standalone
 //! runtime crate's `pub use` list (`support-runtime/src/lib.rs`), the `pub use` list `emit_support`
 //! writes into the embedded `support` module, and the root re-export lists in
-//! `spargen/src/codegen/runtime.rs` that both the generated root `pub use` and the operation
-//! error-type naming read. Nothing but this suite holds them to each other: a name dropped from the
-//! embedded module still compiles when no generated code happens to use it, and a name added to the
-//! root surface changes the public API of every generated client without any other gate noticing.
+//! `spargen/src/name/mod.rs` that both the generated root `pub use` and the operation type naming
+//! read. This suite holds them to each other: a name dropped from the embedded module still
+//! compiles when no generated code happens to use it. A name added to the root surface changes the
+//! public API of every generated client; `e2e.rs`'s `BASIC_SPEC` module snapshot shows it as a diff
+//! in one generated module, and this suite's root-surface golden file names it as a surface change.
 //!
 //! Everything here reads the *emitted* module rather than spargen's source, so what is pinned is
 //! what a consumer receives:
@@ -327,10 +328,6 @@ fn idents(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Runtime types a root re-export mentions that the root does not yet re-export, each with the
-/// issue that decides it. An entry that stops being needed fails the test, so this only shrinks.
-const UNNAMEABLE_TRACKED: &[(&str, &str)] = &[];
-
 #[test]
 fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
     // The root re-export list has to cover every runtime type a caller meets through a type it can
@@ -339,7 +336,6 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
     // (#256). The embedded `support` module is private, so the root is the only path there is.
     // Checked here: every public inherent method's signature, and every associated type of every
     // impl, on a type the root re-exports. A runtime type they mention must be re-exported too.
-    let mut tracked_seen = BTreeSet::new();
     for spec in [PLAIN_SPEC.to_owned(), full_spec("")] {
         let generated = generate(&spec);
         let root = root_reexports(&generated);
@@ -403,26 +399,11 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
             "examined {impls_examined} impls of root re-exported types and {members_examined} of \
              their public methods and associated types: the scan has stopped reading the impls"
         );
-        unnameable.retain(|found| {
-            let tracked = UNNAMEABLE_TRACKED.iter().any(|(entry, _)| entry == found);
-            if tracked {
-                tracked_seen.insert(found.clone());
-            }
-            !tracked
-        });
         assert!(
             unnameable.is_empty(),
             "a root re-export exposes runtime types the root does not re-export: {unnameable:?}"
         );
     }
-    let stale: Vec<_> = UNNAMEABLE_TRACKED
-        .iter()
-        .filter(|(entry, _)| !tracked_seen.contains(*entry))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "tracked exceptions no longer needed; remove them: {stale:?}"
-    );
 }
 
 #[test]

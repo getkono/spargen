@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|server-removed|servers::Server1|server builder removed
+bump=major

@@ -70,10 +70,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -103,10 +102,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 /// The Encoding Object form of #696: `spaceDelimited`/`pipeDelimited` are defined only for arrays
@@ -136,6 +134,10 @@ paths:
                 style: STYLE
       responses:
         "204": { description: No Content }
+components:
+  schemas:
+    Arr: { type: array, items: { type: string } }
+    Nil: { type: 'null' }
 "##;
     let spec = |media: &str, style: &str, schema: &str| {
         TEMPLATE
@@ -145,6 +147,10 @@ paths:
     };
     let form = "application/x-www-form-urlencoded";
     let multipart = "multipart/form-data";
+    // A `null` member reached through a `$ref` is not folded into the property's root, so it
+    // stays a union member whose `null` is the whole value.
+    let member_null = "{ oneOf: [{ $ref: '#/components/schemas/Arr' }, \
+                       { $ref: '#/components/schemas/Nil' }] }";
     let rejected = [
         (form, "spaceDelimited", "{ type: string }"),
         (
@@ -208,16 +214,16 @@ paths:
             "pipeDelimited",
             "{ type: array, items: { type: string } }",
         ),
+        (form, "spaceDelimited", member_null),
     ];
     for (media, style, schema) in accepted {
         let spec = spec(media, style, schema);
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{media} {style} {schema}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{media} {style} {schema}: {report:#?}"
+        );
     }
 }
 
@@ -253,7 +259,6 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
 }

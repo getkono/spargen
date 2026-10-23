@@ -187,17 +187,16 @@ paths:
                     xml: {{ nodeType: {node_type}, {deprecated} }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{deprecated}: {report:#?}"
-            );
-            assert!(
-                has_code(&report, Code::InvalidInput),
-                "{deprecated}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{deprecated}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::InvalidInput),
+            "{deprecated}: {report:#?}"
+        );
     }
 }
 
@@ -222,10 +221,9 @@ paths:
                 properties:
                   id: { type: string, xml: { nodeType: fragment } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 /// The same unknown hint on a type that is never serialized as XML genuinely has no effect, so it
@@ -280,12 +278,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedMediaType),
-        "{checked:#?}"
-    );
 }
 
 #[test]
@@ -315,35 +307,47 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
 fn json_alternative_wins_over_xml_on_same_body() {
-    // When a body offers both JSON and XML, media selection deterministically prefers JSON, so the
-    // API does not use XML at all — generation succeeds with no E009.
-    let spec = r##"
+    // When a body offers both JSON and XML, media selection deterministically prefers JSON, in
+    // either key order, so the API does not use XML at all: generation succeeds with no E009 and
+    // the XML codec runtime is not embedded.
+    let spec = |content: &str| {
+        format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /x:
     post:
       requestBody:
         content:
-          application/xml:
-            schema: { type: object }
-          application/json:
-            schema: { type: object, required: [id], properties: { id: { type: string } } }
-      responses:
-        "204": { description: No Content }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
+{content}      responses:
+        "204": {{ description: No Content }}
+"##
+        )
+    };
+    let xml = "          application/xml:\n            schema: { type: object }\n";
+    let json = "          application/json:\n            schema: { type: object, required: [id], properties: { id: { type: string } } }\n";
+    // The XML-only control shows the embedded XML codec runtime naming `quick_xml`, so the marker
+    // is present whenever that runtime is.
+    let (control, control_code) = generate_with_code(&spec(xml));
+    assert_eq!(control.outcome(), Outcome::Generated, "{control:#?}");
+    assert!(control_code.contains("quick_xml::"), "{control_code}");
+    for content in [format!("{xml}{json}"), format!("{json}{xml}")] {
+        let (report, code) = generate_with_code(&spec(&content));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert!(
+            !code.contains("quick_xml::"),
+            "XML runtime embedded:\n{code}"
+        );
+    }
 }
 
 #[test]
@@ -373,10 +377,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -406,10 +409,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -438,8 +440,6 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    let checked = check(spec);
-    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
 }
 
 #[test]
@@ -533,9 +533,6 @@ paths:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    // check/generate parity: the same rejection is reached without emitting.
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 // --- OpenAPI 3.2 XML nodeType defaulting ----------------------------------------------------
@@ -566,10 +563,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -594,10 +590,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -623,14 +618,13 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-        assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
 #[test]
@@ -654,10 +648,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 // --- Root and `items` XML Objects (#703) ----------------------------------------------------
@@ -717,6 +710,180 @@ components:
         struct_attributes(&code, "Pet").contains(&r#"#[serde(rename = "pet")]"#.to_owned()),
         "{code}"
     );
+}
+
+/// Without a root `xml.name`, OpenAPI infers a component schema's element name as the component
+/// name. A struct an XML body reaches takes it as its container rename wherever it differs from
+/// the Rust identifier; an explicit root `xml.name` still wins, and a struct no XML body reaches
+/// carries none.
+#[test]
+fn a_component_name_names_the_element_an_xml_body_serializes_as() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/pet-item' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: '#/components/schemas/Pet' } }
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/order_item' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/json-item' } }
+components:
+  schemas:
+    pet-item:
+      type: object
+      properties:
+        id: { type: integer }
+    Pet:
+      type: object
+      properties:
+        id: { type: integer }
+    order_item:
+      type: object
+      xml: { name: order }
+      properties:
+        id: { type: integer }
+    json-item:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    let renames = |ty: &str| -> Vec<String> {
+        struct_attributes(&code, ty)
+            .into_iter()
+            .filter(|line| line.starts_with("#[serde(rename"))
+            .collect()
+    };
+    assert_eq!(
+        renames("PetItem"),
+        [r#"#[serde(rename = "pet-item")]"#],
+        "{code}"
+    );
+    assert!(renames("Pet").is_empty(), "{code}");
+    assert_eq!(
+        renames("OrderItem"),
+        [r#"#[serde(rename = "order")]"#],
+        "{code}"
+    );
+    assert!(renames("JsonItem").is_empty(), "{code}");
+}
+
+/// A document whose only XML construct is an XML body still names that body's root element after
+/// its component: no `xml` object anywhere, so nothing but the body itself sets the name.
+#[test]
+fn a_component_name_names_an_xml_body_with_no_xml_object_in_the_document() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/pet-item' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    pet-item:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    assert_eq!(
+        struct_attributes(&code, "PetItem")
+            .into_iter()
+            .filter(|line| line.starts_with("#[serde(rename"))
+            .collect::<Vec<_>>(),
+        [r#"#[serde(rename = "pet-item")]"#],
+        "{code}"
+    );
+}
+
+/// A component key may be no XML name (a leading digit, `-` or `.`), and quick-xml refuses to
+/// write such an element at run time. The name OpenAPI infers from it is not applied: each struct
+/// an XML body reaches reports it (`W006`) and keeps its Rust name, while a struct no XML body
+/// reaches has nothing to report.
+#[test]
+fn a_component_name_that_is_no_xml_name_is_reported_and_not_applied() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /receipts:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/1-receipt' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: '#/components/schemas/-order' } }
+  /dots:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/.dot' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/2-json' } }
+components:
+  schemas:
+    1-receipt:
+      type: object
+      properties:
+        id: { type: integer }
+    '-order':
+      type: object
+      properties:
+        id: { type: integer }
+    .dot:
+      type: object
+      properties:
+        id: { type: integer }
+    2-json:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut messages = messages_for(&report, Code::XmlHintIgnored);
+    messages.sort_unstable();
+    assert_eq!(messages.len(), 3, "{report:#?}");
+    for (message, name) in messages.iter().zip(["-order", ".dot", "1-receipt"]) {
+        assert!(
+            message.contains(&format!("component name `{name}` is not an XML name")),
+            "{message}"
+        );
+    }
+    assert!(!code.contains("#[serde(rename = \"1-receipt\")]"), "{code}");
+    assert!(!code.contains("#[serde(rename = \"-order\")]"), "{code}");
+    assert!(!code.contains("#[serde(rename = \".dot\")]"), "{code}");
+    assert!(!code.contains("#[serde(rename = \"2-json\")]"), "{code}");
 }
 
 /// The inline schema of an XML body has no component name to infer the element from, so OpenAPI
@@ -844,13 +1011,12 @@ components:
         id: {{ type: integer }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{xml}: {report:#?}");
-            assert!(
-                has_code(&report, Code::UnsupportedMediaType),
-                "{xml}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{xml}: {report:#?}");
+        assert!(
+            has_code(&report, Code::UnsupportedMediaType),
+            "{xml}: {report:#?}"
+        );
     }
 }
 
@@ -1062,7 +1228,8 @@ components:
 /// name and never reads the struct's container rename there, so the root name has to become the
 /// field's: without it each element went on the wire as `<pets>` while `check` printed `clean`.
 /// A name written beside the `$ref` on the items still wins, and an owner that also travels as
-/// JSON keeps its field name under the shared-type `W006`, like every other field rename.
+/// JSON keeps its field name under the shared-type `W006`, like every other field rename. An owner
+/// no XML body reaches derives no rename at all, so the root name alone raises no `W006` there.
 #[test]
 fn a_component_root_name_names_each_element_of_an_array_property_of_it() {
     let pet = "Pet: { type: object, xml: { name: pet }, properties: { id: { type: integer } } }";
@@ -1092,8 +1259,13 @@ fn a_component_root_name_names_each_element_of_an_array_property_of_it() {
             "critter",
         ),
     ] {
-        for shared in [false, true] {
-            let json_use = if shared {
+        for reach in ["xml", "shared", "json"] {
+            let body_media = if reach == "json" {
+                "application/json"
+            } else {
+                "application/xml"
+            };
+            let json_use = if reach == "shared" {
                 "
         '200':
           description: ok
@@ -1111,7 +1283,7 @@ paths:
     post:
       requestBody:
         content:
-          application/xml: {{ schema: {{ $ref: '#/components/schemas/Owner' }} }}
+          {body_media}: {{ schema: {{ $ref: '#/components/schemas/Owner' }} }}
       responses:
         '204': {{ description: ok }}{json_use}
 components:
@@ -1124,24 +1296,39 @@ components:
     {list}
 "##
             );
-            let case = format!("{version} {pets} shared={shared}");
+            let case = format!("{version} {pets} reach={reach}");
             let (report, code) = generate_with_code(&spec);
             assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
             let field_rename = format!(r#"rename = "{element}","#);
-            if shared {
-                assert!(
-                    messages_for(&report, Code::XmlHintIgnored)
-                        .iter()
-                        .any(|m| m.contains("shared between an XML body")),
-                    "{case}: {report:#?}"
-                );
-                assert!(!code.contains(&field_rename), "{case}: {code}");
-            } else {
-                assert!(
-                    !has_code(&report, Code::XmlHintIgnored),
-                    "{case}: {report:#?}"
-                );
-                assert!(code.contains(&field_rename), "{case}: {code}");
+            match reach {
+                "shared" => {
+                    assert!(
+                        messages_for(&report, Code::XmlHintIgnored)
+                            .iter()
+                            .any(|m| m.contains("shared between an XML body")),
+                        "{case}: {report:#?}"
+                    );
+                    assert!(!code.contains(&field_rename), "{case}: {code}");
+                }
+                "json" => {
+                    // The root name alone derives no rename on an owner no XML body reaches, so it
+                    // has nothing to warn about; a name written on the items is a hint like any
+                    // other and keeps its `W006`.
+                    let written = pets.contains("critter");
+                    assert_eq!(
+                        has_code(&report, Code::XmlHintIgnored),
+                        written,
+                        "{case}: {report:#?}"
+                    );
+                    assert!(!code.contains(&field_rename), "{case}: {code}");
+                }
+                _ => {
+                    assert!(
+                        !has_code(&report, Code::XmlHintIgnored),
+                        "{case}: {report:#?}"
+                    );
+                    assert!(code.contains(&field_rename), "{case}: {code}");
+                }
             }
             assert!(
                 struct_attributes(&code, "Pet").contains(&r#"#[serde(rename = "pet")]"#.to_owned()),

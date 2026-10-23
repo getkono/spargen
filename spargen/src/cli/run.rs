@@ -3,11 +3,11 @@
 //!
 //! The optional analysis binary. It is not a `mod` of the library: `src/bin/spargen.rs` pulls these
 //! files in with `#[path]`, so the CLI depends on the published facade exactly as any other
-//! consumer would, and can reach nothing private.
+//! consumer would, and reaches only spargen's `pub` items, as any consumer does.
 
 use std::process::ExitCode;
 
-use spargen::{check, explain, ConfigError, Spec};
+use spargen::{check, explain, ConfigError, Report, Spec};
 
 use super::args::{Cli, Command, Format};
 use super::config;
@@ -20,11 +20,7 @@ use super::exit::ExitStatus;
 /// depends only on the facade.
 pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
-        Command::Check(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
+        Command::Check(args) => with_spec(args.spec, &args.options, |spec| {
             let report = check(&spec);
             emit(&report, args.format, Stream::Stderr);
             if report.succeeded() {
@@ -32,39 +28,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             } else {
                 ExitStatus::Diagnostics.into()
             }
-        }
-        Command::Deps(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
-            match spargen::requirements(&spec) {
-                Ok(requirements) => {
-                    emit(&requirements, args.format, Stream::Stdout);
-                    ExitStatus::Ok.into()
-                }
-                Err(report) => {
-                    emit(&report, args.format, Stream::Stderr);
-                    ExitStatus::Diagnostics.into()
-                }
-            }
-        }
-        Command::Lock(args) => {
-            let spec = match config::resolve(args.spec, &args.options) {
-                Ok(spec) => spec,
-                Err(error) => return config_error(error),
-            };
-            match spargen::vendor(&spec) {
-                Ok(vendored) => {
-                    emit(&vendored, args.format, Stream::Stdout);
-                    ExitStatus::Ok.into()
-                }
-                Err(report) => {
-                    emit(&report, args.format, Stream::Stderr);
-                    ExitStatus::Diagnostics.into()
-                }
-            }
-        }
+        }),
+        Command::Deps(args) => with_spec(args.spec, &args.options, |spec| {
+            report_or(spargen::requirements(&spec), args.format)
+        }),
+        Command::Lock(args) => with_spec(args.spec, &args.options, |spec| {
+            report_or(spargen::vendor(&spec), args.format)
+        }),
         Command::Diff(args) => {
             let (old, new) = match spec_pair(args.old, args.new, &args.options) {
                 Ok(pair) => pair,
@@ -107,6 +77,37 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
     }
 }
 
+/// Resolve `spec` with `options` and run `then` over it, or report the config/flag error and exit
+/// with a usage status.
+fn with_spec(
+    spec: camino::Utf8PathBuf,
+    options: &super::args::SpecArgs,
+    then: impl FnOnce(Spec) -> ExitCode,
+) -> ExitCode {
+    match config::resolve(spec, options) {
+        Ok(spec) => then(spec),
+        Err(error) => config_error(error),
+    }
+}
+
+/// Emit `result`'s value and exit cleanly, or emit its rejection [`Report`] and exit with the
+/// diagnostics status. Human output puts the value on stdout and the rejection on stderr.
+fn report_or<T: std::fmt::Display + serde::Serialize>(
+    result: Result<T, Report>,
+    format: Format,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            emit(&value, format, Stream::Stdout);
+            ExitStatus::Ok.into()
+        }
+        Err(report) => {
+            emit(&report, format, Stream::Stderr);
+            ExitStatus::Diagnostics.into()
+        }
+    }
+}
+
 /// Resolve both sides of a diff. The shared options apply to each side, but config-file discovery
 /// is per spec — the two documents may well live in different directories.
 fn spec_pair(
@@ -126,8 +127,8 @@ fn config_error(error: ConfigError) -> ExitCode {
     ExitStatus::Usage.into()
 }
 
-/// Where a rendered value goes: diagnostics belong on stderr so `--format json` output stays
-/// pipeable on stdout.
+/// Where the human rendering of a value goes: diagnostics on stderr, results on stdout. JSON
+/// output ignores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stream {
     Stdout,
@@ -137,10 +138,11 @@ enum Stream {
 /// Render one value in the requested format.
 ///
 /// Every renderable type implements both `Display` (the human form) and `Serialize` (the JSON
-/// form), so the CLI holds no formatting logic of its own and cannot drift from the library's.
+/// form), so every command but `explain` renders through the library's own forms. `explain`
+/// prints its text, or builds its `{ "code", "explain" }` JSON object, inline in [`run`].
 ///
-/// `stream` chooses where the *human* rendering goes — diagnostics belong on stderr. JSON is
-/// machine output and always goes to stdout so it stays pipeable.
+/// `stream` chooses where the *human* rendering goes. JSON always goes to stdout, whatever
+/// `stream` says.
 fn emit<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format, stream: Stream) {
     match format {
         Format::Json => {

@@ -114,6 +114,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
+/// The keywords whose value maps member names to subschemas that lowering descends into.
+const NAMED_MEMBER_KEYWORDS: [&str; 2] = ["properties", "patternProperties"];
+
+/// The keywords whose value is an array of subschemas that lowering descends into.
+const INDEXED_MEMBER_KEYWORDS: [&str; 4] = ["prefixItems", "allOf", "oneOf", "anyOf"];
+
+/// The keywords whose value is one subschema that lowering descends into.
+const SINGLE_SUBSCHEMA_KEYWORDS: [&str; 2] = ["additionalProperties", "items"];
+
 /// Whether lowering the schema at `frame` descends into the schema at `site`, both pointers into
 /// one file: `site` is `frame` itself, or lies below it along only the keywords
 /// [`collect_node_refs`] walks.
@@ -134,15 +143,13 @@ fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonP
     };
     let mut tokens = rest.split('/');
     while let Some(keyword) = tokens.next() {
-        match keyword {
-            // Each of these is followed by a member name or an index.
-            "properties" | "patternProperties" | "prefixItems" | "allOf" | "oneOf" | "anyOf" => {
-                if tokens.next().is_none() {
-                    return false;
-                }
+        if NAMED_MEMBER_KEYWORDS.contains(&keyword) || INDEXED_MEMBER_KEYWORDS.contains(&keyword) {
+            // Followed by a member name or an index.
+            if tokens.next().is_none() {
+                return false;
             }
-            "additionalProperties" | "items" => {}
-            _ => return false,
+        } else if !SINGLE_SUBSCHEMA_KEYWORDS.contains(&keyword) {
+            return false;
         }
     }
     true
@@ -162,8 +169,8 @@ fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonP
 /// `text/event-stream` envelope — is lowered as the stream's item type on its own, never inside
 /// the envelope's frame. Counting them made an unreferenced `$defs` entry —
 /// zero emitted bytes, not one instance added or removed — flip a document into a hard rejection
-/// whose message asserted a dependence that does not exist. [`lowering_encloses`] accepts exactly
-/// the same keywords, so the two halves of the predicate agree on what "inside" means.
+/// whose message asserted a dependence that does not exist. [`lowering_encloses`] reads the same
+/// three keyword sets, so the two halves of the predicate agree on what "inside" means.
 fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
     // A boolean schema, or anything that is not a schema object, carries no reference.
     let Some(object) = node.as_object() else {
@@ -172,21 +179,21 @@ fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
     if let Some(reference) = object.get("$ref").and_then(SpannedValue::as_str) {
         out.push(reference);
     }
-    for keyword in ["properties", "patternProperties"] {
+    for keyword in NAMED_MEMBER_KEYWORDS {
         if let Some(members) = object.get(keyword).and_then(SpannedValue::as_object) {
             for (_, child) in members.iter() {
                 collect_node_refs(child, out);
             }
         }
     }
-    for keyword in ["prefixItems", "allOf", "oneOf", "anyOf"] {
+    for keyword in INDEXED_MEMBER_KEYWORDS {
         if let Some(members) = object.get(keyword).and_then(SpannedValue::as_array) {
             for child in members {
                 collect_node_refs(child, out);
             }
         }
     }
-    for keyword in ["additionalProperties", "items"] {
+    for keyword in SINGLE_SUBSCHEMA_KEYWORDS {
         if let Some(child) = object.get(keyword) {
             collect_node_refs(child, out);
         }

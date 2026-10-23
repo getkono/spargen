@@ -71,6 +71,19 @@ fn ndjson_tolerates_crlf() {
 }
 
 #[test]
+fn ndjson_strips_one_trailing_cr_from_an_unterminated_line_at_eof() {
+    let mut buf = b"{\"a\":1}\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Ndjson, true);
+    assert_eq!(items, vec![r#"{"a":1}"#]);
+    assert!(buf.is_empty());
+
+    // Exactly one `\r` is stripped; a second one stays in the payload.
+    let mut buf = b"{\"a\":1}\r\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Ndjson, true);
+    assert_eq!(items, vec!["{\"a\":1}\r"]);
+}
+
+#[test]
 fn json_sequence_frames_record_separator_delimited_values() {
     let mut buf = b"\x1e{\"a\":1}\n\x1e{\n  \"a\": 2\n}\n".to_vec();
     let (items, done) = drain(&mut buf, Framing::JsonSequence, true);
@@ -195,6 +208,14 @@ fn sse_flushes_a_final_event_without_a_trailing_blank_line_at_eof() {
     // At EOF: the final event is flushed even without a closing blank line.
     let (items, _) = drain(&mut buf, Framing::Sse, true);
     assert_eq!(items, vec![r#"{"a":1}"#]);
+}
+
+#[test]
+fn sse_strips_the_trailing_cr_from_an_unterminated_last_line_at_eof() {
+    let mut buf = b"data: {\"a\":1}\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Sse, true);
+    assert_eq!(items, vec![r#"{"a":1}"#]);
+    assert!(buf.is_empty());
 }
 
 #[test]
@@ -717,6 +738,21 @@ fn an_sse_retry_counts_only_as_ascii_digits() {
             "{field}"
         );
     }
+    // An ignored `retry` leaves the one an earlier line of the same event set.
+    for field in ["retry: 12a", "retry:"] {
+        let mut buf = format!("retry: 5\n{field}\ndata: 1\n\n").into_bytes();
+        assert_eq!(
+            next_frame(&mut buf, Framing::SseJsonData, false),
+            FramePoll::Item {
+                payload: b"1".to_vec(),
+                metadata: SseMetadata {
+                    id: None,
+                    retry: Some(5)
+                },
+            },
+            "{field}"
+        );
+    }
     // An event carrying only an ignored `retry` dispatches nothing at all.
     let mut buf = b"retry: soon\n\n".to_vec();
     assert_eq!(
@@ -759,9 +795,47 @@ fn an_sse_line_without_a_colon_is_a_field_with_an_empty_value() {
     assert_eq!(stream.last_event_id(), Some(""));
 }
 
+/// An SSE event that dispatches nothing is consumed and the same call frames the complete event
+/// buffered behind it, before EOF too, rather than asking for more bytes.
+#[test]
+fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
+    for at_eof in [false, true] {
+        let mut buf = b": keep-alive\n\ndata: 1\n\n".to_vec();
+        assert_eq!(
+            next_frame(&mut buf, Framing::SseJsonData, at_eof),
+            FramePoll::Item {
+                payload: b"1".to_vec(),
+                metadata: SseMetadata::default(),
+            },
+            "at_eof = {at_eof}"
+        );
+        assert!(buf.is_empty());
+    }
+}
+
+/// A reconnectable stream starts from the `Last-Event-ID` its prepared request already carries,
+/// before any event has been read.
+#[test]
+fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
+    let core = ClientCore::new("https://example.com").unwrap();
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .header("last-event-id", "evt-0")
+        .build()
+        .unwrap();
+    let stream: EventStream<serde_json::Value> = EventStream::new_reconnectable(
+        response("data: 1\n\n"),
+        Framing::SseJsonData,
+        core,
+        Some(request),
+    );
+    assert_eq!(stream.last_event_id(), Some("evt-0"));
+}
+
 /// JSON text sequences: bytes before the first record separator are discarded, a buffer with
 /// no separator is held until EOF and dropped there, and an empty record frames nothing and is
-/// consumed so the next call reaches the record after it.
+/// consumed so the same call reaches the record after it.
 #[test]
 fn json_sequence_discards_junk_and_skips_empty_records() {
     let mut buf = b"junk\x1e1\n".to_vec();
@@ -790,18 +864,175 @@ fn json_sequence_discards_junk_and_skips_empty_records() {
     );
     assert_eq!(buf, b"\x1e{\"a\":");
 
-    let mut buf = b"\x1e \n\x1e2\n".to_vec();
-    assert_eq!(
-        next_frame(&mut buf, Framing::JsonSequence, true),
-        FramePoll::NeedMore
-    );
-    assert_eq!(buf, b"\x1e2\n");
-    assert_eq!(
-        next_frame(&mut buf, Framing::JsonSequence, true),
-        FramePoll::Item {
-            payload: b"2".to_vec(),
-            metadata: SseMetadata::default(),
+    // An empty record is consumed and the same call frames the record behind it, before EOF too.
+    for at_eof in [false, true] {
+        let mut buf = b"\x1e \n\x1e2\n\x1e".to_vec();
+        assert_eq!(
+            next_frame(&mut buf, Framing::JsonSequence, at_eof),
+            FramePoll::Item {
+                payload: b"2".to_vec(),
+                metadata: SseMetadata::default(),
+            }
+        );
+        assert_eq!(buf, b"\x1e");
+    }
+}
+
+/// Consecutive empty JSON text sequence records still buffered when the body ends do not end
+/// the stream: with no reconnect policy, every record behind them is yielded before `None`.
+#[test]
+fn json_sequence_yields_the_records_behind_consecutive_empty_records_at_end_of_body() {
+    for (body, expected) in [
+        ("\x1e\n\x1e\n\x1e2\n", vec![serde_json::json!(2)]),
+        (
+            "\x1e\n\x1e \n\x1e\n\x1e{\"a\":1}\n\x1e\n\x1e\n\x1e{\"a\":2}\n\x1e\n\x1e\n",
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})],
+        ),
+    ] {
+        let mut stream: EventStream<serde_json::Value> =
+            EventStream::new(response(body), Framing::JsonSequence);
+        let mut items = Vec::new();
+        while let Some(item) = poll_ready(stream.next()) {
+            items.push(item.unwrap());
         }
+        assert_eq!(items, expected, "{body:?}");
+    }
+}
+
+/// A stream whose `ClientCore` bounds an unterminated item at `max_stream_frame` bytes and
+/// retains 4 bytes of an error body, holding a replayable request and the given policy.
+fn bounded_stream(
+    body: &str,
+    framing: Framing,
+    max_stream_frame: usize,
+    policy: Arc<ImmediateReconnect>,
+) -> EventStream<serde_json::Value> {
+    let backend = Arc::new(SequenceBackend::new([(200, "{\"a\":2}\n")]));
+    let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
+    core.config_mut().max_stream_frame = max_stream_frame;
+    core.config_mut().max_error_body = 4;
+    let request = core
+        .http()
+        .request(Method::GET, "https://example.com/events")
+        .build()
+        .unwrap();
+    match EventStream::new_reconnectable(response(body), framing, core, Some(request))
+        .with_reconnect(policy)
+    {
+        Ok(stream) => stream,
+        Err(error) => panic!("reconnect should be available: {error}"),
+    }
+}
+
+/// Once more than `max_stream_frame` bytes of an item whose terminator has not arrived are
+/// buffered, the stream yields a `Decode` error retaining `max_error_body` bytes of them and
+/// ends: the reconnect policy is not consulted, and the over-limit item is never yielded, though
+/// it is valid JSON the end of the body would otherwise have flushed. The complete item ahead of
+/// it in the same chunk is yielded first.
+#[test]
+fn an_unterminated_item_past_max_stream_frame_is_a_decode_error_that_ends_the_stream() {
+    for (framing, body, retained) in [
+        (
+            Framing::Ndjson,
+            "{\"a\":1}\n{\"b\":\"0123456789\"}",
+            &b"{\"b\""[..],
+        ),
+        (
+            Framing::SseJsonData,
+            "data: {\"a\":1}\n\ndata: {\"b\":\"0123\"}",
+            &b"data"[..],
+        ),
+        (
+            Framing::JsonSequence,
+            "\x1e\n\x1e{\"a\":1}\n\x1e{\"b\":\"0123456789\"}",
+            &b"\x1e{\"b"[..],
+        ),
+    ] {
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 5,
+            ..ImmediateReconnect::default()
+        });
+        let mut stream = bounded_stream(body, framing, 16, policy.clone());
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"a": 1}),
+            "{framing:?}"
+        );
+        match poll_ready(stream.next()) {
+            Some(Err(Error::Decode {
+                status,
+                headers,
+                path,
+                body,
+                truncated,
+            })) => {
+                assert_eq!(status.as_u16(), 200);
+                assert_eq!(headers.get("x-response").unwrap(), "initial");
+                assert_eq!(
+                    path,
+                    "stream item exceeds max_stream_frame (16 bytes) before its terminator"
+                );
+                assert_eq!(&body[..], retained, "{framing:?}");
+                assert!(truncated);
+            }
+            other => panic!("{framing:?}: expected a Decode error, got {other:?}"),
+        }
+        assert!(poll_ready(stream.next()).is_none(), "{framing:?}");
+        assert!(policy.seen.lock().unwrap().is_empty(), "{framing:?}");
+    }
+}
+
+/// An unterminated item of exactly `max_stream_frame` bytes stays buffered, and the end of the
+/// body flushes it as an ordinary item.
+#[test]
+fn an_unterminated_item_at_max_stream_frame_is_still_framed() {
+    let policy = Arc::new(ImmediateReconnect::default());
+    let mut stream = bounded_stream(
+        "{\"a\":1}\n{\"b\":\"01234567\"}",
+        Framing::Ndjson,
+        16,
+        policy,
     );
-    assert!(buf.is_empty());
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"a": 1})
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"b": "01234567"})
+    );
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// Empty JSON text sequence records do not hold back the complete records behind them: every
+/// record in a chunk is framed before what is left is measured against `max_stream_frame`, so a
+/// valid sequence whose items each fit is yielded whole even though the chunk exceeds the bound.
+#[test]
+fn json_sequence_records_behind_an_empty_record_are_framed_under_max_stream_frame() {
+    let policy = Arc::new(ImmediateReconnect::default());
+    let mut stream = bounded_stream(
+        "\x1e\n\x1e{\"a\":1}\n\x1e{\"a\":2}\n\x1e{\"a\":3}\n\x1e",
+        Framing::JsonSequence,
+        16,
+        policy.clone(),
+    );
+    for a in 1..=3 {
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({ "a": a })
+        );
+    }
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// The default bound is the documented 16 MiB, and a stream built without a `ClientCore` takes
+/// it.
+#[test]
+fn max_stream_frame_defaults_to_sixteen_mebibytes() {
+    assert_eq!(
+        crate::ClientConfig::default().max_stream_frame,
+        16 * 1024 * 1024
+    );
+    let stream: EventStream<serde_json::Value> = EventStream::new(response(""), Framing::Ndjson);
+    assert_eq!(stream.max_frame, 16 * 1024 * 1024);
 }

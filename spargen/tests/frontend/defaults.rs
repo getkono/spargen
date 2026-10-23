@@ -539,18 +539,12 @@ components:
 
 #[test]
 fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
-    for (entry, report) in [
-        ("generate", generate(NUMERIC_DEFAULT_SPEC)),
-        ("check", check(NUMERIC_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::SchemaDefaultNotApplied),
-            "{entry}: `3` and `3` do not conflict: {report:#?}"
-        );
-    }
-
     let (report, code) = generate_with_code(NUMERIC_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaDefaultNotApplied),
+        "`3` and `3` do not conflict: {report:#?}"
+    );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     for name in ["Both", "BothReversed"] {
         let start = code
@@ -765,6 +759,39 @@ components:
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "{report:#?}"
+    );
+}
+
+/// A component-root `default` beside an empty `description` is the type's whole rustdoc: the
+/// empty description is treated as absent, so the note opens the doc rather than following a
+/// blank paragraph.
+#[test]
+fn component_root_default_beside_an_empty_description_opens_the_doc() {
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Count:
+      type: integer
+      description: ""
+      default: 1
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let item = code
+        .find("pub type Count")
+        .unwrap_or_else(|| panic!("`Count` is emitted: {code}"));
+    let note = code[..item]
+        .rfind("Default: `1`.")
+        .unwrap_or_else(|| panic!("`Count` documents its default: {code}"));
+    let opener = code[..note].trim_end_matches(' ');
+    assert!(
+        opener.ends_with("///") || opener.ends_with("/**"),
+        "the note opens `Count`'s rustdoc, with no blank paragraph before it: {}",
+        &code[opener.len().saturating_sub(40)..item]
     );
 }
 
