@@ -30,7 +30,7 @@ proc-macro = true
 # `default-features = false` keeps it that way should spargen's default set ever grow.
 # `uuid`/`time` output mappings are controlled at call time through `Spec::uuid`/`Spec::time` (or
 # the macro's `no_uuid`/`no_time`), not by Cargo features.
-spargen = { path = "../spargen", version = "0.5.0", default-features = false }
+spargen = { path = "../spargen", version = "0.6.0", default-features = false }
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
