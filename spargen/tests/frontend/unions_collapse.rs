@@ -960,3 +960,67 @@ fn a_union_left_one_variant_emits_no_copy_of_that_variants_type() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #987: a union a sibling meet or a merge leaves one variant is that variant's kind,
+/// re-emitted under the union's own name, so what the union lowered on the way is unused unless
+/// that kind names it: each member's own lowering (`PickVariant<N>`, with its `…Item`) and the
+/// sibling keywords' own lowering (`PickConstraint`). A branch the sibling excludes, branches the
+/// one-variant merge folds, a branch of scalar keywords alone, and a sole member each leave one
+/// variant here. Every `Pick…` type declared beside `Pick` is named by another declaration: where
+/// the kind is a scalar that is none, and where it is an array, the item type it names.
+#[test]
+fn a_union_left_one_variant_emits_none_of_its_members_or_siblings_own_lowerings() {
+    let mut mismatches = Vec::new();
+    for site in [
+        "{ type: [string, 'null'], oneOf: [ { items: { type: string } }, { type: string } ] }",
+        "{ type: [string, 'null'], anyOf: [ { items: { type: string } }, { type: string } ] }",
+        "{ type: [string, 'null'], oneOf: [ { items: { type: string } }, { const: null }, \
+         { type: string } ] }",
+        "{ type: [string, 'null'], oneOf: [ {}, {} ] }",
+        "{ type: [string, 'null'], oneOf: [ {}, { const: null } ] }",
+        "{ type: [integer, 'null'], oneOf: [ { minLength: 1 }, { type: integer } ] }",
+        "{ type: [string, 'null'], oneOf: [ { minLength: 1 }, { type: [string, 'null'] } ] }",
+        "{ type: [string, 'null'], oneOf: [ { minLength: 1 } ] }",
+        "{ type: [array, 'null'], oneOf: [ { items: { type: string } }, { type: string } ] }",
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let declared: Vec<&str> = types
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| {
+                ["pub struct ", "pub enum ", "pub type "]
+                    .iter()
+                    .find_map(|item| line.strip_prefix(item))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';', '=']).next())
+            .filter(|name| name.starts_with("Pick"))
+            .collect();
+        // A name occurs once, in its own declaration, where nothing else names it.
+        let occurrences = |name: &str| {
+            types
+                .match_indices(name)
+                .filter(|(at, _)| {
+                    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                    !types[..*at].ends_with(ident) && !types[at + name.len()..].starts_with(ident)
+                })
+                .count()
+        };
+        let unnamed: Vec<&&str> = declared
+            .iter()
+            .filter(|name| **name != "Pick" && occurrences(name) < 2)
+            .collect();
+        if !declared.contains(&"Pick") || !unnamed.is_empty() {
+            mismatches.push(format!("{site}: nothing names {unnamed:?}\n{types}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

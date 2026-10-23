@@ -12,7 +12,8 @@ use super::*;
 /// one member left the survivor's `…Variant0Constrained`, and a `$ref` to a union refined by
 /// untyped sibling keywords left the met union `…ReferenceIntersection`. Each is now discarded,
 /// while a type the re-emitted kind does refer to — the `$ref` case's met branch, or the nested
-/// struct a sole member's meet builds for a property both sides declare — is kept.
+/// struct a sole member's meet builds for a property both sides declare — is kept. Where the union
+/// is left one variant, its members' and its sibling keywords' own lowerings go with it (#987).
 #[test]
 fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
     fn spec(field: &str) -> String {
@@ -48,31 +49,21 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
         (
             "sole non-null member",
             "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: 'null' }], required: [name] }",
-            &["HolderfieldConstraint", "Holderfield"],
+            &["Holderfield"],
             "HolderfieldConstrained",
         ),
         (
             "sole non-null member whose meet builds a nested struct",
             "{ oneOf: [{ $ref: '#/components/schemas/Box' }, { type: 'null' }], \
              properties: { sub: { type: object, required: [q] } } }",
-            &[
-                "HolderfieldConstraintsubq",
-                "HolderfieldConstraintsub",
-                "HolderfieldConstraint",
-                "HolderfieldConstrainedsub",
-                "Holderfield",
-            ],
+            &["HolderfieldConstrainedsub", "Holderfield"],
             "HolderfieldConstrained",
         ),
         (
             "one member left by the siblings",
             "{ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: integer }], type: object, \
              required: [name] }",
-            &[
-                "HolderfieldConstraint",
-                "HolderfieldVariant1",
-                "Holderfield",
-            ],
+            &["Holderfield"],
             "HolderfieldVariant0Constrained",
         ),
         (
@@ -90,8 +81,8 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
         let (report, code) = generate_with_code(&spec(field));
         assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
         let mut lowered = field_types(&code);
-        // The sibling's own lowered field alias is emitted as every lowered sibling is, and is not
-        // what this pins.
+        // The sibling's own lowered field alias, which a `$ref`'s sibling keywords still emit, is
+        // not what this pins.
         lowered.retain(|name| name != "HolderfieldConstraintname");
         assert_eq!(lowered, expected, "{case}: `{discarded}` is unused");
     }
