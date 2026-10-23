@@ -595,6 +595,66 @@ paths:
     );
 }
 
+/// A direct recursive `allOf` member written in a sub-file as a bare `#/components/schemas/X`, where
+/// the sub-file also declares an `X` of its own, reads the root's `X` that is mid-lowering. The
+/// root-component pre-check in `gather_ref_target` rejects it before `ensure_component` runs, so the
+/// report is the one `E013` and no `W011` for the shadowed sub-file `X`. Removing that pre-check
+/// would add the `W011` (#992 tracks that decision); until then this pins the report unchanged.
+#[test]
+fn a_recursive_all_of_member_shadowed_by_the_root_reports_only_the_recursion() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/X' } }
+components:
+  schemas:
+    X:
+      type: object
+      properties:
+        w: { $ref: './lib.yaml#/components/schemas/W' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    W:
+      allOf:
+        - { $ref: '#/components/schemas/X' }
+        - { type: object, properties: { n: { type: string } } }
+    X:
+      type: object
+"##,
+    )
+    .unwrap();
+    let (generated, checked, _) = generate_and_check_dir(&dir, "openapi.yaml");
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert_eq!(codes(report), ["E013"], "{entry}: {report:#?}");
+        assert!(
+            messages_for(report, Code::AllOfIrreconcilable)
+                .iter()
+                .any(|message| message.contains("direct recursive")),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 /// The precondition `ensure_resolved`'s root-component routing rests on: a pointer deeper than a
 /// component, such as `/components/schemas/Tree/properties/x`, is routed by `contains_key` alone,
 /// which is sound only because no root component key can contain `/`. Structural validation rejects
