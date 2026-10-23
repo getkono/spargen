@@ -131,6 +131,43 @@ fn a_ref_members_xml_object_is_reported() {
     );
 }
 
+/// A member of a component's `allOf`, where that component reaches the body only as a `$ref`
+/// member of another composition: the member's contribution is merged into that composition too,
+/// so it is judged by every type that merges it, not by the component's own reachability alone.
+#[test]
+fn a_member_merged_through_a_component_ref_is_judged_by_the_type_merging_it() {
+    assert_member_hint_reported(
+        r##"    Both:
+      allOf:
+        - $ref: "#/components/schemas/Shared"
+        - $ref: "#/components/schemas/Pet"
+    Shared:
+      allOf:
+        - type: object
+          xml: { namespace: "urn:shared" }
+          properties:
+            id: { type: integer }"##,
+        "namespace",
+    );
+    // Two `$ref` hops: `Both` merges `Middle`, which merges `Shared`.
+    assert_member_hint_reported(
+        r##"    Both:
+      allOf:
+        - $ref: "#/components/schemas/Middle"
+        - $ref: "#/components/schemas/Pet"
+    Middle:
+      allOf:
+        - $ref: "#/components/schemas/Shared"
+    Shared:
+      allOf:
+        - type: object
+          xml: { prefix: s }
+          properties:
+            id: { type: integer }"##,
+        "prefix",
+    );
+}
+
 /// `anyOf` branches that cannot be told apart merge into one type, which consumes each branch's
 /// own definition and with it the branch's `xml` object.
 #[test]

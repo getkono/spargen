@@ -109,6 +109,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         result
     }
 
+    /// Note that the composition [`Self::xml_holders`] names last merges `ty`, the type a `$ref`
+    /// member resolved to, so a member merged into `ty` is judged by that composition's type too.
+    pub(super) fn record_xml_merger(&mut self, ty: TypeId) {
+        let Some(holder) = self.xml_holders.last().cloned() else {
+            return;
+        };
+        let mergers = self.xml_mergers.entry(ty).or_default();
+        if !mergers.contains(&holder) {
+            mergers.push(holder);
+        }
+    }
+
     /// Read the `xml` object of `schema`, a `$ref` whose siblings bear no shape and so resolved to
     /// `target` itself. A name there would rename the element of a type every use of the target
     /// shares (OpenAPI 3.1 reads it so; 3.2 ignores it under the `none` node type a `$ref`
@@ -310,18 +322,43 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
 
 /// The emitted definitions a merged member's `xml` object at `site` is reported against: those at
 /// its composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any,
-/// in the same document; none where no definition encloses it.
+/// in the same document; and, for each of those a `$ref` member of another composition merged
+/// ([`LowerCtx::record_xml_merger`]), that composition's, transitively. None where no definition
+/// encloses it.
 fn merged_into(
     site: &XmlSite,
     root: &RootXml,
     emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+    xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
 ) -> Vec<TypeId> {
-    let (document, mut pointer) = match &root.holder {
-        Some((document, pointer)) => (document, Some(pointer.clone())),
-        None => (&site.0, site.1.parent()),
+    let mut owners = match &root.holder {
+        Some((document, pointer)) => enclosing_emitted(document, Some(pointer), emitted_sites),
+        None => enclosing_emitted(&site.0, site.1.parent().as_ref(), emitted_sites),
     };
+    let mut next = 0;
+    while let Some(&id) = owners.get(next) {
+        next += 1;
+        for (document, pointer) in xml_mergers.get(&id).into_iter().flatten() {
+            for merger in enclosing_emitted(document, Some(pointer), emitted_sites) {
+                if !owners.contains(&merger) {
+                    owners.push(merger);
+                }
+            }
+        }
+    }
+    owners
+}
+
+/// The emitted definitions at `pointer` in `document`, else at the nearest pointer above it that
+/// has any; none where no definition encloses it.
+fn enclosing_emitted(
+    document: &str,
+    pointer: Option<&JsonPointer>,
+    emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+) -> Vec<TypeId> {
+    let mut pointer = pointer.cloned();
     while let Some(at) = pointer {
-        if let Some(ids) = emitted_sites.get(&(document.clone(), at.clone())) {
+        if let Some(ids) = emitted_sites.get(&(document.to_owned(), at.clone())) {
             return ids.clone();
         }
         pointer = at.parent();
@@ -373,12 +410,14 @@ fn is_xml_name(name: &str) -> bool {
 /// ([`LowerCtx::record_ref_xml`]), or any on a composition member the merge consumed
 /// ([`LowerCtx::record_member_xml`], judged by the type the merge produced) — is `E009` on a type
 /// an XML body reaches and `W006` elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
     meet_locations: &HashMap<TypeId, Provenance>,
     root_xml: &HashMap<XmlSite, RootXml>,
     field_xml_sites: &HashSet<XmlSite>,
+    xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
     is_oas32: bool,
     diags: &mut Diagnostics,
 ) {
@@ -434,7 +473,10 @@ pub(super) fn gate_xml_field_renames(
                 && !emitted_sites.contains_key(*site)
                 && (root.name.is_some() || !root.unsupported.is_empty())
         })
-        .map(|(site, root)| (site, root, merged_into(site, root, &emitted_sites)))
+        .map(|(site, root)| {
+            let owners = merged_into(site, root, &emitted_sites, xml_mergers);
+            (site, root, owners)
+        })
         .collect();
     merged_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
 

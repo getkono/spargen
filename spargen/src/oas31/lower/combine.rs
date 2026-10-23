@@ -525,6 +525,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
             }
             let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             // The pre-check above sees root components only. A name the root does not declare
             // is a *sub-file* component, and it reaches its own reservation through
@@ -548,6 +549,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // type contributes its fields.
         if is_remote_ref(reference) {
             let ty = self.ensure_remote(reference, &schema.provenance)?;
+            self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
                 RefMember {
