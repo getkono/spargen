@@ -1,4 +1,5 @@
-//! Values on the wire: dates, a per-operation server override, and RFC 6570 multipart parts.
+//! Values on the wire: dates, a per-operation server override, RFC 6570 multipart parts, and CBOR
+//! bodies.
 
 use super::*;
 
@@ -382,4 +383,181 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
         .status()
         .unwrap();
     assert!(status.success(), "the multipart wire round-trip must pass");
+}
+
+/// A CBOR body travels as the exact bytes it is (#900): `application/cbor` and a `+cbor` suffixed
+/// type are each sent as their own `Content-Type` and asked for as their own `Accept`, and the
+/// response comes back untouched, while an `application/octet-stream` operation still sets no
+/// `Accept` of its own.
+#[test]
+fn cbor_bodies_reach_the_wire_under_their_own_media_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Cbor, version: 1.0.0 }
+paths:
+  /directory:
+    post:
+      operationId: publishDirectory
+      requestBody:
+        required: true
+        content:
+          application/cbor:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: the signed directory
+          content:
+            application/cbor:
+              schema: { type: string, format: binary }
+  /receipt:
+    post:
+      operationId: fetchReceipt
+      requestBody:
+        required: true
+        content:
+          application/cose+cbor:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: the signed receipt
+          content:
+            application/cose+cbor:
+              schema: { type: string, format: binary }
+  /blob:
+    post:
+      operationId: putBlob
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: the blob
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "cbor_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/cbor.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+/// Serve one request, answering `body` under `content_type`, and return the request as received:
+/// its lowercased head and its body.
+fn serve_once(
+    content_type: &'static str,
+    body: &'static [u8],
+) -> (String, std::thread::JoinHandle<(String, Vec<u8>)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        let (head, length) = loop {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0, "the request ended before its head did");
+            received.extend_from_slice(&buf[..read]);
+            if let Some(end) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .map_or(0, |length| length.trim().parse::<usize>().unwrap());
+                received.drain(..end + 4);
+                break (head, length);
+            }
+        };
+        while received.len() < length {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0, "the request ended before its body did");
+            received.extend_from_slice(&buf[..read]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        stream.flush().unwrap();
+        (head, received)
+    });
+    (format!("http://{addr}"), server)
+}
+
+/// A CBOR map whose bytes no re-encoding would preserve: a non-canonical length prefix.
+const SIGNED: &[u8] = b"\xb9\x00\x01\x61k\x42\x00\xff";
+
+#[test]
+fn cbor_is_sent_and_asked_for_under_its_own_media_type() {
+    for (media, call) in [
+        (
+            "application/cbor",
+            (|client: &cbor_client::BlockingClient, body: &bytes::Bytes| {
+                client.publish_directory(body)
+            }) as fn(&_, &_) -> _,
+        ),
+        ("application/cose+cbor", |client, body| client.fetch_receipt(body)),
+    ] {
+        let (base, server) = serve_once(media, SIGNED);
+        let client = cbor_client::BlockingClient::new(&base).unwrap();
+        let returned = call(&client, &bytes::Bytes::from_static(SIGNED))
+            .expect("the CBOR call round-trips")
+            .into_inner();
+        let (head, body) = server.join().unwrap();
+        assert_eq!(header(&head, "content-type"), [media], "{head}");
+        // The declared type replaces the HTTP stack's default `*/*`, rather than joining it.
+        assert_eq!(header(&head, "accept"), [media], "{head}");
+        assert_eq!(body, SIGNED, "the request body must be the caller's exact bytes");
+        assert_eq!(&returned[..], SIGNED, "the response must be the server's exact bytes");
+    }
+}
+
+/// Every value of the header `name` in a lowercased request head, in order.
+fn header<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(field, _)| *field == name)
+        .map(|(_, value)| value.trim())
+        .collect()
+}
+
+#[test]
+fn octet_stream_still_leaves_accept_to_the_http_stack() {
+    let (base, server) = serve_once("application/octet-stream", SIGNED);
+    let client = cbor_client::BlockingClient::new(&base).unwrap();
+    client
+        .put_blob(&bytes::Bytes::from_static(SIGNED))
+        .expect("the octet-stream call round-trips");
+    let (head, _) = server.join().unwrap();
+    assert_eq!(header(&head, "content-type"), ["application/octet-stream"], "{head}");
+    // The generated method sets no `Accept`; what arrives is the HTTP stack's own default.
+    assert_eq!(header(&head, "accept"), ["*/*"], "{head}");
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "cbor"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the CBOR wire round-trip must pass");
 }
