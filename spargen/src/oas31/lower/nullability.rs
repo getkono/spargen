@@ -638,9 +638,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Whether `schema`, a union or a `$ref` to one, lowered to `ty`, is one `null` matches by the
     /// one decision ([`Self::null_admission`]) although `ty` does not carry it
-    /// ([`Self::carries_null`]): its branches leave `null` undecided, so its lowering is no
-    /// `Option` and has no `()` arm, yet `null` satisfies it, as untyped `items` branches of an
-    /// `anyOf` do.
+    /// ([`Self::carries_null`]): no `Option`, no `()` arm and no variant that accepts `null`, as
+    /// an `anyOf` of untyped `items` branches, which leave `null` undecided, lowers.
     fn union_matches_uncarried_null(&self, schema: &Schema, ty: Ty) -> bool {
         self.null_admission(schema).matches() && !self.carries_null(ty)
     }
