@@ -141,9 +141,13 @@ pub(super) fn choose_media<'a, T>(
         // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
         // nothing is allowed.
         //
-        // A selected CBOR key is the exception among octet-classified responses: it is announced
-        // in the request's `Accept`, so the alternatives a server could otherwise have sent are
-        // asked against at the wire, and every one of them is reported.
+        // A selected CBOR key is the exception among octet-classified responses, and its
+        // alternatives are always reported. Where the request announces it in `Accept` (every
+        // bodied success response is CBOR, `Responses::accept`), the alternatives a server could
+        // otherwise have sent are asked against at the wire. Where it does not — an error
+        // response, or a success beside a non-CBOR success body — nothing narrows at the wire, and
+        // the alternatives are reported all the same: this choice is made one response at a time,
+        // before the operation's `Accept` is known.
         let suppressible = position == BodyPosition::Response
             && classified == MediaType::OctetStream
             && !is_cbor(media_essence(media));
