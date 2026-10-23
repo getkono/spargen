@@ -16,7 +16,24 @@ use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
 use super::shape::ref_siblings_bear_shape;
-use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, UnionSibling};
+use super::{
+    DiscriminatorMembers, HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, UnionSibling,
+};
+
+/// A union's members, sorted before any is lowered: what [`LowerCtx::lower_union_with_sibling`]
+/// hands the sole-member collapse and the variant path alike.
+struct UnionMembers<'s> {
+    /// The members that are not null-only, in document order.
+    real: Vec<&'s SchemaOr>,
+    /// Whether the members are a `oneOf`'s or an `anyOf`'s.
+    mode: UnionMode,
+    /// How many null-only members there are: each is a branch `null` matches, which a `oneOf`
+    /// counts against its exactly-one rule beside the real branches that accept `null` too.
+    null_members: usize,
+    /// Whether the schema's own keywords permit `null` (a `"null"` in its `type` array, a
+    /// `const: null`, an `enum` listing `null`), which supplies no branch of its own.
+    null_from_type_array: bool,
+}
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower a `oneOf`/`anyOf` union, with `open_narrowing` out of effect.
@@ -112,8 +129,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union
     }
 
+    /// Whether `member`, a branch of the union `schema` that closes a reference cycle, is kept
+    /// unmet. A sibling that is a multi-category `type` array alone constrains a branch's category
+    /// and nothing else, so a cycle-closing branch of a category it admits meets it in itself,
+    /// and is kept unmet rather than refused ([`Self::cycle_branch_within`]).
+    fn kept_unmet(&self, schema: &Schema, member: &SchemaOr) -> bool {
+        union_sibling_is_categories_alone(schema)
+            .is_some_and(|allowed| self.cycle_branch_within(member, allowed))
+    }
+
     /// [`Self::lower_union_closed`] past the lowering of its `sibling`, which it meets with every
-    /// member of the `oneOf`/`anyOf` `members`.
+    /// member of the `oneOf`/`anyOf` `members`: the members are sorted into null-only and real
+    /// ones, a single real member collapses ([`Self::lower_sole_union_member`]), and several are
+    /// lowered as variants ([`Self::lower_union_variants`]).
     fn lower_union_with_sibling(
         &mut self,
         schema: &Schema,
@@ -122,14 +150,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         mode: UnionMode,
         sibling: Option<UnionSibling>,
     ) -> Option<Ty> {
-        // A sibling that is a multi-category `type` array alone constrains a branch's category and
-        // nothing else, so a cycle-closing branch of a category it admits meets it in itself, and
-        // is kept unmet rather than refused below ([`Self::cycle_branch_within`]).
-        let categories_alone = union_sibling_is_categories_alone(schema);
-        let kept_unmet = |ctx: &Self, member: &SchemaOr| {
-            categories_alone.is_some_and(|allowed| ctx.cycle_branch_within(member, allowed))
-        };
-
         // Two DIFFERENT facts, tracked apart because only one of them can rescue an empty
         // intersection. A null-only MEMBER supplies a branch that `null` validates against. A
         // `"null"` in the enclosing `type` array only *permits* null: `oneOf` still demands exactly
@@ -142,25 +162,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // decides nothing about `null`, takes it from either, as it does in the `allOf` spelling
         // (#632).
         let null_from_type_array = NullAdmission::of_own_keywords(schema) == NullAdmission::Admits;
-        let mut null_from_member = false;
-        // How many null-only members there are: each is a branch `null` matches, which a `oneOf`
-        // counts against its exactly-one rule beside the real branches that accept `null` too.
         let mut null_members = 0usize;
         let mut real_members: Vec<&SchemaOr> = Vec::new();
         for member in members {
             if member_is_null_only(member) {
-                null_from_member = true;
                 null_members += 1;
             } else {
                 real_members.push(member);
             }
         }
-        // The union accepts `null` only through a branch `null` matches (#574): a `null` member,
-        // or a real branch that accepts it after its sibling meet. The `type` array alone adds
-        // nothing, so it does not start this; an untyped branch, which decides nothing about
-        // `null`, takes the array's `null` below, and the meet keeps it where the other sibling
-        // keywords admit it.
-        let mut nullable = null_from_member;
 
         // Every schema the discriminator names is checked against the members before any path
         // below can return. The collapses do not build a discriminated dispatch at all, so a check
@@ -196,7 +206,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // siblings are present, so one shape would get two codes.
                 if self.member_closes_a_cycle(member, &schema.provenance)
                     && !self.member_is_this_union(member, &schema.provenance)
-                    && !kept_unmet(self, member)
+                    && !self.kept_unmet(schema, member)
                 {
                     return self.reject_union_member_cycle(schema);
                 }
@@ -208,205 +218,264 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // allOf single-member collapse — which keeps the `ensure_component` last-insert invariant
         // when the union is a component body (a bare `$ref` member would otherwise return an existing
         // id and leave the popped root mismatched).
-        if real_members.len() == 1 {
-            // The member is lowered under this schema's own hint and then re-emitted below, so its
-            // own lowering is a second copy of the same type (#926).
-            let member_from = self.graph_mark();
-            let mut inner = self.lower_schema_or(real_members[0], hint)?;
-            // Everything the sibling meet below inserts has an id at or above this mark; the
-            // member and the sibling were lowered before it.
-            let mark = self.graph_mark();
-            // The member's OWN nullability, before the intersection overwrites `inner`. Needed
-            // below when the sibling is not entitled to decide.
-            let member_nullable = inner.nullable;
-            // An untyped object member's non-null struct decides nothing about `null` either
-            // (#567), so it takes `null` from a sibling or a meet as `Value` does; so does any
-            // other member whose own keywords leave `null` undecided (#574).
-            let member_untyped = self.branch_takes_permitted_null(real_members[0], inner);
-            // Whether `null` satisfies the member met with the sibling, by the one decision
-            // ([`Self::null_admission`]): an untyped object or array member, a nested union `null`
-            // matches, and a member of scalar keywords alone are branches `null` matches as a
-            // member that states it is.
-            let null_matches_member = self
-                .branch_null_admission(real_members[0])
-                .and(self.union_sibling_null_admission(schema))
-                .matches();
-            // A `null` member beside a member `null` matches too puts `null` in two branches,
-            // which fails a `oneOf`'s exactly-one rule (#563, #622, #627).
-            let null_twice =
-                mode == UnionMode::OneOf && null_members + usize::from(null_matches_member) > 1;
-            // The sole member is the reservation *this* schema will occupy, so the union is the
-            // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
-            // exactly as a direct recursive member does in a multi-member union. That path already
-            // refuses it, and this is the same shape written with fewer members beside it, so it
-            // gets the same code and the same wording rather than a second code chosen by member
-            // count. Asked before the reservation guards below, which would otherwise answer the
-            // narrower question first and hand one shape two codes again.
-            //
-            // The document-half guard above (`member_closes_a_cycle`) runs before this collapse
-            // and would otherwise answer `E013` for this shape whenever the union carries sibling
-            // keywords. It excludes a member that is this union's own reservation
-            // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
-            // without siblings, and with one member or several.
-            // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
-            // `tests/frontend/recursion_reservations.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
-            if self.reservation_at(&schema.provenance) == Some(inner.id) {
-                return self.reject_union_member_is_the_union(schema);
-            }
-            // The reservation half of the cycle test, on the sole real member. The document half
-            // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
-            // reference reaches here still pointing at a placeholder, and the intersection below
-            // cannot compose with one. Reported with the same wording the other two spellings use,
-            // because it is the same fact about the same document.
-            if sibling.is_some()
-                && self.is_in_progress_root(inner.id)
-                && !kept_unmet(self, real_members[0])
-            {
-                return self.reject_union_member_cycle(schema);
-            }
-            // The member is some *other* type's still-open reservation — the cycle-closing
-            // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
-            // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
-            // `check_invariants` reports as `E011` against a document that is not malformed.
-            //
-            // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
-            // the cycle has a finite size and optional because the `null` member is what collapsed
-            // away. That is `Option<Box<T>>` — what `docs/support-matrix.md` promises for this
-            // construct, and what the direct `{$ref: T}` spelling already produces.
-            //
-            // Inserting no def is safe exactly where this union is not itself the body of a type
-            // whose root id was reserved before lowering began. Where it is, the caller pops the
-            // last insert and lifts it into that reserved root, so returning a foreign id would
-            // relocate the wrong def and dangle the component. `ensure_component` recognises that
-            // shape as a nullable alias before it reserves anything, so the root-component spelling
-            // never arrives here; a sub-file or remote body reaching it is refused rather than
-            // mis-assembled.
-            if self.is_reservation(inner.id) {
-                if self.reservation_at(&schema.provenance).is_some() {
-                    return self.reject_self_referential_union(
-                        schema,
-                        "this schema's whole body is a union whose only non-null member is a \
+        let members = UnionMembers {
+            real: real_members,
+            mode,
+            null_members,
+            null_from_type_array,
+        };
+        if let [member] = members.real[..] {
+            return self.lower_sole_union_member(schema, hint, member, &members, sibling);
+        }
+        self.lower_union_variants(schema, hint, &members, sibling, discriminator_members)
+    }
+
+    /// [`Self::lower_union_with_sibling`] for a union with one real `member` beside its null-only
+    /// ones: the member's type, met with the `sibling`, re-emitted under this schema's own name,
+    /// `Option<T>` beside a `null` member, and no enum.
+    fn lower_sole_union_member(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        member: &SchemaOr,
+        members: &UnionMembers<'_>,
+        sibling: Option<UnionSibling>,
+    ) -> Option<Ty> {
+        let UnionMembers {
+            mode,
+            null_members,
+            null_from_type_array,
+            ..
+        } = *members;
+        let null_from_member = null_members > 0;
+        // The union accepts `null` only through a branch `null` matches, as
+        // [`Self::lower_union_variants`] says.
+        let mut nullable = null_from_member;
+        // The member is lowered under this schema's own hint and then re-emitted below, so its
+        // own lowering is a second copy of the same type (#926).
+        let member_from = self.graph_mark();
+        let mut inner = self.lower_schema_or(member, hint)?;
+        // Everything the sibling meet below inserts has an id at or above this mark; the
+        // member and the sibling were lowered before it.
+        let mark = self.graph_mark();
+        // The member's OWN nullability, before the intersection overwrites `inner`. Needed
+        // below when the sibling is not entitled to decide.
+        let member_nullable = inner.nullable;
+        // An untyped object member's non-null struct decides nothing about `null` either
+        // (#567), so it takes `null` from a sibling or a meet as `Value` does; so does any
+        // other member whose own keywords leave `null` undecided (#574).
+        let member_untyped = self.branch_takes_permitted_null(member, inner);
+        // Whether `null` satisfies the member met with the sibling, by the one decision
+        // ([`Self::null_admission`]): an untyped object or array member, a nested union `null`
+        // matches, and a member of scalar keywords alone are branches `null` matches as a
+        // member that states it is.
+        let null_matches_member = self
+            .branch_null_admission(member)
+            .and(self.union_sibling_null_admission(schema))
+            .matches();
+        // A `null` member beside a member `null` matches too puts `null` in two branches,
+        // which fails a `oneOf`'s exactly-one rule (#563, #622, #627).
+        let null_twice =
+            mode == UnionMode::OneOf && null_members + usize::from(null_matches_member) > 1;
+        // The sole member is the reservation *this* schema will occupy, so the union is the
+        // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
+        // exactly as a direct recursive member does in a multi-member union. That path already
+        // refuses it, and this is the same shape written with fewer members beside it, so it
+        // gets the same code and the same wording rather than a second code chosen by member
+        // count. Asked before the reservation guards below, which would otherwise answer the
+        // narrower question first and hand one shape two codes again.
+        //
+        // The document-half guard above (`member_closes_a_cycle`) runs before this collapse
+        // and would otherwise answer `E013` for this shape whenever the union carries sibling
+        // keywords. It excludes a member that is this union's own reservation
+        // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
+        // without siblings, and with one member or several.
+        // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
+        // `tests/frontend/recursion_reservations.rs` asserts the reported error codes are **exactly** `[E007]` on both its spellings.
+        if self.reservation_at(&schema.provenance) == Some(inner.id) {
+            return self.reject_union_member_is_the_union(schema);
+        }
+        // The reservation half of the cycle test, on the sole real member. The document half
+        // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
+        // reference reaches here still pointing at a placeholder, and the intersection below
+        // cannot compose with one. Reported with the same wording the other two spellings use,
+        // because it is the same fact about the same document.
+        if sibling.is_some()
+            && self.is_in_progress_root(inner.id)
+            && !self.kept_unmet(schema, member)
+        {
+            return self.reject_union_member_cycle(schema);
+        }
+        // The member is some *other* type's still-open reservation — the cycle-closing
+        // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
+        // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
+        // `check_invariants` reports as `E011` against a document that is not malformed.
+        //
+        // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
+        // the cycle has a finite size and optional because the `null` member is what collapsed
+        // away. That is `Option<Box<T>>` — what `docs/support-matrix.md` promises for this
+        // construct, and what the direct `{$ref: T}` spelling already produces.
+        //
+        // Inserting no def is safe exactly where this union is not itself the body of a type
+        // whose root id was reserved before lowering began. Where it is, the caller pops the
+        // last insert and lifts it into that reserved root, so returning a foreign id would
+        // relocate the wrong def and dangle the component. `ensure_component` recognises that
+        // shape as a nullable alias before it reserves anything, so the root-component spelling
+        // never arrives here; a sub-file or remote body reaching it is refused rather than
+        // mis-assembled.
+        if self.is_reservation(inner.id) {
+            if self.reservation_at(&schema.provenance).is_some() {
+                return self.reject_self_referential_union(
+                    schema,
+                    "this schema's whole body is a union whose only non-null member is a \
                          `$ref` that closes a reference cycle, so the schema names no shape of its \
                          own and cannot be given a generated type",
+                );
+            }
+            // A sibling meet is refused above, so here there is no sibling, or one that is a
+            // multi-category `type` array alone admitting the target's category, and a target
+            // whose keywords decide nothing takes the array's `null` (#574).
+            let takes_null = inner.nullable || (null_from_type_array && member_untyped);
+            inner.nullable = (takes_null || nullable) && !null_twice;
+            inner.boxed = true;
+            return Some(inner);
+        }
+        // An untyped member accepts the `null` the `type` array permits (#574), as the
+        // multi-member path's untyped variants do, before the sibling meet so the other
+        // sibling keywords can still take it away.
+        if null_from_type_array && member_untyped {
+            inner.nullable = true;
+        }
+        if let Some(sibling) = sibling {
+            // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
+            // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
+            // `Ty::nullable` — cannot see it. Restore exactly that branch. Without it the
+            // intersection reports empty for a schema `null` genuinely satisfies, and the
+            // `$ref` spelling of the identical instance set, where the target's nullability
+            // rides on its own `Ty`, generates while this one rejects.
+            //
+            // `null_from_type_array` is deliberately NOT restored here: it supplies no branch,
+            // and it already reaches the intersection on the sibling side, where it belongs —
+            // it can narrow what the result accepts, never create something to accept.
+            inner.nullable = inner.nullable || null_from_member;
+            let constrained_hint = format!("{hint}Constrained");
+            let met = self.meet_scoped_and_report(
+                sibling.refiner,
+                |ctx, reach| {
+                    // A member uninhabited on its own leaves the union so whatever the
+                    // sibling is (#615), rather than an empty meet that rejects it below.
+                    let met = ctx.meet_union_sibling(
+                        schema,
+                        inner,
+                        sibling.refiner,
+                        reach,
+                        &constrained_hint,
                     );
-                }
-                // A sibling meet is refused above, so here there is no sibling, or one that is a
-                // multi-category `type` array alone admitting the target's category, and a target
-                // whose keywords decide nothing takes the array's `null` (#574).
-                let takes_null = inner.nullable || (null_from_type_array && member_untyped);
-                inner.nullable = (takes_null || nullable) && !null_twice;
-                inner.boxed = true;
-                return Some(inner);
-            }
-            // An untyped member accepts the `null` the `type` array permits (#574), as the
-            // multi-member path's untyped variants do, before the sibling meet so the other
-            // sibling keywords can still take it away.
-            if null_from_type_array && member_untyped {
-                inner.nullable = true;
-            }
-            if let Some(sibling) = sibling {
-                // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
-                // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
-                // `Ty::nullable` — cannot see it. Restore exactly that branch. Without it the
-                // intersection reports empty for a schema `null` genuinely satisfies, and the
-                // `$ref` spelling of the identical instance set, where the target's nullability
-                // rides on its own `Ty`, generates while this one rejects.
-                //
-                // `null_from_type_array` is deliberately NOT restored here: it supplies no branch,
-                // and it already reaches the intersection on the sibling side, where it belongs —
-                // it can narrow what the result accepts, never create something to accept.
-                inner.nullable = inner.nullable || null_from_member;
-                let constrained_hint = format!("{hint}Constrained");
-                let met = self.meet_scoped_and_report(
-                    sibling.refiner,
-                    |ctx, reach| {
-                        // A member uninhabited on its own leaves the union so whatever the
-                        // sibling is (#615), rather than an empty meet that rejects it below.
-                        let met = ctx.meet_union_sibling(
-                            schema,
-                            inner,
-                            sibling.refiner,
-                            reach,
-                            &constrained_hint,
-                        );
-                        ctx.uninhabited_union_meet(inner, met)
-                    },
-                    |ctx| {
-                        ctx.reject_unscoped_union_sibling(
-                            schema,
-                            "the union's sole non-null member states no JSON category, and the \
+                    ctx.uninhabited_union_meet(inner, met)
+                },
+                |ctx| {
+                    ctx.reject_unscoped_union_sibling(
+                        schema,
+                        "the union's sole non-null member states no JSON category, and the \
                              enclosing schema's untyped sibling keywords settle none for it — they \
                              are both object keywords and array keywords, or its `type` array \
                              admits another category beside theirs — so no single Rust type \
                              represents what they constrain of it",
-                        )
-                    },
+                    )
+                },
+                schema,
+                unreached_message,
+            )?;
+            // An empty lowered meet where `null` satisfies the member and the sibling alike
+            // ([`Self::null_admission`]) is `null` alone, as the multi-member path narrows such
+            // a branch (#670, #674): a `$ref` to a union `null` matches through an untyped
+            // branch of its own lowered non-null.
+            let met = match met {
+                Err(NoMeet::Empty) if null_matches_member => Ok(self.insert_type(
+                    &constrained_hint,
+                    TypeKind::Null,
+                    crate::ir::Docs::default(),
+                    None,
+                )),
+                met => met,
+            };
+            let Ok(constrained) = met else {
+                // Neither side admits null and the non-null shapes do not meet, so nothing is
+                // left to collapse to. The terminal code matches the multi-variant path below,
+                // which rejects with `E007` once every variant has been excluded — but only the
+                // terminal code: that path also emits a per-variant `W011`, and this one
+                // deliberately does not, because `W011` describes a construct dropped from
+                // output that still exists, and here no enum is generated at all.
+                //
+                // The message says "empty or unrepresentable" for the same reason Site A's
+                // does: it covers both, and the sole non-null member is named because there
+                // is exactly one, so the author needs no index to find it.
+                return self.reject_branchless_union(
                     schema,
-                    unreached_message,
-                )?;
-                // An empty lowered meet where `null` satisfies the member and the sibling alike
-                // ([`Self::null_admission`]) is `null` alone, as the multi-member path narrows such
-                // a branch (#670, #674): a `$ref` to a union `null` matches through an untyped
-                // branch of its own lowered non-null.
-                let met = match met {
-                    Err(NoMeet::Empty) if null_matches_member => Ok(self.insert_type(
-                        &constrained_hint,
-                        TypeKind::Null,
-                        crate::ir::Docs::default(),
-                        None,
-                    )),
-                    met => met,
-                };
-                let Ok(constrained) = met else {
-                    // Neither side admits null and the non-null shapes do not meet, so nothing is
-                    // left to collapse to. The terminal code matches the multi-variant path below,
-                    // which rejects with `E007` once every variant has been excluded — but only the
-                    // terminal code: that path also emits a per-variant `W011`, and this one
-                    // deliberately does not, because `W011` describes a construct dropped from
-                    // output that still exists, and here no enum is generated at all.
-                    //
-                    // The message says "empty or unrepresentable" for the same reason Site A's
-                    // does: it covers both, and the sole non-null member is named because there
-                    // is exactly one, so the author needs no index to find it.
-                    return self.reject_branchless_union(
-                        schema,
-                        "the union's sole non-null member and the enclosing schema's own sibling \
+                    "the union's sole non-null member and the enclosing schema's own sibling \
                          keywords have an empty or unrepresentable intersection, leaving the union \
                          with no variant",
-                    );
-                };
-                // The intersection owns the answer for nullability too — but ONLY where the sibling
-                // is entitled to give one, which is a question about the SIBLING. Reading the
-                // enclosing schema's `type` instead answered it wrongly in both directions: the two
-                // disagree whenever a multi-type array is deleted for lowering, and whenever the
-                // sibling speaks through `enum`/`const` rather than `type`. An object applicator
-                // denies nothing and must not remove the union's own acceptance.
-                nullable = if sibling.speaks_about_null {
-                    constrained.nullable
-                } else {
-                    member_nullable || null_from_member
-                };
-                inner = constrained;
-            }
-            let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
-            // The meet's result is re-emitted under this schema's name, so the meet's own inserts
-            // (`…Constrained`, and whatever it built on the way) are unused unless `kind` reaches
-            // them (#462). Without a sibling nothing was inserted since `mark`.
-            let mut ty = self.reemit_meet(schema, hint, mark, kind);
-            // The member's own lowering, which the re-emitted def replaced, is unused unless the
-            // re-emitted kind reaches it or a memo holds it (#926).
-            self.elide_unused_union_lowering(member_from..mark);
-            // The sibling meet narrowed the member to the exact null type beside a `null` member:
-            // `null` matches both branches and fails exactly-one, and the member accepts nothing
-            // else, so nothing satisfies the schema, as the multi-member path below rejects for
-            // the same branches (#632).
-            if null_twice && sibling.is_some() && self.is_exact_null(inner) {
-                return self.reject_one_of_null_in_every_branch(schema);
-            }
-            ty.nullable = (inner.nullable || nullable) && !null_twice;
-            ty.boxed = inner.boxed;
-            return Some(ty);
+                );
+            };
+            // The intersection owns the answer for nullability too — but ONLY where the sibling
+            // is entitled to give one, which is a question about the SIBLING. Reading the
+            // enclosing schema's `type` instead answered it wrongly in both directions: the two
+            // disagree whenever a multi-type array is deleted for lowering, and whenever the
+            // sibling speaks through `enum`/`const` rather than `type`. An object applicator
+            // denies nothing and must not remove the union's own acceptance.
+            nullable = if sibling.speaks_about_null {
+                constrained.nullable
+            } else {
+                member_nullable || null_from_member
+            };
+            inner = constrained;
         }
+        let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+        // The meet's result is re-emitted under this schema's name, so the meet's own inserts
+        // (`…Constrained`, and whatever it built on the way) are unused unless `kind` reaches
+        // them (#462). Without a sibling nothing was inserted since `mark`.
+        let mut ty = self.reemit_meet(schema, hint, mark, kind);
+        // The member's own lowering, which the re-emitted def replaced, is unused unless the
+        // re-emitted kind reaches it or a memo holds it (#926).
+        self.elide_unused_union_lowering(member_from..mark);
+        // The sibling meet narrowed the member to the exact null type beside a `null` member:
+        // `null` matches both branches and fails exactly-one, and the member accepts nothing
+        // else, so nothing satisfies the schema, as the multi-member path below rejects for
+        // the same branches (#632).
+        if null_twice && sibling.is_some() && self.is_exact_null(inner) {
+            return self.reject_one_of_null_in_every_branch(schema);
+        }
+        ty.nullable = (inner.nullable || nullable) && !null_twice;
+        ty.boxed = inner.boxed;
+        Some(ty)
+    }
+
+    /// [`Self::lower_union_with_sibling`] for a union with two or more real members: each is
+    /// lowered and met with the `sibling` as a variant, the variants a meet excludes, narrows to
+    /// `null`, or leaves indistinguishable are dropped or merged, and what remains is one variant's
+    /// type or an enum dispatched by [`Self::union_strategy`]. `discriminator_members` is the
+    /// discriminator's resolution against the members, where the union has one.
+    fn lower_union_variants(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        members: &UnionMembers<'_>,
+        sibling: Option<UnionSibling>,
+        discriminator_members: Option<DiscriminatorMembers>,
+    ) -> Option<Ty> {
+        let UnionMembers {
+            real: ref real_members,
+            mode,
+            null_members,
+            null_from_type_array,
+        } = *members;
+        let null_from_member = null_members > 0;
+        // The union accepts `null` only through a branch `null` matches (#574): a `null` member,
+        // or a real branch that accepts it after its sibling meet. The `type` array alone adds
+        // nothing, so it does not start this; an untyped branch, which decides nothing about
+        // `null`, takes the array's `null` below, and the meet keeps it where the other sibling
+        // keywords admit it.
+        let mut nullable = null_from_member;
 
         // Lower every real variant first (their defs — especially `$ref` components — insert before
         // the union def below), recording the `$ref` component name for tag/variant naming.
@@ -460,13 +529,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // A cycle-closing branch a multi-category `type` array alone admits meets that sibling
             // in itself: it is the variant it is without one.
-            let sibling =
-                if sibling.is_some() && self.is_in_progress_root(ty.id) && kept_unmet(self, member)
-                {
-                    None
-                } else {
-                    sibling
-                };
+            let sibling = if sibling.is_some()
+                && self.is_in_progress_root(ty.id)
+                && self.kept_unmet(schema, member)
+            {
+                None
+            } else {
+                sibling
+            };
             // The reservation half of the cycle test again, on a multi-variant union. Same fact,
             // same wording, same place in the order: before anything tries to intersect against the
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
@@ -846,8 +916,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(ty);
         }
 
+        let strategy = self.union_strategy(
+            schema,
+            &variants,
+            &ref_names,
+            &variant_members,
+            mode,
+            discriminator_members.as_ref(),
+        )?;
+        let union = Union { variants, strategy };
+        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
+        // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
+        // gathers its members the report waits for its scalar meet, which may give a `Value`
+        // variant a type ([`Self::held_untyped_warnings`], #660).
+        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
+            let untyped = self.untyped_one_of_variants(&union, &variant_members);
+            self.report_untyped_one_of(HeldUntypedWarning {
+                provenance: schema.provenance.clone(),
+                untyped,
+            });
+        }
+        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
+        self.union_variant_members.insert(ty.id, merged_members);
+        if held_for_scalar_meet {
+            self.scalar_meet_unmerged.insert(ty.id);
+        }
+        ty.nullable = nullable;
+        Some(ty)
+    }
+
+    /// How the enum of `variants` tells them apart: by the discriminator, where `schema` has one
+    /// that dispatches them (`discriminator_members` is its resolution against the members),
+    /// then by JSON category or a unique required key where they are disjoint, and otherwise by
+    /// trial matching under `mode`. `ref_names` and `variant_members` are aligned with
+    /// `variants`. Rejected (`E007`) where a `defaultMapping` names a member the sibling
+    /// keywords excluded, or a component member's own name selects another member.
+    fn union_strategy(
+        &mut self,
+        schema: &Schema,
+        variants: &[UnionVariant],
+        ref_names: &[Option<String>],
+        variant_members: &[usize],
+        mode: UnionMode,
+        discriminator_members: Option<&DiscriminatorMembers>,
+    ) -> Option<UnionStrategy> {
         let strategy = if let (Some(discriminator), Some(resolved)) =
-            (&schema.discriminator, &discriminator_members)
+            (&schema.discriminator, discriminator_members)
         {
             // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
             // member the enclosing schema's sibling keywords excluded (`W011`) is the one way left
@@ -868,9 +982,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             };
             let mut discriminated = self.discriminated_strategy(
-                &variants,
-                &ref_names,
-                &variant_members,
+                variants,
+                ref_names,
+                variant_members,
                 &discriminator.property_name,
                 resolved,
                 default_variant,
@@ -940,32 +1054,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             discriminated
-                .or_else(|| self.disjoint_strategy(&variants))
-                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
+                .or_else(|| self.disjoint_strategy(variants))
+                .unwrap_or_else(|| self.trial_strategy(variants, mode))
         } else {
-            self.disjoint_strategy(&variants)
-                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
+            self.disjoint_strategy(variants)
+                .unwrap_or_else(|| self.trial_strategy(variants, mode))
         };
-
-        let union = Union { variants, strategy };
-        // A `$ref`'s own `oneOf` sibling is reported by the `$ref` arm once the meet has made its
-        // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
-        // gathers its members the report waits for its scalar meet, which may give a `Value`
-        // variant a type ([`Self::held_untyped_warnings`], #660).
-        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
-            let untyped = self.untyped_one_of_variants(&union, &variant_members);
-            self.report_untyped_one_of(HeldUntypedWarning {
-                provenance: schema.provenance.clone(),
-                untyped,
-            });
-        }
-        let mut ty = self.insert_schema_type(schema, hint, TypeKind::Union(union));
-        self.union_variant_members.insert(ty.id, merged_members);
-        if held_for_scalar_meet {
-            self.scalar_meet_unmerged.insert(ty.id);
-        }
-        ty.nullable = nullable;
-        Some(ty)
+        Some(strategy)
     }
 
     /// Report, as `W001` at `provenance`, the variants of a trial-matched `oneOf` (one whose decode
@@ -1078,7 +1173,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// type, or to distinct structs or string enums of one structure (#492,
     /// [`TypeGraph::same_decoded_values`]) — into the first of them, keeping `ref_names` and
     /// `variant_members` aligned with `variants`, and report the merge as
-    /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_closed`]
+    /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_variants`]
     /// counts the branches `null` matches before any merge, across the merged sets and the rest.
     /// Returns the members each kept variant stands for, aligned with `variants`.
     ///
