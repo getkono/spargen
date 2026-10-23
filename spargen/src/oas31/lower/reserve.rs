@@ -10,7 +10,7 @@ use crate::source::is_remote_ref;
 
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
 /// One of a reservation frame's two memos: a key to its root id and nullability.
@@ -35,7 +35,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             self.ensure_component(name, Some(reference), at)
         } else if is_remote_ref(reference) {
-            self.ensure_remote(reference)
+            self.ensure_remote(reference, at)
         } else {
             self.ensure_resolved(reference, at, hint)
         }
@@ -51,7 +51,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// an empty token is no component: structural validation admits only `^[a-zA-Z0-9._-]+$` as a
     /// root component key, so neither could be declared, and the filter says so without relying on
     /// it.
-    pub(super) fn root_component_at<'p>(
+    fn root_component_at<'p>(
         &self,
         file: crate::diag::FileId,
         pointer: &'p crate::diag::JsonPointer,
@@ -171,15 +171,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // lowered inside this frame is the last insert, so its def is lifted into this reservation
         // and the target's own component entry is left naming an id that no longer holds it.
         // Chaining exactly as the bare spelling does gives both the one answer that spelling gives,
-        // cycle check included. The siblings are still acknowledged where they always were: the
-        // audit reports an ignored validation keyword (`W001`) independently of lowering. A
-        // `default` is the one sibling this frame used to carry (as a doc note on the root's own
-        // def); an alias has no def to carry it, so it is reported as `W005` in the parser's words
-        // for the bare `$ref`+`default` spelling rather than dropped silently.
+        // cycle check included. The audit acknowledges the siblings: it reports an ignored
+        // validation keyword (`W001`) independently of lowering. A `default` would ride as a doc
+        // note on a def, and an alias has no def to carry it, so it is reported as `W005` in the
+        // parser's words for the bare `$ref`+`default` spelling rather than dropped silently.
         if let Some(reference) = schema.reference.as_deref() {
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            if !schema_has_shape_constraint(&sibling) {
+            if !ref_siblings_bear_shape(schema) {
                 // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
                 self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
@@ -295,9 +292,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // has something to carry. It is not the final one: the null decision of the body
         // (`null_admission`) reads every composition the body spells, but a `$ref` loop back into a
         // body still being lowered decides nothing in it, so for a recursive body it is a guess.
-        // Writing it back over the lowered result
-        // discarded every decision `lower_union` makes about null the moment a union was spelled as
-        // a named component — the dominant spelling in real descriptions. A guess a back-edge read
+        // Writing it back over the lowered result would discard every decision `lower_union` makes
+        // about null whenever a union is spelled as a named component — the dominant spelling in
+        // real descriptions. A guess a back-edge read
         // and the body then contradicted is reported by `settle_reservation`, and the next pass
         // opens this reservation with the body's answer instead (see [`lower`]).
         let provisional_nullable = self.provisional_nullability(&reservation, schema);
@@ -421,16 +418,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// the root document's component map first, so when the root declares the name too, the root's
     /// wins and the sub-file's declaration is never read.
     ///
-    /// The precedence is kept — changing it would retype every split description that relies on it
-    /// — but until now nothing said it. Before the sub-file branch existed the reference did not
-    /// resolve at all, so only one of the two declarations was ever live and no choice had to be
-    /// made; making the reference resolve makes the choice, and it is consequential: adding one
-    /// unrelated component to the root document silently retargets a reference written in another
-    /// file, and `spargen diff` across that pair reports a breaking change.
+    /// The precedence stands because changing it would retype every split description that relies
+    /// on it, and it is consequential: adding one unrelated component to the root document
+    /// silently retargets a reference written in another file, and `spargen diff` across that pair
+    /// reports a breaking change. This warning is what makes the choice visible.
     ///
-    /// `W011` is what the shadowed declaration is — a declaration with no effect — so no ordinal
-    /// moves and the code keeps the matrix cell and `errors.md` row it already has. Emitted per
-    /// reference site rather than once per name, because the site is what the reader has to find.
+    /// The shadowed declaration is a declaration with no effect, which is what `W011` reports.
+    /// Emitted per reference site rather than once per name, because the site is what the reader
+    /// has to find.
     ///
     /// `reference` is the `$ref` **as the site wrote it**, and only the bare-fragment spelling can
     /// be shadowed: `#/components/schemas/<name>` addresses the document it appears in, so writing
@@ -505,8 +500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `enum`, a sibling `$ref`: anything at all makes it a constrained schema rather than
         // another name for its target.
         let mut without_union = schema.clone();
-        without_union.one_of.clear();
-        without_union.any_of.clear();
+        without_union.clear_union_keywords();
         if schema_has_shape_constraint(&without_union) {
             return None;
         }
@@ -520,9 +514,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let target = only.reference.as_deref()?;
         // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
         // siblings, which is an intersection and not an alias.
-        let mut member_without_ref = only.clone();
-        member_without_ref.reference = None;
-        if schema_has_shape_constraint(&member_without_ref) {
+        if ref_siblings_bear_shape(only) {
             return None;
         }
         let (id, target_nullable) = self.open_reservation_for_ref(target, &only.provenance)?;
@@ -530,10 +522,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             id,
             // The target's *own* nullability is as much a fact about this alias as a `"null"`
             // member is. `ensure_component` computes it at reserve time so that every `$ref`
-            // consumer agrees on it without waiting for the body to finish, and reading only the
-            // members disagrees: an alias with no `"null"` member whose target is nullable emitted
-            // a non-`Option` field where the direct `{$ref: T}` spelling of that same target
-            // emitted an optional one.
+            // consumer agrees on it without waiting for the body to finish. Reading only the members
+            // would disagree with them: an alias with no `"null"` member whose target is nullable
+            // would emit a non-`Option` field where the direct `{$ref: T}` spelling of that same
+            // target emits an optional one.
             nullable: target_nullable || members.iter().any(member_is_null_only),
             // The target is mid-lowering, so this is a cycle-closing reference and needs the box
             // for the recursive type to have a finite size.
@@ -547,9 +539,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The three in-progress maps are each keyed by a different spelling of that identity, so this
     /// mirrors [`Self::lower_schema`]'s own `$ref` dispatch exactly: whichever `ensure_*` the
     /// reference would be lowered through is the map consulted for it. Keying on the literal
-    /// `#/components/schemas/` prefix instead made a target's identity depend on the reference
-    /// site's spelling, which is how one schema came to be both an alias and an unrepresentable
-    /// shape in the same document.
+    /// `#/components/schemas/` prefix would make a target's identity depend on the reference
+    /// site's spelling, and one schema could then be both an alias and an unrepresentable shape in
+    /// the same document.
     ///
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
     /// which the ordinary lowering path handles and reports for itself. It resolves no node and
@@ -611,13 +603,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// schema comes from the vendored, hash-pinned copy already in the bundle; no network). A remote
     /// ref re-entered while its own body is still lowering — a self- or mutually-recursive vendored
     /// schema — returns a boxed back-edge against the reserved root id, so recursion terminates and
-    /// generates a finite (boxed) type instead of overflowing the stack.
-    pub(super) fn ensure_remote(&mut self, reference: &str) -> Option<Ty> {
-        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference))
+    /// generates a finite (boxed) type instead of overflowing the stack. `at` is the site of the
+    /// `$ref` being lowered, where a loop of bare-`$ref` vendored documents is reported.
+    pub(super) fn ensure_remote(&mut self, reference: &str, at: &Provenance) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference, at))
     }
 
     /// [`Self::ensure_remote`]'s body, run with `open_narrowing` out of effect, as for a component.
-    fn ensure_remote_closed(&mut self, reference: &str) -> Option<Ty> {
+    fn ensure_remote_closed(&mut self, reference: &str, at: &Provenance) -> Option<Ty> {
         if let Some(ty) = self.reserved_type(Reservation::Remote(reference.to_owned())) {
             return Some(ty);
         }
@@ -633,7 +626,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema.reference.is_some() {
             if !self.remote_alias_stack.insert(reference.to_owned()) {
                 // E004 case: cycle
-                Diagnostic::error(Code::UnresolvedRef, self.document.provenance.clone())
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!("remote $ref `{reference}` forms an alias cycle"))
                     .emit(self.diags);
                 return None;
@@ -648,8 +641,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // collapse resolves it to the target's reservation, which is not this frame's, so the
         // `pop_last()` below would lift the wrong def and the `assert_eq!` after it would abort the
         // process. Recognised here, before anything is reserved, so the frame never opens and there
-        // is nothing to pop. `ensure_component` has always done this; the other two frames had the
-        // guard only downstream, where it could not see a remote frame's reservations.
+        // is nothing to pop. `ensure_component` does the same; a guard downstream could not see a
+        // remote frame's reservations.
         if let Some(alias) = self.nullable_alias_back_edge(&schema) {
             return Some(alias);
         }
@@ -667,23 +660,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// a *fresh owned schema* on every call, so a bundle reference has no `document`-level identity
     /// the way a root component does.
     ///
-    /// Without one, each reference site re-resolved and re-lowered its target from scratch. That is
-    /// three faults at once, not one: a shared component became one generated type per *use* instead
-    /// of per *declaration* (two public Rust types for one schema, two items in the `surface` semver
-    /// surface); a reuse graph cost 2^N lowerings rather than N, so a 40-line two-file description
-    /// produced no output and no diagnostic; and a recursive schema had nothing to terminate
-    /// against but [`MAX_SCHEMA_DEPTH`], rejecting with `E014` a document `docs/support-matrix.md`
-    /// promises is supported.
+    /// Keying each target on one identity gives one generated type per *declaration* rather than
+    /// per *use* (one public Rust type per schema, one item in the `surface` semver surface), keeps
+    /// a reuse graph at N lowerings rather than 2^N, and gives a recursive schema a reservation to
+    /// terminate against before [`MAX_SCHEMA_DEPTH`] would reject it with `E014`.
     ///
-    /// The identity is the resolved target's own `file#pointer` ([`resolved_identity`]), read from
+    /// That identity is the resolved target's own `file#pointer` ([`resolved_identity`]), read from
     /// the parsed schema's provenance rather than from the `$ref` spelling, so every way of writing
     /// one target lands on one key: a sub-file's bare `#/components/schemas/Inner` and the root's
     /// `./lib.yaml#/components/schemas/Inner` resolve to the same file and pointer and share one
     /// type. Keying on the spelling — or on `(file, name)` — would give one target two identities,
-    /// which is how these two paths came to behave differently in the first place. A target inside
-    /// the root document's own component map is routed back to [`Self::ensure_component`] for the
-    /// same reason: that map is already its identity, and a second one beside it would re-create the
-    /// divergence in a new place.
+    /// and the two spellings would lower to two types. A target inside the root document's own
+    /// component map is routed back to [`Self::ensure_component`] for the same reason: that map is
+    /// already its identity, and a second one beside it would split the target the same way.
     ///
     /// **Cycle safety.** The reservation is inserted *before* the body is lowered, so any re-entry
     /// on the same key — self-recursion, mutual recursion, or a diamond — finds it and returns a
@@ -693,23 +682,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
     /// nothing repeated can accumulate against it.
     ///
-    /// **Semver.** spargen's semver surface is the public API of *generated output*, and this
-    /// changes it for any description that reaches a target through more than one reference. Types
-    /// that existed only because one schema was lowered once per use site are gone, and a type is
-    /// now named for the schema it resolves from rather than for whichever site reached it first.
-    /// `surface`'s own classifier calls a removed public item `ChangeKind::TypeRemoved`, which its
-    /// impact policy grades **Major**, so regenerating against an unchanged description can stop
-    /// compiling a consumer that named one of the removed types. That is the correct outcome — the
-    /// removed types were artefacts of lowering the same schema repeatedly — but it is a breaking
-    /// change to the generated API and is released as one.
-    ///
     /// [`MAX_SCHEMA_DEPTH`]: super::MAX_SCHEMA_DEPTH
-    pub(super) fn ensure_resolved(
-        &mut self,
-        reference: &str,
-        at: &Provenance,
-        hint: &str,
-    ) -> Option<Ty> {
+    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
         self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
     }
 
@@ -771,25 +745,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether this definition is a named component root — reachable by name from anywhere else in
     /// the document, rather than owned by the single use site that produced it.
     pub(super) fn is_component_root(&self, id: TypeId) -> bool {
+        self.reservation_roots().any(|root| root == id)
+    }
+
+    /// The root id of every reservation, finished or still being lowered, across every
+    /// [`Reservation`] frame: both memos [`Self::reservation_memos`] hands out for each.
+    pub(super) fn reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components
             .values()
-            .chain(self.in_progress.values())
             .chain(self.remote_components.values())
-            .chain(self.remote_in_progress.values())
             .chain(self.resolved_components.values())
+            .map(|&(root, _)| root)
+            .chain(self.open_reservation_roots())
+    }
+
+    /// The root id of every reservation whose body is still being lowered: the in-progress memo
+    /// of each [`Reservation`] frame.
+    fn open_reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.in_progress
+            .values()
+            .chain(self.remote_in_progress.values())
             .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+            .map(|&(root, _)| root)
     }
 
     /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
     /// placeholder [`TypeGraph::reserve`] inserted rather than the schema's own shape.
     ///
     /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
-    /// `graph.get(id).kind`. That kind is now [`TypeKind::Reserved`] — it was `TypeKind::Any` until
-    /// the dedicated variant landed, which is why reading one answered "scalar" for a type that is
-    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` now names
-    /// `Reserved` in its own `match` and refuses it, so the refusal lives in the function rather
-    /// than in each caller. Every id in the three in-progress maps is such a placeholder, and the
+    /// `graph.get(id).kind`. That kind is [`TypeKind::Reserved`], which `push_ref_member` names in
+    /// its own `match` and refuses, so the refusal lives in the function rather than in each
+    /// caller. Every id in the three in-progress maps is such a placeholder, and the
     /// only safe thing to do with one is refuse to read it.
     ///
     /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
@@ -799,11 +785,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// [`TypeGraph::reserve`]: crate::ir::TypeGraph::reserve
     pub(super) fn is_in_progress_root(&self, id: TypeId) -> bool {
-        self.in_progress
-            .values()
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_in_progress.values())
-            .any(|&(root, _)| root == id)
+        self.open_reservation_roots().any(|root| root == id)
     }
 
     /// Whether the graph currently holds `id` as a [`TypeKind::Reserved`] placeholder.
@@ -856,7 +838,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             //
             // Only one shape reaches here: a vendored document whose **whole body** is the union,
             // because only then does the provenance canonicalise to a frame's own `file#pointer`.
-            // `remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
+            // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
             // document and the only thing in the suite that executes this loop; deleting the loop
             // turns it red. Every other remote recursion sits at a property or an `allOf` member,
             // whose pointer is not the frame's, so it reaches here and matches nothing.

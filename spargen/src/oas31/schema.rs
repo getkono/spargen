@@ -110,6 +110,15 @@ impl Schema {
         self.additional_properties = None;
     }
 
+    /// Remove the union keywords: `oneOf`, `anyOf` and the `discriminator` that selects among
+    /// their branches. Lowering does this where it reads a union's sibling keywords apart from the
+    /// union itself.
+    pub(crate) fn clear_union_keywords(&mut self) {
+        self.one_of.clear();
+        self.any_of.clear();
+        self.discriminator = None;
+    }
+
     /// Whether this schema constrains a value at all — neither its storage shape nor its
     /// validation.
     ///
@@ -280,7 +289,8 @@ pub(crate) struct ValidationKeywords {
     pub(crate) max_properties: Option<u64>,
     /// Another JSON Schema validation/applicator keyword is present: one of the deserializer's
     /// `SUBSCHEMA_KEYWORDS` (`not`, `if`/`then`/`else`, `contains`, `propertyNames`,
-    /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, or `maxContains`.
+    /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, `maxContains`, or
+    /// an OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum`.
     pub(crate) other: bool,
 }
 

@@ -11,12 +11,12 @@
 //!   [`OmitRule::Component`] path/name — and an [`OmitRule::Pointer`] string — that contains a glob
 //!   metacharacter (`*`, `**`, or `?`) is matched as a glob over the construct's path/name (or the
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
-//!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
-//!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
-//!   auto-carve builds from literal document text are escaped for exactly that reason. A
-//!   backslash escapes whatever character follows it, in exact and glob rules alike (`\b` is `b`,
-//!   `\\` is one literal backslash). See
-//!   [`glob_match`] for the semantics.
+//!   metacharacter is an exact rule and removes exactly the one construct it names. A
+//!   metacharacter is escapable with a backslash (`\*`, `\?`), because a URI path may
+//!   legitimately contain one; rules that auto-carve builds from literal document text are escaped
+//!   for exactly that reason. A backslash escapes whatever character follows it, in exact and glob
+//!   rules alike (`\b` is `b`, `\\` is one literal backslash). See [`glob_match`] for the
+//!   semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
 //!   the rest. The fixpoint driver lives in the facade (it must re-run the pipeline); this module
@@ -41,7 +41,7 @@ pub use rule::{ComponentKind, OmitMethod, OmitRule, UnknownOmitToken};
 /// A compatibility omit profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Omit {
-    /// Exact omit rules.
+    /// Omit rules (exact or glob).
     pub rules: Vec<OmitRule>,
 }
 
@@ -304,7 +304,10 @@ fn emit_omitted(diags: &mut Diagnostics, pointer: &JsonPointer, span: Span, desc
         Provenance::new(pointer.clone(), Some(span)),
     )
     .message(format!("omitted construct matched by `{describe}`"))
-    .remedy("the source schema was not modified; remove the omit rule once spargen supports this construct")
+    .remedy(
+        "the source schema was not modified; once spargen supports this construct, remove a \
+         hand-written omit rule (auto-carve stops omitting it on its own)",
+    )
     .emit(diags);
 }
 
@@ -389,7 +392,7 @@ fn emit_invalid_rule(
         Provenance::new(JsonPointer::root(), Some(bundle.root().span())),
     )
     .message(format!("{message}: {}", rule.describe()))
-    .remedy("use exact paths, operation methods, component names, or RFC 6901 pointers")
+    .remedy("fix the rule so it names a construct below the root of a loaded file, or remove it")
     .emit(diags);
 }
 
@@ -402,6 +405,7 @@ fn emit_invalid_rule(
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
     let reject = |message: String, diags: &mut Diagnostics| {
+        // E020 case: required-root-field, no-root-member
         Diagnostic::error(
             Code::OmitCreatedInvalidDocument,
             Provenance::new(JsonPointer::root(), Some(root.span())),
@@ -629,8 +633,8 @@ mod tests {
     }
 
     /// Exact and glob rules share one escaping rule: a backslash escapes whatever follows it, so
-    /// `\b` is the literal `b` in both forms. The exact form used to keep the backslash, so the
-    /// exact rule `/a\b` named the path `/a\b` while the glob `/a\b*` named `/abc`.
+    /// `\b` is the literal `b` in both forms: the exact rule `/a\b` names the path `/ab`, as the
+    /// glob `/a\b*` matches `/abc`.
     #[test]
     fn an_escaped_ordinary_character_means_itself_in_exact_and_glob_rules() {
         assert_eq!(unescape_glob(r"/a\b"), "/ab");
@@ -1109,9 +1113,10 @@ components:
 
     #[test]
     fn carve_rules_are_deduped_sorted_and_error_only() {
+        // Any error code carves the same way; this one is not held to an emission-site marker.
         let error = |pointer: &str| {
             Diagnostic::error(
-                Code::UnsupportedMediaType,
+                Code::DynamicRefRejected,
                 Provenance::new(JsonPointer::from(pointer.to_owned()), None),
             )
             .build()
@@ -1157,7 +1162,7 @@ components:
         let id = bundle.file_id_for_path(file).unwrap();
         // Any error code carves the same way; this one is not held to an emission-site marker.
         Diagnostic::error(
-            Code::UnsupportedMediaType,
+            Code::DynamicRefRejected,
             Provenance::new(
                 JsonPointer::from(pointer.to_owned()),
                 Some(bundle.value_at(id).span()),

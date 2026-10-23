@@ -349,7 +349,8 @@ fn all_of_member_layout(member: &str) -> (Report, Report, String) {
 /// and inside an `allOf` that is two more conjuncts of the same merge.
 ///
 /// Both local arms are driven: the root-component spelling and the file-reference spelling, which
-/// takes the inlining arm. The remote arm has its own fixture in `mod remote`.
+/// takes the inlining arm. The remote arm has its own fixture,
+/// `refs_remote::a_remote_all_of_member_ref_intersects_its_shape_bearing_siblings`.
 #[test]
 fn an_all_of_member_ref_intersects_its_shape_bearing_siblings() {
     for target in ["#/components/schemas/Leaf", "./lib.yaml#/Leaf"] {

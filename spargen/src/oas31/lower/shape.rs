@@ -1,9 +1,12 @@
-//! Two keyword gates over one schema: [`schema_has_shape_constraint`], whether a schema's keywords
-//! give it a shape of its own, which decides whether a `$ref`'s siblings are intersected with its
-//! target; and [`schema_imposes_scalar`], whether an `allOf` member not read as an object still
-//! constrains its instances, which decides whether it is lowered whole as a scalar contribution.
+//! Keyword gates over one schema: [`schema_has_shape_constraint`], whether a schema's keywords
+//! give it a shape of its own, and [`ref_siblings_bear_shape`], the same question of a `$ref`'s
+//! siblings, which decides whether they are intersected with its target;
+//! [`schema_imposes_scalar`], whether an `allOf` member not read as an object still constrains its
+//! instances, which decides whether it is lowered whole as a scalar contribution; and
+//! [`schema_is_object_like`] and [`schema_has_union`], whether a schema constrains object shape or
+//! carries a union of its own.
 
-use crate::oas31::Schema;
+use crate::oas31::{JsonType, Schema};
 
 /// Whether an `allOf` member not read as an object still constrains its instances, so it is
 /// lowered whole as a scalar contribution — as opposed to a pure annotation member (`{}` /
@@ -21,8 +24,7 @@ pub(super) fn schema_imposes_scalar(schema: &Schema) -> bool {
         || schema.const_value.is_some()
         || schema.content_encoding.is_some()
         || schema.format.as_deref() == Some("binary")
-        || !schema.one_of.is_empty()
-        || !schema.any_of.is_empty()
+        || schema_has_union(schema)
 }
 
 /// One row of [`SHAPE_KEYWORDS`]: a keyword's published spelling, and whether a schema carries it.
@@ -74,11 +76,36 @@ pub(super) fn schema_has_shape_constraint(schema: &Schema) -> bool {
     SHAPE_KEYWORDS.iter().any(|(_, bears)| bears(schema))
 }
 
+/// Whether `schema`'s keywords beside its `$ref` give it a shape of its own:
+/// [`schema_has_shape_constraint`] of the schema with the reference stripped, asked without
+/// cloning it. A `$ref` whose siblings answer `false` is simply its target.
+pub(super) fn ref_siblings_bear_shape(schema: &Schema) -> bool {
+    SHAPE_KEYWORDS
+        .iter()
+        .any(|&(keyword, bears)| keyword != "$ref" && bears(schema))
+}
+
+/// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
+/// policy, a `required` set, or an explicit `object` type — and so contributes fields to an `allOf`
+/// merge rather than a scalar.
+pub(super) fn schema_is_object_like(schema: &Schema) -> bool {
+    !schema.properties.is_empty()
+        || !schema.pattern_properties.is_empty()
+        || schema.additional_properties.is_some()
+        || !schema.required.is_empty()
+        || schema.types.types.contains(&JsonType::Object)
+}
+
+/// Whether a schema carries a `oneOf` or an `anyOf` of its own.
+pub(super) fn schema_has_union(schema: &Schema) -> bool {
+    !schema.one_of.is_empty() || !schema.any_of.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{schema_has_shape_constraint, Schema, SHAPE_KEYWORDS};
+    use super::{ref_siblings_bear_shape, schema_has_shape_constraint, Schema, SHAPE_KEYWORDS};
     use crate::diag::{Code, Diagnostics, FileId, JsonPointer};
 
     fn schema(yaml: &str) -> Schema {
@@ -182,6 +209,44 @@ mod tests {
                 "a schema carrying only `{keyword}` should clear exactly its own row"
             );
         }
+    }
+
+    /// `ref_siblings_bear_shape` is the gate asked of the schema with its `$ref` stripped, for a
+    /// `$ref` alone, beside each other row's keyword, and beside nothing at all.
+    #[test]
+    fn ref_siblings_bear_shape_is_the_gate_without_the_reference() {
+        let probes = [
+            "$ref: '#/components/schemas/A'",
+            "$ref: '#/components/schemas/A'\ndescription: d\ndefault: a\nmaxLength: 2",
+            "description: d",
+            "$ref: '#/components/schemas/A'\ntype: string",
+            "$ref: '#/components/schemas/A'\nproperties: { a: { type: string } }",
+            "$ref: '#/components/schemas/A'\npatternProperties: { '^a': { type: string } }",
+            "$ref: '#/components/schemas/A'\nadditionalProperties: false",
+            "$ref: '#/components/schemas/A'\nrequired: [a]",
+            "$ref: '#/components/schemas/A'\nitems: { type: string }",
+            "$ref: '#/components/schemas/A'\nprefixItems: [{ type: string }]",
+            "$ref: '#/components/schemas/A'\nenum: [a]",
+            "$ref: '#/components/schemas/A'\nconst: a",
+            "$ref: '#/components/schemas/A'\ncontentEncoding: base64",
+            "$ref: '#/components/schemas/A'\nformat: binary",
+            "$ref: '#/components/schemas/A'\nallOf: [{ type: string }]",
+            "$ref: '#/components/schemas/A'\noneOf: [{ type: string }]",
+            "$ref: '#/components/schemas/A'\nanyOf: [{ type: string }]",
+            "type: string",
+        ];
+        for probe in probes {
+            let schema = schema(probe);
+            let mut stripped = schema.clone();
+            stripped.reference = None;
+            assert_eq!(
+                ref_siblings_bear_shape(&schema),
+                schema_has_shape_constraint(&stripped),
+                "`ref_siblings_bear_shape` disagrees with the stripped gate for {probe:?}"
+            );
+        }
+        assert!(!ref_siblings_bear_shape(&schema(probes[0])));
+        assert!(ref_siblings_bear_shape(&schema(probes[3])));
     }
 
     /// The gate reads nothing the table does not name. A schema carrying every other keyword the

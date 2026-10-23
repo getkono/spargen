@@ -1,9 +1,11 @@
-//! The small set of dispatch routines shared within a generated client: build URL →
-//! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
-//! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
+//! The dispatch routines every operation of a generated client shares: build URL → attach auth
+//! (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated
+//! client (not via a shared crate).
 //!
-//! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
-//! distinct body type — the one place monomorphization is unavoidable.
+//! URL building and sending are non-generic. The success decoders are generic over the body type
+//! and the error classifiers over the operation's error type `E`; each takes the body codec as a
+//! closure over the shared `decode_success_with` / `classify_with` routine, so one copy of each
+//! is monomorphized per distinct body or error type.
 
 use std::convert::Infallible;
 
@@ -13,23 +15,15 @@ use serde::de::DeserializeOwned;
 
 use crate::{ClientCore, Error, ResponseValue};
 
-/// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-/// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+/// Build a request URL from the base URL, or an optional per-operation server override, and a
+/// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
+/// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
+/// runtime regex. Non-generic.
 ///
 /// `query` holds complete `name=value` fragments that the parameter helpers have already
 /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
 /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
 /// a `,` inside one of them.
-pub fn build_url(
-    core: &ClientCore,
-    path: &str,
-    query: &[String],
-) -> Result<Url, Error<Infallible>> {
-    build_url_on(core, None, path, query)
-}
-
-/// As [`build_url`], but against an optional per-operation server override. An absolute override
-/// replaces the client's base URL; a relative one is joined onto it.
 pub fn build_url_on(
     core: &ClientCore,
     server: Option<&str>,
@@ -115,28 +109,23 @@ fn base_for(core: &ClientCore, server: Option<&str>) -> Result<Url, Error<Infall
 
 /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
 fn append_query(url: &mut Url, query: &[String]) {
-    if query.is_empty() {
-        return;
+    if !query.is_empty() {
+        append_query_text(url, &query.join("&"));
     }
+}
+
+/// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
+fn append_query_text(url: &mut Url, text: &str) {
     let joined = match url.query() {
-        Some(existing) if !existing.is_empty() => format!("{existing}&{}", query.join("&")),
-        _ => query.join("&"),
+        Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
+        _ => text.to_owned(),
     };
     url.set_query(Some(&joined));
 }
 
-/// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-/// Both forms replace any query embedded in the selected server URL.
-pub fn build_url_with_query_string(
-    core: &ClientCore,
-    path: &str,
-    query: &[String],
-    query_string: Option<&str>,
-) -> Result<Url, Error<Infallible>> {
-    build_url_with_query_string_on(core, None, path, query, query_string)
-}
-
-/// As [`build_url_with_query_string`], but against an optional per-operation server override.
+/// As [`build_url_on`], for a URL whose entire query string is owned by an OpenAPI 3.2
+/// `in: querystring` parameter. With or without a query string, it replaces any query embedded in
+/// the selected server URL.
 pub fn build_url_with_query_string_on(
     core: &ClientCore,
     server: Option<&str>,
@@ -150,11 +139,7 @@ pub fn build_url_with_query_string_on(
     url.set_query(None);
     append_query(&mut url, query);
     if let Some(query_string) = query_string {
-        let joined = match url.query() {
-            Some(existing) if !existing.is_empty() => format!("{existing}&{query_string}"),
-            _ => query_string.to_owned(),
-        };
-        url.set_query(Some(&joined));
+        append_query_text(&mut url, query_string);
     }
     Ok(url)
 }
@@ -323,6 +308,8 @@ where
 }
 
 /// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
+/// A documented body that is not UTF-8, or whose text `E` rejects, is [`Error::Decode`]; an empty
+/// body is decoded like any other, as [`decode_text_body`] describes.
 pub async fn classify_error_text<E>(
     core: &ClientCore,
     response: Response,

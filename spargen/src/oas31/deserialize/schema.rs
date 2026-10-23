@@ -11,7 +11,8 @@ use super::super::schema::DiscriminatorTarget;
 use super::super::{Discriminator, RefOr, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints};
 use super::keywords::{parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS};
 use super::{
-    expect_array, expect_string, is_oas_dialect, object, provenance, reference_object, required,
+    expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
+    required,
 };
 
 /// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
@@ -128,14 +129,14 @@ fn parse_schema_or(
             )
             .emit(diags);
     }
-    if let Some(dialect) = map.get("$schema").and_then(SpannedValue::as_str) {
+    let dialect_pointer = pointer.push("$schema");
+    if let Some((value, dialect)) = map.get("$schema").and_then(|value| {
+        expect_string(value, &dialect_pointer, diags).map(|dialect| (value, dialect))
+    }) {
         if !is_oas_dialect(dialect) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
-                provenance(
-                    &pointer.push("$schema"),
-                    map.get("$schema").expect("present"),
-                ),
+                provenance(&dialect_pointer, value),
             )
             .message(format!(
                 "schema resource uses unsupported dialect `{dialect}`"
@@ -147,44 +148,13 @@ fn parse_schema_or(
     let schema = Schema {
         boolean: None,
         types: parse_type_set(map.get("type"), &pointer.push("type"), diags),
-        reference: map
-            .get("$ref")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
-        properties: map
-            .get("properties")
-            .and_then(SpannedValue::as_object)
-            .map(|properties| {
-                properties
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        parse_schema_or(value, &pointer.push("properties").push(&key.name), diags)
-                            .map(|schema| (key.name.clone(), schema))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        reference: string_keyword(map, "$ref", pointer, diags),
+        properties: parse_schema_map(map, "properties", pointer, diags),
         required: parse_required(map.get("required"), &pointer.push("required"), diags),
         additional_properties: map.get("additionalProperties").and_then(|value| {
             parse_schema_or(value, &pointer.push("additionalProperties"), diags).map(Box::new)
         }),
-        pattern_properties: map
-            .get("patternProperties")
-            .and_then(SpannedValue::as_object)
-            .map(|patterns| {
-                patterns
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        parse_schema_or(
-                            value,
-                            &pointer.push("patternProperties").push(&key.name),
-                            diags,
-                        )
-                        .map(|schema| (key.name.clone(), schema))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        pattern_properties: parse_schema_map(map, "patternProperties", pointer, diags),
         items: map
             .get("items")
             .and_then(|value| parse_schema_or(value, &pointer.push("items"), diags).map(Box::new)),
@@ -199,37 +169,17 @@ fn parse_schema_or(
         discriminator: map
             .get("discriminator")
             .and_then(|value| parse_discriminator(value, &pointer.push("discriminator"), diags)),
-        defs: map
-            .get("$defs")
-            .and_then(SpannedValue::as_object)
-            .map(|defs| {
-                defs.iter()
-                    .filter_map(|(key, value)| {
-                        parse_schema_or(value, &pointer.push("$defs").push(&key.name), diags)
-                            .map(|schema| (key.name.clone(), schema))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        defs: parse_schema_map(map, "$defs", pointer, diags),
         validation_children: parse_validation_children(map, pointer, diags),
         enum_values: map
             .get("enum")
-            .and_then(SpannedValue::as_array)
+            .and_then(|value| expect_array(value, &pointer.push("enum"), diags))
             .map(<[SpannedValue]>::to_vec),
         const_value: map.get("const").cloned(),
         default: map.get("default").cloned(),
-        format: map
-            .get("format")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
-        content_encoding: map
-            .get("contentEncoding")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
-        content_media_type: map
-            .get("contentMediaType")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
+        format: string_keyword(map, "format", pointer, diags),
+        content_encoding: string_keyword(map, "contentEncoding", pointer, diags),
+        content_media_type: string_keyword(map, "contentMediaType", pointer, diags),
         content_schema: map.get("contentSchema").and_then(|value| {
             parse_schema_or(value, &pointer.push("contentSchema"), diags).map(Box::new)
         }),
@@ -237,26 +187,11 @@ fn parse_schema_or(
             .get("xml")
             .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
         validation: parse_validation(map, pointer, diags),
-        deprecated: map
-            .get("deprecated")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
-        read_only: map
-            .get("readOnly")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
-        write_only: map
-            .get("writeOnly")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
-        title: map
-            .get("title")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
-        description: map
-            .get("description")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
+        deprecated: bool_keyword(map, "deprecated", pointer, diags),
+        read_only: bool_keyword(map, "readOnly", pointer, diags),
+        write_only: bool_keyword(map, "writeOnly", pointer, diags),
+        title: string_keyword(map, "title", pointer, diags),
+        description: string_keyword(map, "description", pointer, diags),
         provenance: provenance(pointer, value),
     };
     Some(SchemaOr::Schema(Box::new(schema)))
@@ -415,19 +350,59 @@ fn parse_validation_children(
             }
         }
     }
-    if let Some(dependent) = map
-        .get("dependentSchemas")
-        .and_then(SpannedValue::as_object)
-    {
-        for (key, value) in dependent.iter() {
-            if let Some(schema) = parse_schema_or(
-                value,
-                &pointer.push("dependentSchemas").push(&key.name),
-                diags,
-            ) {
-                children.push((format!("dependentSchemas/{}", key.name), schema));
-            }
-        }
+    for (name, schema) in parse_schema_map(map, "dependentSchemas", pointer, diags) {
+        children.push((format!("dependentSchemas/{name}"), schema));
     }
     children
+}
+
+/// A keyword whose value maps names to schemas (`properties`, `patternProperties`, `$defs`,
+/// `dependentSchemas`): each entry parsed at its own pointer, or `E011` at the keyword when the
+/// value is not an object, which used to read as no entries at all.
+fn parse_schema_map(
+    map: &SpannedMap,
+    keyword: &str,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> IndexMap<String, SchemaOr> {
+    let Some(value) = map.get(keyword) else {
+        return IndexMap::new();
+    };
+    let pointer = pointer.push(keyword);
+    let Some(entries) = object(value, &pointer, diags) else {
+        return IndexMap::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(key, value)| {
+            parse_schema_or(value, &pointer.push(&key.name), diags)
+                .map(|schema| (key.name.clone(), schema))
+        })
+        .collect()
+}
+
+/// A string-valued keyword (`$ref`, `format`, `title`, ...): absent, or the string, or `E011` at
+/// the keyword, which used to read as absent.
+fn string_keyword(
+    map: &SpannedMap,
+    keyword: &str,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<String> {
+    map.get(keyword)
+        .and_then(|value| expect_string(value, &pointer.push(keyword), diags))
+        .map(str::to_owned)
+}
+
+/// A boolean keyword (`deprecated`, `readOnly`, `writeOnly`): `false` when absent, or `E011` at
+/// the keyword when it is not a boolean, which used to read as `false`.
+fn bool_keyword(
+    map: &SpannedMap,
+    keyword: &str,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> bool {
+    map.get(keyword)
+        .and_then(|value| expect_bool(value, &pointer.push(keyword), diags))
+        .unwrap_or(false)
 }

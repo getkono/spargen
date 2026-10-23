@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::{next_link, next_link_target, LinkPaginator};
 use crate::tests::poll_ready;
-use crate::{ClientCore, Error};
+use crate::{ClientCore, Error, ExecuteFuture, HttpBackend};
 
 fn link_headers(values: &[&str]) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -110,6 +112,90 @@ fn comma_inside_uri_is_not_a_separator() {
 fn comma_inside_quoted_param_is_not_a_separator() {
     assert_eq!(
         next_of(r#"<https://x/2>; title="a, b, c"; rel="next""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn angle_bracket_inside_quoted_param_opens_no_uri() {
+    // Entry splitting respects `<…>` only outside a quoted string: the `<` in the title is text,
+    // so the comma after the closing quote still separates the two entries.
+    assert_eq!(
+        next_of(r#"<https://x/1>; title="a<b", <https://x/2>; rel="next""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn angle_bracket_in_param_section_does_not_hide_a_semicolon() {
+    // Parameter splitting ignores angle brackets: an unclosed `<` in a parameter value leaves the
+    // following `;` a separator, so the `rel` after it is still read.
+    assert_eq!(
+        next_of("<https://x/2>; title=<x; rel=next"),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn an_escaped_quote_inside_a_quoted_param_does_not_close_it() {
+    // The `\"` is escaped, so the quoted title runs on past the comma and swallows what looks
+    // like a second entry: the `rel="next"` belongs to the first entry.
+    assert_eq!(
+        next_of(r#"<https://x/1>; title="a\", <https://x/3>"; rel="next""#),
+        Some("https://x/1".to_owned())
+    );
+}
+
+#[test]
+fn a_backslash_outside_a_quoted_string_escapes_nothing() {
+    // Outside a quoted string a backslash is ordinary text, so the comma after it still
+    // separates the entries and the `rel="next"` belongs to the second one.
+    assert_eq!(
+        next_of(r#"<https://x/1>; title=a\, <https://x/2>; rel="next""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn a_quote_inside_the_uri_opens_no_quoted_string() {
+    // The `"` sits inside `<…>`, so it is part of the URI-reference: the comma after the first
+    // entry's `rel="prev"` still separates the entries.
+    assert_eq!(
+        next_of(r#"<https://x/"a>; rel="prev", <https://x/2>; rel="next""#),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn a_rel_value_is_unquoted_only_when_quotes_open_and_close_it() {
+    // Only a value that both starts and ends with `"` loses them: a value that merely starts
+    // with one is a relation type that is not `next`, and a lone `"` is not a quoted string.
+    assert_eq!(next_of(r#"<https://x/2>; rel="nextx"#), None);
+    assert_eq!(next_of(r#"<https://x/2>; rel=""#), None);
+    assert_eq!(next_of(r#"<https://x/2>; rel=next""#), None);
+}
+
+#[test]
+fn text_before_the_uri_reference_does_not_shift_it() {
+    // The URI-reference is whatever sits between the first `<` and the `>` after it, wherever
+    // that `<` falls in the entry.
+    assert_eq!(
+        next_of("junk <https://x/2>; rel=next"),
+        Some("https://x/2".to_owned())
+    );
+}
+
+#[test]
+fn parameters_are_read_from_just_past_the_closing_angle() {
+    // The parameter section starts right after `>`: the URI's last character is not part of
+    // it (a trailing `"` there would open a quoted string that hides the `;`), and the `>`
+    // itself is not either, so a first parameter written straight after it keeps its name.
+    assert_eq!(
+        next_of(r#"<https://x/2">; rel=next"#),
+        Some(r#"https://x/2""#.to_owned())
+    );
+    assert_eq!(
+        next_of("<https://x/2>rel=next"),
         Some("https://x/2".to_owned())
     );
 }
@@ -308,10 +394,41 @@ fn a_success_page_that_fails_to_decode_terminates_as_a_decode_error() {
     assert!(poll_ready(pager.next_page()).is_none());
 }
 
+/// A backend that answers every request with one canned page carrying a `rel="next"` link, so
+/// `next_page` can run through `send` without a socket.
+#[derive(Debug)]
+struct OnePageBackend;
+
+impl HttpBackend for OnePageBackend {
+    fn execute(&self, _request: reqwest::Request) -> ExecuteFuture<'_> {
+        Box::pin(async {
+            Ok(ok_page(
+                "[7]",
+                Some(r#"<https://x/items?page=2>; rel="next""#),
+            ))
+        })
+    }
+}
+
+/// An armed paginator's `next_page` sends the request, yields the decoded page, and re-arms
+/// from the page's `Link` header.
+#[test]
+fn next_page_fetches_and_decodes_the_armed_url() {
+    let core = ClientCore::with_backend(Arc::new(OnePageBackend), "https://x").unwrap();
+    let mut pager: LinkPaginator<Vec<i64>> =
+        core.paginate_links(reqwest::Url::parse("https://x/items?page=1").unwrap());
+    let page = poll_ready(pager.next_page())
+        .expect("an armed paginator yields a page")
+        .expect("the page decodes");
+    assert_eq!(page.into_inner(), vec![7]);
+    assert_eq!(
+        pager.next.as_ref().map(reqwest::Url::as_str),
+        Some("https://x/items?page=2")
+    );
+}
+
 /// A paginator seeded with no next link answers `None` on its first pull without building or
-/// sending a request. A `next_page` that does have a URL to fetch reaches `send`, which needs
-/// a live socket this poll-once harness cannot provide, so its post-`send` half is driven
-/// through `handle_response` in the tests above instead.
+/// sending a request.
 #[test]
 fn paginator_disarms_when_seeded_empty() {
     let empty: LinkPaginator<Vec<i64>> = LinkPaginator::from_headers(core(), &HeaderMap::new());

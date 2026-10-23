@@ -15,7 +15,6 @@ mod synth;
 
 use std::collections::HashMap;
 
-use crate::diag::Diagnostics;
 use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind};
 
 pub(crate) use casing::{to_pascal_case, to_snake_case};
@@ -226,10 +225,9 @@ pub(crate) struct OperationBindings {
     pub(crate) cookies: Ident,
 }
 
-/// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts
-/// that cannot be resolved are reported through `diags`.
-pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
-    let _ = diags;
+/// Allocate every identifier the API needs, in one deterministic pass. Allocation is total: each
+/// scope resolves a collision by suffixing, so every lowered API gets a complete set of names.
+pub(crate) fn allocate(api: &Api) -> Names {
     let mut names = Names::default();
 
     // Servers live in their own module, so they get their own scope and can never collide with a
@@ -657,7 +655,7 @@ pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::{allocate, Ident, Names};
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, BodyEncoding, Info, MediaType, Method, Operation, OperationId, ParamLoc, ParamStyle,
         Parameter, PathSegment, PathTemplate, Prim, RequestBody, Responses, Ty, TypeDef, TypeGraph,
@@ -753,7 +751,7 @@ mod tests {
     }
 
     fn names(params: Vec<Parameter>, body: bool) -> Names {
-        allocate(&api(params, body), &mut Diagnostics::new(100))
+        allocate(&api(params, body))
     }
 
     /// The allocated identifier of every parameter, keyed by what identifies a parameter in
@@ -943,7 +941,7 @@ mod tests {
             document: String::new(),
         });
 
-        let names = allocate(&api, &mut Diagnostics::new(100));
+        let names = allocate(&api);
 
         assert_eq!(names.types[&declared].as_str(), "Text");
         assert_ne!(names.types[&synthesized].as_str(), "Text");
@@ -1215,6 +1213,7 @@ mod tests {
                         body: bodied.then_some(text),
                         media: bodied.then_some(MediaType::Json),
                         stream: None,
+                        accept: None,
                         headers: headers
                             .iter()
                             .map(|name| ResponseHeader {
@@ -1277,7 +1276,7 @@ mod tests {
         ) {
             use proptest::prop_assert_eq;
             let api = synthetic_api(&definitions, &operations, &servers);
-            let names = allocate(&api, &mut Diagnostics::new(100));
+            let names = allocate(&api);
 
             prop_assert_eq!(names.types.len(), api.types.iter().count());
             let header_structs: usize = operations

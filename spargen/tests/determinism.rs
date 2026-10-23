@@ -130,25 +130,10 @@ fn every_generating_corpus_case_is_byte_identical_across_runs() {
     assert!(generating > 0, "the manifest names no generating case");
 }
 
-/// The specification `e2e.rs` declares as the raw-string constant `name`, read out of that file so
-/// the two cannot drift.
-fn e2e_spec(name: &str) -> &'static str {
-    const E2E: &str = include_str!("e2e.rs");
-    let open = format!("const {name}: &str = r##\"");
-    let start = E2E
-        .find(&open)
-        .unwrap_or_else(|| panic!("e2e.rs declares `{name}`"))
-        + open.len();
-    // The first `"##` after the opening delimiter is the one that closes the raw string.
-    let len = E2E[start..]
-        .find("\"##")
-        .unwrap_or_else(|| panic!("`{name}` is a closed raw string"));
-    &E2E[start..start + len]
-}
-
-/// The broad specification `e2e.rs` compile-checks.
+/// The broad specification `e2e.rs` compile-checks: the file its `BASIC_SPEC` includes, so the
+/// two cannot drift.
 fn e2e_basic_spec() -> &'static str {
-    e2e_spec("BASIC_SPEC")
+    include_str!("e2e/specs/basic.yaml")
 }
 
 #[test]
@@ -165,7 +150,7 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs() {
 /// reach.
 #[test]
 fn the_e2e_oas32_spec_is_byte_identical_across_runs() {
-    let (_src, spec_path) = write_spec(e2e_spec("OAS32_SPEC"));
+    let (_src, spec_path) = write_spec(include_str!("e2e/specs/oas32.yaml"));
     assert_eq!(
         assert_generates_identically(&spec_path, "e2e OAS32_SPEC"),
         Outcome::Generated
@@ -176,7 +161,7 @@ fn the_e2e_oas32_spec_is_byte_identical_across_runs() {
 /// position a value reaches the wire from.
 #[test]
 fn the_e2e_date_spec_is_byte_identical_across_runs() {
-    let (_src, spec_path) = write_spec(e2e_spec("DATE_SPEC"));
+    let (_src, spec_path) = write_spec(include_str!("e2e/specs/date.yaml"));
     assert_eq!(
         assert_generates_identically(&spec_path, "e2e DATE_SPEC"),
         Outcome::Generated

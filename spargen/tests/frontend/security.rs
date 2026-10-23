@@ -39,13 +39,12 @@ components:
       type: http
       scheme: digest
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::UnknownSecurityScheme),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -78,12 +77,11 @@ components:
     token: {{ type: http, scheme: {spelling} }}
 "##
         );
-        let report = check(&spec);
+        let (report, code) = generate_with_code(&spec);
         assert!(
             !has_code(&report, Code::UnknownSecurityScheme),
             "`{spelling}`: {report:#?}"
         );
-        let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
             Outcome::Rejected,
@@ -179,17 +177,15 @@ components:
     let one_hop = spec_with(
         "    A: { $ref: \"#/components/securitySchemes/B\" }\n    B: { type: http, scheme: bearer }\n",
     );
-    for report in [generate(&one_hop), check(&one_hop)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
-    }
+    let report = generate(&one_hop);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
 
     // A target that is not a Security Scheme at all never reaches the location check.
     let not_a_scheme = spec_with("    A: { $ref: \"#/x-elsewhere/Bearer/type\" }\n");
-    for report in [generate(&not_a_scheme), check(&not_a_scheme)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(&not_a_scheme);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]
@@ -209,13 +205,12 @@ components:
     mtls:
       type: mutualTLS
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]

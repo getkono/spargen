@@ -19,7 +19,7 @@ pub(crate) struct TypeGraph {
     /// The definitions [`elide`](Self::elide) withheld from the output.
     elided: BTreeSet<TypeId>,
     /// The XML element name a struct serializes as at the root of an XML body, from the root
-    /// `xml.name` of the schema it was lowered from (see
+    /// `xml.name` of the schema it was lowered from or, for a component, its component name (see
     /// [`set_xml_root_name`](Self::set_xml_root_name)).
     xml_root_names: BTreeMap<TypeId, String>,
 }
@@ -651,8 +651,18 @@ pub(crate) struct Field {
 pub(crate) struct XmlField {
     /// The wire element (or attribute) name, overriding the property name: the property's
     /// `xml.name`, or for an array property, whose items are emitted directly under the parent,
-    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to.
+    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to; under
+    /// OpenAPI 3.2, also the XML root name of the struct a [`Self::by_reference`] field resolves to.
     pub(crate) name: Option<String>,
+    /// Whether the property's schema — or, for an array property, its `items` — is a `$ref` whose
+    /// node type is `none`, as OpenAPI 3.2 defaults it: the node names no element, and the
+    /// referenced schema's own element stands in its place. An explicit `xml.nodeType` other than
+    /// `none` on that node leaves this `false`.
+    pub(crate) by_reference: bool,
+    /// Whether that same node is a `$ref` with an explicit `xml.nodeType: element`: under OpenAPI
+    /// 3.2 the reference is then an element of its own, named after the property, so the field
+    /// takes no name from the struct it resolves to, not even an array item's root `xml.name`.
+    pub(crate) element_reference: bool,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub(crate) attribute: bool,
@@ -818,26 +828,12 @@ mod tests {
     //! reservation, so the audit is checked rather than counted by hand. The graph's elision
     //! bookkeeping is pinned here too.
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use proc_macro2::{Delimiter, TokenStream, TokenTree};
     use syn::{Arm, ExprMatch, Pat};
 
-    /// Every `.rs` file under `dir`, recursively, in a stable order.
-    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-            .map(|entry| entry.expect("directory entry").path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            if path.is_dir() {
-                rust_sources(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-    }
+    use crate::test_support::rust_sources;
 
     /// Every `match` expression in `tokens`, at any nesting depth, re-parsed on its own.
     ///
@@ -946,8 +942,7 @@ mod tests {
     #[test]
     fn every_type_kind_match_states_its_answer_for_a_reservation() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rust_sources(&src, &mut files);
+        let files = rust_sources(&src);
 
         let mut sites = 0usize;
         let mut absorbers = Vec::new();

@@ -278,6 +278,16 @@ fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
     }
 }
 
+/// The manual `Debug` renders the type and its inner backend, and marks the policy it leaves out.
+#[test]
+fn debug_names_the_backend_and_its_inner_backend() {
+    let backend = retrying(Arc::new(SequenceBackend::new(vec![200])), 0);
+    let rendered = format!("{backend:?}");
+    assert!(rendered.starts_with("RetryBackend {"), "{rendered}");
+    assert!(rendered.contains("inner: SequenceBackend"), "{rendered}");
+    assert!(rendered.ends_with(".. }"), "{rendered}");
+}
+
 #[test]
 fn exponential_backoff_doubles_and_clamps() {
     let base = Duration::from_millis(100);

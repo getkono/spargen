@@ -2,6 +2,7 @@
 //! a `$ref`, and combining them.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use indexmap::{IndexMap, IndexSet};
 
@@ -10,10 +11,13 @@ use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind
 use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
-use super::meet::{carries_key, merge_field_default, NoMeet};
+use super::all_of::real_union;
+use super::meet::{carries_key, drop_applied_default_if_required, merge_field_default, NoMeet};
 use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
-use super::shape::{schema_has_shape_constraint, schema_imposes_scalar};
+use super::shape::{
+    schema_has_shape_constraint, schema_has_union, schema_imposes_scalar, schema_is_object_like,
+};
 use super::{
     all_of_entry_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
     ScopedRefiners, MAX_SCHEMA_DEPTH,
@@ -155,6 +159,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|def| def.kind.clone())?;
             let mut ty = self.reemit_meet(schema, hint, mark, kind);
             ty.nullable = intersection.nullable;
+            self.elide_unused_member_lowerings(contributions);
             return Some(ty);
         }
 
@@ -368,11 +373,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if required.contains(&field.name.wire) {
                 field.required = true;
             }
-            if field.required {
-                if let Some(default) = &mut field.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(field);
         }
 
         // A property repeated by three or more members is met pair by pair, and each meet replaces
@@ -383,7 +384,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // As the all-scalar branch takes its meet's nullability: `null` satisfies the merge when
         // it satisfies every member.
         ty.nullable = object_all_of_admits_null(contributions);
+        self.elide_unused_member_lowerings(contributions);
         Some(ty)
+    }
+
+    /// Elide what the merge's result leaves unused of each inline member's own lowering that
+    /// [`Contribution::Object`]'s `lowered` records: the union of its `type` array's categories
+    /// where the merge took it as an object, and its fields where it took it as that union. The
+    /// result is inserted already, so whatever it reaches stays.
+    fn elide_unused_member_lowerings(&mut self, contributions: &[Contribution]) {
+        for contribution in contributions {
+            if let Contribution::Object {
+                lowered: Some(lowered),
+                ..
+            } = contribution
+            {
+                self.elide_unused_union_lowering(lowered.clone());
+            }
+        }
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
@@ -411,6 +429,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
                 union: None,
+                lowered: None,
             });
         }
         Some(())
@@ -457,10 +476,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.gather_ref_target(schema, reference, hint, out)?;
             // `$ref` is an applicator, not a replacement for the member that holds it: the member
             // is the target AND its own shape-bearing siblings, so those are further conjuncts of
-            // this same merge, gathered exactly as a separate member carrying them would be. Every
-            // arm above used to return once the target was pushed, which silently deleted the
-            // siblings' properties and `required`, and let a sibling contradicting its target
-            // generate as the target alone. The gate is the one `lower_schema_inner` asks of a
+            // this same merge, gathered exactly as a separate member carrying them would be.
+            // Returning once the target is pushed would delete the siblings' properties and
+            // `required` silently, and let a sibling contradicting its target generate as the
+            // target alone. The gate is the one `lower_ref_with_siblings` asks of a
             // `$ref`'s siblings, so the two positions agree on what counts as a shape.
             let mut sibling = schema.clone();
             sibling.reference = None;
@@ -492,7 +511,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             // A `$ref` to a component still being lowered is a direct recursive allOf member
             // whose fields are not yet known — irreconcilable (distinct from a member with
-            // recursive *fields*, which lowers fine).
+            // recursive *fields*, which lowers fine). Refused before `ensure_component` is asked,
+            // which would first report a sub-file's own declaration of the name as shadowed
+            // (`W011`) beside this rejection, though `push_ref_member` reports it in the same
+            // words.
             if self.in_progress.contains_key(name) {
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
@@ -517,13 +539,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
         // component member: a member still being lowered is a direct recursive ref whose fields
-        // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
+        // are not yet known (irreconcilable, refused by `push_ref_member`), otherwise its shared
+        // type contributes its fields.
         if is_remote_ref(reference) {
-            if self.remote_in_progress.contains_key(reference) {
-                return self
-                    .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_REMOTE_MEMBER);
-            }
-            let ty = self.ensure_remote(reference)?;
+            let ty = self.ensure_remote(reference, &schema.provenance)?;
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
                 RefMember {
@@ -548,8 +567,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // test the target's identity (`reservation_at`) instead of `is_in_progress_root`. Without
         // this, a member that is the very schema being lowered descends into its own body again
         // and stops only at `MAX_SCHEMA_DEPTH`, reporting a chain length for what is a cycle of
-        // length one. The component and remote arms above refuse to read an in-progress member;
-        // this one now does too.
+        // length one. Like the component and remote arms above, this one refuses to read an
+        // in-progress member.
         if self.reservation_at(&target.provenance).is_some() {
             return self.reject_all_of_cycle(
                 schema.provenance.clone(),
@@ -608,12 +627,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.gathering(|ctx| ctx.gather_resolved_target(target, &hint, &mut contributed));
         self.resolved_member_stack.pop();
         expanded?;
+        // A target's member whose `type` names `object` beside another category is met as its
+        // object alone, as before #827: the union of its categories is read only for a member
+        // written inline in the composition ([`objects_met_as_their_unions`]). Recorded here, it
+        // would stay reachable from the memo at every later use, and be emitted unused.
+        let mut unread = Vec::new();
+        for contribution in &mut contributed {
+            if let Contribution::Object {
+                union,
+                lowered: lowered @ Some(_),
+                ..
+            } = contribution
+            {
+                *union = None;
+                unread.extend(lowered.take());
+            }
+        }
         let recorded = contributed
             .into_iter()
             .enumerate()
             .map(|(index, contribution)| (gathering.origins.get(&index).cloned(), contribution))
             .collect();
         self.resolved_contributions.insert(key.clone(), recorded);
+        // The fields stay, held by the record; what only the union reached goes.
+        self.elide_unused_lowerings(unread);
         self.replay_resolved(&key, out);
         Some(())
     }
@@ -674,9 +711,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Expand a bundle-`$ref` `allOf` member's resolved target as [`Self::gather_member`] expands
     /// any member: a target that is itself a `$ref` chains to *its* target (and gathers its own
     /// siblings), one that is an `allOf` flattens its members, and only a plain body is read for
-    /// object or scalar keywords. Reading every target as a plain body took an `allOf` or alias
-    /// target, which carries neither kind of keyword, for a pure annotation, and silently dropped
-    /// everything it constrains (issue #306).
+    /// object or scalar keywords. An `allOf` or alias target carries neither kind of keyword, so
+    /// reading it as a plain body would take it for a pure annotation and silently drop everything
+    /// it constrains (issue #306).
     ///
     /// This recursion does not pass through [`Self::lower_schema`], so it counts against
     /// [`Self::depth`] itself: a long acyclic chain of such targets rejects with `E014` rather than
@@ -717,8 +754,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// A member whose body is still being lowered is refused here, with `recursive` as the
     /// message, rather than by each caller: a reservation's kind says nothing about the schema's
-    /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
-    /// silent scalar. A caller cannot forget the guard because it no longer holds it.
+    /// shape, and reading it as "not a struct" would make a recursive member a silent scalar. The
+    /// guard lives here, so no caller has one to forget.
     ///
     /// `decides_null` is [`Self::ref_target_decides_null`] of the target: an untyped object target,
     /// or one composed of untyped object members alone, admits `null` without deciding the merge's
@@ -739,15 +776,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } = member;
         // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
-        // arm is the whole guard the callers used to hold.
+        // arm is the whole guard against reading one.
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Reserved) => {
                 return self.reject_all_of_cycle(provenance.clone(), recursive)
             }
-            // A target of untyped array applicators alone lowered standalone to `Value`, which met
-            // the merge as its identity and dropped its `items` with no diagnostic (#610); it now
-            // lowers standalone to an array (#614), which would deny the merge's other categories.
-            // Either way the target is read by its keywords, as an inline member and a sub-file
+            // Read by the type it lowers to standalone, a target of untyped array applicators
+            // alone would deny the merge's other categories as an array (#614), or as `Value` meet
+            // the merge as its identity and drop its `items` with no diagnostic (#610). Either way
+            // the target is read by its keywords, as an inline member and a sub-file
             // target are (#607): it refines the merge's arrays and constrains nothing else. It is a
             // `$ref` target, so `open_narrowing` is out of effect for it.
             Some(TypeKind::Any | TypeKind::Array(_) | TypeKind::Tuple(_)) => {
@@ -791,6 +828,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     required,
                     nullable: decides_null.then_some(ty.nullable),
                     union,
+                    lowered: None,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -805,16 +843,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
         // A member carrying its own `oneOf`/`anyOf` is that union, its object keywords refining the
-        // branches as `lower_union` refines them; read as an object by its keywords, the union was
-        // dropped with no diagnostic (issue #419).
+        // branches as `lower_union` refines them; read as an object by its keywords, the union
+        // would be dropped with no diagnostic (issue #419).
         if schema_is_object_like(schema) && !schema_has_union(schema) {
+            let from = self.graph_mark();
             let (fields, additional) = self.object_body(schema, hint)?;
+            // A `type` naming `object` beside another non-null category admits that category's
+            // instances too, so the member also carries the union of its categories it lowers to
+            // on its own, which a union met with the merge meets branch by branch: read as an
+            // object alone, it dropped every branch of that union that is not an object, and
+            // reported each as excluded (#827).
+            let union = if names_object_beside_another_category(schema) {
+                Some(self.lower_schema(schema, hint)?)
+            } else {
+                None
+            };
+            let lowered = union.map(|_| from..self.graph_mark());
             out.push(Contribution::Object {
                 fields,
                 additional,
                 required: schema.required.clone(),
                 nullable: stated_nullability(schema),
-                union: None,
+                union,
+                lowered,
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -824,8 +875,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(ImpliedCategory::Only(JsonType::Array))
         ) {
             // Untyped array applicators (`items`, `prefixItems`) name no `type`, so neither arm
-            // above reads them, and they were dropped as an annotation with no diagnostic (#607).
-            // In 2020-12 they constrain only arrays, so they refine the merge's array members and
+            // above reads them; this arm keeps them from being dropped as an annotation with no
+            // diagnostic (#607). In 2020-12 they constrain only arrays, so they refine the merge's
+            // array members and
             // leave the rest, as the same member does beside a union.
             let scoped = self.lower_scoped_refiners(schema, true, None, hint)?;
             out.push(Contribution::Refiner {
@@ -860,9 +912,17 @@ pub(super) enum Contribution {
         /// The type a `$ref` member's target lowered to, where that target is a `oneOf`/`anyOf`
         /// that lowered to one object (its one real branch): beside scalar members alone it is
         /// met with them as the union it is ([`LowerCtx::combine_all_of`]), as the same union
-        /// written inline is, rather than mixed with them as an object (#678). `None` for every
-        /// other object member.
+        /// written inline is, rather than mixed with them as an object (#678). For an inline
+        /// member whose `type` names `object` beside another non-null category, the union of its
+        /// categories it lowers to on its own, met as that union beside scalar members alone and
+        /// beside a union the merge is met with ([`objects_met_as_their_unions`], #827). `None`
+        /// for every other object member.
         union: Option<Ty>,
+        /// The ids the inline member's own lowering inserted, where `union` is the union of its
+        /// `type` array's categories: its fields and that union, each elided where the merge
+        /// leaves it unused ([`LowerCtx::elide_unused_union_lowering`]). `None` for every other
+        /// object member.
+        lowered: Option<Range<u32>>,
     },
     Scalar(Ty),
     /// A member of untyped array applicators alone (`items`, `prefixItems`, no `type`): the
@@ -910,46 +970,126 @@ pub(super) fn take_refiners(contributions: &mut Vec<Contribution>) -> Vec<(Box<S
     refiners
 }
 
-/// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
-/// policy, a `required` set, or an explicit `object` type — and so contributes fields to an `allOf`
-/// merge rather than a scalar.
-pub(super) fn schema_is_object_like(schema: &Schema) -> bool {
-    !schema.properties.is_empty()
-        || !schema.pattern_properties.is_empty()
-        || schema.additional_properties.is_some()
-        || !schema.required.is_empty()
-        || schema.types.types.contains(&JsonType::Object)
-}
-
-/// Whether a schema carries a `oneOf` or an `anyOf` of its own.
-pub(super) fn schema_has_union(schema: &Schema) -> bool {
-    !schema.one_of.is_empty() || !schema.any_of.is_empty()
-}
-
-/// The index of the one `allOf` member that is an inline `oneOf`/`anyOf`, where exactly one is
-/// ([`LowerCtx::lower_all_of_with_union_member`]). A member that is a `$ref` is its target first,
-/// and an `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
-/// members, and beside object members they are `E013`
-/// ([`LowerCtx::reject_all_of_several_unions`]).
-pub(super) fn sole_union_member(schema: &Schema) -> Option<usize> {
-    let mut unions = schema.all_of.iter().enumerate().filter(|(_, member)| {
-        matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))
-    });
-    let (index, _) = unions.next()?;
-    unions.next().is_none().then_some(index)
-}
-
-/// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
-/// [`LowerCtx::object_body`] carries each as a required field of its own, marked
-/// [`Field::undeclared`].
-pub(super) fn undeclared_required(schema: &Schema) -> Vec<String> {
-    let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
-    schema
-        .required
+/// Take each inline object member of `contributions` whose `type` names `object` beside another
+/// non-null category as the union of its categories it lowered to ([`Contribution::Object`]'s
+/// `union`), where no other object member keeps the merge an object, and return the ids each
+/// one's own lowering inserted, for the caller to elide once its result no longer uses them. A
+/// union met with the merge then meets that member branch by branch, as the sibling spelling
+/// meets the same `type` array (#827): read as an object, it dropped every branch of the union
+/// that is not an object.
+pub(super) fn objects_met_as_their_unions(contributions: &mut [Contribution]) -> Vec<Range<u32>> {
+    let keeps_object = contributions
         .iter()
-        .filter(|name| seen.insert(name.as_str()))
-        .cloned()
-        .collect()
+        .any(|contribution| matches!(contribution, Contribution::Object { lowered: None, .. }));
+    if keeps_object {
+        return Vec::new();
+    }
+    let mut lowerings = Vec::new();
+    for contribution in contributions.iter_mut() {
+        if let Contribution::Object {
+            union: Some(union),
+            lowered: Some(lowered),
+            ..
+        } = contribution
+        {
+            lowerings.push(lowered.clone());
+            *contribution = Contribution::Scalar(*union);
+        }
+    }
+    lowerings
+}
+
+/// Whether `schema`'s own `type` names `object` and at least one other category besides `null`:
+/// a multi-category `type` array, which lowers to a union of its categories rather than to an
+/// object ([`LowerCtx::gather_inline`]).
+fn names_object_beside_another_category(schema: &Schema) -> bool {
+    let types = &schema.types.types;
+    types.contains(&JsonType::Object)
+        && types
+            .iter()
+            .any(|ty| !matches!(ty, JsonType::Object | JsonType::Null))
+}
+
+impl LowerCtx<'_, '_> {
+    /// The index of the one `allOf` member that is a union
+    /// ([`LowerCtx::lower_all_of_with_union_member`]): an inline `oneOf`/`anyOf`, or a `$ref`
+    /// with no shape-bearing siblings to a root component that is one and is not being lowered
+    /// already, which is met as its
+    /// target's union (#841). Where several members are unions and exactly one of them has two or
+    /// more non-null branches ([`real_union`]), it is that one: the others each lower to their one
+    /// real branch, and are met with the object members as that branch (#841). Otherwise an
+    /// `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
+    /// members, and beside object members they are `E013`
+    /// ([`LowerCtx::reject_all_of_several_unions`]).
+    ///
+    /// Where every member is a union, inline or as a `$ref`, and the schema's own keywords bear
+    /// no shape, no object member is met with them: only the one inline union is the member,
+    /// as before #841, so `allOf: [{$ref: U}, {$ref: NullableOther}]` keeps the scalar meet it
+    /// generated through.
+    pub(super) fn sole_union_member(&self, schema: &Schema) -> Option<usize> {
+        if self.every_member_is_a_union(schema) {
+            let mut inline = schema.all_of.iter().enumerate().filter(|(_, member)| {
+                matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))
+            });
+            let (index, _) = inline.next()?;
+            return inline.next().is_none().then_some(index);
+        }
+        let unions: Vec<(usize, bool)> = schema
+            .all_of
+            .iter()
+            .enumerate()
+            .filter_map(|(index, member)| {
+                let SchemaOr::Schema(member) = member else {
+                    return None;
+                };
+                let Some(reference) = member.reference.as_deref() else {
+                    return schema_has_union(member).then(|| (index, real_union(member)));
+                };
+                // A component still being lowered is a recursive member, which the gather
+                // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here. Nor
+                // is one whose body is already being expanded as a union member, which reserves
+                // nothing: the gather lowers it through its reservation, where a recursion stops.
+                let name = reference.strip_prefix("#/components/schemas/")?;
+                if self.in_progress.contains_key(name)
+                    || self.union_member_stack.iter().any(|open| open == name)
+                {
+                    return None;
+                }
+                let mut siblings = member.as_ref().clone();
+                siblings.reference = None;
+                if schema_has_shape_constraint(&siblings) {
+                    return None;
+                }
+                let target = self.ref_target_body(reference, &member.provenance)?;
+                schema_has_union(&target).then(|| (index, real_union(&target)))
+            })
+            .collect();
+        if let [(index, _)] = unions.as_slice() {
+            return Some(*index);
+        }
+        let mut real = unions.iter().filter(|(_, real)| *real);
+        let (index, _) = real.next()?;
+        real.next().is_none().then_some(*index)
+    }
+
+    /// Whether every `allOf` member of `schema` is a `oneOf`/`anyOf`, inline or as the target of
+    /// a `$ref`, and its own keywords bear no shape ([`Self::sole_union_member`]).
+    fn every_member_is_a_union(&self, schema: &Schema) -> bool {
+        let mut own = schema.clone();
+        own.all_of.clear();
+        !schema_has_shape_constraint(&own)
+            && schema.all_of.iter().all(|member| {
+                let SchemaOr::Schema(member) = member else {
+                    return false;
+                };
+                match member.reference.as_deref() {
+                    None => schema_has_union(member),
+                    Some(reference) => self
+                        .ref_target_body(reference, &member.provenance)
+                        .is_some_and(|target| schema_has_union(&target)),
+                }
+            })
+    }
 }
 
 /// The `E013` cycle wording for an `allOf` member that is a `$ref` to a root component still being

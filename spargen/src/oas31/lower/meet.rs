@@ -14,6 +14,17 @@ use super::nullability::{non_nullable, type_accepts_null};
 use super::{LowerCtx, Refiner, ScopeReach};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Where the schema `ty` lowers from was authored: the location [`Self::meet_locations`]
+    /// recorded for a meet struct, else the type's own provenance, unless that is the document root
+    /// every synthesized type falls back to.
+    fn authored_location(&self, ty: Ty) -> Option<Provenance> {
+        if let Some(location) = self.meet_locations.get(&ty.id) {
+            return Some(location.clone());
+        }
+        let def = self.graph.get(ty.id)?;
+        (!def.provenance.pointer.as_str().is_empty()).then(|| def.provenance.clone())
+    }
+
     /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
     /// value must satisfy every member, so any member denying unknown keys forbids them outright),
     /// whatever the other side's value schema is. Two typed value schemas merge to their typed
@@ -92,10 +103,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // made about the intersection — `is_in_progress_root`'s own documentation says the only
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
-        // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` found no meet for it
-        // (it now refuses by a `Reserved` arm of its own), and the null rescue typed the
-        // position as the exact JSON null type. The result was `pub type X = ();` — a client that
+        // identity lets one through, and the rescue below would convert that unanswerable
+        // intersection into a confident wrong answer: finding no non-null meet (which
+        // `intersect_non_null` refuses by a `Reserved` arm of its own), the null rescue would type
+        // the position as the exact JSON null type. That is `pub type X = ();` — a client that
         // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
         // which is the standing invariant's fourth, silent behaviour.
         //
@@ -385,11 +396,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         existing.required = existing.required || field.required;
         Some(intersection.map(|met| {
             existing.ty = met;
-            if existing.required {
-                if let Some(default) = &mut existing.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(existing);
         }))
     }
 
@@ -572,15 +579,9 @@ pub(super) enum NoMeet {
 /// a (base64) JSON string.
 pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
     match kind {
-        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
-        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
-        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
-        | TypeKind::Bytes => Some(JsonCategory::String),
-        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
-            ScalarRepr::String => JsonCategory::String,
-            ScalarRepr::Int => JsonCategory::Number,
-            ScalarRepr::Bool => JsonCategory::Boolean,
-        }),
+        TypeKind::Primitive(primitive) => Some(primitive_category(*primitive)),
+        TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(repr_category(enumeration.repr)),
         TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
         TypeKind::Struct(_) => Some(JsonCategory::Object),
         // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
@@ -628,15 +629,28 @@ fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     })
 }
 
-fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
-    match repr {
-        ScalarRepr::String => matches!(
-            primitive,
-            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
-        ),
-        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
-        ScalarRepr::Bool => primitive == Prim::Bool,
+/// The JSON category every value of a scalar primitive falls in.
+fn primitive_category(primitive: Prim) -> JsonCategory {
+    match primitive {
+        Prim::Bool => JsonCategory::Boolean,
+        Prim::I32 | Prim::I64 | Prim::F64 => JsonCategory::Number,
+        Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date => JsonCategory::String,
     }
+}
+
+/// The JSON category every member of a scalar enum backed by `repr` falls in.
+fn repr_category(repr: ScalarRepr) -> JsonCategory {
+    match repr {
+        ScalarRepr::String => JsonCategory::String,
+        ScalarRepr::Int => JsonCategory::Number,
+        ScalarRepr::Bool => JsonCategory::Boolean,
+    }
+}
+
+/// Whether an enum backed by `repr` and a `primitive` sit in one JSON category, so their
+/// intersection narrows the enum to the primitive.
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    repr_category(repr) == primitive_category(primitive)
 }
 
 /// Whether one side of an intersection carries a field for the wire name `wire`, declared or only
@@ -654,7 +668,7 @@ pub(super) fn carries_key(fields: &[Field], wire: &str) -> bool {
 /// only the keys no side declares) does not reach a property the other side declares. So the
 /// declared field is kept whole — its type, default, flags and `xml` hints — and the requirement
 /// is added to it. Two declarations, or two undeclared fields, are left to the caller to intersect.
-pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
+fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     if existing.undeclared == other.undeclared {
         return false;
     }
@@ -663,12 +677,19 @@ pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
         *existing = other.clone();
     }
     existing.required = required;
-    if required {
-        if let Some(default) = &mut existing.default {
+    drop_applied_default_if_required(existing);
+    true
+}
+
+/// Keep a required field consistent with its default: a serde default fires only for an absent
+/// optional field, so a required field drops its applied `default`, which stays documented in
+/// rustdoc.
+pub(super) fn drop_applied_default_if_required(field: &mut Field) {
+    if field.required {
+        if let Some(default) = &mut field.default {
             default.applied = None;
         }
     }
-    true
 }
 
 /// The `default` the merged field of an intersection keeps for a repeated property, given every

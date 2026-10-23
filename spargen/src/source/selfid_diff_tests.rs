@@ -1,8 +1,6 @@
 //! `spargen lock` and the build each keep their own reading of a document's `$self`, their own
 //! choice of parse format, and their own `http`/`https` predicate. These tables drive both copies
-//! over one set of URLs and paths and hold them to agreement row by row. A row where the copies
-//! disagree today records each side's current answer and names the bug issue filed for it, so the
-//! disagreement can neither widen nor close without this file changing.
+//! over one set of URLs and paths and hold them to agreement row by row.
 //!
 //! The lock walk is reachable only under `remote-fetch`, which gates this module as it gates
 //! `vendor`.
@@ -15,7 +13,7 @@ use super::bundle::{classify_self, parse_by_name, SelfRegistration};
 use super::lock::{vendor_path_for_url, Lock};
 use super::parse_json;
 use super::remote::is_http_url;
-use super::vendor::{parse_scratch, self_identity, Base, SelfIdentity};
+use super::vendor::{parse_scratch_local, parse_scratch_remote, self_identity, Base, SelfIdentity};
 
 /// What a `$self` makes a document, in terms both copies can be compared in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +40,6 @@ enum Expect<T: 'static> {
     Agree,
     /// Both copies give this answer.
     Both(T),
-    /// The copies disagree today: each side's current answer, and the bug issue filed for it.
-    Disagree { lock: T, build: T, bug: u32 },
 }
 
 impl<T: std::fmt::Debug + PartialEq> Expect<T> {
@@ -53,15 +49,11 @@ impl<T: std::fmt::Debug + PartialEq> Expect<T> {
         let met = match self {
             Expect::Agree => got.0 == got.1,
             Expect::Both(both) => got.0 == *both && got.1 == *both,
-            Expect::Disagree { lock, build, .. } => got.0 == *lock && got.1 == *build,
         };
         if !met {
             let want = match self {
                 Expect::Agree => "agreement".to_owned(),
                 Expect::Both(both) => format!("agreement on {both:?}"),
-                Expect::Disagree { lock, build, bug } => {
-                    format!("({lock:?}, {build:?}), the disagreement #{bug} records")
-                }
             };
             failures.push(format!("{row}: (lock, build) = {got:?}, want {want}"));
         }
@@ -189,10 +181,14 @@ fn observe(accepts: impl Fn(&str) -> bool) -> Format {
     }
 }
 
-/// The lock walk's choice (`parse_scratch`) for the document named `name`: a local path, or the
-/// URL it was fetched from.
-fn lock_format(name: &str) -> Format {
-    observe(|text| parse_scratch(name, text).is_some())
+/// The lock walk's choice for the document named `name`: a local path (`parse_scratch_local`), or
+/// the URL it was fetched from (`parse_scratch_remote`).
+fn lock_format(name: &str, remote: bool) -> Format {
+    if remote {
+        observe(|text| parse_scratch_remote(name, text).is_some())
+    } else {
+        observe(|text| parse_scratch_local(name, text).is_some())
+    }
 }
 
 /// The build's choice (`parse_by_name`): a local document by its path, and a remote one by the
@@ -208,18 +204,8 @@ fn build_format(name: &str, remote: bool) -> Format {
 
 #[test]
 fn the_lock_and_the_build_parse_every_document_alike() {
-    use Expect::{Both, Disagree};
+    use Expect::Both;
     use Format::{Either, Json, Yaml};
-    // The lock folds the name's case before reading its suffix; the build reads the extension as
-    // written.
-    const CASE_BUG: u32 = 915;
-    // The lock cuts a local path at its first `?`; the build reads the extension through it.
-    const QUERY_BUG: u32 = 916;
-    // The lock matches the suffix of a dot-file name; the build reads it as having no extension.
-    const DOTFILE_BUG: u32 = 917;
-    // The lock reads a remote URL's suffix through a trailing `/`; the build reads the vendored
-    // path, which drops the empty last segment.
-    const SLASH_BUG: u32 = 918;
     let local: &[(&str, Expect<Format>)] = &[
         ("specs/api.json", Both(Json)),
         ("specs/api.yaml", Both(Yaml)),
@@ -229,64 +215,16 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("specs/./lib/../api.json", Both(Json)),
         ("specs.json/api", Both(Either)),
         // Extension case.
-        (
-            "specs/api.JSON",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "specs/api.Yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "specs/api.YML",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        // A query string, which a relative `$ref` carries into the local path it names.
-        (
-            "specs/api.json?v=1",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: QUERY_BUG,
-            },
-        ),
-        (
-            "specs/api.yaml?v=1",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: QUERY_BUG,
-            },
-        ),
+        ("specs/api.JSON", Both(Json)),
+        ("specs/api.Yaml", Both(Yaml)),
+        ("specs/api.YML", Both(Yaml)),
+        // A query string, which a relative `$ref` carries into the local path it names (#916).
+        ("specs/api.json?v=1", Both(Either)),
+        ("specs/api.yaml?v=1", Both(Either)),
+        ("specs/api.json#x", Both(Either)),
         // A name that is only a dot and an extension.
-        (
-            "specs/.json",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
-        (
-            "specs/.yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
+        ("specs/.json", Both(Either)),
+        ("specs/.yaml", Both(Either)),
     ];
     let remote: &[(&str, Expect<Format>)] = &[
         ("https://h.example/api.json", Both(Json)),
@@ -306,46 +244,20 @@ fn the_lock_and_the_build_parse_every_document_alike() {
         ("https://h.example/api.json;v=1", Both(Either)),
         ("https://h.example/api%2Ejson", Both(Either)),
         // Extension case.
-        (
-            "https://h.example/api.JSON",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
-        (
-            "https://h.example/api.Yaml",
-            Disagree {
-                lock: Yaml,
-                build: Either,
-                bug: CASE_BUG,
-            },
-        ),
+        ("https://h.example/api.JSON", Both(Json)),
+        ("https://h.example/api.Yaml", Both(Yaml)),
         // A trailing slash.
-        (
-            "https://h.example/api.json/",
-            Disagree {
-                lock: Either,
-                build: Json,
-                bug: SLASH_BUG,
-            },
-        ),
+        ("https://h.example/api.json/", Both(Json)),
+        ("https://h.example/api.yaml/", Both(Yaml)),
+        ("https://h.example/api.json//", Both(Json)),
         // A name that is only a dot and an extension.
-        (
-            "https://h.example/.json",
-            Disagree {
-                lock: Json,
-                build: Either,
-                bug: DOTFILE_BUG,
-            },
-        ),
+        ("https://h.example/.json", Both(Either)),
     ];
     let rows = local.iter().map(|row| (row, false));
     let rows = rows.chain(remote.iter().map(|row| (row, true)));
     let mut failures = Vec::new();
     for ((name, expect), remote) in rows {
-        let got = (lock_format(name), build_format(name, remote));
+        let got = (lock_format(name, remote), build_format(name, remote));
         expect.check(&format!("`{name}`"), got, &mut failures);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

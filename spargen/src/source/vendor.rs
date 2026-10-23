@@ -11,14 +11,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
-use super::bundle::{local_identity, parse_yaml_then_json, working_dir};
+use super::bundle::{local_identity, parse_by_extension, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
     classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
     split_fragment, RefTarget,
 };
 use super::sha256::sha256_hex;
-use super::{parse_json, parse_yaml, SpannedValue};
+use super::SpannedValue;
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
@@ -233,7 +233,7 @@ pub(crate) fn vendor(
         input_error(diags, format!("failed to read `{spec}`: {error}"));
         Aborted
     })?;
-    let Some(root_value) = parse_scratch(spec.as_str(), &root_text) else {
+    let Some(root_value) = parse_scratch_local(spec.as_str(), &root_text) else {
         input_error(
             diags,
             format!("failed to parse `{spec}` while scanning for remote $refs"),
@@ -283,7 +283,7 @@ pub(crate) fn vendor(
                         let identity = scanned.identity(&target);
                         if scanned.seen_local.insert(identity.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
-                                if let Some(value) = parse_scratch(target.as_str(), &text) {
+                                if let Some(value) = parse_scratch_local(target.as_str(), &text) {
                                     scanned.local_docs.insert(identity, scanned.docs.len());
                                     let loaded = scanned.add(value, Base::Local(target));
                                     queue.push_back((loaded, JsonPointer::root()));
@@ -379,7 +379,7 @@ pub(crate) fn vendor(
                         sha256,
                     });
                     if let Ok(text) = String::from_utf8(bytes) {
-                        if let Some(value) = parse_scratch(&url, &text) {
+                        if let Some(value) = parse_scratch_remote(&url, &text) {
                             let next = scanned.docs.len();
                             scanned.remote_docs.insert(url.clone(), next);
                             scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
@@ -448,22 +448,35 @@ pub(crate) fn vendor(
     })
 }
 
-/// Parse text into a value tree for ref-scanning only, discarding parse diagnostics. Chooses the
-/// format by the `.json`/`.yaml`/`.yml` suffix of `name` (a path or URL), else tries YAML then JSON.
-pub(super) fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
-    let id = crate::diag::FileId(0);
-    let lowered = name
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(name)
-        .to_ascii_lowercase();
-    if lowered.ends_with(".json") {
-        parse_json(id, text, &mut Diagnostics::default()).ok()
-    } else if lowered.ends_with(".yaml") || lowered.ends_with(".yml") {
-        parse_yaml(id, text, &mut Diagnostics::default()).ok()
-    } else {
-        parse_yaml_then_json(id, text, &mut Diagnostics::default()).ok()
-    }
+/// Parse a local document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from `path`, the reading the build's `parse_by_name`
+/// makes: a name that is only a dot and an extension, such as `.json`, has none (#917). A `?` or
+/// `#` in a local path is part of the file's name (a relative `$ref` such as `api.yaml?v=1` keeps
+/// its query in the path it names), so it is read through rather than cut off: `api.json?v=1`
+/// names no recognised extension (#916).
+pub(super) fn parse_scratch_local(path: &str, text: &str) -> Option<SpannedValue> {
+    parse_scratch(Utf8Path::new(path).extension(), text)
+}
+
+/// Parse a fetched document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from [`vendor_path_for_url`]'s path for `url`, which is
+/// the name the build parses the vendored copy by. That path drops a `?` query, a `#` fragment and
+/// any empty segment, so `api.json/` is read as JSON, as the build reads it (#918); a name that is
+/// only a dot and an extension, such as `.json`, has none, as it has none to the build (#917).
+pub(super) fn parse_scratch_remote(url: &str, text: &str) -> Option<SpannedValue> {
+    parse_scratch(Utf8Path::new(&vendor_path_for_url(url)).extension(), text)
+}
+
+fn parse_scratch(extension: Option<&str>, text: &str) -> Option<SpannedValue> {
+    parse_by_extension(
+        crate::diag::FileId(0),
+        extension,
+        text,
+        &mut Diagnostics::default(),
+    )
+    .ok()
 }
 
 fn input_error(diags: &mut Diagnostics, message: String) {

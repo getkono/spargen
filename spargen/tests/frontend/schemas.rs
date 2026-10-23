@@ -853,6 +853,87 @@ components:
     }
 }
 
+/// Issue #828: JSON Schema compares numbers by value, so on a schema whose `type` names `integer`
+/// an integral float `enum`/`const` member below 2^53 is the integer it equals, as an integral
+/// float `default` on an `integer` field is. A fractional member, one of magnitude 2^53 or more,
+/// and an integral float on a schema whose `type` does not name `integer` stay `E008`.
+/// check/generate parity.
+#[test]
+fn integral_float_members_of_an_integer_enum_are_integers() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Level:
+      type: integer
+      enum: [1.0, 2]
+    One:
+      type: integer
+      const: 1.0
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
+    }
+    // The members are the integers the spelled-as-integers schemas name: the same module, but for
+    // the spelling.
+    let integers = spec
+        .replace("[1.0, 2]", "[1, 2]")
+        .replace("const: 1.0", "const: 1");
+    let (_, written_as_floats) = generate_with_code(spec);
+    let (_, written_as_integers) = generate_with_code(&integers);
+    assert_eq!(
+        module_body(&written_as_floats),
+        module_body(&written_as_integers)
+    );
+
+    for (case, schema, named) in [
+        (
+            "fractional",
+            "type: integer\n      enum: [1.5, 2]",
+            "1.5 is",
+        ),
+        (
+            "at 2^53",
+            "type: integer\n      const: 9007199254740992.0",
+            "9007199254740992.0 is",
+        ),
+        (
+            "number-typed",
+            "type: number\n      enum: [1.0, 2.0]",
+            "1.0 is",
+        ),
+        ("untyped", "enum: [1.0, 2.0]", "1.0 is"),
+    ] {
+        let rejected = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Level:\n      {schema}\n"
+        );
+        for report in [generate(&rejected), check(&rejected)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            let messages = messages_for(&report, Code::NonScalarEnum);
+            assert!(
+                !messages.is_empty()
+                    && messages
+                        .iter()
+                        .all(|m| m.contains(named) && m.contains("floating-point number")),
+                "{case}: {messages:#?}"
+            );
+            // Only an integral float below 2^53 off an `integer` schema is told where it would
+            // be read as an integer.
+            let hinted = matches!(case, "number-typed" | "untyped");
+            assert_eq!(
+                messages
+                    .iter()
+                    .all(|m| m.contains("only on a schema whose `type` names `integer`")),
+                hinted,
+                "{case}: {messages:#?}"
+            );
+        }
+    }
+}
+
 /// Untyped `required` or `additionalProperties` alone are object applicators, and establish the
 /// object category as untyped `properties` and the same keywords beside a `$ref` already do
 /// (#613). They used to fall to `serde_json::Value`, dropping the constraint with no diagnostic,

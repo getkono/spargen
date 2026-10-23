@@ -7,13 +7,16 @@
 use super::*;
 
 /// The `type` (and its own `enum` / `const`) one constraint set holds the union to, a `type` array
-/// of two non-null categories included (#677).
-const NULL_CONJUNCTS: [&str; 10] = [
+/// of two non-null categories included (#677), and one naming `object` or `array` beside a scalar
+/// category (#827).
+const NULL_CONJUNCTS: [&str; 12] = [
     "type: [string, 'null']",
     "type: [integer, 'null']",
     "type: string",
     "type: [string, integer]",
     "type: [string, integer, 'null']",
+    "type: [object, string]",
+    "type: [array, integer, 'null']",
     "type: [string, 'null'], enum: [a]",
     "type: [string, 'null'], enum: [a, null]",
     "type: [string, 'null'], const: a",
@@ -89,29 +92,6 @@ impl NullSpelling {
 }
 
 impl NullCase {
-    /// A gap held exactly until #818 lands: beside a multi-category `type` array listing `null`,
-    /// an exact-null branch (`const: null`, `enum: [null]`, a `$ref` to `Z`) and another real
-    /// branch, the spellings that list the conjunct before the union hoist the branch's `null`
-    /// into an `Option` where the others carry it as the `()` arm. Those spellings are not
-    /// compared for it.
-    fn conjunct_first_hoists_the_null_arm(&self, spelling: NullSpelling) -> bool {
-        let exact_null = |branch: &&str| {
-            matches!(
-                *branch,
-                "{ const: null }" | "{ enum: [null] }" | "{ $ref: '#/components/schemas/Z' }"
-            )
-        };
-        matches!(
-            spelling,
-            NullSpelling::UnionSecond | NullSpelling::Nested | NullSpelling::RefMembers
-        ) && self.conjunct == "type: [string, integer, 'null']"
-            && self.branches.iter().any(exact_null)
-            && self
-                .branches
-                .iter()
-                .any(|branch| !exact_null(branch) && *branch != "{ type: 'null' }")
-    }
-
     fn union(&self) -> String {
         let keyword = if self.one_of { "oneOf" } else { "anyOf" };
         format!("{keyword}: [ {} ]", self.branches.join(", "))
@@ -225,9 +205,6 @@ fn null_answer(report: &Report, source: &str) -> NullAnswer {
 fn assert_null_parity(case: &NullCase) -> Result<NullAnswer, TestCaseError> {
     let mut seen: Option<(NullSpelling, NullAnswer, String)> = None;
     for spelling in NullSpelling::ALL {
-        if case.conjunct_first_hoists_the_null_arm(spelling) {
-            continue;
-        }
         let spec = case.spec(spelling);
         let (report, source) = generate_module(&spec);
         let checked = check(&spec);
@@ -305,7 +282,9 @@ proptest! {
 /// branch the conjunct excludes is reported (`W011`) in every spelling (#671), one of a category a
 /// multi-category `type` array omits included (#677), and one of two branches that lower to one
 /// generated type (#678). A `$ref` to a union of one untyped object branch is met as that union
-/// beside a scalar conjunct, as the inline union is (#678).
+/// beside a scalar conjunct, as the inline union is (#678). An exact-null branch beside one that
+/// refuses `null`, under a multi-category `type` array listing `null`, is the `()` arm in every
+/// spelling, the conjunct-first ones included (#818).
 #[test]
 fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     let excluded_1 = vec![
@@ -436,6 +415,36 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
         )
     })
     .collect();
+    // #818, an exact-null branch beside a branch that refuses `null`, held to a multi-category
+    // `type` array listing `null`: the branch's `null` is the `()` arm in every spelling, the ones
+    // that list the conjunct before the union included, and never an `Option` around `Pick`.
+    for (one_of, branches) in [
+        (true, vec!["{ type: integer }", "{ const: null }"]),
+        (
+            true,
+            vec!["{ type: string, enum: [a] }", "{ enum: [null] }"],
+        ),
+        (
+            true,
+            vec!["{ type: integer }", "{ $ref: '#/components/schemas/Z' }"],
+        ),
+        (false, vec!["{ type: string }", "{ const: null }"]),
+    ] {
+        let row = (
+            "#818",
+            "type: [string, integer, 'null']",
+            branches,
+            NullAnswer {
+                unit_arms: 1,
+                ..pick(false, Vec::new())
+            },
+        );
+        if one_of {
+            rows.push(row);
+        } else {
+            any_of_rows.push(row);
+        }
+    }
     // #678, a union of one untyped object branch beside a scalar conjunct: the `$ref`'d union is
     // met as the union it is, not mixed with the conjunct as the object it lowers to, so only
     // `null` is left in every spelling.

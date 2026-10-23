@@ -539,18 +539,12 @@ components:
 
 #[test]
 fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
-    for (entry, report) in [
-        ("generate", generate(NUMERIC_DEFAULT_SPEC)),
-        ("check", check(NUMERIC_DEFAULT_SPEC)),
-    ] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::SchemaDefaultNotApplied),
-            "{entry}: `3` and `3` do not conflict: {report:#?}"
-        );
-    }
-
     let (report, code) = generate_with_code(NUMERIC_DEFAULT_SPEC);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaDefaultNotApplied),
+        "`3` and `3` do not conflict: {report:#?}"
+    );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     for name in ["Both", "BothReversed"] {
         let start = code

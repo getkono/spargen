@@ -139,7 +139,8 @@ mod support {
             /// An `apiKey` sent as the named cookie.
             ApiKeyCookie(&'static str),
             /// `mutualTLS`. Satisfied by the client certificate configured on the injected
-            /// `reqwest::Client`, so the request carries nothing extra and no credential is registered.
+            /// `reqwest::Client`, so the request carries nothing extra and any credential registered under
+            /// its scheme is never read.
             MutualTls,
         }
         /// One scheme reference inside an operation's security requirement: the `securitySchemes` key the
@@ -413,10 +414,8 @@ mod support {
         /// the backend (see [`super::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
         /// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
         ///
-        /// The generated `Client` exposes `Client::new(base_url)`,
-        /// `Client::with_client(reqwest::Client, base_url)`, and
-        /// `Client::with_backend(Arc<dyn HttpBackend>, base_url)`, plus one `#[inline]` method per operation
-        /// that delegates to the non-generic dispatch routines.
+        /// The generated `Client` wraps one of these and documents its own constructors; each of its
+        /// operation methods delegates to the shared dispatch routines.
         #[derive(Debug, Clone)]
         pub struct ClientCore {
             http: reqwest::Client,
@@ -506,33 +505,28 @@ mod support {
         }
     }
     mod dispatch {
-        //! The small set of dispatch routines shared within a generated client: build URL →
-        //! attach auth (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated client
-        //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
+        //! The dispatch routines every operation of a generated client shares: build URL → attach auth
+        //! (in the `auth` module) → send → classify status → decode. Sharing happens *within* a generated
+        //! client (not via a shared crate).
         //!
-        //! URL/send/classification are non-generic; only body decode is generic, monomorphized once per
-        //! distinct body type — the one place monomorphization is unavoidable.
+        //! URL building and sending are non-generic. The success decoders are generic over the body type
+        //! and the error classifiers over the operation's error type `E`; each takes the body codec as a
+        //! closure over the shared `decode_success_with` / `classify_with` routine, so one copy of each
+        //! is monomorphized per distinct body or error type.
         use std::convert::Infallible;
         use bytes::Bytes;
         use reqwest::{Request, Response, Url};
         use serde::de::DeserializeOwned;
         use super::{ClientCore, Error, ResponseValue};
-        /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
-        /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+        /// Build a request URL from the base URL, or an optional per-operation server override, and a
+        /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
+        /// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
+        /// runtime regex. Non-generic.
         ///
         /// `query` holds complete `name=value` fragments that the parameter helpers have already
         /// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
         /// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
         /// a `,` inside one of them.
-        pub fn build_url(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_on(core, None, path, query)
-        }
-        /// As [`build_url`], but against an optional per-operation server override. An absolute override
-        /// replaces the client's base URL; a relative one is joined onto it.
         pub fn build_url_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -616,28 +610,21 @@ mod support {
         }
         /// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
         fn append_query(url: &mut Url, query: &[String]) {
-            if query.is_empty() {
-                return;
+            if !query.is_empty() {
+                append_query_text(url, &query.join("&"));
             }
+        }
+        /// Append pre-encoded query text to a URL, after an `&` where it already carries a non-empty query.
+        fn append_query_text(url: &mut Url, text: &str) {
             let joined = match url.query() {
-                Some(existing) if !existing.is_empty() => {
-                    format!("{existing}&{}", query.join("&"))
-                }
-                _ => query.join("&"),
+                Some(existing) if !existing.is_empty() => format!("{existing}&{text}"),
+                _ => text.to_owned(),
             };
             url.set_query(Some(&joined));
         }
-        /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-        /// Both forms replace any query embedded in the selected server URL.
-        pub fn build_url_with_query_string(
-            core: &ClientCore,
-            path: &str,
-            query: &[String],
-            query_string: Option<&str>,
-        ) -> Result<Url, Error<Infallible>> {
-            build_url_with_query_string_on(core, None, path, query, query_string)
-        }
-        /// As [`build_url_with_query_string`], but against an optional per-operation server override.
+        /// As [`build_url_on`], for a URL whose entire query string is owned by an OpenAPI 3.2
+        /// `in: querystring` parameter. With or without a query string, it replaces any query embedded in
+        /// the selected server URL.
         pub fn build_url_with_query_string_on(
             core: &ClientCore,
             server: Option<&str>,
@@ -649,13 +636,7 @@ mod support {
             url.set_query(None);
             append_query(&mut url, query);
             if let Some(query_string) = query_string {
-                let joined = match url.query() {
-                    Some(existing) if !existing.is_empty() => {
-                        format!("{existing}&{query_string}")
-                    }
-                    _ => query_string.to_owned(),
-                };
-                url.set_query(Some(&joined));
+                append_query_text(&mut url, query_string);
             }
             Ok(url)
         }
@@ -831,6 +812,8 @@ mod support {
                 .await
         }
         /// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
+        /// A documented body that is not UTF-8, or whose text `E` rejects, is [`Error::Decode`]; an empty
+        /// body is decoded like any other, as [`decode_text_body`] describes.
         pub async fn classify_error_text<E>(
             core: &ClientCore,
             response: Response,
@@ -978,8 +961,9 @@ mod support {
         /// The closed error taxonomy shared by every spargen-generated client. `E` is the
         /// operation's typed error body (an enum when several error statuses are documented).
         ///
-        /// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
-        /// guarantee, not a variant (see the crate docs). Every variant implements [`std::error::Error`]
+        /// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
+        /// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
+        /// standard HTTP semantics. Every variant implements [`std::error::Error`]
         /// with full source chains, and `Debug` never leaks secrets.
         ///
         /// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new
@@ -1709,7 +1693,9 @@ mod support {
             Scalar,
             /// A comma-separated list.
             Array,
-            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set.
+            /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
+            /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
+            /// without an error.
             Object,
             /// A `content`-typed header carrying JSON.
             Json,
@@ -1766,7 +1752,11 @@ mod support {
         /// Parse one documented response header, or `Ok(None)` when it is absent.
         ///
         /// Repeated occurrences are joined with `,` first, which is the RFC 9110 field-list rule and the
-        /// same shape a non-exploded array is written in.
+        /// same shape a non-exploded array is written in. [`HeaderShape::SetCookie`] is the exception:
+        /// each occurrence is decoded as one list item and none are joined.
+        ///
+        /// An occurrence that is not valid UTF-8 is [`HeaderError::NotUtf8`], and a value that does not
+        /// deserialize into `T` is [`HeaderError::Parse`].
         pub fn parse_header<T: DeserializeOwned>(
             headers: &HeaderMap,
             name: &'static str,
@@ -1782,39 +1772,47 @@ mod support {
                 parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
             }
             if shape == HeaderShape::SetCookie {
-                let lines = |scalars| Value::Array(
-                    parts.iter().map(|part| scalar(part, scalars)).collect(),
-                );
-                if let Ok(value) = serde_json::from_value(lines(Scalars::Text)) {
-                    return Ok(Some(value));
-                }
-                return serde_json::from_value(lines(Scalars::Json))
-                    .map(Some)
-                    .map_err(|error| HeaderError::Parse {
+                return text_then_json(
                         name,
-                        message: error.to_string(),
-                    });
+                        |scalars| {
+                            Value::Array(
+                                parts.iter().map(|part| scalar(part, scalars)).collect(),
+                            )
+                        },
+                    )
+                    .map(Some);
             }
             let raw = parts.join(",");
             if shape == HeaderShape::Json {
                 return serde_json::from_str(&raw)
                     .map(Some)
-                    .map_err(|error| HeaderError::Parse {
-                        name,
-                        message: error.to_string(),
-                    });
+                    .map_err(|error| parse_error(name, &error));
             }
-            let textual = reconstruct(&raw, shape, explode, Scalars::Text);
-            if let Ok(value) = serde_json::from_value(textual) {
-                return Ok(Some(value));
-            }
-            let typed = reconstruct(&raw, shape, explode, Scalars::Json);
-            serde_json::from_value(typed)
+            text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars))
                 .map(Some)
-                .map_err(|error| HeaderError::Parse {
-                    name,
-                    message: error.to_string(),
-                })
+        }
+        /// Deserialize the value `build` rebuilds from header text, reading every token as text first.
+        ///
+        /// `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the number
+        /// 1 — the encoding cannot tell them apart. The target type can: the text-only reading is tried
+        /// first, and the JSON reading only if that does not deserialize. The error reported is the
+        /// JSON-flavored one, which is the more informative of the two.
+        fn text_then_json<T: DeserializeOwned>(
+            name: &'static str,
+            build: impl Fn(Scalars) -> Value,
+        ) -> Result<T, HeaderError> {
+            if let Ok(value) = serde_json::from_value(build(Scalars::Text)) {
+                return Ok(value);
+            }
+            serde_json::from_value(build(Scalars::Json))
+                .map_err(|error| parse_error(name, &error))
+        }
+        /// The [`HeaderError::Parse`] for header `name`, carrying serde's message.
+        fn parse_error(name: &'static str, error: &serde_json::Error) -> HeaderError {
+            HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            }
         }
         /// How a bare header token is interpreted when rebuilding a JSON value.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1842,9 +1840,8 @@ mod support {
             scalars: Scalars,
         ) -> Value {
             match shape {
-                HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => {
-                    scalar(raw, scalars)
-                }
+                HeaderShape::Scalar => scalar(raw, scalars),
+                HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
                 HeaderShape::Array => {
                     Value::Array(
                         raw.split(',').map(|part| scalar(part, scalars)).collect(),
@@ -2061,7 +2058,7 @@ mod support {
         //! assembled here rather than through `url`'s `query_pairs_mut`, which would encode both alike.
         use std::fmt;
         use serde::Serialize;
-        use serde_json::Value;
+        use serde_json::{Map, Value};
         /// Which characters survive unencoded when a serialized value is placed on the wire.
         ///
         /// The variant is chosen by codegen from the parameter's location, style, and `allowReserved`;
@@ -2114,7 +2111,10 @@ mod support {
             Serialize(serde_json::Error),
             /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
             NestedValue,
-            /// A style defined only for objects (`deepObject`) received a non-object value.
+            /// A value that must be an object was not one. Three emitters return it: a `deepObject` query
+            /// parameter over a non-object value ([`serialize_deep_object`]), a form-urlencoded body that
+            /// does not serialize to a JSON object ([`serialize_form_body`]), and a multipart part asked for
+            /// the query-only `deepObject` style ([`serialize_multipart_values`]).
             ExpectedObject,
             /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
             /// scalar or undefined value.
@@ -2242,26 +2242,9 @@ mod support {
                 Value::Null => Ok(String::new()),
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding),
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join(","))
+                    Ok(object_pairs(&values, encoding)?.join(","))
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(parts.join(","))
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding),
                 value => scalar(&value, encoding),
             }
         }
@@ -2293,25 +2276,15 @@ mod support {
                     )
                 }
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    ";{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.concat())
+                    Ok(
+                        object_pairs(&values, encoding)?
+                            .iter()
+                            .map(|pair| format!(";{pair}"))
+                            .collect(),
+                    )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(format!(";{name}={}", parts.join(",")))
+                    Ok(format!(";{name}={}", object_flat(& values, ",", encoding) ?))
                 }
                 value => Ok(format!(";{name}={}", scalar(& value, encoding) ?)),
             }
@@ -2333,26 +2306,9 @@ mod support {
                 }
                 Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
                 Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, ParameterError>>()
-                        .map(|parts| parts.join("."))?
+                    object_pairs(&values, encoding)?.join(".")
                 }
-                Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    parts.join(",")
-                }
+                Value::Object(values) => object_flat(&values, ",", encoding)?,
                 value => scalar(&value, encoding)?,
             };
             Ok(format!(".{rendered}"))
@@ -2386,33 +2342,21 @@ mod support {
                         ],
                     )
                 }
-                Value::Object(values) if explode => {
-                    values
-                        .iter()
-                        .map(|(key, value)| {
-                            Ok(
-                                format!(
-                                    "{}={}", encode(key, encoding), scalar(value, encoding) ?
-                                ),
-                            )
-                        })
-                        .collect()
-                }
+                Value::Object(values) if explode => object_pairs(&values, encoding),
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(","))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, ",", encoding) ?)
+                        ],
+                    )
                 }
                 value => Ok(vec![format!("{name}={}", scalar(& value, encoding) ?)]),
             }
         }
         /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
         ///
-        /// Both styles are defined only for arrays and objects with `explode: false`; the frontend rejects
-        /// every other combination, so a scalar here is a generator bug rather than user input.
+        /// Both styles are defined only for arrays and objects with `explode: false`, and any other value
+        /// is refused with `ParameterError::ExpectedComposite`.
         pub fn serialize_delimited<T: Serialize>(
             name: &str,
             value: &T,
@@ -2430,12 +2374,12 @@ mod support {
                     )
                 }
                 Value::Object(values) => {
-                    let mut parts = Vec::with_capacity(values.len() * 2);
-                    for (key, value) in values {
-                        parts.push(encode(&key, encoding));
-                        parts.push(scalar(&value, encoding)?);
-                    }
-                    Ok(vec![format!("{name}={}", parts.join(delimiter.as_str()))])
+                    Ok(
+                        vec![
+                            format!("{name}={}", object_flat(& values, delimiter
+                            .as_str(), encoding) ?)
+                        ],
+                    )
                 }
                 _ => Err(ParameterError::ExpectedComposite),
             }
@@ -2517,6 +2461,9 @@ mod support {
         /// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
         /// whose key repeats a declared property's name is never sent: the declared property's own value
         /// is, or nothing when that property is absent, as in a multipart body.
+        ///
+        /// A `value` that does not serialize to a JSON object is refused with
+        /// `ParameterError::ExpectedObject`.
         pub fn serialize_form_body<T: Serialize>(
             value: &T,
             properties: &[FormProperty],
@@ -2635,7 +2582,8 @@ mod support {
         ///
         /// Object values never reach here: the specification defines no part representation for them, so
         /// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
-        /// style) rather than guessing at one.
+        /// style) rather than guessing at one. A `deepObject` `style` is refused with
+        /// `ParameterError::ExpectedObject`.
         pub fn serialize_multipart_values<T: Serialize>(
             value: &T,
             style: FormStyle,
@@ -2687,6 +2635,37 @@ mod support {
                 .map(|value| scalar(value, encoding))
                 .collect::<Result<Vec<_>, ParameterError>>()
                 .map(|parts| parts.join(separator))
+        }
+        /// An object's members as `key,value` alternating in one `separator`-joined value: the
+        /// `explode: false` shape every style but `deepObject` shares.
+        fn object_flat(
+            values: &Map<String, Value>,
+            separator: &str,
+            encoding: PercentEncoding,
+        ) -> Result<String, ParameterError> {
+            let mut parts = Vec::with_capacity(values.len() * 2);
+            for (key, value) in values {
+                parts.push(encode(key, encoding));
+                parts.push(scalar(value, encoding)?);
+            }
+            Ok(parts.join(separator))
+        }
+        /// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
+        /// style then prefixes or joins.
+        fn object_pairs(
+            values: &Map<String, Value>,
+            encoding: PercentEncoding,
+        ) -> Result<Vec<String>, ParameterError> {
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(
+                        format!(
+                            "{}={}", encode(key, encoding), scalar(value, encoding) ?
+                        ),
+                    )
+                })
+                .collect()
         }
         fn scalar(
             value: &Value,
@@ -2816,8 +2795,10 @@ mod support {
             ///
             /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
             /// relative target against the fetched URL) to arm the following page, then decodes the body as
-            /// `T`. Three things terminate the paginator (subsequent calls return `None`):
+            /// `T`. Four things terminate the paginator (subsequent calls return `None`):
             ///
+            /// * a request for the `next` URL that cannot be built →
+            ///   `Some(Err(Error::RequestConstruction(..)))`;
             /// * a **transport failure** → `Some(Err(..))`;
             /// * a **non-success HTTP status** (anything outside `2xx`) → `Some(Err(Error::UnexpectedStatus))`
             ///   — the body is *never* decoded as `T`, so an error payload can't masquerade as a page. The
@@ -2892,7 +2873,7 @@ mod support {
                 let Ok(field) = value.to_str() else {
                     continue;
                 };
-                for entry in split_link_entries(field) {
+                for entry in split_outside(field, b',', true) {
                     if let Some((uri, true)) = parse_link_entry(entry) {
                         return Some(uri);
                     }
@@ -2900,11 +2881,14 @@ mod support {
             }
             None
         }
-        /// Split one `Link` header field value into its comma-separated entries, treating commas inside the
-        /// `<…>` URI-reference or inside a quoted parameter string as literal (not separators).
-        fn split_link_entries(field: &str) -> Vec<&str> {
-            let bytes = field.as_bytes();
-            let mut entries = Vec::new();
+        /// Split `text` on `delim`, treating a delimiter inside a quoted string as literal (a backslash
+        /// escapes the next character there). With `respect_angles`, a delimiter inside a `<…>`
+        /// URI-reference is literal too, and a quote inside one opens no quoted string. A `Link` field
+        /// value splits into entries on `,` with angles respected; an entry's parameter section splits on
+        /// `;` without.
+        fn split_outside(text: &str, delim: u8, respect_angles: bool) -> Vec<&str> {
+            let bytes = text.as_bytes();
+            let mut parts = Vec::new();
             let mut start = 0;
             let mut in_angle = false;
             let mut in_quote = false;
@@ -2914,19 +2898,19 @@ mod support {
                     b'\\' if in_quote => {
                         i += 1;
                     }
-                    b'<' if !in_quote => in_angle = true,
-                    b'>' if !in_quote => in_angle = false,
+                    b'<' if respect_angles && !in_quote => in_angle = true,
+                    b'>' if respect_angles && !in_quote => in_angle = false,
                     b'"' if !in_angle => in_quote = !in_quote,
-                    b',' if !in_angle && !in_quote => {
-                        entries.push(&field[start..i]);
+                    byte if byte == delim && !in_angle && !in_quote => {
+                        parts.push(&text[start..i]);
                         start = i + 1;
                     }
                     _ => {}
                 }
                 i += 1;
             }
-            entries.push(&field[start..]);
-            entries
+            parts.push(&text[start..]);
+            parts
         }
         /// Parse a single `Link` entry into its URI-reference plus whether its `rel` names `next`. Returns
         /// `None` if no `<…>` URI is present.
@@ -2939,7 +2923,7 @@ mod support {
                 return None;
             }
             let mut is_next = false;
-            for param in split_params(&entry[close + 1..]) {
+            for param in split_outside(&entry[close + 1..], b';', false) {
                 let param = param.trim();
                 let Some(eq) = param.find('=') else {
                     continue;
@@ -2956,28 +2940,6 @@ mod support {
                 }
             }
             Some((uri, is_next))
-        }
-        /// Split an entry's parameter section on `;`, treating semicolons inside a quoted string as literal.
-        fn split_params(text: &str) -> Vec<&str> {
-            let bytes = text.as_bytes();
-            let mut parts = Vec::new();
-            let mut start = 0;
-            let mut in_quote = false;
-            let mut i = 0;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'\\' if in_quote => i += 1,
-                    b'"' => in_quote = !in_quote,
-                    b';' if !in_quote => {
-                        parts.push(&text[start..i]);
-                        start = i + 1;
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            parts.push(&text[start..]);
-            parts
         }
     }
     mod response {
@@ -3029,9 +2991,10 @@ mod support {
         //!
         //! ## Bring-your-own timing (no async timer in the runtime)
         //!
-        //! The runtime has no async timer of its own and never pulls in `tokio`, so the *wait* between
-        //! attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff as a boxed
-        //! `Future` that the caller builds with their own runtime's timer (e.g. `tokio::time::sleep`).
+        //! The runtime has no async timer of its own, and the retry path never pulls in `tokio`, so the
+        //! *wait* between attempts is supplied by the caller: [`RetryPolicy::retry`] returns the backoff
+        //! as a boxed `Future` that the caller builds with their own runtime's timer (e.g.
+        //! `tokio::time::sleep`).
         //! [`RetryBackend`] simply `.await`s that future; it never sleeps itself. A pure
         //! [`exponential_backoff`] helper computes the delay [`Duration`] a policy hands to its timer, so
         //! exponential backoff needs no runtime support either.
@@ -3153,7 +3116,7 @@ mod support {
         /// [`RetryBackend`] calls [`retry`](RetryPolicy::retry) after each attempt. Returning
         /// `Some(future)` means "retry after awaiting this future"; the future carries the backoff delay,
         /// built with the caller's own async timer (e.g. `tokio::time::sleep`) — this is how timing stays
-        /// caller-owned and the runtime avoids a `tokio` dependency. Returning `None` stops retrying and the
+        /// caller-owned and the retry path avoids a `tokio` dependency. Returning `None` stops retrying and the
         /// last outcome is returned.
         pub trait RetryPolicy: MaybeSend + MaybeSync {
             /// Called after attempt `attempt` (0-based) produced `outcome`. Return `Some(wait)` to retry
@@ -3246,7 +3209,7 @@ mod support {
         //!
         //! The seam is a `dyn`-able trait ([`HttpBackend`]) so the generated `Client` stays non-generic:
         //! [`super::ClientCore`] holds an `Arc<dyn HttpBackend>` rather than a type parameter. The async
-        //! method returns a manually boxed future (`Pin<Box<dyn Future + Send + '_>>`) instead of using
+        //! method returns a manually boxed future ([`ExecuteFuture`], `Send` off wasm) instead of using
         //! `async-trait`, so std's `Future`/`Pin`/`Box` carry the abstraction.
         //!
         //! The currency is reqwest's own types: the trait abstracts *how* a `reqwest::Request` runs, not a
@@ -3336,9 +3299,9 @@ mod support {
         //! unchanged — the abstraction collapses away off wasm.
         //!
         //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so those
-        //! aliases (`ExecuteFuture`, `RetryWait`, `TokenFuture`, `TokenProvider`) are instead `cfg`-gated to
-        //! carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
+        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
+        //! boxed future, stream, and callback alias in the runtime, public or private, is instead
+        //! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
         //! source that builds on both targets.
         /// `Send` on native targets; a vacuous marker on `wasm32`.
         ///
@@ -3364,8 +3327,9 @@ mod support {
         impl<T: ?Sized> MaybeSync for T {}
     }
     mod stream {
-        //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`) or
-        //! newline-delimited JSON (`application/x-ndjson`). A streaming operation returns an
+        //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`),
+        //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
+        //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
         //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
         //! `next().await` convenience method. Reqwest's body stream keeps delivery incremental on native
         //! and browser targets; dropping `EventStream` drops that body stream and cancels the transfer.
@@ -3451,7 +3415,8 @@ mod support {
             /// RFC 7464 JSON Text Sequences (`application/json-seq` / `application/*+json-seq`).
             JsonSequence,
         }
-        /// A typed async stream of items decoded from a streaming response body (SSE or ndjson).
+        /// A typed async stream of items decoded from a streaming response body (SSE, ndjson, or a JSON
+        /// Text Sequence).
         ///
         /// Yielded by generated operation methods whose success response is a streaming media type, in
         /// place of the usual `ResponseValue<T>`. Drive it manually:
@@ -3562,6 +3527,9 @@ mod support {
                 }
             }
             /// Enable automatic reconnects using a caller-owned policy and timer.
+            ///
+            /// Returns [`Error::RequestConstruction`] when the stream holds no request it can resend,
+            /// because the operation's request could not be cloned (a streaming request body, for example).
             pub fn with_reconnect(
                 mut self,
                 policy: Arc<dyn ReconnectPolicy>,
@@ -4204,11 +4172,10 @@ mod support {
     };
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
-        build_url, build_url_on, build_url_with_query_string,
-        build_url_with_query_string_on, classify_error, classify_error_bytes,
-        classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-        decode_success_with, decode_text_body, read_error_body, send, unexpected_status,
-        StatusSpec,
+        build_url_on, build_url_with_query_string_on, classify_error,
+        classify_error_bytes, classify_error_text, decode_success, decode_success_bytes,
+        decode_success_text, decode_success_with, decode_text_body, read_error_body,
+        send, unexpected_status, StatusSpec,
     };
     pub use error::{
         ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError,
@@ -4220,7 +4187,7 @@ mod support {
         encode, serialize_deep_object, serialize_delimited, serialize_form,
         serialize_form_body, serialize_label, serialize_matrix,
         serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty,
-        FormStyle, ParameterError, PercentEncoding,
+        FormStyle, PercentEncoding,
     };
     pub use paginate::{next_link, LinkPaginator};
     pub use response::ResponseValue;
@@ -4909,32 +4876,6 @@ pub mod types {
     pub struct NullOnlyProperty {
         #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
         pub x: Option<NullOnlyPropertyx>,
-    }
-    #[derive(Debug, Clone)]
-    pub enum NullOnlyPropertyx84222325 {}
-    impl<'de> serde::Deserialize<'de> for NullOnlyPropertyx84222325 {
-        fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            Err(
-                serde::de::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
-    }
-    impl serde::Serialize for NullOnlyPropertyx84222325 {
-        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            Err(
-                serde::ser::Error::custom(
-                    "no JSON value can inhabit schema NullOnlyPropertyx84222325",
-                ),
-            )
-        }
     }
     #[derive(Debug, Clone)]
     pub enum NullOnlyPropertyx {}
@@ -6303,6 +6244,7 @@ pub mod types {
     pub type XmlOrderid = i64;
     pub type XmlOrdersku = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename = "xml-receipt")]
     pub struct XmlReceipt {
         #[serde(rename = "ReceiptCode")]
         pub code: XmlReceiptcode,
@@ -6384,15 +6326,11 @@ pub mod types {
         )]
         pub tags: Option<RequestBodytags0d6778a5>,
     }
-    pub type Token = bytes::Bytes;
     pub type Token84222325 = String;
-    pub type Cursor = bytes::Bytes;
     pub type Cursor84222325 = String;
     pub type RequestBody43755b84 = bytes::Bytes;
-    pub type Cursor394a9248 = bytes::Bytes;
     pub type Cursor842223252 = String;
     pub type RequestBodydigest = bytes::Bytes;
-    pub type RequestBodypreviousC67f70f9 = bytes::Bytes;
     pub type RequestBodyprevious = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
@@ -6408,7 +6346,6 @@ pub mod types {
         pub digest: Option<ResponseBodydigest>,
     }
     pub type RequestBodyfile = bytes::Bytes;
-    pub type RequestBodythumb1536c7fa = bytes::Bytes;
     pub type RequestBodythumb = bytes::Bytes;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody20d50470 {
@@ -10887,6 +10824,16 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         inner: Client,
         runtime: support::BlockingRuntime,
     }
+    /// Build the current-thread runtime every `BlockingClient` constructor owns, reporting a
+    /// failure as the constructors' `RequestConstruction` error.
+    #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+    #[allow(clippy::result_large_err)]
+    fn new_runtime() -> Result<
+        support::BlockingRuntime,
+        support::Error<std::convert::Infallible>,
+    > {
+        support::BlockingRuntime::new().map_err(support::Error::request_construction)
+    }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     #[forbid(unsafe_code)]
     #[allow(
@@ -10902,8 +10849,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::new(base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied `reqwest::Client`.
@@ -10912,8 +10858,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_client(client, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Build a blocking client over a caller-supplied transport backend.
@@ -10922,8 +10867,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             base_url: &str,
         ) -> Result<Self, support::Error<std::convert::Infallible>> {
             let inner = Client::with_backend(backend, base_url)?;
-            let runtime = support::BlockingRuntime::new()
-                .map_err(support::Error::request_construction)?;
+            let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
         /// Borrow the wrapped async client.

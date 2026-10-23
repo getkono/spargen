@@ -6,7 +6,7 @@ use quote::quote;
 use crate::ir::{Api, MediaType, Operation, ParamLoc, Ty, TypeKind};
 use crate::name::Names;
 
-use super::body::body_send_tokens;
+use super::body::{accept_tokens, body_send_tokens};
 use super::dispatch::{
     attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
 };
@@ -145,6 +145,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             }
         }
     });
+    let accept = accept_tokens(operation, bindings);
     let body_send = body_send_tokens(operation, api, names, bindings);
     let attach_auth = attach_auth_tokens(operation, api, request_binding);
     let error_branch = error_branch_tokens(operation, api, names, error_ident);
@@ -201,6 +202,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             #cookie_init
             #(#cookies)*
             #cookie_attach
+            #accept
             #body_send
             #attach_auth
             let #request_binding = #request_binding
@@ -295,7 +297,7 @@ pub(super) fn operation_args(
     }
     if let Some(params_binding) = &bindings.params {
         // `impl Into<Option<..>>` accepts the bundle directly as well as `None`/`Some(..)`, so a
-        // caller who sets optional parameters no longer wraps them in `Some`.
+        // caller who sets optional parameters passes the bundle without wrapping it in `Some`.
         args.push(quote! { #params_binding: impl Into<Option<#params_ident>> });
         forwards.push(quote! { #params_binding });
     }

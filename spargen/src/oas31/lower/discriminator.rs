@@ -7,8 +7,9 @@ use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
     resolve_discriminator_targets,
 };
-use crate::oas31::{Schema, SchemaOr};
+use crate::oas31::{Resolver, Schema, SchemaOr};
 
+use super::shape::schema_has_union;
 use super::{DiscriminatorMembers, LowerCtx};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -105,7 +106,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(discriminator) = &schema.discriminator else {
             return;
         };
-        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+        if schema_has_union(schema) {
             return;
         }
         resolve_discriminator_targets(self.resolver, self.diags, discriminator);
@@ -318,11 +319,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// Dropping the name there would rename those variants in documents that generate today; the
 /// root-only filter confines the change to what previously rejected. The name is no component
 /// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
-pub(super) fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
+pub(super) fn member_component_name<'m>(
+    member: &'m SchemaOr,
+    resolver: &Resolver<'_>,
+) -> Option<&'m str> {
     let SchemaOr::Schema(schema) = member else {
         return None;
     };
-    let in_sub_file = schema.provenance.span.is_some_and(|span| span.file != root);
+    let in_sub_file = resolver.written_in(&schema.provenance) != resolver.root_id();
     schema
         .reference
         .as_deref()?

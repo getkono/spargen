@@ -76,6 +76,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if classify_media_range(media_essence(media_name)).is_some()
             || media_essence_is_suffix_range(media_essence(media_name))
         {
+            // E009 case: request-range
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
                     "media type `{media_name}` is a media range, which describes a family rather \
@@ -92,6 +93,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // *request* body has no representation here, so it stays rejected (narrowed `E009`) rather
         // than silently degrade. (`choose_media` only picks it when no whole-body alternative exists.)
         if media.stream_framing().is_some() {
+            // E009 case: streaming-request
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
                     "media type `{media_name}` is only supported for streaming response bodies, \
@@ -128,6 +130,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if media == MediaType::Multipart
             && self.form_body_is_not_object(ty, object.schema.is_some())
         {
+            // E009 case: form-body-not-object
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(
                     "a `multipart/form-data` request body must be an object schema; its \
@@ -148,6 +151,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         if let Some(ty) = ty {
             if !self.raw_body_compatible(media, ty) {
+                // E009 case: raw-schema
                 Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                     .message(format!(
                         "media type `{media_name}` requires a string-like or binary schema that can be sent as a raw body"
@@ -162,6 +166,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `None` the wire cannot carry. An absent body is `required: false`, a different
             // construct, so the `null` is refused rather than reinterpreted as one.
             if ty.nullable && (media == MediaType::Text || self.is_bytes(ty)) {
+                // E009 case: raw-null
                 Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                     .message(format!(
                         "this `{media_name}` request body is sent as raw content, which has no \
@@ -180,6 +185,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if media == MediaType::FormUrlEncoded
             && self.form_body_is_not_object(ty, object.schema.is_some())
         {
+            // E009 case: form-body-not-object
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(
                     "an `application/x-www-form-urlencoded` request body must be an object \

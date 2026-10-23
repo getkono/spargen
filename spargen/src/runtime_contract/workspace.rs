@@ -5,8 +5,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
 ///
 /// Each outcome carries only what is read from it: the path searched from exists only where no
-/// root was found, the one place it is named. It was once a field of every outcome, and on the
-/// others it was never read, so nothing could observe what it held (#202).
+/// root was found, the one place it is named (#202).
 pub(super) enum WorkspaceRoot {
     /// The consumer manifest itself — `[package]` and `[workspace]` in one file — at its
     /// absolutized path. It is already parsed and already in `manifests`, so it must not be read or
@@ -91,7 +90,7 @@ pub(super) fn workspace_root(
     }
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
     // The nearest candidate that exists and does not parse. Remembered, never acted on: a valid
-    // root further up still wins, exactly as before, and nothing here can tell whether this file
+    // root further up still wins, and nothing here can tell whether this file
     // was the root at all — the walk skipped it precisely because it could not read it.
     let mut unreadable = None;
     while let Some(candidate_dir) = directory {

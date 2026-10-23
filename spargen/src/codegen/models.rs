@@ -177,11 +177,13 @@ fn emit_type_def(
         TypeKind::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
-            // A root `xml.name` names the element quick-xml writes for this struct at the root of
-            // an XML body. serde hands a struct's (renamed) name to the serializer, and only
-            // quick-xml reads it, so this changes no other wire.
+            // A root `xml.name`, or a component's inferred one, names the element quick-xml writes
+            // for this struct at the root of an XML body. serde hands a struct's (renamed) name to
+            // the serializer, and only quick-xml reads it, so this changes no other wire. A name
+            // equal to the identifier is the serde name already.
             let xml_root = types
                 .xml_root_name(id)
+                .filter(|name| *name != ident.to_string())
                 .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
@@ -491,7 +493,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::CodegenOptions;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{Api, Docs, Info, Prim, Ty, TypeDef, TypeGraph, TypeKind};
 
     /// Every capitalised identifier in `tokens` that is written bare — not after `::` or `.`, and
@@ -599,7 +601,7 @@ mod tests {
             types,
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         let file: syn::File = syn::parse2(super::emit_models(
             &api,
             &names,

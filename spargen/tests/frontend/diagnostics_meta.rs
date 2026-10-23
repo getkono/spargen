@@ -99,6 +99,25 @@ fn the_location_oracle_sees_each_lost_location() {
     let key = reasons(located(Code::InvalidInput, "", 0, (2, 15, 16), "m"));
     assert_eq!(key.len(), 1, "{key:?}");
     assert!(key[0].contains("the pointer is empty"), "{key:?}");
+    // A non-string key is addressed by the mapping that holds it (#923): the empty pointer is its
+    // location only where the root mapping itself holds such a key.
+    let non_string = located(
+        Code::InvalidInput,
+        "",
+        0,
+        (2, 15, 16),
+        "YAML object keys must be strings",
+    );
+    let nested = oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\nx: { 1: one }\n",
+    );
+    assert_eq!(nested.len(), 1, "{nested:?}");
+    assert!(oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\n1: one\n"
+    )
+    .is_empty());
     // The validator's verdict on the root value is about the root, however short the YAML parser
     // spans a flow collection (`[]` to its closing bracket's start), and so is a stream that is
     // not one document.
@@ -626,4 +645,27 @@ fn relocation_moves_every_schema_behind_a_reference() {
     assert_eq!(root["openapi"], "3.1.0");
     let bare = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n";
     assert!(oracles::relocate(bare).is_none());
+}
+
+/// [`oracles::unreferenced_copies`] reports a hash-suffixed copy of a component that nothing names
+/// (#926), and passes the same copy once something names it, a component allocated a suffixed
+/// name because its own collides with a reserved one (`Box`), and an unreferenced
+/// `<Hint>Constraint` copy, which is #924's.
+#[test]
+fn the_unreferenced_copy_oracle_sees_a_copy_nothing_names() {
+    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+                schemas:\n    S0: { type: object }\n    Box: { type: object }\n";
+    let module = |items: &str| format!("pub mod types {{\n{items}\n}}\npub fn op() {{}}\n");
+    let copy =
+        module("    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub struct Box00ba9f5f {}");
+    assert_eq!(
+        oracles::unreferenced_copies(&copy, spec),
+        ["`S071def3c4` is emitted, but nothing names it and it is no component"],
+    );
+    let named = module(
+        "    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub type Alias = S071def3c4;",
+    );
+    assert!(oracles::unreferenced_copies(&named, spec).is_empty());
+    let constraint = module("    pub struct S0 {}\n    pub type S0ConstraintD3cb2251 = f64;");
+    assert!(oracles::unreferenced_copies(&constraint, spec).is_empty());
 }

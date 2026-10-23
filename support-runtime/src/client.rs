@@ -56,10 +56,8 @@ impl Default for ClientConfig {
 /// the backend (see [`crate::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
 /// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
 ///
-/// The generated `Client` exposes `Client::new(base_url)`,
-/// `Client::with_client(reqwest::Client, base_url)`, and
-/// `Client::with_backend(Arc<dyn HttpBackend>, base_url)`, plus one `#[inline]` method per operation
-/// that delegates to the non-generic dispatch routines.
+/// The generated `Client` wraps one of these and documents its own constructors; each of its
+/// operation methods delegates to the shared dispatch routines.
 #[derive(Debug, Clone)]
 pub struct ClientCore {
     http: reqwest::Client,

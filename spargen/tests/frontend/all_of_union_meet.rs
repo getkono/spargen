@@ -11,7 +11,9 @@ use super::*;
 /// public types nothing referred to (#561), such as `Umember0`, a trial-matched `oneOf` with a
 /// `serde_json::Value` variant, beside the met union `U`. Each spelling of the meet now withholds
 /// them: as an `allOf` member, beside an `allOf`, and beside a `$ref` alone or with keywords, where
-/// the keywords' own lowered type, `UconstraintConstraint`, is withheld too (#571). What
+/// the keywords' own lowered type, `UconstraintConstraint`, is withheld too (#571), and so is the
+/// object composition the union was met with, `Ucomposition`, as an `allOf` member and beside an
+/// `allOf` (#852). What
 /// something can still name stays: a branch the met union refers to, a `$ref`'d component first
 /// lowered inside the union, and a `$ref`'d subschema the resolver's memo hands a later `$ref`.
 #[test]
@@ -33,7 +35,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
     let refiner = "{ properties: { a: { type: string } } }";
     let b = "B: { type: object, properties: { a: { type: string } } }";
     // Each spelling, with the types it no longer emits and the ones it must keep.
-    let cases: [(&str, String, &[&str], &[&str]); 7] = [
+    let cases: [(&str, String, &[&str], &[&str]); 9] = [
         (
             "an allOf member",
             format!("U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}"),
@@ -105,6 +107,18 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
             ),
             &["Umember0"],
             &["U", "Umember0Variant0", "X"],
+        ),
+        (
+            "an allOf member beside an object member",
+            format!("{b}\n    U: {{ allOf: [{{ $ref: '#/components/schemas/B' }}, {{ anyOf: [{{}}, {{}}] }}] }}"),
+            &["Ucomposition"],
+            &["B", "U"],
+        ),
+        (
+            "beside an allOf with an object member",
+            format!("{b}\n    U: {{ anyOf: [{{}}, {{}}], allOf: [{{ $ref: '#/components/schemas/B' }}] }}"),
+            &["Ucomposition"],
+            &["B", "U"],
         ),
     ];
     for (spelling, schemas, withheld, kept) in cases {
@@ -1183,4 +1197,200 @@ fn an_all_of_union_member_beside_a_union_is_met_before_its_branches_merge() {
             "{spelling}: the member's unmerged lowering is emitted unused:\n{types}"
         );
     }
+}
+
+/// An `allOf` member whose `type` names `object` beside another category admits that category's
+/// instances too, so a union met with it keeps every branch of a category the array names, as the
+/// sibling spelling `{type: [object, string], oneOf: [...]}` does (#827). Read as an object member,
+/// it dropped the `string` branch as excluded (`W011`) and collapsed `Pick` to an empty struct
+/// that refuses every string. A branch of a category the array omits is still reported, and an
+/// object member beside the array keeps the composition an object, so there the `string` branch
+/// is excluded, and the array beside an object member alone still merges into that object. An
+/// untyped object member (`properties` or `required` alone) constrains objects alone, so beside it
+/// the `string` branch stays and the object branch is refined. Beside scalar members alone the
+/// array generates their meet, and a bundle `$ref` target's array is read as its object alone.
+#[test]
+fn an_all_of_type_array_naming_object_keeps_the_union_branches_of_its_categories() {
+    let excluded = |report: &Report| -> Vec<String> {
+        messages_for(report, Code::DeclarationHasNoEffect)
+            .into_iter()
+            .filter(|message| message.starts_with("union member "))
+            .map(str::to_owned)
+            .collect()
+    };
+    let union = "oneOf: [ { type: object }, { type: string } ]";
+    let wider = "oneOf: [ { type: object }, { type: string }, { type: integer } ]";
+    let array = "type: [object, string]";
+    // Each spelling, with the union branches the meet excludes.
+    let cases: [(&str, String, &[&str]); 8] = [
+        (
+            "the sibling spelling",
+            format!("{{ {array}, {union} }}"),
+            &[],
+        ),
+        (
+            "an allOf member",
+            format!("{{ allOf: [ {{ {array} }}, {{ {union} }} ] }}"),
+            &[],
+        ),
+        (
+            "an allOf member nested in an inner allOf",
+            format!("{{ allOf: [ {{ {array} }}, {{ allOf: [ {{ {union} }} ] }} ] }}"),
+            &[],
+        ),
+        (
+            "beside an allOf",
+            format!("{{ {union}, allOf: [ {{ {array} }} ] }}"),
+            &[],
+        ),
+        (
+            "an allOf member with object keywords, a branch of an omitted category beside it",
+            format!(
+                "{{ allOf: [ {{ {array}, properties: {{ a: {{ type: string }} }} }}, {{ {wider} \
+                 }} ] }}"
+            ),
+            &["union member 2"],
+        ),
+        // An untyped object member constrains objects alone, so every string still satisfies
+        // it: it refines the union's object branch and leaves the `string` branch.
+        (
+            "an allOf member beside an untyped object member",
+            format!(
+                "{{ allOf: [ {{ {array} }}, {{ properties: {{ a: {{ type: string }} }} }}, {{ \
+                 {union} }} ] }}"
+            ),
+            &[],
+        ),
+        (
+            "beside an allOf of the array and an untyped object member",
+            format!(
+                "{{ {union}, allOf: [ {{ {array} }}, {{ properties: {{ a: {{ type: string }} \
+                 }} }} ] }}"
+            ),
+            &[],
+        ),
+        (
+            "an allOf member beside an object member",
+            format!(
+                "{{ allOf: [ {{ {array} }}, {{ type: object, properties: {{ a: {{ type: string \
+                 }} }} }}, {{ {union} }} ] }}"
+            ),
+            &["union member 1"],
+        ),
+    ];
+    for (spelling, pick, expected) in cases {
+        let (report, code) =
+            generate_with_code(&with_schemas("3.1.0", &format!("    Pick: {pick}\n")));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{spelling}: {report:#?}"
+        );
+        let excluded = excluded(&report);
+        assert_eq!(excluded.len(), expected.len(), "{spelling}: {excluded:#?}");
+        for (message, member) in excluded.iter().zip(expected) {
+            assert!(message.starts_with(member), "{spelling}: {message}");
+        }
+        let variants = enum_variants(&code, "Pick");
+        if expected == ["union member 1"] {
+            assert!(
+                variants.is_empty(),
+                "{spelling}: an object composition:\n{code}"
+            );
+            assert_eq!(
+                declared_fields(&code, "Pick"),
+                ["a"],
+                "{spelling}: the object member's field is kept:\n{code}"
+            );
+        } else {
+            assert_eq!(variants.len(), 2, "{spelling}: {variants:#?}\n{code}");
+            assert!(
+                variants.iter().any(|variant| {
+                    let payload = variant.split_once("(Box<").map(|(_, rest)| rest);
+                    payload
+                        .and_then(|rest| rest.strip_suffix(">)"))
+                        .is_some_and(|name| alias_target(&code, name).as_deref() == Some("String"))
+                }),
+                "{spelling}: the `string` branch is a variant: {variants:#?}\n{code}"
+            );
+            if spelling.contains("untyped") {
+                assert!(
+                    variants.iter().any(|variant| {
+                        variant
+                            .split_once("(Box<")
+                            .and_then(|(_, rest)| rest.strip_suffix(">)"))
+                            .is_some_and(|name| declared_fields(&code, name) == ["a"])
+                    }),
+                    "{spelling}: the untyped member refines the object branch: {variants:#?}\n{code}"
+                );
+            }
+        }
+        assert_no_untyped_value(&code);
+    }
+    // An untyped `required` alone constrains objects alone too, so the `string` branch stays.
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        &format!("    Pick: {{ allOf: [ {{ {array} }}, {{ required: [a] }}, {{ {union} }} ] }}\n"),
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(excluded(&report).is_empty(), "{report:#?}");
+    assert_eq!(enum_variants(&code, "Pick").len(), 2, "{code}");
+    // Beside scalar members alone, the array is the union of its categories met with them, which
+    // generates their meet: rejected as an object/scalar mix (`E013`) before #827.
+    for scalar in ["{ type: string }", "{ type: string, minLength: 2 }"] {
+        let (report, code) = generate_with_code(&with_schemas(
+            "3.1.0",
+            &format!("    Pick: {{ allOf: [ {{ {array} }}, {scalar} ] }}\n"),
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{scalar}: {report:#?}"
+        );
+        assert_eq!(
+            alias_target(&code, "Pick").as_deref(),
+            Some("String"),
+            "{scalar}:\n{code}"
+        );
+    }
+    // A bundle target's array is read as its object alone, as before #827, so the union of its
+    // categories, which the target's memoised contribution would keep reachable, is not emitted.
+    for other in ["{ $ref: '#/components/schemas/Cat' }", "{ type: string }"] {
+        let mut spec = with_schemas(
+            "3.1.0",
+            &format!("    Pick: {{ allOf: [ {{ $ref: '#/x-defs/p' }}, {other} ] }}\n"),
+        );
+        spec.push_str(&format!(
+            "x-defs:\n  p: {{ {array}, properties: {{ a: {{ type: string }} }} }}\n"
+        ));
+        let (report, code) = generate_with_code(&spec);
+        assert!(
+            !types_module(&code).contains("pub enum PMember"),
+            "{other}: the target's union is emitted unused: {report:#?}\n{code}"
+        );
+    }
+    let mut spec = with_schemas(
+        "3.1.0",
+        "    Pick: { allOf: [ { $ref: '#/x-defs/p' }, { $ref: '#/components/schemas/Cat' } ] }\n",
+    );
+    spec.push_str(&format!(
+        "x-defs:\n  p: {{ {array}, properties: {{ a: {{ type: string }} }} }}\n"
+    ));
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(declared_fields(&code, "Pick"), ["a", "kind"], "{code}");
+    // Beside an object member alone, the array still merges into that object, and the union of
+    // its categories it was also lowered to is not emitted unused.
+    let (report, code) = generate_with_code(&with_schemas(
+        "3.1.0",
+        &format!(
+            "    Pick: {{ allOf: [ {{ $ref: '#/components/schemas/Cat' }}, {{ {array} }} ] }}\n"
+        ),
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(declared_fields(&code, "Pick"), ["kind"], "{code}");
+    assert!(
+        !types_module(&code).contains("pub enum PickMember1"),
+        "the member's own union is emitted unused:\n{code}"
+    );
 }

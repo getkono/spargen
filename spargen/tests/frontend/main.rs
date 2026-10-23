@@ -9,13 +9,13 @@
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
 //! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413) and to a real location
-//! (#454), and hold every union a `Generated` run emits to variants a value can tell apart (#402).
-//! The last two oracles live in `oracles/`, shared with `fuzz_frontend.rs` and
-//! `lowering_props.rs`.
+//! (#454), hold every union a `Generated` run emits to variants a value can tell apart (#402),
+//! and hold its module to no unused second copy of a type (#926). The last three oracles live in
+//! `oracles/`, shared with `fuzz_frontend.rs` and `lowering_props.rs`.
 //!
 //! This file holds that shared harness; the fixtures sit in one module per construct family or
-//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies`, ...), each reaching the
-//! harness through `use super::*`.
+//! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies_streaming`, ...), each
+//! reaching the harness through `use super::*`.
 
 use camino::Utf8PathBuf;
 use spargen::{
@@ -32,8 +32,11 @@ mod all_of_meet_conflicts;
 mod all_of_merge;
 mod all_of_nullability;
 mod all_of_union_meet;
+mod all_of_union_spellings;
 mod audit_reach;
-mod bodies;
+mod bodies_binary;
+mod bodies_media_keys;
+mod bodies_streaming;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;
@@ -43,11 +46,16 @@ mod encoding_headers;
 mod parameters;
 mod pattern_properties;
 mod placement;
-mod recursion;
+mod recursion_aliases;
+mod recursion_cycles;
+mod recursion_reservations;
 mod ref_sibling_categories;
 mod ref_sibling_rejections;
 mod ref_sibling_unions;
 mod refs;
+mod refs_bundle_identity;
+mod refs_remote;
+mod refs_sub_files;
 mod requirements;
 mod responses;
 mod schema_keywords;
@@ -62,6 +70,7 @@ mod unions_null_branches;
 mod unions_siblings;
 mod untyped_branch_nullability;
 mod xml;
+mod xml_ref_elements;
 
 /// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
 /// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
@@ -71,9 +80,11 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
 }
 
 /// `spargen::generate`, then [`assert_claims_hold`] and [`assert_located`] on the report, and
-/// [`assert_distinguishable_variants`] on the module a `Generated` run wrote. Every fixture here
-/// reaches `generate` through this function, so every diagnostic any fixture provokes is held to
-/// its run, and every union any fixture emits is held to variants a value can tell apart.
+/// [`assert_distinguishable_variants`] and [`assert_no_unreferenced_copy`] on the module a
+/// `Generated` run wrote. Every fixture here reaches `generate` through this function, so every
+/// diagnostic any fixture provokes is held to its run, every union any fixture emits is held to
+/// variants a value can tell apart, and no module any fixture generates keeps a second lowering of
+/// a schema that nothing names.
 fn run_generate(build: &Build) -> Report {
     let report = spargen::generate(build);
     assert_claims_hold(&report);
@@ -81,8 +92,20 @@ fn run_generate(build: &Build) -> Report {
     if report.outcome() == Outcome::Generated {
         let code = std::fs::read_to_string(build.output()).unwrap_or_default();
         assert_distinguishable_variants(&report, &code);
+        assert_no_unreferenced_copy(build.spec(), &code);
     }
     report
+}
+
+/// Fail where `code`, the module generated from `spec`, emits a second copy of a type that nothing
+/// names ([`oracles::unreferenced_copies`], #926).
+fn assert_no_unreferenced_copy(spec: &Spec, code: &str) {
+    let root = std::fs::read_to_string(spec.path()).unwrap_or_default();
+    let copies = oracles::unreferenced_copies(code, &root);
+    assert!(
+        copies.is_empty(),
+        "a schema lowered twice left its unused copy emitted: {copies:#?}"
+    );
 }
 
 /// `spargen::check`, then [`assert_claims_hold`] and [`assert_located`] on the report, as

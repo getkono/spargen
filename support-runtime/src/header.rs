@@ -23,7 +23,9 @@ pub enum HeaderShape {
     Scalar,
     /// A comma-separated list.
     Array,
-    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set.
+    /// Alternating `key,value` pairs, or `key=value` pairs when `explode` is set. A pair that is
+    /// incomplete (a trailing key with no value, or an exploded member without `=`) is dropped
+    /// without an error.
     Object,
     /// A `content`-typed header carrying JSON.
     Json,
@@ -87,7 +89,11 @@ impl std::error::Error for HeaderError {}
 /// Parse one documented response header, or `Ok(None)` when it is absent.
 ///
 /// Repeated occurrences are joined with `,` first, which is the RFC 9110 field-list rule and the
-/// same shape a non-exploded array is written in.
+/// same shape a non-exploded array is written in. [`HeaderShape::SetCookie`] is the exception:
+/// each occurrence is decoded as one list item and none are joined.
+///
+/// An occurrence that is not valid UTF-8 is [`HeaderError::NotUtf8`], and a value that does not
+/// deserialize into `T` is [`HeaderError::Parse`].
 pub fn parse_header<T: DeserializeOwned>(
     headers: &HeaderMap,
     name: &'static str,
@@ -104,17 +110,10 @@ pub fn parse_header<T: DeserializeOwned>(
     }
     // `Set-Cookie` is decoded per occurrence and never joined; see [`HeaderShape::SetCookie`].
     if shape == HeaderShape::SetCookie {
-        let lines =
-            |scalars| Value::Array(parts.iter().map(|part| scalar(part, scalars)).collect());
-        if let Ok(value) = serde_json::from_value(lines(Scalars::Text)) {
-            return Ok(Some(value));
-        }
-        return serde_json::from_value(lines(Scalars::Json))
-            .map(Some)
-            .map_err(|error| HeaderError::Parse {
-                name,
-                message: error.to_string(),
-            });
+        return text_then_json(name, |scalars| {
+            Value::Array(parts.iter().map(|part| scalar(part, scalars)).collect())
+        })
+        .map(Some);
     }
     let raw = parts.join(",");
     // A `content`-typed header is JSON text, with no `simple` ambiguity to resolve: it is parsed
@@ -122,26 +121,33 @@ pub fn parse_header<T: DeserializeOwned>(
     if shape == HeaderShape::Json {
         return serde_json::from_str(&raw)
             .map(Some)
-            .map_err(|error| HeaderError::Parse {
-                name,
-                message: error.to_string(),
-            });
+            .map_err(|error| parse_error(name, &error));
     }
-    // `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the
-    // number 1 — the encoding cannot tell them apart. The target type can: try the text as-is
-    // first, and fall back to its JSON reading only if that does not deserialize. The error
-    // reported is the JSON-flavored one, which is the more informative of the two.
-    let textual = reconstruct(&raw, shape, explode, Scalars::Text);
-    if let Ok(value) = serde_json::from_value(textual) {
-        return Ok(Some(value));
+    text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars)).map(Some)
+}
+
+/// Deserialize the value `build` rebuilds from header text, reading every token as text first.
+///
+/// `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the number
+/// 1 — the encoding cannot tell them apart. The target type can: the text-only reading is tried
+/// first, and the JSON reading only if that does not deserialize. The error reported is the
+/// JSON-flavored one, which is the more informative of the two.
+fn text_then_json<T: DeserializeOwned>(
+    name: &'static str,
+    build: impl Fn(Scalars) -> Value,
+) -> Result<T, HeaderError> {
+    if let Ok(value) = serde_json::from_value(build(Scalars::Text)) {
+        return Ok(value);
     }
-    let typed = reconstruct(&raw, shape, explode, Scalars::Json);
-    serde_json::from_value(typed)
-        .map(Some)
-        .map_err(|error| HeaderError::Parse {
-            name,
-            message: error.to_string(),
-        })
+    serde_json::from_value(build(Scalars::Json)).map_err(|error| parse_error(name, &error))
+}
+
+/// The [`HeaderError::Parse`] for header `name`, carrying serde's message.
+fn parse_error(name: &'static str, error: &serde_json::Error) -> HeaderError {
+    HeaderError::Parse {
+        name,
+        message: error.to_string(),
+    }
 }
 
 /// How a bare header token is interpreted when rebuilding a JSON value.
@@ -166,9 +172,10 @@ pub fn require_header<T: DeserializeOwned>(
 /// Rebuild a JSON value from `simple`-style header text.
 fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
     match shape {
+        HeaderShape::Scalar => scalar(raw, scalars),
         // `SetCookie` is handled before any joining happens, and `Json` before any reconstruction,
         // both in `parse_header`.
-        HeaderShape::Json | HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
+        HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
         HeaderShape::Array => {
             Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
         }

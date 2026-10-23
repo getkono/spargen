@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics};
 use crate::ir::MediaType;
-use crate::oas31::media::{classify_media, classify_media_range, media_essence};
+use crate::oas31::media::{classify_media, classify_media_range, is_cbor, media_essence};
 
 /// The codec a `content` key's essence classifies as, or `None` with an `E009` for one spargen
 /// does not support.
@@ -18,12 +18,23 @@ pub(super) fn lower_media_type(
     match classify_media(essence) {
         Some((media, _)) => Some(media),
         None => {
-            Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!("media type `{essence}` is not supported"))
-                .emit(diags);
+            media_type_not_supported(essence, provenance, diags);
             None
         }
     }
+}
+
+/// Report `E009` for a media type spargen has no codec for, spelled as `spelling`: the essence
+/// where one key is classified, the raw `content` key where none of them is.
+fn media_type_not_supported(
+    spelling: &str,
+    provenance: &crate::diag::Provenance,
+    diags: &mut Diagnostics,
+) {
+    // E009 case: no-codec
+    Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
+        .message(format!("media type `{spelling}` is not supported"))
+        .emit(diags);
 }
 
 /// Where a body sits, which decides whether an alternative that decodes identically may go
@@ -56,7 +67,8 @@ pub(super) struct ChosenMedia<'a, T> {
 /// non-text range such as `video/*`, or an `image`/`audio`/`video` member such as `image/png` —
 /// leaves out of that `W014` each other octet-classified alternative `opaque` proves constrains
 /// nothing, since it would decode exactly like the selection. `opaque` answers that without
-/// lowering anything.
+/// lowering anything. A selected CBOR key is not exempt: it is sent as `Accept`, so its
+/// alternatives are narrowed at the wire.
 pub(super) fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,
@@ -128,8 +140,17 @@ pub(super) fn choose_media<'a, T>(
         // octet-classified alternative carrying an object schema would be *rejected* by the octet
         // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
         // nothing is allowed.
-        let suppressible =
-            position == BodyPosition::Response && classified == MediaType::OctetStream;
+        //
+        // A selected CBOR key is the exception among octet-classified responses, and its
+        // alternatives are always reported. Where the request announces it in `Accept` (every
+        // bodied success response is CBOR, `Responses::accept`), the alternatives a server could
+        // otherwise have sent are asked against at the wire. Where it does not — an error
+        // response, or a success beside a non-CBOR success body — nothing narrows at the wire, and
+        // the alternatives are reported all the same: this choice is made one response at a time,
+        // before the operation's `Accept` is known.
+        let suppressible = position == BodyPosition::Response
+            && classified == MediaType::OctetStream
+            && !is_cbor(media_essence(media));
         let ignored: Vec<&str> = content
             .iter()
             .filter(|(candidate, _)| candidate.as_str() != media)
@@ -148,9 +169,7 @@ pub(super) fn choose_media<'a, T>(
         });
     }
     let (media, _) = content.first()?;
-    Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-        .message(format!("media type `{media}` is not supported"))
-        .emit(diags);
+    media_type_not_supported(media, provenance, diags);
     None
 }
 

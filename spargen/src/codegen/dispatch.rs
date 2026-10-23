@@ -384,9 +384,9 @@ fn response_media_for_spec(
 mod tests {
     use crate::ir::{MediaType, Response, Responses, StatusSpec, Ty, TypeId};
 
-    /// Issue #233: `default` was once the selector `Range(0)`, so a `0XX` entry decoded under the
-    /// `default` response's codec (or the fallback, with no `default`), and its variant and
-    /// runtime selector collided with `default`'s. Each selector now reads only its own response.
+    /// Issue #233: each status selector reads only its own response, so a `0XX` entry decodes
+    /// under its own codec, not the `default` response's (or the fallback, with no `default`), and
+    /// its variant and runtime selector stay distinct from `default`'s.
     #[test]
     fn each_status_selector_reads_its_own_response_media_and_label() {
         let response = |media| Response {
@@ -397,6 +397,7 @@ mod tests {
             }),
             media: Some(media),
             stream: None,
+            accept: None,
             headers: Vec::new(),
         };
         let with_default = Responses {

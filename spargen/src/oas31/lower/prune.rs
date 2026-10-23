@@ -14,7 +14,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// before [`Self::meet_union_with_all_of`] or a `$ref`'s target met it. The pre-meet union
     /// itself and the branch types the meet replaced were emitted as public types nothing referred
     /// to (#561). [`Self::meet_ref_union_sibling`] also passes the ids the keywords beside the
-    /// union were lowered into, an input to the same meet (#571).
+    /// union were lowered into, an input to the same meet (#571). A position that drops or
+    /// replaces the type its schema lowered to passes that lowering too: a `format: binary`
+    /// parameter's bytes type, which the client takes as a `String` copy, and a response header
+    /// `W011` skips (#927); a union's sole real member, which the union re-emits under its own
+    /// name; each member of a union left one variant, and its sibling keywords' own lowering,
+    /// when the union re-emits that variant's kind (#987); and every `patternProperties` value
+    /// after the first, whose type the map takes (#926).
     ///
     /// Unlike the meets' own inserts ([`Self::elide_meet_intermediates`]), these come from lowering
     /// a schema, so a memo may hold one: a component, remote or bundle target a branch `$ref`s and
@@ -34,21 +40,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .flat_map(|(_, def)| kind_edges(&def.kind))
             .filter(inside)
             .collect();
-        roots.extend(
-            self.components
-                .values()
-                .chain(self.in_progress.values())
-                .chain(self.remote_components.values())
-                .chain(self.remote_in_progress.values())
-                .chain(self.resolved_components.values())
-                .chain(self.resolved_in_progress.values())
-                .map(|&(id, _)| id)
-                .filter(inside),
-        );
+        roots.extend(self.reservation_roots().filter(inside));
         for (_, contribution) in self.resolved_contributions.values().flatten() {
             match contribution {
-                Contribution::Object { fields, .. } => {
+                Contribution::Object { fields, union, .. } => {
                     roots.extend(fields.iter().map(|field| field.ty.id).filter(inside));
+                    roots.extend(union.map(|union| union.id).filter(inside));
                 }
                 Contribution::Scalar(ty) => roots.extend(Some(ty.id).filter(inside)),
                 Contribution::Refiner { scoped, .. } => roots.extend(
@@ -99,7 +96,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
         if reached.iter().any(|id| id.0 >= mark) {
-            self.elide_unreached(mark, &reached);
+            self.elide_unreached((mark..self.graph_mark()).map(TypeId), &reached);
             return;
         }
         while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
@@ -136,15 +133,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept.
     pub(super) fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
-        self.elide_unreached(mark, &reached);
+        self.elide_unreached((mark..self.graph_mark()).map(TypeId), &reached);
     }
 
-    /// Elide every type inserted since `mark` that is not in `reached`.
-    fn elide_unreached(&mut self, mark: u32, reached: &HashSet<TypeId>) {
-        let Some(last) = self.graph.last_id() else {
-            return;
-        };
-        for id in (mark..=last.0).map(TypeId) {
+    /// [Elide](TypeGraph::elide) every type in `ids` that is not in `reached`: the inserts since
+    /// a mark, or the ones a union's sibling meets made, that the type kept in their place does not
+    /// reach.
+    pub(super) fn elide_unreached(
+        &mut self,
+        ids: impl IntoIterator<Item = TypeId>,
+        reached: &HashSet<TypeId>,
+    ) {
+        for id in ids {
             if !reached.contains(&id) {
                 self.graph.elide(id);
             }

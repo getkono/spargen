@@ -175,17 +175,20 @@ impl fmt::Display for Date {
     /// `YYYY-MM-DD`, matching `Serialize` for the reason given on [`DateTime`]'s `Display`, with the
     /// same fallback for a year RFC 3339's four-digit `full-date` cannot express.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let year = self.0.year();
-        if !(0..=9999).contains(&year) {
-            return write!(formatter, "{}", self.0);
+        match full_date(self.0) {
+            Some(text) => formatter.write_str(&text),
+            None => write!(formatter, "{}", self.0),
         }
-        write!(
-            formatter,
-            "{year:04}-{:02}-{:02}",
-            u8::from(self.0.month()),
-            self.0.day()
-        )
     }
+}
+
+/// `date` as an RFC 3339 `full-date` (`YYYY-MM-DD`), or `None` for a year outside `0..=9999`,
+/// which the format's four-digit year cannot express.
+fn full_date(date: time::Date) -> Option<String> {
+    let year = date.year();
+    (0..=9999)
+        .contains(&year)
+        .then(|| format!("{year:04}-{:02}-{:02}", u8::from(date.month()), date.day()))
 }
 
 impl FromStr for Date {
@@ -220,17 +223,13 @@ impl FromStr for Date {
 
 impl Serialize for Date {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let year = self.0.year();
-        if !(0..=9999).contains(&year) {
-            return Err(serde::ser::Error::custom(format!(
-                "date year {year} has no RFC 3339 full-date representation"
-            )));
-        }
-        serializer.serialize_str(&format!(
-            "{year:04}-{:02}-{:02}",
-            u8::from(self.0.month()),
-            self.0.day()
-        ))
+        let text = full_date(self.0).ok_or_else(|| {
+            serde::ser::Error::custom(format!(
+                "date year {} has no RFC 3339 full-date representation",
+                self.0.year()
+            ))
+        })?;
+        serializer.serialize_str(&text)
     }
 }
 

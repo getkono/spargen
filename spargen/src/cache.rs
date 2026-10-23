@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
-use crate::source::{sha256_hex, InputBundle};
+use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
 use crate::{Build, Code, Spec};
 
 const CACHE_FORMAT: u32 = 5;
@@ -34,7 +34,7 @@ impl InputSnapshot {
             .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
             .collect::<Vec<_>>();
         let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
-        let lock = spec_dir.join("spargen.lock");
+        let lock = spec_dir.join(LOCK_FILE_NAME);
         // The applied config files are read like `spargen.lock`: a file that existed when it was
         // applied and cannot be read now fails the build rather than dropping out of the inputs.
         let lock = lock.is_file().then_some(lock);
@@ -42,9 +42,11 @@ impl InputSnapshot {
             match std::fs::read(path) {
                 Ok(bytes) => inputs.push((path.clone(), bytes)),
                 Err(error) => {
-                    diagnostics.emit(cache_diagnostic(format!(
-                        "failed to read build input `{path}`: {error}"
-                    )));
+                    Diagnostic::at_root(
+                        Code::InvalidInput,
+                        format!("failed to read build input `{path}`: {error}"),
+                    )
+                    .emit(&mut diagnostics);
                     return Err(diagnostics);
                 }
             }
@@ -122,6 +124,10 @@ pub(crate) fn finalized(rendered: &str, input_digest: &str) -> (String, String) 
     )
 }
 
+/// The content digest of the generated file at `path` when it is still the output of
+/// `input_digest`. `None`, which makes the caller regenerate, when the file is unreadable, lacks
+/// either header line, records a different input digest, or its body does not hash to the
+/// recorded content digest (a manual edit).
 pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let first = bytes.iter().position(|byte| *byte == b'\n')?;
@@ -144,6 +150,9 @@ pub(crate) struct CachedRun {
     pub(crate) requirements: RuntimeRequirements,
 }
 
+/// The recorded run for this input and output. `None`, which makes the caller rerun the pipeline,
+/// when the cache file is unreadable or does not parse, or its format, input digest or content
+/// digest differs from the current one.
 pub(crate) fn read_cache(
     path: &Utf8Path,
     input_digest: &str,
@@ -247,20 +256,6 @@ fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
 fn append(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
     output.extend_from_slice(bytes);
-}
-
-fn cache_diagnostic(message: String) -> Diagnostic {
-    Diagnostic {
-        code: Code::InvalidInput,
-        severity: Code::InvalidInput.severity(),
-        pointer: JsonPointer::root(),
-        span: None,
-        file: None,
-        message,
-        remedy: None,
-        interpretation: None,
-        claim: OutcomeClaim::of(Code::InvalidInput.severity()),
-    }
 }
 
 #[derive(Serialize, Deserialize)]

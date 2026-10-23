@@ -1,5 +1,5 @@
 //! # Subsystem: codegen
-//! layer-deps: ir, name, support, diag
+//! layer-deps: ir, name, support
 //!
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
 //! deterministic item ordering and `prettyplease` formatting. Codegen never
@@ -66,18 +66,11 @@ impl Default for CodegenOptions {
     }
 }
 
-/// A single generated source file, already formatted rustfmt-clean via `prettyplease`.
-#[derive(Debug, Clone)]
-pub(crate) struct GeneratedFile {
-    /// The formatted source.
-    pub(crate) contents: String,
-}
-
-/// The complete generated code for one client (models, client, embedded support).
+/// The complete generated code for one client (models, client, embedded support): one module.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GeneratedCode {
-    /// The generated files, in deterministic order.
-    pub(crate) files: Vec<GeneratedFile>,
+    /// The module's source, already formatted rustfmt-clean via `prettyplease`.
+    pub(crate) contents: String,
 }
 
 /// The prefix of the message a [`CodegenError`] displays. The frontend and fuzz harnesses
@@ -149,9 +142,7 @@ pub(crate) fn generate(
 /// raise when they are not a parseable Rust file.
 fn render(tokens: proc_macro2::TokenStream) -> Result<GeneratedCode, CodegenError> {
     let contents = format_tokens(tokens).map_err(CodegenError)?;
-    Ok(GeneratedCode {
-        files: vec![GeneratedFile { contents }],
-    })
+    Ok(GeneratedCode { contents })
 }
 
 #[cfg(test)]

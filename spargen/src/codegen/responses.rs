@@ -393,7 +393,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::emit_error_enum;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
         Prim, Response, Responses, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
@@ -426,6 +426,7 @@ mod tests {
                         body: Some(body),
                         media: Some(MediaType::Json),
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],
@@ -448,7 +449,7 @@ mod tests {
             types,
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         emit_error_enum(&api.operations[0], &api, &names).to_string()
     }
 

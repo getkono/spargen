@@ -415,7 +415,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::CodegenOptions;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, Method, Operation, OperationId, PathSegment, PathTemplate, Response,
         Responses, Server, StatusSpec, TypeGraph, UrlSegment,
@@ -470,6 +470,7 @@ mod tests {
                         body: None,
                         media: None,
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],
@@ -501,7 +502,7 @@ mod tests {
             types: TypeGraph::default(),
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
         let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
             .expect("the emitted client parses");
