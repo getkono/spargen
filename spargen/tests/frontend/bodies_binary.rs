@@ -1110,6 +1110,94 @@ paths:
         !has_code(&report, Code::AlternativeMediaIgnored),
         "{report:#?}"
     );
+
+    // An error response's CBOR key is never announced in `Accept`, and its alternatives are
+    // reported all the same: the selection is made per response, before `Accept` is known.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "204": { description: No Content }
+        "400":
+          description: Bad
+          content:
+            application/cbor: { schema: {} }
+            application/octet-stream: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::AlternativeMediaIgnored),
+        [
+            "`application/cbor` is selected; the alternative media type(s) \
+          `application/octet-stream` are not"
+        ],
+        "{report:#?}"
+    );
+    let method = method_source(&code, "get_doc");
+    assert!(!method.contains("ACCEPT"), "{method}");
+}
+
+#[test]
+fn cbor_is_a_concrete_cbor_suffix_under_any_type_and_never_a_suffix_range() {
+    // A `+cbor` subtype counts under any top-level type, not only `application/`; a suffix
+    // *range* names no concrete type and stays unsupported.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /doc:
+    post:
+      operationId: sendDoc
+      requestBody:
+        required: true
+        content:
+          text/foo+cbor: { schema: { type: string, format: binary } }
+      responses:
+        "200":
+          description: OK
+          content:
+            text/foo+cbor: { schema: { type: string, format: binary } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let method = method_source(&code, "send_doc");
+    assert!(
+        method.contains("reqwest::header::CONTENT_TYPE, \"text/foo+cbor\""),
+        "{method}"
+    );
+    assert!(
+        method.contains("reqwest::header::ACCEPT, \"text/foo+cbor\""),
+        "{method}"
+    );
+
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "200":
+          description: OK
+          content:
+            application/*+cbor: { schema: { type: string, format: binary } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType && d.message.contains("application/*+cbor")
+            }),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]
