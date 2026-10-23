@@ -114,6 +114,9 @@ paths:
 /// it; on multipart a delimited scalar was sent as if `style: form` had been declared. Both are
 /// `E009`, as every other undefined RFC 6570 combination in an Encoding Object is. A nullable
 /// array property stays supported: a `null` property is omitted from a form body, not serialized.
+/// A `oneOf` whose `null` member is reached through a `$ref` is the value itself: form-urlencoded
+/// omits it like a root `null`, but multipart sends it as an empty part, so only multipart
+/// rejects it.
 #[test]
 fn e009_an_encoding_style_over_a_property_admitting_a_value_it_cannot_serialize() {
     const TEMPLATE: &str = r##"
@@ -166,6 +169,7 @@ components:
         ),
         (multipart, "spaceDelimited", "{ type: string }"),
         (multipart, "pipeDelimited", "{ type: boolean }"),
+        (multipart, "spaceDelimited", member_null),
     ];
     for (media, style, schema) in rejected {
         let spec = spec(media, style, schema);

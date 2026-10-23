@@ -260,10 +260,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         // The delimited styles are defined only for arrays and objects and `deepObject` only for
-        // objects (#696); the parameter-side construct is `E010`. A `null` property is omitted
-        // from the body before any style sees it, at the root or as a union member's value alike.
+        // objects (#696); the parameter-side construct is `E010`. A `null` at the property's root
+        // is omitted from the body before any style sees it. A `oneOf`/`anyOf` member's `null` is
+        // the whole value: a form-urlencoded body omits it like a root `null`, but multipart sends
+        // it as a part of its own, which these styles have no serialization for.
+        let member_null_sent = media == MediaType::Multipart;
         if let Some(domain) = StyleDomain::of(&style)
-            .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, false))
+            .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, member_null_sent))
         {
             // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())

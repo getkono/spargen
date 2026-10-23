@@ -685,7 +685,8 @@ impl StyleDomain {
     /// `null` the root admits reaches the serializer: it does for a required parameter, while an
     /// optional one's `None` is not sent and a form body omits a `null` property.
     /// `member_null_sent` says the same of a `null` a `oneOf`/`anyOf` member admits, which is the
-    /// whole value: a parameter sends it, optional or not, and a form body omits it.
+    /// whole value: a parameter and a multipart part send it, optional or not, and a
+    /// form-urlencoded body omits it.
     pub(super) fn admits_only(
         self,
         graph: &TypeGraph,
