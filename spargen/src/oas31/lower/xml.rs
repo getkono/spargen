@@ -24,10 +24,15 @@ pub(super) struct RootXml {
     name: Option<String>,
     /// The hints with no faithful quick-xml mapping, as [`XmlField::unsupported`] spells them.
     unsupported: Vec<String>,
-    /// For a `$ref` whose siblings bear no shape, the type it resolved to and where the `$ref` was
-    /// written: such a schema inserts no definition of its own, so its site names none, and the
-    /// type is shared with every other use of the target.
-    target: Option<(TypeId, Provenance)>,
+    /// For a `$ref` whose siblings bear no shape, the type it resolved to: such a schema inserts
+    /// no definition of its own, so its site names none, and the type is shared with every other
+    /// use of the target.
+    target: Option<TypeId>,
+    /// The schema carrying the `xml` object, where its reports point.
+    at: Provenance,
+    /// For a composition member read by its keywords ([`LowerCtx::record_member_xml`]), the site
+    /// of the composition it was gathered into, where its merged type is looked for first.
+    holder: Option<XmlSite>,
 }
 
 /// The position an `xml` object is read in, which decides what its node type may be.
@@ -48,14 +53,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn record_root_xml(&mut self, schema: &Schema, hints: &XmlHints) {
         let (name, unsupported) = read_hints(schema, hints, XmlNode::Root);
         let site = self.xml_site(&schema.provenance);
+        let holder = self
+            .root_xml
+            .get(&site)
+            .and_then(|root| root.holder.clone());
         self.root_xml.insert(
             site,
             RootXml {
                 name,
                 unsupported,
                 target: None,
+                at: schema.provenance.clone(),
+                holder,
             },
         );
+    }
+
+    /// Read the `xml` object of `schema`, a composition member gathered by its keywords into the
+    /// composition [`Self::xml_holders`] names last. Such a member inserts no definition of its
+    /// own, so [`gate_xml_field_renames`] reports each of its hints against the type its
+    /// composition lowered to. A definition later lowered from the same schema reads it as a
+    /// root instead ([`Self::record_root_xml`]), keeping the holder.
+    pub(super) fn record_member_xml(&mut self, schema: &Schema) {
+        let Some(hints) = &schema.xml else {
+            return;
+        };
+        let (name, mut unsupported) = read_hints(schema, hints, XmlNode::Root);
+        // A `$ref` defaults to the node type `none`, under which `read_hints` gives no name; a
+        // name beside a member's `$ref` would still rename neither the target nor the merge.
+        if schema.reference.is_some() && name.is_none() && hints.name.is_some() {
+            unsupported.push("name".to_owned());
+        }
+        let site = self.xml_site(&schema.provenance);
+        let holder = self.xml_holders.last().cloned();
+        self.root_xml.entry(site).or_insert(RootXml {
+            name,
+            unsupported,
+            target: None,
+            at: schema.provenance.clone(),
+            holder,
+        });
+    }
+
+    /// Run `gather` with `schema` as the composition [`Self::record_member_xml`] attributes the
+    /// members it gathers to.
+    pub(super) fn with_xml_holder<T>(
+        &mut self,
+        schema: &Schema,
+        gather: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let site = self.xml_site(&schema.provenance);
+        self.xml_holders.push(site);
+        let result = gather(self);
+        self.xml_holders.pop();
+        result
     }
 
     /// Read the `xml` object of `schema`, a `$ref` whose siblings bear no shape and so resolved to
@@ -76,7 +127,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             RootXml {
                 name: None,
                 unsupported,
-                target: Some((target, schema.provenance.clone())),
+                target: Some(target),
+                at: schema.provenance.clone(),
+                holder: None,
             },
         );
     }
@@ -255,6 +308,27 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
     }
 }
 
+/// The emitted definitions a merged member's `xml` object at `site` is reported against: those at
+/// its composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any,
+/// in the same document; none where no definition encloses it.
+fn merged_into(
+    site: &XmlSite,
+    root: &RootXml,
+    emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+) -> Vec<TypeId> {
+    let (document, mut pointer) = match &root.holder {
+        Some((document, pointer)) => (document, Some(pointer.clone())),
+        None => (&site.0, site.1.parent()),
+    };
+    while let Some(at) = pointer {
+        if let Some(ids) = emitted_sites.get(&(document.clone(), at.clone())) {
+            return ids.clone();
+        }
+        pointer = at.parent();
+    }
+    Vec::new()
+}
+
 /// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
 /// holds every element name it writes to. A component key is not held to it: `[a-zA-Z0-9._-]+`
 /// admits a leading digit, `-` or `.`.
@@ -333,15 +407,35 @@ pub(super) fn gate_xml_field_renames(
     }
     // A `$ref` with nothing but annotations beside it names its target's type, not a definition
     // of its own; ordered by site, which a hash map does not keep.
-    let mut ref_sites: Vec<(&XmlSite, &RootXml, TypeId, &Provenance)> = root_xml
+    let mut ref_sites: Vec<(&XmlSite, &RootXml, TypeId)> = root_xml
         .iter()
         .filter(|(site, _)| !field_xml_sites.contains(*site))
         .filter_map(|(site, root)| {
-            let (target, at) = root.target.as_ref()?;
-            (!root.unsupported.is_empty()).then_some((site, root, *target, at))
+            let target = root.target?;
+            (!root.unsupported.is_empty()).then_some((site, root, target))
         })
         .collect();
     ref_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
+    // A schema whose `xml` object no emitted definition keeps: a composition member merged into
+    // another type (an `allOf` member read by its keywords, a union branch merged away). It names
+    // no element of its own, so each of its hints, a name included, is reported against the type
+    // the merge produced: the nearest emitted definition at its composition's site or above it.
+    let mut emitted_sites: HashMap<XmlSite, Vec<TypeId>> = HashMap::new();
+    for (id, def) in graph.emitted() {
+        let site = (def.document.clone(), def.provenance.pointer.clone());
+        emitted_sites.entry(site).or_default().push(id);
+    }
+    let mut merged_sites: Vec<(&XmlSite, &RootXml, Vec<TypeId>)> = root_xml
+        .iter()
+        .filter(|(site, root)| {
+            root.target.is_none()
+                && !field_xml_sites.contains(*site)
+                && !emitted_sites.contains_key(*site)
+                && (root.name.is_some() || !root.unsupported.is_empty())
+        })
+        .map(|(site, root)| (site, root, merged_into(site, root, &emitted_sites)))
+        .collect();
+    merged_sites.sort_by(|(a, ..), (b, ..)| (&a.0, a.1.as_str()).cmp(&(&b.0, b.1.as_str())));
 
     let mut xml_roots: Vec<TypeId> = Vec::new();
     let mut non_xml_roots: Vec<TypeId> = Vec::new();
@@ -369,7 +463,12 @@ pub(super) fn gate_xml_field_renames(
         }
     }
     // Cheap guard: no hint to settle and no XML body whose root element a component names.
-    if !any_hint && root_sites.is_empty() && ref_sites.is_empty() && xml_roots.is_empty() {
+    if !any_hint
+        && root_sites.is_empty()
+        && ref_sites.is_empty()
+        && merged_sites.is_empty()
+        && xml_roots.is_empty()
+    {
         return;
     }
 
@@ -422,6 +521,21 @@ pub(super) fn gate_xml_field_renames(
                 .clone(),
             format!(
                 "`{}` on the schema's own `xml` object",
+                unsupported.join("`, `")
+            ),
+        ));
+    }
+    for (_, root, owners) in merged_sites {
+        let mut unsupported = root.unsupported.clone();
+        if root.name.is_some() {
+            unsupported.push("name".to_owned());
+        }
+        unsupported_reports.push((
+            owners.iter().any(|id| xml_reachable.contains(id)),
+            root.at.clone(),
+            format!(
+                "`{}` on the `xml` object of a composition member merged into another type, which \
+                 names no element of its own",
                 unsupported.join("`, `")
             ),
         ));
@@ -629,10 +743,10 @@ pub(super) fn gate_xml_field_renames(
         )
         .emit(diags);
     }
-    for (_, root, target, at) in ref_sites {
+    for (_, root, target) in ref_sites {
         unsupported_reports.push((
             xml_reachable.contains(&target),
-            at.clone(),
+            root.at.clone(),
             format!(
                 "`{}` on the `xml` object beside a `$ref`, whose type every use of the target \
                  shares",
