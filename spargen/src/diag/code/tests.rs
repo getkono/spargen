@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use super::Code;
+use crate::test_support::{read_repo_file, repo_root, rust_sources};
 
 /// Every code must appear in the published index, with the same title, and nothing may appear
 /// there that is not a real code. The index is product surface — `spargen explain` and
@@ -14,7 +15,7 @@ fn the_published_index_lists_exactly_the_declared_codes() {
         eprintln!("skipping: not tested from the workspace");
         return;
     };
-    let index = read_repo_document(&root, "docs/errors.md");
+    let index = read_repo_file(&root, "docs/errors.md");
     let rows: Vec<(String, String)> = index
         .lines()
         .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
@@ -108,8 +109,8 @@ fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
         eprintln!("skipping: not tested from the workspace");
         return;
     };
-    let matrix = read_repo_document(&root, "docs/support-matrix.md");
-    let scope = read_repo_document(&root, "docs/openapi-3.2.md");
+    let matrix = read_repo_file(&root, "docs/support-matrix.md");
+    let scope = read_repo_file(&root, "docs/openapi-3.2.md");
 
     let matrix_cited = cited_codes(&matrix);
     for (cited, _) in matrix_cited.iter().chain(cited_codes(&scope).iter()) {
@@ -173,7 +174,7 @@ fn the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim() {
         eprintln!("skipping: not tested from the workspace");
         return;
     };
-    let matrix = read_repo_document(&root, "docs/support-matrix.md");
+    let matrix = read_repo_file(&root, "docs/support-matrix.md");
     let explain = Code::RuntimeDependencyContract.explain();
     let code = Code::RuntimeDependencyContract.as_str();
 
@@ -370,24 +371,6 @@ fn a_comment_or_an_absence_is_not_a_fixture() {
                 "refused as a fixture: {positive}"
             );
         }
-}
-
-/// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
-/// carries neither the workspace manifest nor the test suites. Gating on the *workspace
-/// marker* rather than on the file under inspection is deliberate: inside the repository a
-/// missing `tests/` file must fail the test, not silently skip it.
-fn repo_root() -> Option<std::path::PathBuf> {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    manifest.contains("[workspace]").then_some(root)
-}
-
-/// Read a document the repository must carry, failing — never skipping — when it is absent.
-/// Only call this under [`repo_root`], which is what decides whether the file must exist.
-fn read_repo_document(root: &std::path::Path, relative: &str) -> String {
-    std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
-        panic!("{relative} must exist in the repository, and reading it failed: {error}")
-    })
 }
 
 /// `all()` is a hand-written `const ALL`, and every docs/behavior test iterates it — so a
@@ -917,22 +900,6 @@ fn case_marker(line: &str) -> Option<(&str, Vec<&str>)> {
     is_code.then(|| (code, tags.split(',').map(str::trim).collect()))
 }
 
-/// Every `.rs` file under `dir`, recursively, in a stable order.
-fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("{} must be readable: {error}", dir.display()))
-        .map(|entry| entry.expect("directory entry").path())
-        .collect();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            rust_sources(&path, into);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            into.push(path);
-        }
-    }
-}
-
 /// `spargen explain` prints an explain body verbatim, and a body that lists the cases reaching
 /// its code makes a claim about the generator a test can check: that the list is exhaustive.
 /// `E004`'s once was not — a security scheme alias miss and a chained Path Item `$ref` reached
@@ -947,8 +914,7 @@ fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
     let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-    let mut files = Vec::new();
-    rust_sources(src, &mut files);
+    let files = rust_sources(src);
     let diag = src.join("diag");
 
     let mut failures = Vec::new();

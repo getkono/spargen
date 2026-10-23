@@ -10,8 +10,9 @@
 //!
 //! The crate is internally partitioned into subsystems with a declared dependency DAG. Each
 //! subsystem module records its allowed dependencies in a machine-readable `//! layer-deps:`
-//! header; `spargen/tests/layering.rs` diffs those declarations against the actual inter-module
-//! `use` edges and fails on any edge not in the table below.
+//! header; `spargen/tests/layering/` diffs those declarations against the inter-module edges the
+//! production (non-test) code actually takes, fails on any edge not in the table below, and
+//! checks that the declared graph is acyclic.
 //!
 //! | Subsystem | May depend on |
 //! |-----------|---------------|
@@ -21,7 +22,7 @@
 //! | `oas31`   | `source`, `ir`, `name`, `diag` |
 //! | `name`    | `ir`, `diag`  |
 //! | `support` | — (an `include_str!` handle to `support-runtime`'s sources, which compile standalone) |
-//! | `codegen` | `ir`, `name`, `support`, `diag` |
+//! | `codegen` | `ir`, `name`, `support` |
 //! | `emit`    | `codegen`     |
 //! | `compat`  | `source`, `diag` |
 //! | `surface` | `ir`, `name`  |
@@ -29,13 +30,15 @@
 //! | facade (`lib.rs`) | all of the above |
 //!
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
-//! lowest layer, which every stage may reach and which depends on nothing, and `ir` as the
-//! lowered model `oas31` produces and `name`, `codegen` and `surface` read. `compat` preprocesses
-//! the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and never feeds
-//! generation.
+//! lowest layer, which the stages that report diagnostics reach and which depends on nothing, and
+//! `ir` as the lowered model `oas31` produces and `name`, `codegen` and `surface` read. `compat`
+//! preprocesses the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and
+//! never feeds generation.
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
 //! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
+//! `test_support`, compiled only into the test build, holds helpers the subsystems' in-crate tests
+//! share; the lint admits it by name as neither.
 
 mod diag;
 
@@ -51,6 +54,8 @@ mod runtime_contract;
 mod source;
 mod support;
 mod surface;
+#[cfg(test)]
+mod test_support;
 
 use std::str::FromStr;
 

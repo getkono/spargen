@@ -11,7 +11,9 @@ use super::*;
 /// public types nothing referred to (#561), such as `Umember0`, a trial-matched `oneOf` with a
 /// `serde_json::Value` variant, beside the met union `U`. Each spelling of the meet now withholds
 /// them: as an `allOf` member, beside an `allOf`, and beside a `$ref` alone or with keywords, where
-/// the keywords' own lowered type, `UconstraintConstraint`, is withheld too (#571). What
+/// the keywords' own lowered type, `UconstraintConstraint`, is withheld too (#571), and so is the
+/// object composition the union was met with, `Ucomposition`, as an `allOf` member and beside an
+/// `allOf` (#852). What
 /// something can still name stays: a branch the met union refers to, a `$ref`'d component first
 /// lowered inside the union, and a `$ref`'d subschema the resolver's memo hands a later `$ref`.
 #[test]
@@ -33,7 +35,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
     let refiner = "{ properties: { a: { type: string } } }";
     let b = "B: { type: object, properties: { a: { type: string } } }";
     // Each spelling, with the types it no longer emits and the ones it must keep.
-    let cases: [(&str, String, &[&str], &[&str]); 7] = [
+    let cases: [(&str, String, &[&str], &[&str]); 9] = [
         (
             "an allOf member",
             format!("U: {{ allOf: [{{ oneOf: [{{ type: string }}, {{}}] }}, {refiner}] }}"),
@@ -105,6 +107,18 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
             ),
             &["Umember0"],
             &["U", "Umember0Variant0", "X"],
+        ),
+        (
+            "an allOf member beside an object member",
+            format!("{b}\n    U: {{ allOf: [{{ $ref: '#/components/schemas/B' }}, {{ anyOf: [{{}}, {{}}] }}] }}"),
+            &["Ucomposition"],
+            &["B", "U"],
+        ),
+        (
+            "beside an allOf with an object member",
+            format!("{b}\n    U: {{ anyOf: [{{}}, {{}}], allOf: [{{ $ref: '#/components/schemas/B' }}] }}"),
+            &["Ucomposition"],
+            &["B", "U"],
         ),
     ];
     for (spelling, schemas, withheld, kept) in cases {

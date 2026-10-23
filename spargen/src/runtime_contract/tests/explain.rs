@@ -59,8 +59,8 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     // reach.
     // It sits beside `runtime_contract/`, under `src/`, so it ships in the published crate and
     // this test still compiles there. Being test-only, it is not needed to build the packaged
-    // library, so `every_included_file_ships_in_the_published_crate` in `tests/layering.rs`
-    // is what holds it in the package.
+    // library, so `every_included_file_ships_in_the_published_crate` in
+    // `tests/layering/packaging.rs` is what holds it in the package.
     // The file carries a trailing newline, as a text file should; the explain body does not.
     let expected = include_str!("../../runtime_contract_e023_explain.txt").trim_end_matches('\n');
 

@@ -328,10 +328,6 @@ fn idents(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Runtime types a root re-export mentions that the root does not yet re-export, each with the
-/// issue that decides it. An entry that stops being needed fails the test, so this only shrinks.
-const UNNAMEABLE_TRACKED: &[(&str, &str)] = &[];
-
 #[test]
 fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
     // The root re-export list has to cover every runtime type a caller meets through a type it can
@@ -340,7 +336,6 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
     // (#256). The embedded `support` module is private, so the root is the only path there is.
     // Checked here: every public inherent method's signature, and every associated type of every
     // impl, on a type the root re-exports. A runtime type they mention must be re-exported too.
-    let mut tracked_seen = BTreeSet::new();
     for spec in [PLAIN_SPEC.to_owned(), full_spec("")] {
         let generated = generate(&spec);
         let root = root_reexports(&generated);
@@ -404,26 +399,11 @@ fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
             "examined {impls_examined} impls of root re-exported types and {members_examined} of \
              their public methods and associated types: the scan has stopped reading the impls"
         );
-        unnameable.retain(|found| {
-            let tracked = UNNAMEABLE_TRACKED.iter().any(|(entry, _)| entry == found);
-            if tracked {
-                tracked_seen.insert(found.clone());
-            }
-            !tracked
-        });
         assert!(
             unnameable.is_empty(),
             "a root re-export exposes runtime types the root does not re-export: {unnameable:?}"
         );
     }
-    let stale: Vec<_> = UNNAMEABLE_TRACKED
-        .iter()
-        .filter(|(entry, _)| !tracked_seen.contains(*entry))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "tracked exceptions no longer needed; remove them: {stale:?}"
-    );
 }
 
 #[test]

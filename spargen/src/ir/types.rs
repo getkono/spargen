@@ -828,26 +828,12 @@ mod tests {
     //! reservation, so the audit is checked rather than counted by hand. The graph's elision
     //! bookkeeping is pinned here too.
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use proc_macro2::{Delimiter, TokenStream, TokenTree};
     use syn::{Arm, ExprMatch, Pat};
 
-    /// Every `.rs` file under `dir`, recursively, in a stable order.
-    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-            .map(|entry| entry.expect("directory entry").path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            if path.is_dir() {
-                rust_sources(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-    }
+    use crate::test_support::rust_sources;
 
     /// Every `match` expression in `tokens`, at any nesting depth, re-parsed on its own.
     ///
@@ -956,8 +942,7 @@ mod tests {
     #[test]
     fn every_type_kind_match_states_its_answer_for_a_reservation() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rust_sources(&src, &mut files);
+        let files = rust_sources(&src);
 
         let mut sites = 0usize;
         let mut absorbers = Vec::new();
