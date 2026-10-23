@@ -505,36 +505,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         !ty.nullable && undecided_kind && self.null_admission(member) == NullAdmission::Undecided
     }
 
-    /// Whether `member`, a union branch lowered to `ty` that hoisted no `null`, is a branch `null`
-    /// matches although nothing in it states `null`, as a `oneOf` counts it beside a branch that
-    /// does: an untyped object or array ([`Self::branch_leaves_null_undecided`], #622), or a
-    /// nested union `null` matches ([`Self::union_matches_uncarried_null`]), written inline or as
-    /// a bare `$ref` to a union component (#628).
-    pub(super) fn branch_matches_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
-        if self.branch_leaves_null_undecided(member, ty) {
-            return true;
-        }
-        let SchemaOr::Schema(member) = member else {
-            return false;
-        };
-        if ty.nullable {
-            return false;
-        }
-        if schema_has_union(member) {
-            return self.union_matches_uncarried_null(member, ty);
-        }
-        let Some(reference) = member.reference.as_deref() else {
-            return false;
-        };
-        // A `$ref` with siblings of its own is an intersection this does not read.
-        !ref_siblings_bear_shape(member)
-            && self
-                .ref_target_body(reference, &member.provenance)
-                .is_some_and(|target| {
-                    schema_has_union(&target) && self.union_matches_uncarried_null(member, ty)
-                })
-    }
-
     /// Whether the body the `$ref` written at `at` names ([`Self::ref_target_body`]) lowers to a
     /// struct, `Vec` or tuple of untyped keywords, as [`Self::branch_leaves_null_undecided`] reads
     /// a cycle-closing reservation ([`Self::schema_is_untyped_shape`]).
@@ -626,7 +596,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
     /// union is met with admits it: an untyped object ([`Self::branch_leaves_null_undecided`]), or
     /// a branch that states nothing and lowers to `Value` (`true`, `{}`), which the meet otherwise
-    /// leaves as it is (#588, #592). Either is then counted as a branch `null` matches.
+    /// leaves as it is (#588, #592).
     pub(super) fn branch_takes_conjunct_null(&self, member: &SchemaOr, ty: Ty) -> bool {
         self.branch_leaves_null_undecided(member, ty)
             || (!ty.nullable

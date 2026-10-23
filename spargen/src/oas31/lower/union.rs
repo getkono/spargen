@@ -219,23 +219,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The member's OWN nullability, before the intersection overwrites `inner`. Needed
             // below when the sibling is not entitled to decide.
             let member_nullable = inner.nullable;
-            // Whether `null` is in the member's branch, for the `oneOf` count below: its own
-            // nullability, which a sibling meet can only take away, or — once a sibling meets it —
-            // the meet's answer for an untyped member, which takes `null` from a sibling that
-            // accepts it (`Value` met with `type: [object, 'null']` is a nullable object), as each
-            // variant of the multi-member path below is counted after its own meet. Without a
-            // meet a member lowering to `Value` is not counted, as that path does not count one
-            // either.
-            let mut member_takes_null = member_nullable;
             // An untyped object member's non-null struct decides nothing about `null` either
             // (#567), so it takes `null` from a sibling or a meet as `Value` does; so does any
             // other member whose own keywords leave `null` undecided (#574).
             let member_untyped = self.branch_takes_permitted_null(real_members[0], inner);
-            // An untyped object or array member constrains objects or arrays alone, so `null`
-            // matches it beside a `null` member, as the multi-member path counts it (#622), and so
-            // does a nested union `null` matches through its own branches (#628).
-            let member_leaves_null_undecided =
-                self.branch_matches_null_undecided(real_members[0], inner);
+            // Whether `null` satisfies the member met with the sibling, by the one decision
+            // ([`Self::null_admission`]): an untyped object or array member, a nested union `null`
+            // matches, and a member of scalar keywords alone are branches `null` matches as a
+            // member that states it is.
+            let null_matches_member = self
+                .branch_null_admission(real_members[0])
+                .and(self.union_sibling_null_admission(schema))
+                .matches();
+            // A `null` member beside a member `null` matches too puts `null` in two branches,
+            // which fails a `oneOf`'s exactly-one rule (#563, #622, #627).
+            let null_twice =
+                mode == UnionMode::OneOf && null_members + usize::from(null_matches_member) > 1;
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -295,22 +294,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // multi-category `type` array alone admitting the target's category, and a target
                 // whose keywords decide nothing takes the array's `null` (#574).
                 let takes_null = inner.nullable || (null_from_type_array && member_untyped);
-                // A `null` member beside a member that accepts `null`, or whose untyped target
-                // leaves it undecided, puts `null` in two branches, as the collapse below counts
-                // it for a member that is no reservation (#627).
-                let null_twice = mode == UnionMode::OneOf
-                    && null_members + usize::from(takes_null || member_leaves_null_undecided) > 1;
                 inner.nullable = (takes_null || nullable) && !null_twice;
                 inner.boxed = true;
                 return Some(inner);
             }
             // An untyped member accepts the `null` the `type` array permits (#574), as the
             // multi-member path's untyped variants do, before the sibling meet so the other
-            // sibling keywords can still take it away. Without a sibling to meet it is then a
-            // branch `null` matches; with one, the meet below recounts it.
+            // sibling keywords can still take it away.
             if null_from_type_array && member_untyped {
                 inner.nullable = true;
-                member_takes_null = true;
             }
             if let Some(sibling) = sibling {
                 // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
@@ -357,19 +349,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // a branch (#670, #674): a `$ref` to a union `null` matches through an untyped
                 // branch of its own lowered non-null.
                 let met = match met {
-                    Err(NoMeet::Empty)
-                        if self
-                            .branch_null_admission(real_members[0])
-                            .and(self.union_sibling_null_admission(schema))
-                            .matches() =>
-                    {
-                        Ok(self.insert_type(
-                            &constrained_hint,
-                            TypeKind::Null,
-                            crate::ir::Docs::default(),
-                            None,
-                        ))
-                    }
+                    Err(NoMeet::Empty) if null_matches_member => Ok(self.insert_type(
+                        &constrained_hint,
+                        TypeKind::Null,
+                        crate::ir::Docs::default(),
+                        None,
+                    )),
                     met => met,
                 };
                 let Ok(constrained) = met else {
@@ -401,10 +386,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     member_nullable || null_from_member
                 };
-                // The `null` member was folded into `inner` before the meet, but an untyped member
-                // accepts `null` already, so folding it changed nothing the meet saw: the meet's
-                // nullability is the member's own after the meet.
-                member_takes_null = member_nullable || (member_untyped && constrained.nullable);
                 inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
@@ -415,13 +396,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The member's own lowering, which the re-emitted def replaced, is unused unless the
             // re-emitted kind reaches it or a memo holds it (#926).
             self.elide_unused_union_lowering(member_from..mark);
-            // A `null` member beside a member that accepts `null` itself puts `null` in two
-            // branches, which fails a `oneOf`'s exactly-one rule (#563), counted after the meet
-            // like the multi-member path's variants. An untyped object or array member is such a
-            // branch whether or not it took `null` from anything (#622).
-            let null_twice = mode == UnionMode::OneOf
-                && null_members + usize::from(member_takes_null || member_leaves_null_undecided)
-                    > 1;
             // The sibling meet narrowed the member to the exact null type beside a `null` member:
             // `null` matches both branches and fails exactly-one, and the member accepts nothing
             // else, so nothing satisfies the schema, as the multi-member path below rejects for
@@ -441,24 +415,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The real member each variant came from: sibling keywords can exclude a member, so a
         // variant's position is not its member's.
         let mut variant_members: Vec<usize> = Vec::new();
-        // How many variants accepted `null` before their nullability was hoisted to the union.
-        let mut nullable_variants = 0usize;
-        // How many variants are the exact JSON `null` (`const: null`, `enum: [null]`), and whether
-        // an untyped branch took `null` from what the union is met with (#567, #586): each such
-        // variant is a branch `null` matches beside it, so a `oneOf` counts them together (#563).
-        let mut null_variants = 0usize;
-        let mut null_from_conjunct = false;
-        // How many branches that state nothing and took the conjunct's `null` a `oneOf` counts
-        // without hoisting (#592).
-        let mut stated_nothing_nulls = 0usize;
-        // How many variants are an untyped object or array branch that still leaves `null`
-        // undecided after its meet ([`Self::branch_leaves_null_undecided`]): its keywords constrain
-        // objects or arrays alone, so `null` matches it, and a `oneOf` counts it beside a branch
-        // that states `null` (#622). A nested union `null` matches through such branches of its
-        // own is counted alike ([`Self::branch_matches_null_undecided`], #628). Counted for
-        // exactly-one alone: such a branch on its own is the non-null struct, array or enum every
-        // other spelling gives it, so it hoists nothing.
-        let mut undecided_nulls = 0usize;
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         // The ids each member's sibling meet inserted. They interleave with the members' own
@@ -468,20 +424,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `anyOf` hoists them to its `Option` beside typed variants (#633). A branch that is the
         // null type on its own (`const: null`) is not one of them.
         let mut met_into_null: HashSet<usize> = HashSet::new();
-        // How many variants are such a branch: each is one branch `null` matches (#645).
-        let mut met_nulls = 0usize;
-        // Whether a branch whose own keywords leave `null` undecided (an untyped object or array,
-        // or a nested union `null` matches) accepts `null` after its meet, whatever gave it: the
-        // `type` array a multi-category sibling permits it through (#574), or a sibling that
-        // states `null`. It is counted as a nullable variant, and is a branch `null` matches
-        // beside an exact-`null` one as the same branch met with a single category is (#657).
-        let mut undecided_took_null = false;
         // The members that are the exact null type on their own (`const: null`, `enum: [null]`),
         // and that no sibling meet narrowed to it, with the ids each one's own lowering inserted:
-        // a `oneOf` drops them where it counts them and `null` matches another branch too (#657).
+        // a `oneOf` drops them where `null` matches another branch too (#657).
         let mut own_nulls: Vec<(usize, std::ops::Range<u32>)> = Vec::new();
         // Whether `null` satisfies a branch met with the sibling, by the one decision
-        // ([`Self::null_admission`]), for a meet that lowered empty.
+        // ([`Self::null_admission`]): for a meet that lowered empty, and for the branches a
+        // `oneOf` counts `null` in.
         let sibling_admission = self.union_sibling_null_admission(schema);
         let null_survives = |ctx: &Self, member: &SchemaOr| {
             ctx.branch_null_admission(member)
@@ -493,7 +442,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
             let lowered = lowered_from..self.graph_mark();
-            let mut took_conjunct_null = false;
             // A variant that is a back-edge to *this* union — the member's type is the very
             // reservation this schema will occupy — is the whole union, so it constrains nothing and
             // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
@@ -510,10 +458,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if self.reservation_at(&schema.provenance) == Some(ty.id) {
                 return self.reject_union_member_is_the_union(schema);
             }
-            // Read before anything below gives the branch a conjunct's `null`, which would hide
-            // that its own keywords decide nothing. A nested union `null` matches through its own
-            // branches is such a branch too (#628).
-            let leaves_null_undecided = self.branch_matches_null_undecided(member, ty);
             // A cycle-closing branch a multi-category `type` array alone admits meets that sibling
             // in itself: it is the variant it is without one.
             let sibling =
@@ -532,40 +476,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // Held back for a meet with nothing of its own to meet first, an untyped object branch
             // accepts `null` wherever what it is met with does (#567), as an untyped `allOf` member
-            // does (#541): its non-null struct decides nothing. Counted as accepting it here, so
-            // the meet keeps `null` in that branch exactly where the other conjuncts admit it, and
-            // a `oneOf` two such branches share rejects it below. Only where a conjunct it is met
-            // with admits `null` ([`Self::unmerged_union_meets_null`]): met with untyped objects
-            // alone, nothing does, and the branch stays the non-null struct every other spelling
-            // of that composition gives it.
+            // does (#541): its non-null struct decides nothing. It accepts it here, so the meet
+            // keeps `null` in that branch exactly where the other conjuncts admit it. Only where a
+            // conjunct it is met with admits `null` ([`Self::unmerged_union_meets_null`]): met with
+            // untyped objects alone, nothing does, and the branch stays the non-null struct every
+            // other spelling of that composition gives it.
             //
             // A branch that states nothing (`true`, `{}`) accepts `null` there too, as it does
             // beside untyped sibling keywords (#592), but `Value` is the identity of the meet, so
             // the meet hands it the conjunct's `null` again. An `anyOf`, which needs one match,
             // hoists it here, and the one decision carries it once on the meet's position
-            // ([`Self::settle_null_admission`]). A `oneOf` counts it here without hoisting it:
-            // the meet's copy is then the branch's answer, which the `oneOf` counts after the meet
-            // read ([`Self::collapse_met_union`]) and the one decision settles (#597).
-            let mut stated_nothing_took_null = false;
+            // ([`Self::settle_null_admission`]). A `oneOf` does not hoist it: the meet's copy is
+            // the branch's answer, which the `oneOf` reads after the meet
+            // ([`Self::collapse_met_union`]) and the one decision settles (#597).
             if sibling.is_none()
                 && self.unmerged_union.as_ref() == Some(&schema.provenance)
                 && self.unmerged_union_meets_null
                 && self.branch_takes_conjunct_null(member, ty)
+                && (mode == UnionMode::AnyOf || self.branch_leaves_null_undecided(member, ty))
             {
-                stated_nothing_took_null = !self.branch_leaves_null_undecided(member, ty);
-                if stated_nothing_took_null && mode == UnionMode::OneOf {
-                    stated_nothing_nulls += 1;
-                    null_from_conjunct = true;
-                } else {
-                    ty.nullable = true;
-                    took_conjunct_null = true;
-                }
+                ty.nullable = true;
             }
             // An untyped branch accepts the `null` the `type` array permits (#574), before the
-            // sibling meet so the other sibling keywords can still take it away, and is then
-            // counted as a branch `null` matches. Without a sibling to meet (a cycle-closing branch
-            // a multi-category `type` array alone admits) nothing else would give it the array's
-            // `null`.
+            // sibling meet so the other sibling keywords can still take it away. Without a sibling
+            // to meet (a cycle-closing branch a multi-category `type` array alone admits) nothing
+            // else would give it the array's `null`.
             if null_from_type_array && self.branch_takes_permitted_null(member, ty) {
                 ty.nullable = true;
             }
@@ -581,7 +516,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 && self.branch_takes_conjunct_null(member, ty)
             {
                 ty.nullable = true;
-                took_conjunct_null = true;
             }
             if let Some(sibling) = sibling {
                 let mark = self.graph_mark();
@@ -682,24 +616,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
-            // A branch the meet narrowed to the exact null type is counted once, as itself, rather
-            // than again as an undecided or nullable branch (#645).
-            if met_into_null.contains(&index) {
-                met_nulls += 1;
-            } else {
-                nullable_variants += usize::from(ty.nullable);
-                // A branch already counted as stating nothing (a nested union lowering to `Value`
-                // that took the conjunct's `null`) is one branch `null` matches, not two.
-                undecided_nulls +=
-                    usize::from(leaves_null_undecided && !ty.nullable && !stated_nothing_took_null);
-                undecided_took_null = undecided_took_null
-                    || (leaves_null_undecided && ty.nullable && !stated_nothing_took_null);
-                if self.is_exact_null(ty) {
-                    null_variants += 1;
-                    own_nulls.push((index, lowered));
-                }
+            if !met_into_null.contains(&index) && self.is_exact_null(ty) {
+                own_nulls.push((index, lowered));
             }
-            null_from_conjunct = null_from_conjunct || (took_conjunct_null && ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
                 .clone()
@@ -740,38 +659,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "union sibling constraints make every variant impossible",
             );
         }
-        // A `oneOf` admits `null` only where exactly one branch does: the `null` members and the
-        // variants that accepted it before it was hoisted are counted together, whether or not any
-        // of the variants merge below, since two put `null` in two branches, which fails
-        // exactly-one (#563). Decided here, before a meet the union is held back for
-        // ([`Self::unmerged_union`]), because the hoist leaves nothing downstream able to count
-        // them. That meet removes `null` from a typed branch only; the `null` it gives an untyped
+        // A `oneOf` admits `null` only where exactly one branch does (#563): `null` matches a
+        // `null` member, and a real branch wherever the one decision says `null` satisfies it met
+        // with the sibling ([`Self::null_admission`]) — one that states `null`, one the sibling
+        // meet narrowed to the exact null type (#645), an untyped object or array (#622), a nested
+        // union `null` matches (#628), and one of scalar keywords alone or that states nothing
+        // (#592). Two of them, whether or not any of the variants merge below, put `null` in two
+        // branches, which fails exactly-one. Decided here from the branches themselves, before a
+        // meet the union is held back for ([`Self::unmerged_union`]); the `null` that meet gives a
         // branch is settled by the one decision after it ([`Self::settle_null_admission`]).
-        // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
-        // (#586): elsewhere it stays the variant `null` decodes to. A branch that states nothing
-        // is counted where it took `null` from the conjunct (#592). An untyped object or array
-        // branch that hoisted nothing is counted
-        // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
-        // nothing and that `null` matches through its own branches (#628). A branch the sibling
-        // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a
-        // `null` member is (#645). Beside such a branch, or an untyped one that leaves `null`
-        // undecided, an exact-`null` variant is counted too: `null` matches both (#657). So it is
-        // beside such an untyped one that accepts `null` after its meet, as the same branch does
-        // beside a multi-category `type` array, which the `allOf` spelling lowers it alone beside.
-        let null_variants =
-            if null_from_conjunct || met_nulls > 0 || undecided_nulls > 0 || undecided_took_null {
-                null_variants
+        let null_branches = real_members
+            .iter()
+            .filter(|member| null_survives(self, member))
+            .count()
+            + if sibling_admission.matches() {
+                null_members
             } else {
                 0
             };
-        let null_twice = mode == UnionMode::OneOf
-            && null_members
-                + nullable_variants
-                + null_variants
-                + stated_nothing_nulls
-                + undecided_nulls
-                + met_nulls
-                > 1;
+        let null_twice = mode == UnionMode::OneOf && null_branches > 1;
         if null_twice {
             nullable = false;
         }
@@ -844,23 +750,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         // A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`),
-        // where the count above takes it beside another branch `null` matches — one the sibling
-        // meet narrowed to the null type (#645), an untyped object or array one (#622), or an
-        // untyped one that took `null` from a conjunct (#586) — puts `null` in two branches. `null`
-        // fails exactly-one, and the branch accepts nothing else, so it accepts nothing the union
-        // does: it is no variant, and the typed branches are, in the sibling spelling and in the
-        // `allOf` one, whose union member is lowered on its own. Kept, it would be a `()` arm that
-        // decodes the `null` the union refuses (#657). The types its own lowering inserted are
-        // elided unless something else names them: a `$ref`'d component stays. Only where another
-        // variant is left, which the count guarantees, since the branch it counts beside is no
-        // exact-`null` variant of its own. Beside a branch that states nothing and took the
-        // conjunct's `null` (#592) the arm stays, and the one decision settles it once the meet
-        // is lowered ([`Self::settle_null_admission`]).
+        // where the count above finds another branch `null` matches, puts `null` in two branches.
+        // `null` fails exactly-one, and the branch accepts nothing else, so it accepts nothing the
+        // union does: it is no variant, and the other branches are, in the sibling spelling and in
+        // the `allOf` one, whose union member is lowered on its own. Kept, it would be a `()` arm
+        // that decodes the `null` the union refuses (#657). The types its own lowering inserted
+        // are elided unless something else names them: a `$ref`'d component stays. Only where
+        // another variant is left.
         let is_own_null = |member: &usize| own_nulls.iter().any(|(own, _)| own == member);
-        if mode == UnionMode::OneOf
-            && null_twice
-            && null_variants > 0
-            && stated_nothing_nulls == 0
+        if null_twice
+            && !own_nulls.is_empty()
             && variant_members.iter().any(|member| !is_own_null(member))
         {
             let entries = std::mem::take(&mut variants)
@@ -938,6 +837,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
             let mut ty = self.insert_schema_type(schema, hint, kind);
+            // So is the sole variant's own type, whose kind the union now is, unless something
+            // else names it, as a union the one decision collapses to one variant leaves it
+            // ([`Self::settle_null_admission`]).
+            self.elide_unused_union_lowering(inner.id.0..inner.id.0 + 1);
             ty.nullable = inner.nullable || nullable;
             ty.boxed = inner.boxed;
             return Some(ty);
@@ -1176,7 +1079,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`TypeGraph::same_decoded_values`]) — into the first of them, keeping `ref_names` and
     /// `variant_members` aligned with `variants`, and report the merge as
     /// `W001` at the union. The union's `null` is not decided here: [`Self::lower_union_closed`]
-    /// counts the branches that accept it before any merge, across the merged sets and the rest.
+    /// counts the branches `null` matches before any merge, across the merged sets and the rest.
     /// Returns the members each kept variant stands for, aligned with `variants`.
     ///
     /// [`TypeGraph::same_decoded_values`]: crate::ir::TypeGraph::same_decoded_values

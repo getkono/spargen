@@ -900,3 +900,63 @@ fn a_met_one_of_whose_variants_stay_distinct_is_emitted_once_under_its_hint() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #934: a union a sibling meet or a `null` count leaves one variant is that variant's
+/// type, re-emitted under the union's name, so the variant's own type, which nothing else names,
+/// is not emitted beside it, as a union the one decision collapses to one variant leaves none.
+/// Here a branch the sibling excludes, an exact-`null` branch `null` matches beside another, and
+/// branches that state nothing or hold scalar keywords alone each leave one variant, whose type is
+/// the named `…Variant` or `…Constraint` type.
+#[test]
+fn a_union_left_one_variant_emits_no_copy_of_that_variants_type() {
+    let mut mismatches = Vec::new();
+    for (site, variant) in [
+        (
+            "{ type: [string, 'null'], oneOf: [ { items: { type: string } }, { type: string } ] }",
+            "PickVariant1",
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ { items: { type: string } }, { const: null }, \
+             { type: string } ] }",
+            "PickVariant2",
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ {}, {} ] }",
+            "PickConstraint",
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ {}, { const: null } ] }",
+            "PickConstraint",
+        ),
+        (
+            "{ type: [string, 'null'], oneOf: [ { minLength: 1 }, { type: [string, 'null'] } ] }",
+            "PickConstraint",
+        ),
+        (
+            "{ required: [u], oneOf: [ { const: null }, {} ] }",
+            "PickConstraint",
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{site}: {report:#?}");
+        let types = types_module(&code);
+        let declared = [" = ", " {"].iter().any(|after| {
+            ["pub struct ", "pub type "]
+                .iter()
+                .any(|item| types.contains(&format!("{item}{variant}{after}")))
+        });
+        if declared {
+            mismatches.push(format!(
+                "{site}: `{variant}` is emitted beside `Pick`\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

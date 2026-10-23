@@ -1243,3 +1243,62 @@ fn an_any_of_met_with_a_nullable_conjunct_carries_its_null_once() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #934: a `oneOf` counts `null` in every branch the one decision says it satisfies — a
+/// branch of scalar keywords alone and one that states nothing among them — so beside such a
+/// branch an exact-`null` branch is a second branch `null` matches, and is no variant before the
+/// union's branches are compared. `{ minLength: 1 }` and `{ type: integer }` met with
+/// `type: [integer, 'null']` are then the union's only branches, which lower to one type, so the
+/// union is that type; and `{}` beside `enum: [null]` is the `serde_json::Value` it lowers to,
+/// with no `W001` for a second variant the union does not have.
+#[test]
+fn a_one_of_exact_null_branch_beside_a_branch_null_matches_unstated_is_no_variant() {
+    let pick = |body: &str| {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {body}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        generate_with_code(&spec)
+    };
+    let mut mismatches = Vec::new();
+    for other in ["{ minLength: 1 }", "{ minimum: 1 }", "true", "{}"] {
+        let site = format!(
+            "{{ type: [integer, 'null'], oneOf: [ {other}, {{ const: null }}, {{ type: integer }} \
+             ] }}"
+        );
+        let (report, code) = pick(&site);
+        let types = types_module(&code);
+        let collapsed = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("members 0, 2") && message.contains("the union is"));
+        if report.outcome() == Outcome::Rejected
+            || !collapsed
+            || field_type(&types, "pub pick").as_deref() != Some("Pick")
+            || types.contains("pub enum Pick ")
+        {
+            mismatches.push(format!(
+                "{site}: not `Pick`, one type with members 0 and 2 merged: {report:#?}\n{types}"
+            ));
+        }
+    }
+    for exact_null in ["{ enum: [null] }", "{ const: null }"] {
+        let site = format!("{{ oneOf: [ {{}}, {exact_null} ] }}");
+        let (report, code) = pick(&site);
+        let types = types_module(&code);
+        let untyped = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("lowers to `serde_json::Value`"));
+        if report.outcome() == Outcome::Rejected
+            || untyped
+            || !types.contains("pub type Pick = serde_json::Value;")
+        {
+            mismatches.push(format!(
+                "{site}: not `Value` without a `W001`: {report:#?}\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
