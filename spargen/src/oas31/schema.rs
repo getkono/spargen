@@ -289,7 +289,8 @@ pub(crate) struct ValidationKeywords {
     pub(crate) max_properties: Option<u64>,
     /// Another JSON Schema validation/applicator keyword is present: one of the deserializer's
     /// `SUBSCHEMA_KEYWORDS` (`not`, `if`/`then`/`else`, `contains`, `propertyNames`,
-    /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, or `maxContains`.
+    /// `unevaluated*`), `dependentSchemas`, `dependentRequired`, `minContains`, `maxContains`, or
+    /// an OpenAPI 3.0 boolean `exclusiveMinimum`/`exclusiveMaximum`.
     pub(crate) other: bool,
 }
 
