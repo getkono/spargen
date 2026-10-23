@@ -369,9 +369,10 @@ fn is_xml_name(name: &str) -> bool {
 /// no root `xml.name` takes its component name as its XML root name, or reports it (`W006`) where
 /// it is no XML name; under OpenAPI 3.2 (`is_oas32`), a property that is a `$ref` to a struct, or
 /// an array property whose items are, takes that struct's XML root name as its field name; and
-/// every hint the codec cannot honour — a field's, an items', a root's, or
-/// one beside a `$ref` ([`LowerCtx::record_ref_xml`]) — is `E009` on a type an XML body reaches
-/// and `W006` elsewhere.
+/// every hint the codec cannot honour — a field's, an items', a root's, one beside a `$ref`
+/// ([`LowerCtx::record_ref_xml`]), or any on a composition member the merge consumed
+/// ([`LowerCtx::record_member_xml`], judged by the type the merge produced) — is `E009` on a type
+/// an XML body reaches and `W006` elsewhere.
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
