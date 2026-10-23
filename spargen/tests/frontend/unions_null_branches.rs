@@ -1145,6 +1145,45 @@ components:
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// Issue #934: a `oneOf` member of an `allOf` whose branches `null` matches twice, by the one
+/// decision, admits no `null`: here a branch of scalar keywords alone and a `$ref` to a union
+/// `null` matches through its untyped `items` branch. So beside a `const: null` member the scalar
+/// meet is empty and the schema is rejected (`E013`), in every member order and nested in an inner
+/// `allOf`, and the union member's `serde_json::Value` variant is reported as the meet that failed
+/// left it (`W001`).
+#[test]
+fn a_union_member_null_matches_twice_takes_no_null_from_a_null_member() {
+    let union = "{ oneOf: [ { minLength: 1 }, { $ref: '#/components/schemas/U' } ] }";
+    let mut mismatches = Vec::new();
+    for site in [
+        format!("{{ allOf: [ {{ const: null }}, {union} ] }}"),
+        format!("{{ allOf: [ {union}, {{ const: null }} ] }}"),
+        format!("{{ allOf: [ {{ const: null }}, {{ allOf: [ {union} ] }} ] }}"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    U: {{ oneOf: [ {{ items: {{ type: string }} }}, {{ type: boolean }} ] }}\n    \
+                 Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, _) = generate_with_code(&spec);
+        let untyped = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("member 0 lowers to `serde_json::Value`"));
+        if report.outcome() != Outcome::Rejected
+            || !has_code(&report, Code::AllOfIrreconcilable)
+            || !untyped
+        {
+            mismatches.push(format!(
+                "{site}: not `E013` with the member's `W001`: {report:#?}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Issue #934: an `anyOf` whose branch states nothing or holds scalar keywords alone, met with a
 /// conjunct that admits `null`, carries that `null` once, as the one decision settles it. The
 /// meet hands such a branch the conjunct's `null`; an `anyOf` needs one match, so the `null` is

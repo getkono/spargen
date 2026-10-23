@@ -79,19 +79,9 @@ fn resolved_identity(provenance: &Provenance) -> Option<String> {
 }
 
 /// `decide` of `target`, read once per [`resolved_identity`] in `memo` and replayed at every later
-/// use. `true` (deciding) is recorded before `decide` runs, so a walk that loops back to `target`
-/// ends there. A target with no span has no identity to key on and is decided un-memoised; the
-/// caller's depth bound still bounds it.
-fn memoised_decision(
-    memo: &RefCell<HashMap<String, bool>>,
-    target: &Schema,
-    decide: impl FnOnce() -> bool,
-) -> bool {
-    memoised_answer(memo, target, true, decide)
-}
-
-/// [`memoised_decision`] with `provisional` as the answer a walk that loops back to `target` reads
-/// while `target` is still being answered.
+/// use. `provisional` is recorded before `decide` runs, so a walk that loops back to `target` reads
+/// it there and ends. A target with no span has no identity to key on and is decided un-memoised;
+/// the caller's depth bound still bounds it.
 fn memoised_answer<T: Copy>(
     memo: &RefCell<HashMap<String, T>>,
     target: &Schema,
@@ -230,9 +220,7 @@ fn lower_pass(
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
         gatherings: Vec::new(),
-        target_decides_null_memo: RefCell::new(HashMap::new()),
-        resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
-        admits_null_undecided_memo: RefCell::new(HashMap::new()),
+        wraps_union_memo: RefCell::new(HashMap::new()),
         null_admission_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
@@ -845,28 +833,16 @@ struct LowerCtx<'a, 'doc> {
     /// reached it. `allOf` is idempotent under a repeated conjunct, so a bundle target whose
     /// contribution the innermost gathering already holds adds nothing more to it.
     gatherings: Vec<Gathering>,
-    /// [`Self::ref_target_decides_null_within`]'s answer for each `$ref` target `allOf` body it
-    /// has read, keyed by the body's own `file#pointer` ([`resolved_identity`]). That read and
-    /// [`Self::all_of_decides_null`] call each other through every `$ref` an `allOf` names, so
-    /// without this a reuse graph that branches (`C<i>: allOf [$ref C<i+1>, $ref C<i+1>]`) is
-    /// re-read once per path, in time exponential in its depth. A body being read records `true`
-    /// (deciding) before its members are ([`memoised_decision`]), so a loop through it ends there,
-    /// with the answer the depth bound gave it before. The document is fixed for the pass, so an
-    /// answer never goes stale.
-    target_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// The same memo for [`Self::all_of_decides_null`]'s read of a bundle-`$ref` member's resolved
-    /// target, which it reads as a whole schema rather than as a `$ref` target body.
-    resolved_all_of_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// [`Self::all_of_wraps_undecided_union`]'s answer for each `$ref` member's target body, keyed
-    /// as [`Self::target_decides_null_memo`] is: a reuse graph of wrappers that branches (`W<i>:
-    /// allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time exponential
-    /// in its depth. A body being read records `false` (admits nothing undecided) before its
+    /// [`Self::all_of_wraps_union`]'s answer for each `$ref` member's target body, keyed by the
+    /// body's own `file#pointer` ([`resolved_identity`]): a reuse graph of wrappers that branches
+    /// (`W<i>: allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time
+    /// exponential in its depth. A body being read records `false` (wraps no union) before its
     /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
-    /// end it.
-    admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
+    /// end it. The document is fixed for the pass, so an answer never goes stale.
+    wraps_union_memo: RefCell<HashMap<String, bool>>,
     /// [`Self::null_admission`]'s answer for each `$ref` target body it has read, keyed as
-    /// [`Self::target_decides_null_memo`] is, so a reuse graph that branches is read once per
-    /// target. A body being read records [`NullAdmission::Undecided`] before its keywords are
+    /// [`Self::wraps_union_memo`] is, so a reuse graph that branches is read once per target. A
+    /// body being read records [`NullAdmission::Undecided`] before its keywords are
     /// ([`memoised_answer`]), so a loop through it ends there.
     ///
     /// [`NullAdmission::Undecided`]: nullability::NullAdmission::Undecided
