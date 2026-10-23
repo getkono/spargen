@@ -479,7 +479,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // this same merge, gathered exactly as a separate member carrying them would be.
             // Returning once the target is pushed would delete the siblings' properties and
             // `required` silently, and let a sibling contradicting its target generate as the
-            // target alone. The gate is the one `lower_schema_inner` asks of a
+            // target alone. The gate is the one `lower_ref_with_siblings` asks of a
             // `$ref`'s siblings, so the two positions agree on what counts as a shape.
             let mut sibling = schema.clone();
             sibling.reference = None;
