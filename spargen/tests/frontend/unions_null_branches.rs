@@ -1144,3 +1144,200 @@ components:
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #934: a `oneOf` member of an `allOf` whose branches `null` matches twice, by the one
+/// decision, admits no `null`: here a branch of scalar keywords alone and a `$ref` to a union
+/// `null` matches through its untyped `items` branch. So beside a `const: null` member the scalar
+/// meet is empty and the schema is rejected (`E013`), in every member order and nested in an inner
+/// `allOf`, and the union member's `serde_json::Value` variant is reported as the meet that failed
+/// left it (`W001`).
+#[test]
+fn a_union_member_null_matches_twice_takes_no_null_from_a_null_member() {
+    let union = "{ oneOf: [ { minLength: 1 }, { $ref: '#/components/schemas/U' } ] }";
+    let mut mismatches = Vec::new();
+    for site in [
+        format!("{{ allOf: [ {{ const: null }}, {union} ] }}"),
+        format!("{{ allOf: [ {union}, {{ const: null }} ] }}"),
+        format!("{{ allOf: [ {{ const: null }}, {{ allOf: [ {union} ] }} ] }}"),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    U: {{ oneOf: [ {{ items: {{ type: string }} }}, {{ type: boolean }} ] }}\n    \
+                 Pick: {site}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        let (report, _) = generate_with_code(&spec);
+        let untyped = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("member 0 lowers to `serde_json::Value`"));
+        if report.outcome() != Outcome::Rejected
+            || !has_code(&report, Code::AllOfIrreconcilable)
+            || !untyped
+        {
+            mismatches.push(format!(
+                "{site}: not `E013` with the member's `W001`: {report:#?}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #934: an `anyOf` whose branch states nothing or holds scalar keywords alone, met with a
+/// conjunct that admits `null`, carries that `null` once, as the one decision settles it. The
+/// meet hands such a branch the conjunct's `null`; an `anyOf` needs one match, so the `null` is
+/// the position's `Option` and no variant's, and beside an exact-`null` branch it is that `()`
+/// arm alone. The union written as a `$ref`'d component beside the conjunct gives the answer the
+/// sibling spelling gives.
+#[test]
+fn an_any_of_met_with_a_nullable_conjunct_carries_its_null_once() {
+    let mut mismatches = Vec::new();
+    for (union, optional, unit_arm) in [
+        ("anyOf: [ {}, { minLength: 1 } ]", true, false),
+        ("anyOf: [ true, { pattern: '^a' } ]", true, false),
+        ("anyOf: [ { const: null }, { minLength: 1 } ]", false, true),
+        ("anyOf: [ { enum: [null] }, {} ]", false, true),
+    ] {
+        for (site, extra) in [
+            (
+                format!("{{ type: [string, 'null'], {union} }}"),
+                String::new(),
+            ),
+            (
+                "{ type: [string, 'null'], $ref: '#/components/schemas/Un' }".to_owned(),
+                format!("    Un: {{ {union} }}\n"),
+            ),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n{extra}    Holder:\n      type: object\n      \
+                     properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                     required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+            let variants = enum_variants(&types, "Pick");
+            let option_arms: Vec<&String> = variants
+                .iter()
+                .filter(|variant| variant.contains("(Option<"))
+                .collect();
+            let has_unit_arm = types.contains("pub type UnVariant0 = ();")
+                || types.contains("pub type PickVariant0 = ();");
+            if pick.starts_with("Option<") != optional
+                || !option_arms.is_empty()
+                || has_unit_arm != unit_arm
+            {
+                mismatches.push(format!(
+                    "{site} with {union}: `pick` is `{pick}`, `Option` arms {option_arms:?}, \
+                     `()` arm {has_unit_arm}; expected `Option` {optional}, no `Option` arm, `()` \
+                     arm {unit_arm}\n{types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #934: a `oneOf` counts `null` in every branch the one decision says it satisfies — a
+/// branch of scalar keywords alone and one that states nothing among them — so beside such a
+/// branch an exact-`null` branch is a second branch `null` matches, and is no variant before the
+/// union's branches are compared. `{ minLength: 1 }` and `{ type: integer }` met with
+/// `type: [integer, 'null']` are then the union's only branches, which lower to one type, so the
+/// union is that type; and `{}` beside `enum: [null]` is the `serde_json::Value` it lowers to,
+/// with no `W001` for a second variant the union does not have.
+#[test]
+fn a_one_of_exact_null_branch_beside_a_branch_null_matches_unstated_is_no_variant() {
+    let pick = |body: &str| {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    Pick: {body}\n    Holder:\n      type: object\n      properties:\n        \
+                 pick: {{ $ref: '#/components/schemas/Pick' }}\n      required: [pick]\n"
+            ),
+        );
+        generate_with_code(&spec)
+    };
+    let mut mismatches = Vec::new();
+    for other in ["{ minLength: 1 }", "{ minimum: 1 }", "true", "{}"] {
+        let site = format!(
+            "{{ type: [integer, 'null'], oneOf: [ {other}, {{ const: null }}, {{ type: integer }} \
+             ] }}"
+        );
+        let (report, code) = pick(&site);
+        let types = types_module(&code);
+        let collapsed = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("members 0, 2") && message.contains("the union is"));
+        if report.outcome() == Outcome::Rejected
+            || !collapsed
+            || field_type(&types, "pub pick").as_deref() != Some("Pick")
+            || types.contains("pub enum Pick ")
+        {
+            mismatches.push(format!(
+                "{site}: not `Pick`, one type with members 0 and 2 merged: {report:#?}\n{types}"
+            ));
+        }
+    }
+    for exact_null in ["{ enum: [null] }", "{ const: null }"] {
+        let site = format!("{{ oneOf: [ {{}}, {exact_null} ] }}");
+        let (report, code) = pick(&site);
+        let types = types_module(&code);
+        let untyped = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("lowers to `serde_json::Value`"));
+        if report.outcome() == Outcome::Rejected
+            || untyped
+            || !types.contains("pub type Pick = serde_json::Value;")
+        {
+            mismatches.push(format!(
+                "{site}: not `Value` without a `W001`: {report:#?}\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Issue #934: an `anyOf` beside a `$ref` to a nullable conjunct, whose branches the meet leaves
+/// as the conjunct itself, collapses to that conjunct with `W001` even though the branches differ
+/// in `null`: a branch that states nothing takes the conjunct's `null`, and `{ type: array }`
+/// refuses it. The variants are compared with each one's own `null` set aside, so the position is
+/// the conjunct, `Option` because a branch admits `null`, and not an enum of two identical
+/// `Box<C>` variants.
+#[test]
+fn a_ref_beside_an_any_of_whose_branches_differ_only_in_null_collapses_to_the_conjunct() {
+    let mut mismatches = Vec::new();
+    for stated_nothing in ["{}", "true"] {
+        let union = format!("anyOf: [ {stated_nothing}, {{ type: array }} ]");
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    C: {{ type: [array, 'null'], items: {{ type: string }} }}\n    Pick: {{ $ref: \
+                 '#/components/schemas/C', {union} }}\n    Holder:\n      type: object\n      \
+                 properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let collapsed = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("differ only in keywords"));
+        if report.outcome() == Outcome::Rejected
+            || !collapsed
+            || !enum_variants(&types, "Pick").is_empty()
+            || alias_target(&types, "Pick").as_deref() != Some("Vec<Citem>")
+            || field_type(&types, "pub pick").as_deref() != Some("Option<Pick>")
+        {
+            mismatches.push(format!(
+                "{union}: not collapsed to `C`: {report:#?}\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

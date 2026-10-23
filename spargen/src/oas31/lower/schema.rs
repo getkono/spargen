@@ -257,7 +257,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
             self.unmerged_union = enclosing_unmerged;
             self.unmerged_union_meets_null = enclosing_meets_null;
-            let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
             let sibling = sibling?;
             let mark = self.graph_mark();
             let meets_from = self.variant_meets.len();
@@ -297,12 +296,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
             let intersection = if has_union_sibling {
-                let intersection = self.clear_counted_null(
-                    intersection,
-                    referenced,
-                    stated_nothing_took_null.as_ref(),
-                    &format!("{hint}ReferenceIntersection"),
-                );
                 let (collapsed, untyped_check) = self.collapse_met_union(
                     schema,
                     intersection,

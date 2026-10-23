@@ -79,19 +79,9 @@ fn resolved_identity(provenance: &Provenance) -> Option<String> {
 }
 
 /// `decide` of `target`, read once per [`resolved_identity`] in `memo` and replayed at every later
-/// use. `true` (deciding) is recorded before `decide` runs, so a walk that loops back to `target`
-/// ends there. A target with no span has no identity to key on and is decided un-memoised; the
-/// caller's depth bound still bounds it.
-fn memoised_decision(
-    memo: &RefCell<HashMap<String, bool>>,
-    target: &Schema,
-    decide: impl FnOnce() -> bool,
-) -> bool {
-    memoised_answer(memo, target, true, decide)
-}
-
-/// [`memoised_decision`] with `provisional` as the answer a walk that loops back to `target` reads
-/// while `target` is still being answered.
+/// use. `provisional` is recorded before `decide` runs, so a walk that loops back to `target` reads
+/// it there and ends. A target with no span has no identity to key on and is decided un-memoised;
+/// the caller's depth bound still bounds it.
 fn memoised_answer<T: Copy>(
     memo: &RefCell<HashMap<String, T>>,
     target: &Schema,
@@ -231,9 +221,7 @@ fn lower_pass(
         resolved_member_stack: Vec::new(),
         union_member_stack: Vec::new(),
         gatherings: Vec::new(),
-        target_decides_null_memo: RefCell::new(HashMap::new()),
-        resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
-        admits_null_undecided_memo: RefCell::new(HashMap::new()),
+        wraps_union_memo: RefCell::new(HashMap::new()),
         null_admission_memo: RefCell::new(HashMap::new()),
         settled,
         guessed: HashSet::new(),
@@ -247,7 +235,6 @@ fn lower_pass(
         field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        stated_nothing_took_null: None,
         held_untyped_warnings: None,
         scalar_meet_union: None,
         scalar_meet_unmerged: HashSet::new(),
@@ -695,21 +682,6 @@ struct ScopeReach {
     uncategorised: bool,
 }
 
-/// What the meet a union is held back for ([`LowerCtx::unmerged_union`]) does with the conjunct's
-/// `null` it hands the union's branches that state nothing and lower to `Value` (`true`, `{}`),
-/// whose `null` the union settled before the meet (#592, #597). `Value` is the identity of the
-/// meet, so the meet gives each such branch that `null` again ([`LowerCtx::clear_counted_null`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum StatedNothingNull {
-    /// The branches with these variant hints took `null` that an `anyOf` hoisted, or that a
-    /// `oneOf` counted beside another branch `null` matches, so the meet's copy is cleared.
-    Counted(Vec<String>),
-    /// A `oneOf` counted one such branch as the only branch `null` matches, so the meet's copy is
-    /// that branch's answer: kept in the variant where the meet leaves a union, and on the
-    /// position where it narrows the union to that branch alone.
-    Sole,
-}
-
 /// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
 /// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
 /// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
@@ -869,28 +841,16 @@ struct LowerCtx<'a, 'doc> {
     /// reached it. `allOf` is idempotent under a repeated conjunct, so a bundle target whose
     /// contribution the innermost gathering already holds adds nothing more to it.
     gatherings: Vec<Gathering>,
-    /// [`Self::ref_target_decides_null_within`]'s answer for each `$ref` target `allOf` body it
-    /// has read, keyed by the body's own `file#pointer` ([`resolved_identity`]). That read and
-    /// [`Self::all_of_decides_null`] call each other through every `$ref` an `allOf` names, so
-    /// without this a reuse graph that branches (`C<i>: allOf [$ref C<i+1>, $ref C<i+1>]`) is
-    /// re-read once per path, in time exponential in its depth. A body being read records `true`
-    /// (deciding) before its members are ([`memoised_decision`]), so a loop through it ends there,
-    /// with the answer the depth bound gave it before. The document is fixed for the pass, so an
-    /// answer never goes stale.
-    target_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// The same memo for [`Self::all_of_decides_null`]'s read of a bundle-`$ref` member's resolved
-    /// target, which it reads as a whole schema rather than as a `$ref` target body.
-    resolved_all_of_decides_null_memo: RefCell<HashMap<String, bool>>,
-    /// [`Self::all_of_wraps_undecided_union`]'s answer for each `$ref` member's target body, keyed
-    /// as [`Self::target_decides_null_memo`] is: a reuse graph of wrappers that branches (`W<i>:
-    /// allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time exponential
-    /// in its depth. A body being read records `false` (admits nothing undecided) before its
+    /// [`Self::all_of_wraps_union`]'s answer for each `$ref` member's target body, keyed by the
+    /// body's own `file#pointer` ([`resolved_identity`]): a reuse graph of wrappers that branches
+    /// (`W<i>: allOf [$ref W<i-1>, $ref W<i-1>]`) is otherwise re-read once per path, in time
+    /// exponential in its depth. A body being read records `false` (wraps no union) before its
     /// members are ([`memoised_answer`]), so a loop through it ends there, as the depth bound would
-    /// end it.
-    admits_null_undecided_memo: RefCell<HashMap<String, bool>>,
+    /// end it. The document is fixed for the pass, so an answer never goes stale.
+    wraps_union_memo: RefCell<HashMap<String, bool>>,
     /// [`Self::null_admission`]'s answer for each `$ref` target body it has read, keyed as
-    /// [`Self::target_decides_null_memo`] is, so a reuse graph that branches is read once per
-    /// target. A body being read records [`NullAdmission::Undecided`] before its keywords are
+    /// [`Self::wraps_union_memo`] is, so a reuse graph that branches is read once per target. A
+    /// body being read records [`NullAdmission::Undecided`] before its keywords are
     /// ([`memoised_answer`]), so a loop through it ends there.
     ///
     /// [`NullAdmission::Undecided`]: nullability::NullAdmission::Undecided
@@ -945,16 +905,6 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
-    /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
-    /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
-    /// `anyOf`, as an untyped object branch's is (#567), or counted by a `oneOf` that the count
-    /// makes refuse `null`. `Value` is the identity of the meet, so the meet hands the branch the
-    /// conjunct's `null` a second time, and the caller clears it there
-    /// ([`Self::clear_counted_null`]) so `null` is counted once per branch. A `oneOf` whose only
-    /// branch `null` matches is one of these records that too ([`StatedNothingNull::Sole`]), so
-    /// a meet that narrows the union to that branch keeps the `null` it gave it (#597).
-    stated_nothing_took_null: Option<(Provenance, StatedNothingNull)>,
     /// The `W001`s inline `oneOf`s raise for their `serde_json::Value` variants while an `allOf`
     /// gathers its members, held back where `Some` ([`HeldUntypedWarning`]). A union member the
     /// `allOf`'s scalar meet meets lowers on its own first, where a branch that states nothing

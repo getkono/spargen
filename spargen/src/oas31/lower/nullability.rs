@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
-use crate::ir::{Ty, TypeId, TypeKind, Union};
+use crate::ir::{Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
@@ -14,7 +14,7 @@ use super::shape::{
     ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
 };
 use super::strategy::retain_strategy;
-use super::{memoised_answer, memoised_decision, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
+use super::{memoised_answer, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
 /// What a schema says about the JSON `null` instance, read from the schema alone in JSON Schema
 /// 2020-12 terms, whatever spelling the constraints take ([`LowerCtx::null_admission`]).
@@ -197,10 +197,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   variant is that variant's type, and one left with none — the exact null type was all the
     ///   lowering found — admits no value at all, which is rejected (`E013`);
     /// * where `null` satisfies it unstated, the type is not `Option` and no variant is;
-    /// * where it admits `null`, the type carries it once: as the `Option` of the union, as a `()`
-    ///   variant, or as the `Option` of the one merged variant `null` matches, and it is made
-    ///   `Option` where none of them does. A `()` variant wins over the union's `Option`: a
-    ///   union holding one is not made `Option` and does not stay one.
+    /// * where it admits `null`, the type carries it once: as a `()` variant, which wins over
+    ///   every `Option` (a union holding one is not made `Option` and does not stay one, and no
+    ///   other variant stays one); as the `Option` of the union, which an `anyOf` of this
+    ///   lowering's own also takes from a variant that accepts `null`; or as the `Option` of the
+    ///   one merged `oneOf` variant `null` matches. It is made `Option` where none of them does.
     ///
     /// A `type` naming only `null` beside an `allOf` whose members lowered to a non-null type,
     /// which admits no value under 2020-12, is applied as the decision reads it: that type or
@@ -248,12 +249,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         match admission {
             NullAdmission::Admits => {
-                if ty.nullable {
-                    // A `()` arm already carries the `null`, so the union is no `Option` as well,
-                    // as an `allOf` spelling of the same constraints settles it (Decision 3).
-                    if self.has_exact_null_variant(ty) {
-                        ty.nullable = false;
-                    }
+                if self.has_exact_null_variant(ty) {
+                    // A `()` arm carries the `null`, so neither the union nor another variant is
+                    // an `Option` as well, as an `allOf` spelling of the same constraints settles
+                    // it (Decision 3).
+                    ty.nullable = false;
+                    self.clear_variant_nulls(ty.id, mark, false);
+                } else if ty.nullable || self.any_of_variant_carries_null(ty, mark) {
+                    // The union's `Option` carries the `null`. An `anyOf` of this lowering's own
+                    // takes it from a variant that accepts it, since one match admits it.
+                    ty.nullable = true;
                     self.clear_variant_nulls(ty.id, mark, false);
                 } else if !self.carries_null(ty) {
                     ty.nullable = true;
@@ -364,6 +369,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.reservation_roots().any(|component| component == id)
     }
 
+    /// Whether `ty` is an `anyOf` union this lowering inserted (at or above `mark`), no component,
+    /// with a variant that accepts `null` ([`Self::carries_null`]).
+    fn any_of_variant_carries_null(&self, ty: Ty, mark: u32) -> bool {
+        ty.id.0 >= mark
+            && !self.is_component_def(ty.id)
+            && matches!(
+                self.graph.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Union(Union {
+                    strategy: UnionStrategy::Trial {
+                        mode: UnionMode::AnyOf,
+                        ..
+                    },
+                    ..
+                }))
+            )
+            && self.carries_null(ty)
+    }
+
     /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
     fn has_exact_null_variant(&self, ty: Ty) -> bool {
         matches!(
@@ -447,54 +470,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         answer
     }
 
-    /// Whether some member of `schema`'s object `allOf` decides the merge's nullability, as
-    /// [`Self::gather_all_of`] records it in each [`Contribution::Object`]: the schema's own
-    /// `type`, a member that states one, a `$ref` member whose target decides it
-    /// ([`Self::ref_target_decides_null`]; a bundle target expanded in place is read as its own
-    /// members are), and the members of a nested `allOf` or of a `$ref` member's siblings. A
-    /// member this cannot read as an object (`enum`, `const`, a union) is taken as deciding, which
-    /// keeps the lowered nullability. `depth` bounds the walk; a chain past it decides. Each `$ref`
-    /// target is read once per pass and its answer replayed
-    /// ([`Self::target_decides_null_memo`], [`Self::resolved_all_of_decides_null_memo`]).
-    fn all_of_decides_null(&self, schema: &Schema, depth: u32) -> bool {
-        if depth >= MAX_SCHEMA_DEPTH
-            || stated_nullability(schema).is_some()
-            || schema.enum_values.is_some()
-            || schema.const_value.is_some()
-            || schema_has_union(schema)
-        {
-            return true;
-        }
-        if let Some(reference) = &schema.reference {
-            let target_decides =
-                if reference.starts_with("#/components/schemas/") || is_remote_ref(reference) {
-                    self.ref_target_decides_null_within(reference, &schema.provenance, depth + 1)
-                } else {
-                    match self.resolver.resolve(
-                        reference,
-                        &schema.provenance,
-                        &mut Diagnostics::default(),
-                    ) {
-                        Ok(resolved) => memoised_decision(
-                            &self.resolved_all_of_decides_null_memo,
-                            &resolved.schema,
-                            || self.all_of_decides_null(&resolved.schema, depth + 1),
-                        ),
-                        Err(_) => true,
-                    }
-                };
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            return target_decides
-                || (schema_has_shape_constraint(&sibling)
-                    && self.all_of_decides_null(&sibling, depth + 1));
-        }
-        schema.all_of.iter().any(|member| match member {
-            SchemaOr::Schema(member) => self.all_of_decides_null(member, depth + 1),
-            SchemaOr::Bool(_) => false,
-        })
-    }
-
     /// Whether `ty` is the exact JSON `null` (`()`), as a `const: null` or `enum: [null]` branch
     /// lowers: a branch `null` matches without its `Ty` being nullable.
     pub(super) fn is_exact_null(&self, ty: Ty) -> bool {
@@ -528,37 +503,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             _ => false,
         };
         !ty.nullable && undecided_kind && self.null_admission(member) == NullAdmission::Undecided
-    }
-
-    /// Whether `member`, a union branch lowered to `ty` that hoisted no `null`, is a branch `null`
-    /// matches although nothing in it states `null`, as a `oneOf` counts it beside a branch that
-    /// does: an untyped object or array ([`Self::branch_leaves_null_undecided`], #622), or a
-    /// nested union `null` matches through its own branches ([`Self::union_admits_null_undecided`]),
-    /// written inline or as a bare `$ref` to a union component (#628). A nested union is read by
-    /// its branches whatever it lowered to, as [`Self::branch_takes_permitted_null`] reads it.
-    pub(super) fn branch_matches_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
-        if self.branch_leaves_null_undecided(member, ty) {
-            return true;
-        }
-        let SchemaOr::Schema(member) = member else {
-            return false;
-        };
-        if ty.nullable {
-            return false;
-        }
-        if schema_has_union(member) {
-            return self.union_admits_null_undecided(member, 0);
-        }
-        let Some(reference) = member.reference.as_deref() else {
-            return false;
-        };
-        // A `$ref` with siblings of its own is an intersection this does not read.
-        !ref_siblings_bear_shape(member)
-            && self
-                .ref_target_body(reference, &member.provenance)
-                .is_some_and(|target| {
-                    schema_has_union(&target) && self.union_admits_null_undecided(&target, 0)
-                })
     }
 
     /// Whether the body the `$ref` written at `at` names ([`Self::ref_target_body`]) lowers to a
@@ -652,7 +596,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
     /// union is met with admits it: an untyped object ([`Self::branch_leaves_null_undecided`]), or
     /// a branch that states nothing and lowers to `Value` (`true`, `{}`), which the meet otherwise
-    /// leaves as it is (#588, #592). Either is then counted as a branch `null` matches.
+    /// leaves as it is (#588, #592).
     pub(super) fn branch_takes_conjunct_null(&self, member: &SchemaOr, ty: Ty) -> bool {
         self.branch_leaves_null_undecided(member, ty)
             || (!ty.nullable
@@ -667,13 +611,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// wherever the union's other sibling keywords admit it. That is a branch lowering to `Value`,
     /// an untyped object ([`Self::branch_leaves_null_undecided`]), a cycle-closing `$ref` whose
     /// target's struct is still a reservation and whose keywords decide nothing, and a nested
-    /// union `null` matches through its own branches ([`Self::union_admits_null_undecided`]).
+    /// union `null` matches ([`Self::union_matches_uncarried_null`]).
     pub(super) fn branch_takes_permitted_null(&self, member: &SchemaOr, ty: Ty) -> bool {
-        // A nested union's branches decide, whatever it lowered to: one that is `Value` can still
-        // be a `oneOf` that `null` matches twice.
+        // A nested union is read by the one decision, whatever it lowered to: one that is `Value`
+        // can still be a `oneOf` that `null` matches twice.
         if let SchemaOr::Schema(member) = member {
             if schema_has_union(member) {
-                return !ty.nullable && self.union_admits_null_undecided(member, 0);
+                return self.union_matches_uncarried_null(member, ty);
             }
         }
         if self
@@ -692,130 +636,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && self.null_admission(member) == NullAdmission::Undecided
     }
 
-    /// Whether `schema` is a `oneOf`/`anyOf` whose other keywords decide nothing about `null` and
-    /// whose branches `null` matches by the union's own rule (exactly one for `oneOf`, at least one
-    /// for `anyOf`), counting a branch that states `null`, one that is `true`, one whose keywords
-    /// leave `null` undecided, and a nested union that admits it in turn. `depth` bounds the walk.
-    fn union_admits_null_undecided(&self, schema: &Schema, depth: u32) -> bool {
-        let (members, one_of) = match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
-            (false, true) => (&schema.one_of, true),
-            (true, false) => (&schema.any_of, false),
-            _ => return false,
-        };
-        if depth >= MAX_SCHEMA_DEPTH {
-            return false;
-        }
-        let mut rest = schema.clone();
-        rest.clear_union_keywords();
-        if self.all_of_decides_null(&rest, depth + 1) {
-            return false;
-        }
-        let matching = members
-            .iter()
-            .filter(|member| match member {
-                SchemaOr::Bool(accepts) => *accepts,
-                SchemaOr::Schema(member) => {
-                    stated_nullability(member) == Some(true)
-                        || self.union_admits_null_undecided(member, depth + 1)
-                        || (!schema_has_union(member)
-                            && !self.all_of_decides_null(member, depth + 1))
-                }
-            })
-            .count();
-        if one_of {
-            // A branch whose `enum` or `const` lists `null` with no `type` (`const: null`,
-            // `enum: [null]`, or a bare `$ref` to one) decides `null`, so it gives the union
-            // nothing undecided to admit, but it is a second branch `null` matches beside an
-            // undecided one, which fails exactly-one (#657). Only beside an undecided branch the
-            // union's own lowering counts it beside ([`Self::branch_counts_beside_exact_null`]),
-            // so this spelling and the sibling one agree; beside a branch of scalar keywords or
-            // one that states nothing the union keeps its `null` in both (#668).
-            matching == 1
-                && !(members.iter().any(|member| match member {
-                    SchemaOr::Schema(member) => self.branch_lists_null_by_value(member),
-                    SchemaOr::Bool(_) => false,
-                }) && members
-                    .iter()
-                    .any(|member| self.branch_counts_beside_exact_null(member, depth + 1)))
-        } else {
-            matching > 0
-        }
+    /// Whether `schema`, a union or a `$ref` to one, lowered to `ty`, is one `null` matches by the
+    /// one decision ([`Self::null_admission`]) although `ty` does not carry it
+    /// ([`Self::carries_null`]): no `Option`, no `()` arm and no variant that accepts `null`, as
+    /// an `anyOf` of untyped `items` branches, which leave `null` undecided, lowers.
+    fn union_matches_uncarried_null(&self, schema: &Schema, ty: Ty) -> bool {
+        self.null_admission(schema).matches() && !self.carries_null(ty)
     }
 
-    /// Whether `member`, a `oneOf` branch, is one beside which the union's own lowering counts an
-    /// exact-null branch as a second branch `null` matches (#657): an untyped object or array
-    /// whose keywords leave `null` undecided (#622), or a nested union `null` matches through its
-    /// own branches (#628), written inline or as a bare `$ref`. A branch of scalar keywords alone
-    /// or one that states nothing (`true`, `{}`) is not one, so the union keeps its `null` beside
-    /// it here as it does in the sibling spelling. `depth` bounds the walk.
-    fn branch_counts_beside_exact_null(&self, member: &SchemaOr, depth: u32) -> bool {
-        let SchemaOr::Schema(member) = member else {
-            return false;
-        };
-        if schema_has_union(member) {
-            return self.union_admits_null_undecided(member, depth);
-        }
-        if stated_nullability(member).is_some() || self.all_of_decides_null(member, depth) {
-            return false;
-        }
-        let Some(reference) = member.reference.as_deref() else {
-            return self.schema_is_untyped_shape(member, depth);
-        };
-        !ref_siblings_bear_shape(member)
-            && self
-                .ref_target_body(reference, &member.provenance)
-                .is_some_and(|target| {
-                    if schema_has_union(&target) {
-                        self.union_admits_null_undecided(&target, depth)
-                    } else {
-                        self.schema_is_untyped_shape(&target, depth)
-                    }
-                })
-    }
-
-    /// Whether `member`, a union branch, matches `null` through an `enum` or `const` that lists it,
-    /// with no `type` of its own and no composition: `const: null`, `enum: [null]`, `enum: [x,
-    /// null]`, or a bare `$ref` whose target, aliases followed, is one. Such a branch decides `null`,
-    /// so [`Self::union_admits_null_undecided`] does not count it among the branches whose
-    /// keywords leave `null` undecided; a branch with a `type` listing `null` is counted there.
-    fn branch_lists_null_by_value(&self, member: &Schema) -> bool {
-        let lists_null = |schema: &Schema| {
-            (schema.enum_values.is_some() || schema.const_value.is_some())
-                && stated_nullability(schema).is_none()
-                && schema.reference.is_none()
-                && schema.all_of.is_empty()
-                && !schema_has_union(schema)
-                && own_keywords_admit_null(schema)
-        };
-        let Some(reference) = member.reference.as_deref() else {
-            return lists_null(member);
-        };
-        !ref_siblings_bear_shape(member)
-            && self
-                .ref_target_body(reference, &member.provenance)
-                .is_some_and(|target| lists_null(&target))
-    }
-
-    /// Whether `schema`, the body an `allOf` member names, is a union whose branches leave `null`
-    /// undecided yet match it ([`Self::union_admits_null_undecided`]), or an `allOf` wrapping one
-    /// ([`Self::all_of_wraps_undecided_union`]). Either admits `null` without deciding it.
-    fn admits_null_undecided_through_union(&self, schema: &Schema, depth: u32) -> bool {
-        if schema_has_union(schema) {
-            self.union_admits_null_undecided(schema, depth)
-        } else {
-            self.all_of_wraps_undecided_union(schema, depth)
-        }
-    }
-
-    /// Whether `schema` is an `allOf`, with no `$ref` or union of its own and own keywords that
-    /// decide nothing about `null`, whose members include a union that admits `null` undecided
-    /// ([`Self::admits_null_undecided_through_union`]), inline or as a bare `$ref` to it, and are
-    /// otherwise members that decide nothing ([`Self::all_of_decides_null`]): `Wrap: { allOf:
+    /// Whether `schema` is an `allOf`, with no `$ref` or union of its own, one of whose members is
+    /// a union, inline or as a bare `$ref` to it, or such an `allOf` in turn: `Wrap: { allOf:
     /// [ { $ref: U } ] }` admits exactly the values `U` does, so a `$ref` member to `Wrap`, or a
     /// non-component pointer to such an `allOf`, takes `null` as a `$ref` member to `U` does
-    /// (#638). `depth` bounds the walk; a chain past it answers `false`. Each `$ref` member's target
-    /// is read once per pass and its answer replayed ([`Self::admits_null_undecided_memo`]).
-    fn all_of_wraps_undecided_union(&self, schema: &Schema, depth: u32) -> bool {
+    /// (#638). `depth` bounds the walk; a chain past it answers `false`. Each `$ref` member's
+    /// target is read once per pass and its answer replayed ([`Self::wraps_union_memo`]).
+    fn all_of_wraps_union(&self, schema: &Schema, depth: u32) -> bool {
         if depth >= MAX_SCHEMA_DEPTH
             || schema.all_of.is_empty()
             || schema.reference.is_some()
@@ -823,74 +658,38 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         {
             return false;
         }
-        let mut own = schema.clone();
-        own.all_of.clear();
-        if self.all_of_decides_null(&own, depth + 1) {
-            return false;
-        }
-        let mut wraps = false;
-        for member in &schema.all_of {
-            let member = match member {
-                SchemaOr::Bool(true) => continue,
-                SchemaOr::Bool(false) => return false,
-                SchemaOr::Schema(member) => member.as_ref(),
+        schema.all_of.iter().any(|member| {
+            let SchemaOr::Schema(member) = member else {
+                return false;
             };
-            let admits = match member.reference.as_deref() {
+            match member.reference.as_deref() {
+                // A `$ref` member with siblings of its own is an intersection this does not read.
                 Some(reference) => {
-                    // A `$ref` member with siblings of its own is an intersection this does not
-                    // read.
                     !ref_siblings_bear_shape(member)
                         && self
                             .ref_target_body(reference, &member.provenance)
                             .is_some_and(|body| {
-                                memoised_answer(
-                                    &self.admits_null_undecided_memo,
-                                    &body,
-                                    false,
-                                    || self.admits_null_undecided_through_union(&body, depth + 1),
-                                )
+                                schema_has_union(&body)
+                                    || memoised_answer(&self.wraps_union_memo, &body, false, || {
+                                        self.all_of_wraps_union(&body, depth + 1)
+                                    })
                             })
                 }
-                None => self.admits_null_undecided_through_union(member, depth + 1),
-            };
-            if admits {
-                wraps = true;
-            } else if self.all_of_decides_null(member, depth + 1) {
-                return false;
-            }
-        }
-        wraps
-    }
-
-    /// [`target_decides_null`] of the schema the `$ref` written at `at` lowered to: a root
-    /// component first, as [`Self::ensure_component`] chooses it, then a remote document from the
-    /// root, as [`Self::ensure_remote`] resolves it, and otherwise the referring file's target.
-    /// A target that is a bare alias (a `$ref` with no shape-bearing sibling) is the schema it
-    /// names, so the chain is followed to its body. The target was already lowered from the same
-    /// resolution, so this only re-reads it; a target that cannot be read keeps its lowered
-    /// nullability as the decision, and reports nothing a second time.
-    ///
-    /// A target body that is an `allOf` decides exactly when some member of its merge does
-    /// ([`Self::all_of_decides_null`], issue #565): a component composed of untyped object members
-    /// alone lowers to the non-null struct [`object_all_of_admits_null`] gives a merge no member
-    /// decides, and that struct is no decision, as the same members written inline make none.
-    pub(super) fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
-        self.ref_target_decides_null_within(reference, at, 0)
-    }
-
-    /// [`Self::ref_target_decides_null`] reached `depth` steps into an
-    /// [`Self::all_of_decides_null`] walk, which bounds the two together: a target's `allOf` can
-    /// name the `$ref` that reached it.
-    fn ref_target_decides_null_within(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
-        self.ref_target_body(reference, at).is_none_or(|target| {
-            if target.all_of.is_empty() {
-                target_decides_null(&target)
-            } else {
-                memoised_decision(&self.target_decides_null_memo, &target, || {
-                    self.all_of_decides_null(&target, depth + 1)
-                })
+                None => schema_has_union(member) || self.all_of_wraps_union(member, depth + 1),
             }
         })
+    }
+
+    /// Whether the schema the `$ref` written at `at` names ([`Self::ref_target_body`]) decides its
+    /// own nullability in an `allOf` merge (issue #541): the one decision ([`Self::null_admission`])
+    /// of its body admits or denies `null`. A body that leaves it undecided — an untyped object, an
+    /// `allOf` of untyped object members alone (#565) — lowers to the non-null struct
+    /// [`object_all_of_admits_null`] gives a merge no member decides, and that struct is no
+    /// decision, as the same members written inline make none. A target that cannot be read keeps
+    /// its lowered nullability as the decision, and reports nothing a second time.
+    pub(super) fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
+        self.ref_target_body(reference, at)
+            .is_none_or(|target| self.null_admission(&target) != NullAdmission::Undecided)
     }
 
     /// The body of the schema the `$ref` written at `at` names, as
@@ -1100,14 +899,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The `union` member of an `allOf` of scalars, lowered on its own to `ty`, as it meets the
     /// other members' `contributions` ([`Self::lower_all_of_with_union_member`]): admitting `null`
-    /// where the union's branches leave it undecided and still match it by the union's own rule
-    /// ([`Self::union_admits_null_undecided`]), such as untyped `items` branches of an `anyOf`, so
-    /// the meet admits `null` exactly where every other member does (#621). Lowered on its own,
-    /// such a union denies `null` for want of a decision, and read that way the meet would deny it
-    /// even beside `type: [array, 'null']`, where the object spelling's meet keeps it. A member
-    /// that lowers to `Value` decides nothing, so with no member of any other type the union keeps
-    /// the answer it has on its own. `union` may also be an `allOf` wrapping such a union, which a
-    /// `$ref` member names ([`Self::admits_null_undecided_through_union`], #638).
+    /// where the union matches it although `ty` does not carry it
+    /// ([`Self::union_matches_uncarried_null`]), such as untyped `items` branches of an `anyOf`,
+    /// so the meet admits `null` exactly where every other member does (#621). Lowered on its own,
+    /// such a union is no `Option` for want of a decision, and read that way the meet would deny
+    /// `null` even beside `type: [array, 'null']`, where the object spelling's meet keeps it. A
+    /// member that lowers to `Value` decides nothing, so with no member of any other type the union
+    /// keeps the answer it has on its own. `union` may also be an `allOf` wrapping such a union,
+    /// which a `$ref` member names ([`Self::all_of_wraps_union`], #638).
     fn union_member_takes_scalar_null<'c>(
         &self,
         mut ty: Ty,
@@ -1121,7 +920,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .get(other.id)
                     .is_some_and(|def| matches!(def.kind, TypeKind::Any)))
         });
-        if decided && !ty.nullable && self.admits_null_undecided_through_union(union, 0) {
+        if decided && self.union_matches_uncarried_null(union, ty) {
             ty.nullable = true;
         }
         ty
@@ -1133,12 +932,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::ref_target_body`], aliases followed, or an inline union (#631). A `$ref` member
     /// that is not a bare `$ref` (its shape-bearing siblings are further members, which the
     /// union's branches never saw), or whose target is neither a union nor an `allOf` wrapping one
-    /// ([`Self::all_of_wraps_undecided_union`], #638), keeps its contribution. A wrapping
-    /// component is gathered as the one scalar it lowers to, and a wrapping non-component target
-    /// as the one scalar its wrapped union lowers to once [`Self::gather_ref_target`] expands it
-    /// in place. An inline union's own keywords are its siblings, read by the union's own rule.
+    /// ([`Self::all_of_wraps_union`], #638), keeps its contribution. A wrapping component is
+    /// gathered as the one scalar it lowers to, and a wrapping non-component target as the one
+    /// scalar its wrapped union lowers to once [`Self::gather_ref_target`] expands it in place.
+    /// An inline union's own keywords are its siblings, read by the one decision with it.
     ///
-    /// Another such member whose union leaves `null` undecided is not one of the members that
+    /// Another such member that `null` matches without carrying it is not one of the members that
     /// decide it: it is exactly a member this rule would hand `null` to, whether written as a
     /// `$ref` or inline. So `allOf: [ { $ref: A }, { $ref: B } ]` of two such unions, the same
     /// `$ref` twice, or two such unions inline or one of each, stays non-null, and only a member
@@ -1163,15 +962,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     None => std::borrow::Cow::Borrowed(member),
                 };
-                (schema_has_union(&target) || self.all_of_wraps_undecided_union(&target, 0))
+                (schema_has_union(&target) || self.all_of_wraps_union(&target, 0))
                     .then_some((slot, *ty, target))
             })
             .collect();
         let undecided: Vec<usize> = unions
             .iter()
-            .filter(|(_, ty, target)| {
-                !ty.nullable && self.admits_null_undecided_through_union(target, 0)
-            })
+            .filter(|(_, ty, target)| self.union_matches_uncarried_null(target, *ty))
             .map(|(slot, _, _)| *slot)
             .collect();
         for (slot, ty, target) in unions {
@@ -1254,21 +1051,6 @@ pub(super) fn union_branch_admits_null(union: &Schema) -> bool {
 /// category and so decides nothing about `null` in an `allOf` merge.
 pub(super) fn stated_nullability(schema: &Schema) -> Option<bool> {
     (!schema.types.types.is_empty()).then(|| schema.types.types.contains(&JsonType::Null))
-}
-
-/// Whether a `$ref` member's target decides its own nullability in an `allOf` merge (issue #541).
-/// A plain untyped body — no `type`, no `enum` or `const`, no `$ref` and no composition
-/// — is the inline untyped member written as a component: it admits `null` and decides nothing, as
-/// [`stated_nullability`] reads the inline spelling. Anything else keeps its lowered nullability as
-/// its decision, except that [`LowerCtx::ref_target_decides_null`] reads a `$ref`
-/// target's `allOf` body through its members (issue #565).
-fn target_decides_null(schema: &Schema) -> bool {
-    stated_nullability(schema).is_some()
-        || schema.enum_values.is_some()
-        || schema.const_value.is_some()
-        || schema.reference.is_some()
-        || !schema.all_of.is_empty()
-        || schema_has_union(schema)
 }
 
 /// Whether a union member is a null-only schema (`{type: "null"}`) — stripped from the union and
