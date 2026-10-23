@@ -12,6 +12,7 @@ use crate::oas31::media::{
 };
 use crate::oas31::{EncodingObject, MediaTypeObject, RefOr, Schema};
 
+use super::parameter::StyleDomain;
 use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -171,8 +172,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Style mode for one property. It refuses (`E009`) a delimited style with `explode: true`,
-    /// and, on multipart, `deepObject` and an object property; `allowReserved` on multipart is
-    /// inert (`W011`).
+    /// on multipart `deepObject` and an object property, and a property admitting a value its
+    /// style is not defined for; `allowReserved` on multipart is inert (`W011`).
     fn encoding_style_mode(
         &mut self,
         encoding: &EncodingObject,
@@ -255,6 +256,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      of `style`/`explode`/`allowReserved`, or omit this API segment with \
                      spargen::omit!",
                 )
+                .emit(self.diags);
+            return None;
+        }
+        // The delimited styles are defined only for arrays and objects and `deepObject` only for
+        // objects (#696); the parameter-side construct is `E010`. A `null` at the property's root
+        // is omitted from the body before any style sees it. A `oneOf`/`anyOf` member's `null` is
+        // the whole value: a form-urlencoded body omits it like a root `null`, but multipart sends
+        // it as a part of its own, which these styles have no serialization for.
+        let member_null_sent = media == MediaType::Multipart;
+        if let Some(domain) = StyleDomain::of(&style)
+            .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, member_null_sent))
+        {
+            // E009 case: undefined-rfc6570
+            Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}.style: {style_name}` serializes {}, but the schema of \
+                     property `{name}` admits another value, which the style has no \
+                     serialization for",
+                    domain.describe()
+                ))
+                .remedy(match domain {
+                    StyleDomain::ArrayOrObject => {
+                        "give the property an array or object schema, or use `style: form`"
+                    }
+                    StyleDomain::Object => {
+                        "give the property an object schema, or use `style: form`"
+                    }
+                })
                 .emit(self.diags);
             return None;
         }

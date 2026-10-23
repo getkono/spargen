@@ -664,6 +664,13 @@ const ENUMERATED_CASES: &[(Code, &[Case])] = &[
                 reserved_wording: None,
             },
             Case {
+                tag: "style-domain",
+                stated_as: "a `spaceDelimited`/`pipeDelimited` parameter whose schema admits a \
+                                value that is not an array or object and a `deepObject` \
+                                parameter whose schema admits a value that is not an object",
+                reserved_wording: None,
+            },
+            Case {
                 tag: "nested-value",
                 stated_as: "a nested array or object inside a `simple`/`form` value",
                 reserved_wording: None,
