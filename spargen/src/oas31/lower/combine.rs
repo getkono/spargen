@@ -511,7 +511,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             // A `$ref` to a component still being lowered is a direct recursive allOf member
             // whose fields are not yet known — irreconcilable (distinct from a member with
-            // recursive *fields*, which lowers fine).
+            // recursive *fields*, which lowers fine). Refused before `ensure_component` is asked,
+            // which would first report a sub-file's own declaration of the name as shadowed
+            // (`W011`) beside this rejection, though `push_ref_member` reports it in the same
+            // words.
             if self.in_progress.contains_key(name) {
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
@@ -536,12 +539,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
         // component member: a member still being lowered is a direct recursive ref whose fields
-        // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
+        // are not yet known (irreconcilable, refused by `push_ref_member`), otherwise its shared
+        // type contributes its fields.
         if is_remote_ref(reference) {
-            if self.remote_in_progress.contains_key(reference) {
-                return self
-                    .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_REMOTE_MEMBER);
-            }
             let ty = self.ensure_remote(reference, &schema.provenance)?;
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(

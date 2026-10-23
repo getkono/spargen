@@ -285,7 +285,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // count. Asked before the reservation guards below, which would otherwise answer the
         // narrower question first and hand one shape two codes again.
         //
-        // The document-half guard above (`member_closes_a_cycle`) runs before this collapse
+        // The document-half guard (`member_closes_a_cycle`, in [`Self::lower_union_with_sibling`])
+        // runs before this collapse
         // and would otherwise answer `E013` for this shape whenever the union carries sibling
         // keywords. It excludes a member that is this union's own reservation
         // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
@@ -296,7 +297,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_union_member_is_the_union(schema);
         }
         // The reservation half of the cycle test, on the sole real member. The document half
-        // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
+        // answers only the `#/components/schemas/…` spelling; a sub-file or remote member
         // reference reaches here still pointing at a placeholder, and the intersection below
         // cannot compose with one. Reported with the same wording the other two spellings use,
         // because it is the same fact about the same document.
