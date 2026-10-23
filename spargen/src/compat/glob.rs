@@ -100,7 +100,8 @@ fn compile_glob(pattern: &str) -> Vec<GlobToken> {
 
 /// Match `text` against a glob `pattern`. `/`-aware: `*` and `?` never cross a `/` segment
 /// separator, while `**` matches across any depth. Polynomial (memoized) so pathological patterns
-/// cannot blow up. Used for bulk omit rules and (via [`glob_match`]) documented in the module docs.
+/// cannot blow up. Used for bulk omit rules; the module documentation of [`compat`](super) says
+/// which rules are read as globs.
 pub(super) fn glob_match(pattern: &str, text: &str) -> bool {
     let tokens = compile_glob(pattern);
     let text: Vec<char> = text.chars().collect();

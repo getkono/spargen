@@ -3,7 +3,8 @@
 
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{
-    BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle, PropertyEncoding, Ty, TypeKind,
+    AdditionalProps, BodyEncoding, Delimiter, EncodingMode, MediaType, ParamStyle,
+    PropertyEncoding, Ty, TypeKind,
 };
 use crate::oas31::media::{
     classify_media, first_list_element, is_field_name, is_field_value, media_essence,
@@ -59,6 +60,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                     .emit(self.diags);
             } else {
+                // E009 case: positional-encoding
                 Diagnostic::error(Code::UnsupportedMediaType, at)
                     .message(format!(
                         "`{field}` describes positional parts of an array-shaped multipart body; \
@@ -84,10 +86,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .iter()
             .map(|field| (field.name.wire.clone(), field.ty))
             .collect();
+        let overflow = match &structure.additional {
+            AdditionalProps::Typed(ty) => Some(**ty),
+            AdditionalProps::Allow | AdditionalProps::Deny => None,
+        };
         // Nested encoding describes nested multipart parts (`multipart/mixed` inside a part).
         // Spargen generates one flat level, so a nested field is rejected rather than dropped.
         for (name, encoding) in &object.encoding {
             if let Some((field, at)) = encoding.nested.first() {
+                // E009 case: nested-encoding
                 Diagnostic::error(Code::UnsupportedMediaType, at.clone())
                     .message(format!(
                         "`encoding.{name}.{field}` describes a nested multipart part, which \
@@ -121,16 +128,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 headers,
             });
         }
-        Some(BodyEncoding { properties })
+        // The members of a typed `additionalProperties` overflow are sent too, as the JSON codec
+        // sends them. An Encoding Object is keyed by property name, so none can name them, and
+        // they take the default for their value type, under the same rules as an undeclared
+        // property (a binary overflow on form-urlencoded is refused, as a binary property is).
+        let additional = match overflow {
+            Some(overflow_ty) => {
+                Some(self.encoding_mode(None, overflow_ty, media, "additionalProperties", at)?)
+            }
+            None => None,
+        };
+        Some(BodyEncoding {
+            properties,
+            additional,
+        })
     }
 
-    /// Apply the Encoding Object's mode switch for one property.
+    /// Apply the Encoding Object's mode switch for one property, or `None` once a refusal is
+    /// reported.
     ///
-    /// In media mode a part's bytes come from the property's lowered type and its declared
-    /// `contentType` rides on it as the header. A declaration is refused (`E009`) where the two
-    /// cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose declared
-    /// type is not JSON, on multipart (the part's header) and on form-urlencoded (the field's
-    /// serialization syntax) alike.
+    /// Any of `style`, `explode` or `allowReserved` selects style mode
+    /// ([`Self::encoding_style_mode`]); otherwise media mode ([`Self::encoding_media_mode`]).
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -146,181 +164,145 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 || encoding.explode.is_some()
                 || encoding.allow_reserved.is_some()
             {
-                let style_name = encoding.style.as_deref().unwrap_or("form");
-                let style = match style_name {
-                    "form" => ParamStyle::Form,
-                    "spaceDelimited" => ParamStyle::Delimited(Delimiter::Space),
-                    "pipeDelimited" => ParamStyle::Delimited(Delimiter::Pipe),
-                    "deepObject" => ParamStyle::DeepObject,
-                    // The document schema enumerates these four, so this is unreachable for a
-                    // validated document.
-                    _ => {
-                        Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
-                            .message(format!(
-                                "`encoding.{name}.style: {style_name}` is not a form style"
-                            ))
-                            .emit(self.diags);
-                        return None;
-                    }
-                };
-                let explode = encoding
-                    .explode
-                    .unwrap_or(matches!(style, ParamStyle::Form));
-                // The specification's own serialization table marks the delimited styles with
-                // `explode: true` as *n/a* — undefined. The identical parameter-side construct is
-                // already `E010`; without this an Encoding Object could declare it and have the
-                // `explode` silently ignored.
-                if explode && matches!(style, ParamStyle::Delimited(_)) {
-                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
-                        .message(format!(
-                            "`encoding.{name}.style: {style_name}` with `explode: true` is \
-                             undefined: the specification's serialization table gives no value for \
-                             that combination"
-                        ))
-                        .remedy("set `explode: false`, or use `style: form`")
-                        .emit(self.diags);
-                    return None;
-                }
-                // `deepObject` builds `name[key]=value` query fragments. A multipart part carries
-                // its name in `Content-Disposition` and its value alone, so there is nowhere for
-                // that syntax to go and no defined representation to fall back on.
-                if media == MediaType::Multipart && style == ParamStyle::DeepObject {
-                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
-                        .message(format!(
-                            "`encoding.{name}.style: deepObject` is defined only for `in: query`; \
-                             it has no `multipart/form-data` part representation"
-                        ))
-                        .remedy(
-                            "use `style: form`, give the property a `contentType` such as \
-                             `application/json`, or omit this API segment with spargen::omit!",
-                        )
-                        .emit(self.diags);
-                    return None;
-                }
-                // An object property under RFC 6570 serialization: the specification says the
-                // Encoding Object applies to the *entire value* for a non-array property, but
-                // defines no part representation for an object, so there is nothing to generate.
-                if media == MediaType::Multipart
-                    && matches!(
-                        self.graph.get(field_ty.id).map(|def| &def.kind),
-                        Some(TypeKind::Struct(_))
-                    )
-                {
-                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
-                        .message(format!(
-                            "`encoding.{name}` selects RFC 6570 serialization for an object \
-                             property, which has no defined `multipart/form-data` part \
-                             representation"
-                        ))
-                        .remedy(
-                            "give the property a `contentType` such as `application/json` instead \
-                             of `style`/`explode`/`allowReserved`, or omit this API segment with \
-                             spargen::omit!",
-                        )
-                        .emit(self.diags);
-                    return None;
-                }
-                // Multipart part values are never percent-encoded, so `allowReserved` is inert.
-                let allow_reserved = encoding.allow_reserved.unwrap_or(false);
-                if allow_reserved && media == MediaType::Multipart {
-                    // W011 case: allow-reserved-multipart
-                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
-                        .message(
-                            "`allowReserved` has no effect on `multipart/form-data`: part values \
-                             are not percent-encoded",
-                        )
-                        .emit(self.diags);
-                }
-                return Some(EncodingMode::Style {
-                    style,
-                    explode,
-                    allow_reserved: allow_reserved && media != MediaType::Multipart,
-                });
+                return self.encoding_style_mode(encoding, field_ty, media, name);
             }
         }
+        self.encoding_media_mode(declared, field_ty, media, name, at)
+    }
+
+    /// Style mode for one property. It refuses (`E009`) a delimited style with `explode: true`,
+    /// and, on multipart, `deepObject` and an object property; `allowReserved` on multipart is
+    /// inert (`W011`).
+    fn encoding_style_mode(
+        &mut self,
+        encoding: &EncodingObject,
+        field_ty: Ty,
+        media: MediaType,
+        name: &str,
+    ) -> Option<EncodingMode> {
+        let style_name = encoding.style.as_deref().unwrap_or("form");
+        let style = match style_name {
+            "form" => ParamStyle::Form,
+            "spaceDelimited" => ParamStyle::Delimited(Delimiter::Space),
+            "pipeDelimited" => ParamStyle::Delimited(Delimiter::Pipe),
+            "deepObject" => ParamStyle::DeepObject,
+            // The document schema enumerates these four and rejects any other as `E011`, so a
+            // validated document does not reach this arm; it reports that same code for a path
+            // that skips validation.
+            _ => {
+                Diagnostic::error(Code::InvalidInput, encoding.provenance.clone())
+                    .message(format!(
+                        "`encoding.{name}.style: {style_name}` is not a form style"
+                    ))
+                    .emit(self.diags);
+                return None;
+            }
+        };
+        let explode = encoding
+            .explode
+            .unwrap_or(matches!(style, ParamStyle::Form));
+        // The specification's own serialization table marks the delimited styles with
+        // `explode: true` as *n/a* — undefined. The identical parameter-side construct is
+        // already `E010`; without this an Encoding Object could declare it and have the
+        // `explode` silently ignored.
+        if explode && matches!(style, ParamStyle::Delimited(_)) {
+            // E009 case: undefined-rfc6570
+            Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}.style: {style_name}` with `explode: true` is \
+                     undefined: the specification's serialization table gives no value for \
+                     that combination"
+                ))
+                .remedy("set `explode: false`, or use `style: form`")
+                .emit(self.diags);
+            return None;
+        }
+        // `deepObject` builds `name[key]=value` query fragments. A multipart part carries
+        // its name in `Content-Disposition` and its value alone, so there is nowhere for
+        // that syntax to go and no defined representation to fall back on.
+        if media == MediaType::Multipart && style == ParamStyle::DeepObject {
+            // E009 case: undefined-rfc6570
+            Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}.style: deepObject` is defined only for `in: query`; \
+                     it has no `multipart/form-data` part representation"
+                ))
+                .remedy(
+                    "use `style: form`, give the property a `contentType` such as \
+                     `application/json`, or omit this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        // An object property under RFC 6570 serialization: the specification says the
+        // Encoding Object applies to the *entire value* for a non-array property, but
+        // defines no part representation for an object, so there is nothing to generate.
+        if media == MediaType::Multipart
+            && matches!(
+                self.graph.get(field_ty.id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            )
+        {
+            // E009 case: undefined-rfc6570
+            Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}` selects RFC 6570 serialization for an object \
+                     property, which has no defined `multipart/form-data` part \
+                     representation"
+                ))
+                .remedy(
+                    "give the property a `contentType` such as `application/json` instead \
+                     of `style`/`explode`/`allowReserved`, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        // Multipart part values are never percent-encoded, so `allowReserved` is inert.
+        let allow_reserved = encoding.allow_reserved.unwrap_or(false);
+        if allow_reserved && media == MediaType::Multipart {
+            // W011 case: allow-reserved-multipart
+            Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                .message(
+                    "`allowReserved` has no effect on `multipart/form-data`: part values \
+                     are not percent-encoded",
+                )
+                .emit(self.diags);
+        }
+        Some(EncodingMode::Style {
+            style,
+            explode,
+            allow_reserved: allow_reserved && media != MediaType::Multipart,
+        })
+    }
+
+    /// Media mode for one property: a part's bytes come from the property's lowered type and its
+    /// declared `contentType` ([`Self::declared_content_type`]), else the default for the type,
+    /// rides on it as the header. A declared `contentType` is refused (`E009`) where it and the
+    /// bytes cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
+    /// declared type is not JSON, on multipart (the part's header) and on form-urlencoded (the
+    /// field's serialization syntax) alike. A binary property on form-urlencoded is refused
+    /// (`E009`) whether or not a `contentType` made it binary.
+    fn encoding_media_mode(
+        &mut self,
+        declared: Option<&EncodingObject>,
+        field_ty: Ty,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Option<EncodingMode> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
         let content_type = match explicit {
-            // `contentType` is a comma-separated list of acceptable types, but a client sends
-            // exactly one, so the first element wins. A comma inside a quoted parameter value is
-            // part of that element, not a list separator.
-            Some(list) => {
-                let first = first_list_element(list).to_owned();
-                // Only the essence can be a range; a `*` in a parameter value is an ordinary
-                // `tchar`.
-                if media_essence(&first).contains('*') {
-                    Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
-                        .message(format!(
-                            "`encoding.{name}.contentType: {first}` is a wildcard; a client must \
-                             send one concrete media type"
-                        ))
-                        .remedy("name a concrete media type such as `image/png`")
-                        .emit(self.diags);
-                    return None;
-                }
-                // The value is sent verbatim as the part's `Content-Type`, so it is held to the
-                // rule a `content` key is: a string that is not a media type at all would
-                // otherwise fall through to the natural codec below with nothing reported, and
-                // fail only when a request is built.
-                if !media_type_is_well_formed(media_essence(&first)) {
-                    Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
-                        .message(format!(
-                            "`encoding.{name}.contentType: {first}` is not a media type"
-                        ))
-                        .remedy("name a media type such as `text/plain`, as `type/subtype`")
-                        .emit(self.diags);
-                    return None;
-                }
-                // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
-                // parameter without `=` (`text/plain; foo`) would otherwise generate with nothing
-                // reported and fail only when the part's `Content-Type` is parsed at request time.
-                // Only a multipart part sends it (`mime_str`); a form-urlencoded field's
-                // `contentType` only picks the codec, so a value the transport could not carry is
-                // no reason to refuse it there. A malformed list is refused under either, as the
-                // essence rule above is: it is not a media type.
-                match media_type_with_parameters(&first) {
-                    Ok(canonical) => canonical,
-                    Err(ParameterFault::Unsendable(canonical)) if media != MediaType::Multipart => {
-                        canonical
-                    }
-                    Err(fault) => {
-                        let (message, remedy) = match fault {
-                            ParameterFault::Malformed => (
-                                format!(
-                                    "`encoding.{name}.contentType: {first}` has a parameter \
-                                     that is not `name=value` under RFC 9110 § 5.6.6"
-                                ),
-                                "write each parameter as `name=value`, with a token name and a \
-                                 token or quoted-string value, such as `text/plain; charset=utf-8`",
-                            ),
-                            ParameterFault::Unsendable(_) => (
-                                format!(
-                                    "`encoding.{name}.contentType: {first}` has a quoted \
-                                     parameter value the generated client cannot send: an empty \
-                                     value, or one holding a `\"` or a tab"
-                                ),
-                                "quote a non-empty value without `\"` or a tab, or drop the \
-                                 parameter",
-                            ),
-                        };
-                        Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
-                            .message(message)
-                            .remedy(remedy)
-                            .emit(self.diags);
-                        return None;
-                    }
-                }
-            }
+            Some(list) => self.declared_content_type(list, declared, media, name, at)?,
             None => self.default_content_type(field_ty),
         };
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
         // sent correctly, with the declared header attached. Media types are case-insensitive
-        // (RFC 9110 § 8.3.1) and the classifier's arms are spelled in lowercase, so the essence is
-        // classified lowercased: `Application/JSON` selects the codec `application/json` does,
-        // here and in the refusal below.
-        let classified = classify_media(&media_essence(&content_type).to_ascii_lowercase())
-            .map(|(codec, _)| codec);
+        // (RFC 9110 § 8.3.1) and `classify_media` matches them so: `Application/JSON` selects the
+        // codec `application/json` does, here and in the refusal below.
+        let classified = classify_media(media_essence(&content_type)).map(|(codec, _)| codec);
         let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
@@ -331,8 +313,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // whatever it declares, so a declaration that is not JSON (`application/xml` over an
         // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
-        // `classified` is the lowercased classification, so `Application/JSON` is judged as the
-        // JSON it is.
+        // `classified` is case-insensitive, so `Application/JSON` is judged as the JSON it is.
         //
         // A form-urlencoded field has no header, so the argument there is not the same one, but it
         // reaches the same rule: its `contentType` is the only statement of the syntax the field's
@@ -347,6 +328,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && self.natural_codec(field_ty) == MediaType::Json
             && classified != Some(MediaType::Json)
         {
+            // E009 case: non-json-structured
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 .message(if media == MediaType::Multipart {
                     format!(
@@ -374,6 +356,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // A form field is a single URL-encoded string; raw bytes have no representation there.
         if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
+            // E009 case: form-binary
             Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
                 // Name what the document wrote: a declared `contentType` is the reason a string
                 // property is binary here, while a property whose own schema is binary defaulted to
@@ -397,6 +380,90 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             content_type,
             codec,
         })
+    }
+
+    /// The media type a declared `contentType` list sends, canonicalized, or `None` once it is
+    /// refused (`E009`): a wildcard, not a media type, or a parameter that is not `name=value`
+    /// (or, on multipart, one the client cannot send).
+    fn declared_content_type(
+        &mut self,
+        list: &str,
+        declared: Option<&EncodingObject>,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Option<String> {
+        // `contentType` is a comma-separated list of acceptable types, but a client sends
+        // exactly one, so the first element wins. A comma inside a quoted parameter value is
+        // part of that element, not a list separator.
+        let first = first_list_element(list).to_owned();
+        // Only the essence can be a range; a `*` in a parameter value is an ordinary
+        // `tchar`.
+        if media_essence(&first).contains('*') {
+            // E009 case: wildcard-content-type
+            Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                .message(format!(
+                    "`encoding.{name}.contentType: {first}` is a wildcard; a client must \
+                     send one concrete media type"
+                ))
+                .remedy("name a concrete media type such as `image/png`")
+                .emit(self.diags);
+            return None;
+        }
+        // The value is sent verbatim as the part's `Content-Type`, so it is held to the
+        // rule a `content` key is: a string that is not a media type at all would
+        // otherwise fall through to the natural codec with nothing reported, and
+        // fail only when a request is built.
+        if !media_type_is_well_formed(media_essence(&first)) {
+            // E009 case: content-type-not-media
+            Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                .message(format!(
+                    "`encoding.{name}.contentType: {first}` is not a media type"
+                ))
+                .remedy("name a media type such as `text/plain`, as `type/subtype`")
+                .emit(self.diags);
+            return None;
+        }
+        // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
+        // parameter without `=` (`text/plain; foo`) would otherwise generate with nothing
+        // reported and fail only when the part's `Content-Type` is parsed at request time.
+        // Only a multipart part sends it (`mime_str`); a form-urlencoded field's
+        // `contentType` only picks the codec, so a value the transport could not carry is
+        // no reason to refuse it there. A malformed list is refused under either, as the
+        // essence rule above is: it is not a media type.
+        match media_type_with_parameters(&first) {
+            Ok(canonical) => Some(canonical),
+            Err(ParameterFault::Unsendable(canonical)) if media != MediaType::Multipart => {
+                Some(canonical)
+            }
+            Err(fault) => {
+                let (message, remedy) = match fault {
+                    ParameterFault::Malformed => (
+                        format!(
+                            "`encoding.{name}.contentType: {first}` has a parameter \
+                             that is not `name=value` under RFC 9110 § 5.6.6"
+                        ),
+                        "write each parameter as `name=value`, with a token name and a \
+                         token or quoted-string value, such as `text/plain; charset=utf-8`",
+                    ),
+                    ParameterFault::Unsendable(_) => (
+                        format!(
+                            "`encoding.{name}.contentType: {first}` has a quoted \
+                             parameter value the generated client cannot send: an empty \
+                             value, or one holding a `\"` or a tab"
+                        ),
+                        "quote a non-empty value without `\"` or a tab, or drop the \
+                         parameter",
+                    ),
+                };
+                // E009 case: content-type-parameter
+                Diagnostic::error(Code::UnsupportedMediaType, encoding_site(declared, at))
+                    .message(message)
+                    .remedy(remedy)
+                    .emit(self.diags);
+                None
+            }
+        }
     }
 
     /// How a property's value is rendered into bytes, from its lowered type alone.
@@ -436,7 +503,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The literal extra part headers of one multipart property.
     ///
     /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
-    /// through `const`, or `default` in its absence — gives a client something to send.
+    /// through `const`, or `default` in its absence, read through a `$ref` to the Header Object or
+    /// in its schema ([`Self::literal_header_value`]) — gives a client something to send. A
+    /// `Content-Type` entry is skipped (`contentType` describes it), `headers` on a body that is
+    /// not multipart is inert (`W011`), and so is a header that pins no value (`W011`); a
+    /// reference that resolves to nothing is reported where it is resolved (`E004`) and nothing
+    /// more is said of that header.
     ///
     /// What is sent is held to RFC 9110: a name that is not a `token`, or a pinned literal that
     /// is not a field value, is refused (`E009`), so `None` is returned once every such header
@@ -494,6 +566,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // grammar refuses would otherwise generate and fail, or be dropped, only when a
                 // request is built.
                 Some(_) if !is_field_name(header_name) => {
+                    // E009 case: part-header
                     Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers` names `{}`, which is not an HTTP field \
@@ -506,6 +579,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     refused = true;
                 }
                 Some(value) if !is_field_value(&value) => {
+                    // E009 case: part-header
                     Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers.{header_name}` pins `{}`, which is not an \

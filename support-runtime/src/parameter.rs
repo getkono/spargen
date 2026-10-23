@@ -12,7 +12,7 @@
 use std::fmt;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Which characters survive unencoded when a serialized value is placed on the wire.
 ///
@@ -69,7 +69,10 @@ pub enum ParameterError {
     Serialize(serde_json::Error),
     /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
     NestedValue,
-    /// A style defined only for objects (`deepObject`) received a non-object value.
+    /// A value that must be an object was not one. Three emitters return it: a `deepObject` query
+    /// parameter over a non-object value ([`serialize_deep_object`]), a form-urlencoded body that
+    /// does not serialize to a JSON object ([`serialize_form_body`]), and a multipart part asked for
+    /// the query-only `deepObject` style ([`serialize_multipart_values`]).
     ExpectedObject,
     /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
     /// scalar or undefined value.
@@ -219,25 +222,8 @@ pub fn serialize_simple<T: Serialize>(
     match serde_json::to_value(value)? {
         Value::Null => Ok(String::new()),
         Value::Array(values) => join_scalars(values.iter(), ",", encoding),
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.join(",")),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(parts.join(","))
-        }
+        Value::Object(values) if explode => Ok(object_pairs(&values, encoding)?.join(",")),
+        Value::Object(values) => object_flat(&values, ",", encoding),
         value => scalar(&value, encoding),
     }
 }
@@ -263,25 +249,11 @@ pub fn serialize_matrix<T: Serialize>(
             ";{name}={}",
             join_scalars(values.iter(), ",", encoding)?
         )),
-        Value::Object(values) if explode => values
+        Value::Object(values) if explode => Ok(object_pairs(&values, encoding)?
             .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    ";{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.concat()),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(format!(";{name}={}", parts.join(",")))
-        }
+            .map(|pair| format!(";{pair}"))
+            .collect()),
+        Value::Object(values) => Ok(format!(";{name}={}", object_flat(&values, ",", encoding)?)),
         value => Ok(format!(";{name}={}", scalar(&value, encoding)?)),
     }
 }
@@ -300,25 +272,8 @@ pub fn serialize_label<T: Serialize>(
         Value::Null => String::new(),
         Value::Array(values) if explode => join_scalars(values.iter(), ".", encoding)?,
         Value::Array(values) => join_scalars(values.iter(), ",", encoding)?,
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect::<Result<Vec<_>, ParameterError>>()
-            .map(|parts| parts.join("."))?,
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            parts.join(",")
-        }
+        Value::Object(values) if explode => object_pairs(&values, encoding)?.join("."),
+        Value::Object(values) => object_flat(&values, ",", encoding)?,
         value => scalar(&value, encoding)?,
     };
     Ok(format!(".{rendered}"))
@@ -347,32 +302,19 @@ pub fn serialize_form<T: Serialize>(
             "{name}={}",
             join_scalars(values.iter(), ",", encoding)?
         )]),
-        Value::Object(values) if explode => values
-            .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}={}",
-                    encode(key, encoding),
-                    scalar(value, encoding)?
-                ))
-            })
-            .collect(),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(vec![format!("{name}={}", parts.join(","))])
-        }
+        Value::Object(values) if explode => object_pairs(&values, encoding),
+        Value::Object(values) => Ok(vec![format!(
+            "{name}={}",
+            object_flat(&values, ",", encoding)?
+        )]),
         value => Ok(vec![format!("{name}={}", scalar(&value, encoding)?)]),
     }
 }
 
 /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
 ///
-/// Both styles are defined only for arrays and objects with `explode: false`; the frontend rejects
-/// every other combination, so a scalar here is a generator bug rather than user input.
+/// Both styles are defined only for arrays and objects with `explode: false`, and any other value
+/// is refused with `ParameterError::ExpectedComposite`.
 pub fn serialize_delimited<T: Serialize>(
     name: &str,
     value: &T,
@@ -385,14 +327,10 @@ pub fn serialize_delimited<T: Serialize>(
             "{name}={}",
             join_scalars(values.iter(), delimiter.as_str(), encoding)?
         )]),
-        Value::Object(values) => {
-            let mut parts = Vec::with_capacity(values.len() * 2);
-            for (key, value) in values {
-                parts.push(encode(&key, encoding));
-                parts.push(scalar(&value, encoding)?);
-            }
-            Ok(vec![format!("{name}={}", parts.join(delimiter.as_str()))])
-        }
+        Value::Object(values) => Ok(vec![format!(
+            "{name}={}",
+            object_flat(&values, delimiter.as_str(), encoding)?
+        )]),
         _ => Err(ParameterError::ExpectedComposite),
     }
 }
@@ -467,46 +405,105 @@ pub enum FormStyle {
 /// `value` must serialize to a JSON object. Each property is rendered by its own resolved
 /// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
 /// value is JSON `null` is omitted entirely rather than sent empty.
+///
+/// `additional` is the body's typed `additionalProperties` overflow: the resolved mode of its
+/// members (the default for their type, since no Encoding Object can name them) and how many
+/// members the overflow map holds, which a generated struct serializes after its declared fields.
+/// When it is `Some`, those members follow the declared ones, ordered by key, rendered in that
+/// mode; when it is `None`, members `properties` does not name are not sent. An overflow member
+/// whose key repeats a declared property's name is never sent: the declared property's own value
+/// is, or nothing when that property is absent, as in a multipart body.
+///
+/// A `value` that does not serialize to a JSON object is refused with
+/// `ParameterError::ExpectedObject`.
 pub fn serialize_form_body<T: Serialize>(
     value: &T,
     properties: &[FormProperty],
+    additional: Option<(FormMode, usize)>,
 ) -> Result<String, ParameterError> {
-    let Value::Object(members) = serde_json::to_value(value)? else {
+    // Serialized to text and read back member by member, a repeated key kept: a
+    // `serde_json::Value` map keeps one entry per key, so a flattened overflow member would
+    // overwrite the declared field of the same name, or stand in for it when that field is
+    // skipped as `None`.
+    let text = serde_json::to_vec(value)?;
+    if text.first() != Some(&b'{') {
         return Err(ParameterError::ExpectedObject);
-    };
+    }
+    let OrderedMembers(members) = serde_json::from_slice(&text)?;
+    let overflow_len = additional.map_or(0, |(_, len)| len);
+    let (declared, overflow) = members.split_at(members.len().saturating_sub(overflow_len));
     let mut fragments: Vec<String> = Vec::new();
     for property in properties {
-        let Some(member) = members.get(property.name) else {
-            continue;
-        };
-        if member.is_null() {
-            continue;
+        if let Some((_, member)) = declared.iter().find(|(name, _)| name == property.name) {
+            push_form_member(&mut fragments, property.name, member, property.mode)?;
         }
-        match property.mode {
-            FormMode::Text => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                scalar(member, PercentEncoding::Form)?
-            )),
-            FormMode::Json => fragments.push(format!(
-                "{}={}",
-                encode(property.name, PercentEncoding::Form),
-                encode(&serde_json::to_string(member)?, PercentEncoding::Form)
-            )),
-            FormMode::Style {
-                style,
-                explode,
-                encoding,
-            } => fragments.extend(style_fragments(
-                property.name,
-                member,
-                style,
-                explode,
-                encoding,
-            )?),
+    }
+    if let Some((mode, _)) = additional {
+        // A generated body's overflow is a `BTreeMap`, so its members arrive ordered by key.
+        for (name, member) in overflow {
+            if !properties.iter().any(|property| property.name == name) {
+                push_form_member(&mut fragments, name, member, mode)?;
+            }
         }
     }
     Ok(fragments.join("&"))
+}
+
+/// A JSON object's members in the order they were written, a repeated key kept each time it
+/// appears.
+struct OrderedMembers(Vec<(String, Value)>);
+
+impl<'de> serde::Deserialize<'de> for OrderedMembers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MembersVisitor;
+        impl<'de> serde::de::Visitor<'de> for MembersVisitor {
+            type Value = OrderedMembers;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<OrderedMembers, A::Error> {
+                let mut members = Vec::new();
+                while let Some(member) = map.next_entry::<String, Value>()? {
+                    members.push(member);
+                }
+                Ok(OrderedMembers(members))
+            }
+        }
+        deserializer.deserialize_map(MembersVisitor)
+    }
+}
+
+/// Render one member of a form body in `mode`; a JSON `null` member adds nothing.
+fn push_form_member(
+    fragments: &mut Vec<String>,
+    name: &str,
+    member: &Value,
+    mode: FormMode,
+) -> Result<(), ParameterError> {
+    if member.is_null() {
+        return Ok(());
+    }
+    match mode {
+        FormMode::Text => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            scalar(member, PercentEncoding::Form)?
+        )),
+        FormMode::Json => fragments.push(format!(
+            "{}={}",
+            encode(name, PercentEncoding::Form),
+            encode(&serde_json::to_string(member)?, PercentEncoding::Form)
+        )),
+        FormMode::Style {
+            style,
+            explode,
+            encoding,
+        } => fragments.extend(style_fragments(name, member, style, explode, encoding)?),
+    }
+    Ok(())
 }
 
 /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
@@ -525,7 +522,8 @@ pub fn serialize_form_body<T: Serialize>(
 ///
 /// Object values never reach here: the specification defines no part representation for them, so
 /// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
-/// style) rather than guessing at one.
+/// style) rather than guessing at one. A `deepObject` `style` is refused with
+/// `ParameterError::ExpectedObject`.
 pub fn serialize_multipart_values<T: Serialize>(
     value: &T,
     style: FormStyle,
@@ -575,6 +573,39 @@ fn join_scalars<'a>(
         .map(|value| scalar(value, encoding))
         .collect::<Result<Vec<_>, ParameterError>>()
         .map(|parts| parts.join(separator))
+}
+
+/// An object's members as `key,value` alternating in one `separator`-joined value: the
+/// `explode: false` shape every style but `deepObject` shares.
+fn object_flat(
+    values: &Map<String, Value>,
+    separator: &str,
+    encoding: PercentEncoding,
+) -> Result<String, ParameterError> {
+    let mut parts = Vec::with_capacity(values.len() * 2);
+    for (key, value) in values {
+        parts.push(encode(key, encoding));
+        parts.push(scalar(value, encoding)?);
+    }
+    Ok(parts.join(separator))
+}
+
+/// An object's members as one `key=value` fragment each: the `explode: true` shape, which each
+/// style then prefixes or joins.
+fn object_pairs(
+    values: &Map<String, Value>,
+    encoding: PercentEncoding,
+) -> Result<Vec<String>, ParameterError> {
+    values
+        .iter()
+        .map(|(key, value)| {
+            Ok(format!(
+                "{}={}",
+                encode(key, encoding),
+                scalar(value, encoding)?
+            ))
+        })
+        .collect()
 }
 
 fn scalar(value: &Value, encoding: PercentEncoding) -> Result<String, ParameterError> {

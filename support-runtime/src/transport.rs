@@ -5,7 +5,7 @@
 //!
 //! The seam is a `dyn`-able trait ([`HttpBackend`]) so the generated `Client` stays non-generic:
 //! [`crate::ClientCore`] holds an `Arc<dyn HttpBackend>` rather than a type parameter. The async
-//! method returns a manually boxed future (`Pin<Box<dyn Future + Send + '_>>`) instead of using
+//! method returns a manually boxed future ([`ExecuteFuture`], `Send` off wasm) instead of using
 //! `async-trait`, so std's `Future`/`Pin`/`Box` carry the abstraction.
 //!
 //! The currency is reqwest's own types: the trait abstracts *how* a `reqwest::Request` runs, not a
@@ -156,5 +156,27 @@ mod tests {
         let _erased: Arc<dyn HttpBackend> = Arc::new(backend);
         // `new` / `with_client` install a default `ReqwestBackend` under the hood.
         let _core = ClientCore::new("https://example.com").unwrap();
+    }
+
+    /// `client` hands back the wrapped client, not a default one: it still holds the default
+    /// header the wrapped client was configured with, which `reqwest::Client`'s `Debug` renders.
+    #[test]
+    fn client_returns_the_wrapped_client() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-wrapped",
+            reqwest::header::HeaderValue::from_static("yes"),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let backend = ReqwestBackend::new(client);
+        let rendered = format!("{:?}", backend.client());
+        assert!(rendered.contains("x-wrapped"), "{rendered}");
+        assert!(
+            !format!("{:?}", reqwest::Client::default()).contains("x-wrapped"),
+            "a default client carries no such header"
+        );
     }
 }

@@ -7,10 +7,9 @@ use quote::quote;
 use crate::ir::{Api, ErrorShape, Operation, SuccessShape, Ty};
 use crate::name::Names;
 
-use super::dispatch::{is_bytes_ty, status_variant_ident, success_enum_ident};
 use super::docs::doc_tokens;
-use super::runtime::error_type_ident;
-use super::ty::ty_tokens;
+use super::idents::{error_type_ident, status_variant_ident, success_enum_ident};
+use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// Emit one typed header struct per documented status that declares response headers.
 ///
@@ -29,12 +28,16 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
         }
         let ident = names
             .response_header_structs
-            .get(&(operation.id.clone(), label.clone()))?;
-        let fields = response.headers.iter().map(|header| {
-            let field = names
+            .get(&(operation.id.clone(), label.clone()))
+            .expect("response header struct allocated");
+        let field_ident = |header: &crate::ir::ResponseHeader| {
+            names
                 .response_header_fields
                 .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                .expect("response header field allocated");
+                .expect("response header field allocated")
+        };
+        let fields = response.headers.iter().map(|header| {
+            let field = field_ident(header);
             // Header structs live beside `Client`, not inside `types`, so the type path must be
             // qualified — a header whose schema lowered to a named type would not resolve here.
             let ty = ty_tokens(header.ty, names, true);
@@ -49,10 +52,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
             quote! { #docs #deprecated pub #field: #ty }
         });
         let reads = response.headers.iter().map(|header| {
-            let field = names
-                .response_header_fields
-                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                .expect("response header field allocated");
+            let field = field_ident(header);
             let name = header.name.clone();
             let shape = match header.shape {
                 crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
@@ -75,7 +75,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
         );
         Some(quote! {
             #[doc = #doc]
-            #[allow(dead_code)]
+            #[allow(dead_code, deprecated)]
             #[derive(Debug, Clone)]
             pub struct #ident {
                 #(#fields),*
@@ -110,16 +110,12 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
 pub(super) fn emit_response_enum(operation: &Operation, names: &Names) -> TokenStream {
     match operation.responses.success() {
         SuccessShape::Enum(entries) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let ident = success_enum_ident(method_ident);
+            let ident = success_enum_ident(operation, names);
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names));
             quote! {
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 pub enum #ident {
                     #(#variants)*
@@ -136,7 +132,7 @@ fn response_variant_def(spec: crate::ir::StatusSpec, ty: Option<Ty>, names: &Nam
     let variant_ident = status_variant_ident(spec);
     match ty {
         Some(ty) => {
-            let ty = response_payload_ty_tokens(ty, names, true);
+            let ty = boxed_ty_tokens(ty, names, true);
             quote! { #variant_ident(#ty), }
         }
         None => quote! { #variant_ident, },
@@ -147,11 +143,7 @@ fn response_variant_def(spec: crate::ir::StatusSpec, ty: Option<Ty>, names: &Nam
 /// entries of which at least one is bodied (several bodies, or one body beside a bodyless status),
 /// a transparent newtype for a lone bodied entry, and the uninhabited alias for no error body.
 pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let method_ident = names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated");
-    let error_ident = error_type_ident(method_ident.as_str());
+    let error_ident = error_type_ident(operation, names);
     let shape = operation.responses.error();
     let api_error_body = shape.api_error_body(&api.types);
     match shape {
@@ -202,7 +194,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 });
                 quote! {
-                    #[allow(dead_code)]
+                    #[allow(dead_code, deprecated)]
                     impl #error_ident {
                         /// The documented error body, whichever status carried it; `None` for a
                         /// documented bodyless status. The status is on the `ResponseValue` that
@@ -214,6 +206,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                         }
                     }
 
+                    #[allow(deprecated)]
                     impl support::ApiErrorBody for #error_ident {
                         type Body = #body_ty;
                         fn body(&self) -> Option<&#body_ty> {
@@ -240,7 +233,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 }
             });
             quote! {
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 pub enum #error_ident {
                     #(#variants)*
@@ -318,12 +311,12 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
             );
             quote! {
                 #[doc = #doc]
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 #[derive(Debug, Clone)]
                 #deserialize
                 pub struct #error_ident(pub #ty);
 
-                #[allow(dead_code)]
+                #[allow(dead_code, deprecated)]
                 impl #error_ident {
                     /// Unwrap to the documented error body.
                     pub fn into_inner(self) -> #ty {
@@ -331,6 +324,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 }
 
+                #[allow(deprecated)]
                 impl std::ops::Deref for #error_ident {
                     type Target = #ty;
                     fn deref(&self) -> &Self::Target {
@@ -344,12 +338,14 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                     }
                 }
 
+                #[allow(deprecated)]
                 impl From<#ty> for #error_ident {
                     fn from(inner: #ty) -> Self {
                         Self(inner)
                     }
                 }
 
+                #[allow(deprecated)]
                 impl From<#error_ident> for #ty {
                     fn from(outer: #error_ident) -> Self {
                         outer.0
@@ -368,6 +364,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
                 // is the bare definition — unboxed, non-nullable — exactly as on the enum shape,
                 // so one bound covers both shapes of the same schema, and a `null` body answers
                 // `None` here as a nullable enum variant does.
+                #[allow(deprecated)]
                 impl support::ApiErrorBody for #error_ident {
                     type Body = #body;
                     fn body(&self) -> Option<&#body> {
@@ -391,18 +388,12 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
     }
 }
 
-/// Multi-status response payloads are uniformly indirect for the same bounded-enum-size reason as
-/// schema unions. Single-body response aliases remain allocation-free.
-pub(super) fn response_payload_ty_tokens(ty: Ty, names: &Names, qualified: bool) -> TokenStream {
-    ty_tokens(Ty { boxed: true, ..ty }, names, qualified)
-}
-
 #[cfg(test)]
 mod tests {
     use indexmap::IndexMap;
 
     use super::emit_error_enum;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
         Prim, Response, Responses, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
@@ -435,6 +426,7 @@ mod tests {
                         body: Some(body),
                         media: Some(MediaType::Json),
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],
@@ -457,7 +449,7 @@ mod tests {
             types,
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         emit_error_enum(&api.operations[0], &api, &names).to_string()
     }
 

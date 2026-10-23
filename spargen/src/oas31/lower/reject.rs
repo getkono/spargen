@@ -18,14 +18,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E007 case: unrepresentable-applicators
-        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(
-                "split the applicators into separate schemas, make every discriminator mapping name \
-                 a member of the union, or omit this API segment with spargen::omit!",
-            )
-            .emit(self.diags);
-        None
+        self.reject_composition(
+            Code::NonDisjointUnion,
+            schema.provenance.clone(),
+            message,
+            "split the applicators into separate schemas, make every discriminator mapping name a \
+             member of the union, or omit this API segment with spargen::omit!",
+        )
     }
 
     /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
@@ -36,14 +35,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E007 case: resolves-to-itself
-        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(
-                "break the reference cycle where a member refers to the union it is written in, or \
-                 omit this API segment with spargen::omit!",
-            )
-            .emit(self.diags);
-        None
+        self.reject_composition(
+            Code::NonDisjointUnion,
+            schema.provenance.clone(),
+            message,
+            "break the reference cycle where a member refers to the union it is written in, or \
+             omit this API segment with spargen::omit!",
+        )
     }
 
     /// A union the enclosing schema's own sibling keywords leave with no branch at all.
@@ -53,20 +51,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E007 case: no-branch-left
-        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(
-                "reconcile the enclosing schema's sibling keywords with the union's members, or \
-                 omit this API segment with spargen::omit!",
-            )
-            .emit(self.diags);
-        None
+        self.reject_composition(
+            Code::NonDisjointUnion,
+            schema.provenance.clone(),
+            message,
+            "reconcile the enclosing schema's sibling keywords with the union's members, or omit \
+             this API segment with spargen::omit!",
+        )
     }
 
     /// An `allOf` that mixes object and scalar members, which no single type can be.
     pub(super) fn reject_all_of_object_scalar_mix<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: object-scalar-mix
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "an `allOf` mixes object and scalar members, which cannot form one type",
@@ -75,13 +72,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// An `allOf` whose object members would meet two or more `oneOf`/`anyOf` unions
-    /// ([`Self::several_unions_beside_object`]): an object composition is met with one union branch
+    /// ([`Self::several_unions_beside_object`]), or a `$ref` to an object, or object keywords,
+    /// beside a union sibling and a union the `$ref`'s target is or its `allOf` sibling reaches
+    /// ([`Self::meet_ref_union_sibling`]): an object composition is met with one union branch
     /// by branch, and a second would nest one union's branches under the other's, so the
     /// conjunction is refused rather than generated as unions of unions whose branches the
     /// generated types cannot tell apart.
     pub(super) fn reject_all_of_several_unions<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: several-unions
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "an `allOf` has object members and more than one `oneOf`/`anyOf` union to meet them \
@@ -94,7 +93,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// An all-scalar `allOf` whose members have no common value or no single representable type.
     pub(super) fn reject_all_of_scalars<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: scalar-members
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "`allOf` scalar members have an empty or unrepresentable intersection",
@@ -105,7 +104,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf` members whose `additionalProperties` value schemas have no common type.
     pub(super) fn reject_all_of_additional<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: additional-values
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "`allOf` members declare conflicting `additionalProperties`",
@@ -121,7 +120,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         name: &str,
     ) -> Option<T> {
         // E013 case: required-property
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             format!(
@@ -140,7 +139,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         name: &str,
     ) -> Option<T> {
         // E013 case: required-property
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             format!(
@@ -158,7 +157,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         provenance: crate::diag::Provenance,
     ) -> Option<T> {
         // E013 case: false-member
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             provenance,
             "an `allOf` member is `false`",
@@ -176,7 +175,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: cycle
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             provenance,
             message,
@@ -196,7 +195,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: unrepresentable-meet
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             message,
@@ -211,7 +210,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// intersection of scalar members, and both are `E013`.
     pub(super) fn reject_one_of_null_in_every_branch<T>(&mut self, schema: &Schema) -> Option<T> {
         // E013 case: scalar-members
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "this schema's own sibling keywords leave every `oneOf` member accepting `null` \
@@ -237,7 +236,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_all_of_scalars(schema);
         }
         // E013 case: null-only-left
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "the only value this schema's own `enum`, `const` or `anyOf` members leave is `null`, \
@@ -254,7 +253,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// distinguishes no further than that.
     pub(super) fn reject_ref_sibling_intersection(&mut self, schema: &Schema) -> Option<Ty> {
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             "the `$ref` target and this schema's own sibling keywords have an empty or \
@@ -289,7 +288,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
         };
         // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             message,
@@ -308,7 +307,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: inferred-category
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             message,
@@ -340,7 +339,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<T> {
         // E013 case: inferred-category
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             message,
@@ -357,7 +356,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         message: &str,
     ) -> Option<Ty> {
         // E013 case: cycle
-        self.reject_irreconcilable(
+        self.reject_composition(
             Code::AllOfIrreconcilable,
             schema.provenance.clone(),
             message,
@@ -387,11 +386,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
     }
 
-    /// Report an irreconcilable composition with `message` and `remedy`: the one body every `E013`
-    /// reporter above shares. `code` is always `E013`'s; it is the caller's argument so that each
-    /// reporter names the code beside its own `// E013 case:` marker, which is how `spargen explain
-    /// E013`'s case list is held to the sites that report each case.
-    fn reject_irreconcilable<T>(
+    /// Report a union or composition no generated type can carry, with `message` and `remedy`:
+    /// the one body every `E007` and `E013` reporter above shares. `code` is `E007`'s for a union
+    /// no enum can carry and `E013`'s for an irreconcilable composition; it is the caller's
+    /// argument so that each reporter names the code beside its own `// E007 case:` or
+    /// `// E013 case:` marker, which is how `spargen explain`'s case list for each code is held to
+    /// the sites that report each case.
+    fn reject_composition<T>(
         &mut self,
         code: Code,
         provenance: crate::diag::Provenance,

@@ -97,8 +97,12 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             core: support::ClientCore,
         }
 
+        // `deprecated`: the module names its own deprecated components in signatures and decode
+        // paths, as `types`, the parameter structs, the response and error types, and the
+        // blocking twin do. A lint level is read at the use site, so a consumer naming a
+        // deprecated item is still warned.
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+        #[allow(dead_code, deprecated, unused_mut, unused_variables, clippy::result_large_err)]
         impl Client {
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::with_client(reqwest::Client::new(), base_url)
@@ -135,13 +139,13 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             ///
             /// Registration checks nothing; each operation matches its `security` requirement
             /// against the registered credentials when it is called, and fails before anything is
-            /// sent, as `support::Error::RequestConstruction`, when no alternative has every scheme
+            /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
             /// registered (`RequestError::MissingCredential`), when the selected alternative has a
             /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
             /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
             /// `Credential::Basic`), or when its token provider fails
-            /// (`RequestError::CredentialProvider`). `support::Credential`'s documentation lists
-            /// which variant each kind of scheme accepts.
+            /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+            /// variant each kind of scheme accepts.
             #(#scheme_docs)*
             #[must_use]
             pub fn with_credential(
@@ -190,21 +194,31 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         }
         let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
 
+        // Every variable has a builder field; only one that declares an `enum` has a typed enum,
+        // so that lookup is the variable's shape rather than an allocation to expect.
+        let field_ident = |name: &String| {
+            names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated")
+        };
+        let enum_ident = |name: &String| names.server_variable_enums.get(&(index, name.clone()));
+        let variant_ident = |name: &String, value: &String| {
+            names
+                .server_variable_variants
+                .get(&(index, name.clone(), value.clone()))
+                .expect("server variable variant allocated")
+        };
+
         let variable_enums = server.variables.iter().filter_map(|(name, variable)| {
-            let enum_ident = names.server_variable_enums.get(&(index, name.clone()))?;
+            let enum_ident = enum_ident(name)?;
             let variants = variable.enum_values.iter().map(|value| {
-                let variant = names
-                    .server_variable_variants
-                    .get(&(index, name.clone(), value.clone()))
-                    .expect("server variable variant allocated");
+                let variant = variant_ident(name, value);
                 let default = (value == &variable.default).then(|| quote! { #[default] });
                 quote! { #default #variant }
             });
             let arms = variable.enum_values.iter().map(|value| {
-                let variant = names
-                    .server_variable_variants
-                    .get(&(index, name.clone(), value.clone()))
-                    .expect("server variable variant allocated");
+                let variant = variant_ident(name, value);
                 quote! { Self::#variant => #value }
             });
             let doc = format!("Permitted values of the `{name}` server variable.");
@@ -227,11 +241,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let fields = server.variables.keys().map(|name| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            let field = field_ident(name);
+            match enum_ident(name) {
                 Some(enum_ident) => {
                     quote! { #field: #enum_ident }
                 }
@@ -240,11 +251,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let defaults = server.variables.iter().map(|(name, variable)| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            let field = field_ident(name);
+            match enum_ident(name) {
                 // The `#[default]` variant is the declared default, so `Default` is exact.
                 Some(enum_ident) => {
                     quote! { #field: <#enum_ident as Default>::default() }
@@ -257,16 +265,13 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let setters = server.variables.iter().map(|(name, variable)| {
-            let field = names
-                .server_variable_fields
-                .get(&(index, name.clone()))
-                .expect("server variable field allocated");
+            let field = field_ident(name);
             let mut doc = format!("Set the `{name}` server variable.");
             if let Some(description) = &variable.description {
                 doc.push(' ');
                 doc.push_str(description);
             }
-            match names.server_variable_enums.get(&(index, name.clone())) {
+            match enum_ident(name) {
                 Some(enum_ident) => {
                     quote! {
                         #[doc = #doc]
@@ -300,11 +305,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                 _ => quote! { url.push_str(#text); },
             },
             crate::ir::UrlSegment::Variable(name) => {
-                let field = names
-                    .server_variable_fields
-                    .get(&(index, name.clone()))
-                    .expect("server variable field allocated");
-                match names.server_variable_enums.get(&(index, name.clone())) {
+                let field = field_ident(name);
+                match enum_ident(name) {
                     Some(_) => quote! { url.push_str(self.#field.as_str()); },
                     None => quote! { url.push_str(&self.#field); },
                 }
@@ -315,11 +317,10 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         // would produce: an enum variable pins its default with `#[default]`, and a server with no
         // variables has nothing to default. A free-form variable carries a spec-declared string,
         // which the derive would replace with `""`.
-        let derivable_default = server.variables.iter().all(|(name, _)| {
-            names
-                .server_variable_enums
-                .contains_key(&(index, name.clone()))
-        });
+        let derivable_default = server
+            .variables
+            .keys()
+            .all(|name| enum_ident(name).is_some());
         let (derive_default, default_impl) = if derivable_default {
             (quote! { , Default }, quote! {})
         } else {
@@ -414,7 +415,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::CodegenOptions;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, Method, Operation, OperationId, PathSegment, PathTemplate, Response,
         Responses, Server, StatusSpec, TypeGraph, UrlSegment,
@@ -469,6 +470,7 @@ mod tests {
                         body: None,
                         media: None,
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],
@@ -500,7 +502,7 @@ mod tests {
             types: TypeGraph::default(),
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
         let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
             .expect("the emitted client parses");

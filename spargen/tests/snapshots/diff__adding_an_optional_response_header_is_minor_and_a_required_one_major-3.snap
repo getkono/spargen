@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|response-header-removed|GET /pets 200 header `x_request_id`|response header removed (was `String`)
+bump=major

@@ -123,8 +123,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         lowered
     }
 
-    /// Run `lower` over a response body's own schema: with `open_narrowing` in effect when the
-    /// option is on, restoring the enclosing answer afterwards.
+    /// Run `lower` with `open_narrowing` in effect when the option is on, restoring the enclosing
+    /// answer afterwards. Used over a response body's own schema, and by
+    /// [`Self::intersect_union`] to meet the one branch a union narrows to where the enclosing
+    /// position's narrowing was open, so that branch is met as the position itself would be.
     pub(super) fn response_narrowing<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
         let enclosing = std::mem::replace(&mut self.narrowing_opens, self.open_narrowing);
         let lowered = lower(self);

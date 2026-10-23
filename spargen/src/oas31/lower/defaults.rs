@@ -231,18 +231,22 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
 /// Classify a float as JSON Schema compares numbers, by value: an integral float of magnitude
 /// below 2^53 is that integer (`3.0` is `3`), so an `integer` field admits it under the same width
 /// check as an integer literal. Anything else — a fraction, or a magnitude of 2^53 or more — stays a
-/// float.
+/// float. The rule is [`exact_integer`]'s, which an `integer` schema's `enum`/`const` members are
+/// read by too.
 fn classify_float(value: f64) -> RawDefault {
+    exact_integer(value).map_or(RawDefault::Float(value), RawDefault::Int)
+}
+
+/// The integer a parsed float names exactly, as JSON Schema compares numbers by value: `Some` for
+/// an integral float of magnitude below 2^53 (`3.0` is `3`), `None` for a fraction or a magnitude
+/// of 2^53 or more.
+pub(super) fn exact_integer(value: f64) -> Option<i64> {
     // At 2^53 and above, consecutive `f64` values are 2 or more apart, so every one of them is
     // integral: `12345678901234567.5` parses to `12345678901234568.0`, and its fraction is gone
     // before this sees it. Below 2^53 every integer is exact, so an integral float there names the
-    // integer its literal wrote, to the precision every float default is parsed at.
+    // integer its literal wrote, to the precision every float is parsed at.
     const EXACT_INTEGER_BOUND: f64 = 9_007_199_254_740_992.0; // 2^53
-    if value.fract() == 0.0 && value.abs() < EXACT_INTEGER_BOUND {
-        RawDefault::Int(value as i64)
-    } else {
-        RawDefault::Float(value)
-    }
+    (value.fract() == 0.0 && value.abs() < EXACT_INTEGER_BOUND).then_some(value as i64)
 }
 
 /// Decide whether a classified `default` is representable against the field's lowered type: a
@@ -319,7 +323,7 @@ pub(super) fn default_display_for(raw: &SpannedValue, kind: Option<&TypeKind>) -
 }
 
 /// Render a representable default for its rustdoc `Default:` note.
-pub(super) fn default_display(value: &DefaultValue) -> String {
+fn default_display(value: &DefaultValue) -> String {
     match value {
         DefaultValue::Bool(value) => value.to_string(),
         DefaultValue::Int(value) => value.to_string(),

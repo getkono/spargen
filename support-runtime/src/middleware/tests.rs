@@ -255,6 +255,115 @@ fn composes_over_retry_backend() {
     assert_eq!(recording.calls(), 1);
 }
 
+/// An inner backend answering with the status at each call index (the last repeats), counting
+/// executions.
+#[derive(Debug)]
+struct SequenceBackend {
+    statuses: Vec<u16>,
+    calls: AtomicU32,
+}
+
+impl SequenceBackend {
+    fn new(statuses: Vec<u16>) -> Self {
+        Self {
+            statuses,
+            calls: AtomicU32::new(0),
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl HttpBackend for SequenceBackend {
+    fn execute(&self, _request: Request) -> ExecuteFuture<'_> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+        let status = *self
+            .statuses
+            .get(index)
+            .or_else(|| self.statuses.last())
+            .expect("at least one canned status");
+        Box::pin(async move { Ok(canned(status)) })
+    }
+}
+
+/// A middleware that counts how many times it runs and records each status it sees come back.
+#[derive(Debug, Default)]
+struct Counting {
+    runs: AtomicU32,
+    seen: Mutex<Vec<u16>>,
+}
+
+impl Middleware for Counting {
+    fn handle<'a>(&'a self, request: Request, next: Next<'a>) -> ExecuteFuture<'a> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let response = next.run(request).await?;
+            self.seen
+                .lock()
+                .expect("mutex not poisoned")
+                .push(response.status().as_u16());
+            Ok(response)
+        })
+    }
+}
+
+/// Retries every transient outcome, with an already-ready wait so no runtime is needed.
+struct RetryTransient;
+
+impl crate::RetryPolicy for RetryTransient {
+    fn retry<'a>(
+        &'a self,
+        attempt: u32,
+        outcome: &crate::RetryOutcome<'_>,
+    ) -> Option<std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+        if attempt < 5 && outcome.is_transient() {
+            Some(Box::pin(std::future::ready(())))
+        } else {
+            None
+        }
+    }
+}
+
+/// The module docs' composability claim, observed in both nestings over `503, 503, 200`: a
+/// `MiddlewareBackend` around a `RetryBackend` runs its middleware once, around the whole retry
+/// loop, and sees only the final `200`; a `RetryBackend` around a `MiddlewareBackend` runs the
+/// middleware once per attempt, and it sees every status.
+#[test]
+fn retry_nesting_decides_whether_middleware_runs_once_or_per_attempt() {
+    // Middleware outside the retry loop.
+    let transport = Arc::new(SequenceBackend::new(vec![503, 503, 200]));
+    let counting = Arc::new(Counting::default());
+    let as_dyn: Arc<dyn Middleware> = counting.clone();
+    let retry: Arc<dyn HttpBackend> = Arc::new(RetryBackend::new(
+        transport.clone(),
+        Arc::new(RetryTransient),
+    ));
+    let backend = MiddlewareBackend::new(retry).layer(as_dyn.clone());
+    assert_eq!(backend.middlewares().len(), 1);
+    assert!(Arc::ptr_eq(&backend.middlewares()[0], &as_dyn));
+    let response = poll_ready(backend.execute(request())).expect("retried chain succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(transport.calls(), 3);
+    assert_eq!(counting.runs.load(Ordering::SeqCst), 1);
+    assert_eq!(*counting.seen.lock().unwrap(), vec![200]);
+
+    // Middleware inside the retry loop.
+    let transport = Arc::new(SequenceBackend::new(vec![503, 503, 200]));
+    let counting = Arc::new(Counting::default());
+    let as_dyn: Arc<dyn Middleware> = counting.clone();
+    let chain = MiddlewareBackend::new(transport.clone()).layer(as_dyn.clone());
+    assert_eq!(chain.middlewares().len(), 1);
+    assert!(Arc::ptr_eq(&chain.middlewares()[0], &as_dyn));
+    let backend = RetryBackend::new(Arc::new(chain), Arc::new(RetryTransient));
+    let response = poll_ready(backend.execute(request())).expect("retried chain succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(transport.calls(), 3);
+    assert_eq!(counting.runs.load(Ordering::SeqCst), 3);
+    assert_eq!(*counting.seen.lock().unwrap(), vec![503, 503, 200]);
+}
+
 #[test]
 fn empty_chain_delegates_straight_to_inner() {
     // A `MiddlewareBackend` with no layers is a transparent pass-through to the inner transport.

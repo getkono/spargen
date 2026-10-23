@@ -53,10 +53,8 @@
 //! }
 //! ```
 //!
-//! No generic closure/future combinator is provided for this: Rust closures returning futures are
-//! awkward to type, and the plain loop over the already-public [`crate::send`] /
-//! [`crate::decode_success`] primitives (which the generated methods use) is clearer and fully
-//! typed. The loop pattern above is the supported shape.
+//! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
+//! type, and a plain loop over the generated operation method is clearer and fully typed.
 
 use std::convert::Infallible;
 use std::marker::PhantomData;
@@ -120,8 +118,10 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///
     /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
     /// relative target against the fetched URL) to arm the following page, then decodes the body as
-    /// `T`. Three things terminate the paginator (subsequent calls return `None`):
+    /// `T`. Four things terminate the paginator (subsequent calls return `None`):
     ///
+    /// * a request for the `next` URL that cannot be built →
+    ///   `Some(Err(Error::RequestConstruction(..)))`;
     /// * a **transport failure** → `Some(Err(..))`;
     /// * a **non-success HTTP status** (anything outside `2xx`) → `Some(Err(Error::UnexpectedStatus))`
     ///   — the body is *never* decoded as `T`, so an error payload can't masquerade as a page. The
@@ -205,7 +205,7 @@ fn next_link_target(headers: &HeaderMap) -> Option<String> {
         let Ok(field) = value.to_str() else {
             continue;
         };
-        for entry in split_link_entries(field) {
+        for entry in split_outside(field, b',', true) {
             if let Some((uri, true)) = parse_link_entry(entry) {
                 return Some(uri);
             }
@@ -214,11 +214,14 @@ fn next_link_target(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// Split one `Link` header field value into its comma-separated entries, treating commas inside the
-/// `<…>` URI-reference or inside a quoted parameter string as literal (not separators).
-fn split_link_entries(field: &str) -> Vec<&str> {
-    let bytes = field.as_bytes();
-    let mut entries = Vec::new();
+/// Split `text` on `delim`, treating a delimiter inside a quoted string as literal (a backslash
+/// escapes the next character there). With `respect_angles`, a delimiter inside a `<…>`
+/// URI-reference is literal too, and a quote inside one opens no quoted string. A `Link` field
+/// value splits into entries on `,` with angles respected; an entry's parameter section splits on
+/// `;` without.
+fn split_outside(text: &str, delim: u8, respect_angles: bool) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
     let mut start = 0;
     let mut in_angle = false;
     let mut in_quote = false;
@@ -229,19 +232,23 @@ fn split_link_entries(field: &str) -> Vec<&str> {
                 // A backslash escapes the next character inside a quoted string; skip both.
                 i += 1;
             }
-            b'<' if !in_quote => in_angle = true,
-            b'>' if !in_quote => in_angle = false,
+            b'<' if respect_angles && !in_quote => in_angle = true,
+            // Mutation testing: replacing this guard with `true`, or its `&&` with `||`, survives
+            // every test and is declared rather than killed. Whenever the guard is false,
+            // `in_angle` is already false: only the `<` arm sets it, which needs `respect_angles`,
+            // a quoted string opens only while `in_angle` is false, and inside one `<` sets nothing.
+            b'>' if respect_angles && !in_quote => in_angle = false,
             b'"' if !in_angle => in_quote = !in_quote,
-            b',' if !in_angle && !in_quote => {
-                entries.push(&field[start..i]);
+            byte if byte == delim && !in_angle && !in_quote => {
+                parts.push(&text[start..i]);
                 start = i + 1;
             }
             _ => {}
         }
         i += 1;
     }
-    entries.push(&field[start..]);
-    entries
+    parts.push(&text[start..]);
+    parts
 }
 
 /// Parse a single `Link` entry into its URI-reference plus whether its `rel` names `next`. Returns
@@ -255,7 +262,7 @@ fn parse_link_entry(entry: &str) -> Option<(String, bool)> {
         return None;
     }
     let mut is_next = false;
-    for param in split_params(&entry[close + 1..]) {
+    for param in split_outside(&entry[close + 1..], b';', false) {
         let param = param.trim();
         let Some(eq) = param.find('=') else {
             continue;
@@ -276,29 +283,6 @@ fn parse_link_entry(entry: &str) -> Option<(String, bool)> {
         }
     }
     Some((uri, is_next))
-}
-
-/// Split an entry's parameter section on `;`, treating semicolons inside a quoted string as literal.
-fn split_params(text: &str) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut in_quote = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if in_quote => i += 1,
-            b'"' => in_quote = !in_quote,
-            b';' if !in_quote => {
-                parts.push(&text[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(&text[start..]);
-    parts
 }
 
 #[cfg(test)]

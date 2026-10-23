@@ -4,14 +4,15 @@
 //! everything structural is decided at generation time; nothing is interpreted at runtime.
 //!
 //! This crate is the library half of the `spargen` tool. Its public surface is the `build.rs`
-//! API — see the [facade](crate) items ([`Spec`], [`Build`], [`generate`], [`check`], [`explain`]).
+//! API: the [crate-root](crate) items, starting from [`Build`] and [`generate`].
 //!
 //! ## Subsystem layering
 //!
 //! The crate is internally partitioned into subsystems with a declared dependency DAG. Each
 //! subsystem module records its allowed dependencies in a machine-readable `//! layer-deps:`
-//! header; `spargen/tests/layering.rs` diffs those declarations against the actual inter-module
-//! `use` edges and fails on any edge not in the table below.
+//! header; `spargen/tests/layering/` diffs those declarations against the inter-module edges the
+//! production (non-test) code actually takes, fails on any edge not in the table below, and
+//! checks that the declared graph is acyclic.
 //!
 //! | Subsystem | May depend on |
 //! |-----------|---------------|
@@ -20,8 +21,8 @@
 //! | `ir`      | `diag`        |
 //! | `oas31`   | `source`, `ir`, `name`, `diag` |
 //! | `name`    | `ir`, `diag`  |
-//! | `support` | — (compiles standalone against reqwest/serde) |
-//! | `codegen` | `ir`, `name`, `support`, `diag` |
+//! | `support` | — (an `include_str!` handle to `support-runtime`'s sources, which compile standalone) |
+//! | `codegen` | `ir`, `name`, `support` |
 //! | `emit`    | `codegen`     |
 //! | `compat`  | `source`, `diag` |
 //! | `surface` | `ir`, `name`  |
@@ -29,11 +30,15 @@
 //! | facade (`lib.rs`) | all of the above |
 //!
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
-//! only vocabulary shared across stages. `compat` preprocesses the bundle before `oas31` sees it;
-//! `surface` reads the lowered API for `diff` and never feeds generation.
+//! lowest layer, which the stages that report diagnostics reach and which depends on nothing, and
+//! `ir` as the lowered model `oas31` produces and `name`, `codegen` and `surface` read. `compat`
+//! preprocesses the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and
+//! never feeds generation.
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
 //! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
+//! `test_support`, compiled only into the test build, holds helpers the subsystems' in-crate tests
+//! share; the lint admits it by name as neither.
 
 mod diag;
 
@@ -49,6 +54,8 @@ mod runtime_contract;
 mod source;
 mod support;
 mod surface;
+#[cfg(test)]
+mod test_support;
 
 use std::str::FromStr;
 
@@ -57,7 +64,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{Build, CargoIntegration, ConfigError, Spec};
 pub use diag::{
-    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
+    Code, Diagnostic, DiagnosticBuilder, FileId, InterpId, JsonPointer, Loc, OutcomeClaim,
+    Provenance, Severity, Span, UnknownCode,
 };
 pub use runtime_contract::{RequiredDependency, Requirements};
 #[cfg(feature = "remote-fetch")]
@@ -69,13 +77,15 @@ pub use surface::{Change, ChangeKind, DiffReport, Impact};
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Outcome {
-    /// The generated module was freshly rendered and written.
+    /// The generated module was rendered by this run rather than replayed from the build cache.
+    /// The output file is rewritten only when its bytes change.
     Generated,
     /// The generated module was already up to date and was verified from the build cache.
     Cached,
     /// The support audit completed without a rejection.
     Clean,
-    /// The spec used an R-class construct; generation failed loudly.
+    /// An error-severity diagnostic was emitted, so the run did not get as far as it was asked
+    /// to.
     Rejected,
 }
 
@@ -95,7 +105,8 @@ impl Outcome {
         !matches!(self, Outcome::Rejected)
     }
 
-    /// Whether this run actually rewrote the output file. A cache hit did not.
+    /// Whether this run rendered the output rather than replaying it from the build cache. A
+    /// rendered output is written only when its bytes differ from the file already on disk.
     pub fn wrote_output(self) -> bool {
         matches!(self, Outcome::Generated)
     }
@@ -123,8 +134,9 @@ impl std::fmt::Display for Outcome {
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
-/// Fields are private and read through accessors, matching [`Spec`], [`Build`], [`Diagnostic`],
-/// and [`DiffRejection`], so the shape can grow without a breaking change.
+/// Fields are private and read through accessors, matching [`Spec`], [`Build`], and
+/// [`DiffRejection`], so the shape can grow without a breaking change. [`Diagnostic`] grows the
+/// other way: its fields are public and the struct is `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
@@ -136,6 +148,16 @@ pub struct Report {
 }
 
 impl Report {
+    /// A rejection carrying `diagnostics`, `truncated` when the batch that produced them reached
+    /// its cap.
+    fn rejected(diagnostics: Vec<Diagnostic>, truncated: bool) -> Self {
+        Self {
+            diagnostics,
+            outcome: Outcome::Rejected,
+            truncated,
+        }
+    }
+
     /// Every diagnostic emitted during the run, in emission order.
     ///
     /// This is the whole list only when [`Self::truncated`] is `false`.
@@ -194,6 +216,11 @@ impl Report {
     /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
     /// warning as `cargo::warning=`. Announcing a rejection as a warning would make the one
     /// message that stops generation look like the ones that do not.
+    ///
+    /// A directive is one line, and Cargo shows a build script's other stdout only under `-vv`,
+    /// so every line of a diagnostic's rendering (its location, pointer, and `help:` remedy
+    /// included) goes out as its own directive at that diagnostic's severity. A truncated report
+    /// ends with the truncation notice as a `cargo::warning=`.
     pub fn emit_cargo_diagnostics(&self) {
         for line in self.cargo_directive_lines() {
             println!("{line}");
@@ -203,13 +230,28 @@ impl Report {
     /// The directive lines [`Self::emit_cargo_diagnostics`] prints, split out so the severity
     /// mapping is testable without capturing the process's stdout.
     fn cargo_directive_lines(&self) -> Vec<String> {
-        self.diagnostics
-            .iter()
-            .map(|diagnostic| match diagnostic.severity {
-                Severity::Error => format!("cargo::error={diagnostic}"),
-                Severity::Warning => format!("cargo::warning={diagnostic}"),
-            })
-            .collect()
+        let mut lines = Vec::new();
+        for diagnostic in &self.diagnostics {
+            let directive = match diagnostic.severity {
+                Severity::Error => "cargo::error=",
+                Severity::Warning => "cargo::warning=",
+            };
+            let rendered = diagnostic.to_string();
+            lines.extend(rendered.lines().map(|line| format!("{directive}{line}")));
+        }
+        if self.truncated {
+            lines.push(format!("cargo::warning={}", self.truncation_notice()));
+        }
+        lines
+    }
+
+    /// The line saying the report stops at `batch_cap`, shared by [`Report`]'s `Display` and
+    /// [`Self::emit_cargo_diagnostics`] so the two cannot drift.
+    fn truncation_notice(&self) -> String {
+        format!(
+            "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
+            self.diagnostics.len()
+        )
     }
 
     /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
@@ -227,11 +269,7 @@ impl std::fmt::Display for Report {
             writeln!(formatter, "{diagnostic}")?;
         }
         if self.truncated {
-            writeln!(
-                formatter,
-                "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
-                self.diagnostics.len()
-            )?;
+            writeln!(formatter, "{}", self.truncation_notice())?;
         }
         Ok(())
     }
@@ -254,14 +292,10 @@ pub fn generate(build: &Build) -> Report {
 
 fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Report {
     let spec = &build.spec;
-    let cargo = cargo_environment(build);
+    let cargo = runtime_contract::cargo_environment(build);
     let mut cargo_diagnostics = cargo.diagnostics;
     if cargo.fatal {
-        return Report {
-            diagnostics: cargo_diagnostics,
-            outcome: Outcome::Rejected,
-            truncated: false,
-        };
+        return Report::rejected(cargo_diagnostics, false);
     }
     let consumer_manifest = cargo.manifest;
     let emit_cargo_directives = cargo.directives;
@@ -273,11 +307,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             }
             let truncated = diagnostics.cap_reached();
             cargo_diagnostics.extend(diagnostics.items().to_vec());
-            return Report {
-                diagnostics: cargo_diagnostics,
-                outcome: Outcome::Rejected,
-                truncated,
-            };
+            return Report::rejected(cargo_diagnostics, truncated);
         }
     };
     if emit_cargo_directives {
@@ -290,66 +320,57 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             let cached = cache_path
                 .as_deref()
                 .and_then(|path| cache::read_cache(path, &snapshot.digest, &content_digest));
-            if let Some(mut cached) = cached {
-                if let Some(manifest) = consumer_manifest.as_deref() {
-                    let audit = runtime_contract::audit(manifest, &cached.requirements);
-                    if emit_cargo_directives {
-                        runtime_contract::cargo_directives(&audit.manifests);
-                    }
-                    cached.diagnostics.extend(audit.diagnostics);
-                }
+            if let Some(cached) = cached {
                 cargo_diagnostics.extend(cached.diagnostics);
-                if cargo_diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.severity == Severity::Error)
-                {
-                    return Report {
-                        diagnostics: cargo_diagnostics,
-                        outcome: Outcome::Rejected,
-                        truncated: false,
-                    };
-                }
                 // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
                 // `Generated` — `wrote_output` must stay true to what happened.
-                return Report {
+                let mut report = Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
-                    truncated: false,
+                    truncated: cached.truncated,
                 };
+                if let Some(manifest) = consumer_manifest.as_deref() {
+                    let audited = apply_audit(&mut report, manifest, &cached.requirements);
+                    if emit_cargo_directives {
+                        runtime_contract::cargo_directives(&audited.manifests);
+                    }
+                }
+                // A replay rejects on any error-severity diagnostic, the audit's or the replayed
+                // run's.
+                if report.has_errors() {
+                    report.outcome = Outcome::Rejected;
+                }
+                return report;
             }
         }
     }
 
     for _ in 0..3 {
-        let preview = preview_inner(spec);
+        let mut preview = preview_inner(spec);
         if preview.report.outcome != Outcome::Generated {
             let mut report = preview.report;
             prepend(&mut report.diagnostics, &cargo_diagnostics);
             return report;
         }
-        let Some(rendered) = preview.files.first().map(String::as_str) else {
+        let Some(rendered) = preview.contents.as_deref() else {
             return pipeline_error_report("generation produced no module".to_owned());
         };
         let Some(requirements) = preview.requirements.as_ref() else {
             return pipeline_error_report("generation produced no runtime requirements".to_owned());
         };
         if let Some(manifest) = consumer_manifest.as_deref() {
-            let audit = runtime_contract::audit(manifest, requirements);
+            let audited = apply_audit(&mut preview.report, manifest, requirements);
             if emit_cargo_directives {
-                runtime_contract::cargo_directives(&audit.manifests);
+                runtime_contract::cargo_directives(&audited.manifests);
             }
-            if !audit.diagnostics.is_empty() {
-                let mut diagnostics = cargo_diagnostics;
-                // The inner run's truncation carries: merging its diagnostics into a wider list
-                // does not make the dropped ones reappear.
-                let truncated = preview.report.truncated;
-                diagnostics.extend(preview.report.diagnostics);
-                diagnostics.extend(audit.diagnostics);
-                return Report {
-                    diagnostics,
-                    outcome: Outcome::Rejected,
-                    truncated,
-                };
+            // A fresh run rejects on any audit finding, before anything is written. The inner
+            // run's truncation carries: merging its diagnostics into a wider list does not make
+            // the dropped ones reappear.
+            if audited.found {
+                let mut report = preview.report;
+                report.outcome = Outcome::Rejected;
+                prepend(&mut report.diagnostics, &cargo_diagnostics);
+                return report;
             }
         }
 
@@ -358,11 +379,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             Err(diagnostics) => {
                 let truncated = diagnostics.cap_reached();
                 cargo_diagnostics.extend(diagnostics.items().to_vec());
-                return Report {
-                    diagnostics: cargo_diagnostics,
-                    outcome: Outcome::Rejected,
-                    truncated,
-                };
+                return Report::rejected(cargo_diagnostics, truncated);
             }
         };
         if snapshot.digest != after.digest {
@@ -383,6 +400,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 &snapshot.digest,
                 &content_digest,
                 &preview.report.diagnostics,
+                preview.report.truncated,
                 requirements,
             ) {
                 return pipeline_error_report(message);
@@ -410,162 +428,85 @@ fn prepend(diagnostics: &mut Vec<Diagnostic>, leading: &[Diagnostic]) {
     *diagnostics = merged;
 }
 
-/// What the Cargo environment affords this run, resolved from [`CargoIntegration`] once so the
-/// generation path below never has to re-decide it.
-struct CargoEnvironment {
-    /// Emit `cargo:rerun-if-changed` directives.
-    directives: bool,
-    /// The consumer manifest to audit against (`E023`), when one was found.
-    manifest: Option<Utf8PathBuf>,
-    /// `W012`/`W013` for a degraded run, or `E024` for a required one.
-    diagnostics: Vec<Diagnostic>,
-    /// Whether `diagnostics` contains a hard failure.
-    fatal: bool,
-}
-
-/// Resolve the Cargo integration policy against the actual process environment.
-fn cargo_environment(build: &Build) -> CargoEnvironment {
-    let under_build_script = runtime_contract::under_build_script();
-    let manifest = runtime_contract::build_script_manifest();
-    resolve_cargo_environment(build.cargo, under_build_script, manifest)
-}
-
-/// The policy decision itself, as a pure function of what the environment affords — so every
-/// branch is reachable in a test without mutating process-global state.
-fn resolve_cargo_environment(
-    integration: CargoIntegration,
-    under_build_script: bool,
-    manifest: Option<Utf8PathBuf>,
-) -> CargoEnvironment {
-    match integration {
-        CargoIntegration::Off => CargoEnvironment {
-            directives: false,
-            manifest: None,
-            diagnostics: Vec::new(),
-            fatal: false,
-        },
-        CargoIntegration::Auto | CargoIntegration::Required if under_build_script => {
-            let diagnostics = match (&manifest, integration) {
-                // A build script with no discoverable manifest cannot be audited, and an
-                // un-audited build is exactly how `E023` reaches the user as a compile error in
-                // generated code instead of a spargen diagnostic.
-                (None, CargoIntegration::Required) => vec![cargo_diagnostic(
-                    Severity::Error,
-                    Code::CargoIntegrationRequired,
-                    "cargo integration is required, but no consumer manifest was found; \
-                     set CARGO_MANIFEST_DIR or use `CargoIntegration::Auto`",
-                )],
-                (None, _) => vec![cargo_diagnostic(
-                    Severity::Warning,
-                    Code::RuntimeAuditSkipped,
-                    "no consumer manifest was found, so the runtime-dependency audit was \
-                     skipped; run `spargen deps <spec>` for the dependencies generated output \
-                     requires",
-                )],
-                (Some(_), _) => Vec::new(),
-            };
-            let fatal = diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error);
-            CargoEnvironment {
-                directives: true,
-                manifest,
-                diagnostics,
-                fatal,
-            }
-        }
-        CargoIntegration::Required => CargoEnvironment {
-            directives: false,
-            manifest: None,
-            diagnostics: vec![cargo_diagnostic(
-                Severity::Error,
-                Code::CargoIntegrationRequired,
-                "cargo integration is required, but this is not a build-script process; \
-                 call `generate` from a `build.rs`, or relax to `CargoIntegration::Auto`",
-            )],
-            fatal: true,
-        },
-        CargoIntegration::Auto => CargoEnvironment {
-            directives: false,
-            manifest: None,
-            diagnostics: vec![cargo_diagnostic(
-                Severity::Warning,
-                Code::CargoIntegrationDegraded,
-                "not a build-script process: no rebuild triggers were emitted and the \
-                 runtime-dependency audit was skipped; call `generate` from a `build.rs`, or \
-                 silence this with `CargoIntegration::Off`",
-            )],
-            fatal: false,
-        },
-    }
-}
-
-/// A diagnostic about the build environment rather than the document: it has no meaningful
-/// location in the spec, so it points at the document root.
-fn cargo_diagnostic(severity: Severity, code: Code, message: &str) -> Diagnostic {
-    let provenance = diag::Provenance::new(JsonPointer::root(), None);
-    let builder = match severity {
-        Severity::Error => Diagnostic::error(code, provenance),
-        Severity::Warning => Diagnostic::warning(code, provenance),
-    };
-    builder.message(message.to_owned()).build()
-}
-
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
 /// producers and client consumers.
 ///
 /// When called from a build script, this also runs the consumer-manifest dependency audit, so
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
-/// package to audit — `spargen deps` prints the required `[dependencies]` block instead.
+/// package to audit — `spargen deps` prints the dependency tables generated output
+/// requires instead.
 pub fn check(spec: &Spec) -> Report {
     let result = run_mode(spec, PipelineMode::Requirements);
     let mut report = result.report;
     let manifest = runtime_contract::build_script_manifest();
     if let (Some(manifest), Some(requirements)) = (manifest, result.requirements) {
-        let audit = runtime_contract::audit(&manifest, &requirements);
-        if !audit.diagnostics.is_empty() {
-            report.diagnostics.extend(audit.diagnostics);
+        // `check` rejects on any audit finding.
+        if apply_audit(&mut report, &manifest, &requirements).found {
             report.outcome = Outcome::Rejected;
         }
     }
     report
 }
 
+/// What [`apply_audit`] merged into a report.
+struct Audited {
+    /// Every manifest the audit read, for rebuild tracking.
+    manifests: Vec<Utf8PathBuf>,
+    /// Whether the audit reported anything.
+    found: bool,
+}
+
+/// Run the consumer-manifest dependency audit (`E023`) of `manifest` against `requirements`, and
+/// append its diagnostics to `report`'s, after the run's own. The outcome is left alone: each
+/// caller states its own reject rule beside the call.
+fn apply_audit(
+    report: &mut Report,
+    manifest: &Utf8Path,
+    requirements: &runtime_contract::RuntimeRequirements,
+) -> Audited {
+    let audit = runtime_contract::audit(manifest, requirements);
+    let found = !audit.diagnostics.is_empty();
+    report.diagnostics.extend(audit.diagnostics);
+    Audited {
+        manifests: audit.manifests,
+        found,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PipelinePreview {
     report: Report,
-    files: Vec<String>,
+    contents: Option<String>,
     requirements: Option<runtime_contract::RuntimeRequirements>,
 }
 
 fn preview_inner(spec: &Spec) -> PipelinePreview {
     let result = run_mode(spec, PipelineMode::Preview);
-    let files = result
-        .plan
-        .map(|plan| plan.files.into_iter().map(|file| file.contents).collect())
-        .unwrap_or_default();
     PipelinePreview {
         report: result.report,
-        files,
+        contents: result.plan.map(|plan| plan.contents),
         requirements: result.requirements,
     }
 }
 
 /// The stack size for the dedicated frontend worker thread. Parsing, deserialization, meta-schema
 /// validation, and lowering are all recursive over the (possibly deeply nested) document. Lowering
-/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`) and the parser bounds nesting
-/// too, so the peak stack is bounded — but only *this* thread guarantees it has room for that bound,
-/// no matter how small the caller's own stack is. A build.rs, a CLI, a proptest worker, or a
-/// libFuzzer target all inherit the same guarantee: no spec — however deep or adversarial — can
-/// overflow the stack, because the recursive work always runs here.
+/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`), and the JSON and YAML
+/// parsers both refuse a document nested past a fixed depth before recursing past it, an alias's
+/// copy counted at the depth it reaches, so the peak stack is bounded — but only *this* thread
+/// guarantees it has room for that bound, no matter how small the caller's own stack is. A
+/// build.rs, a CLI, a proptest worker, or a libFuzzer target all inherit the same guarantee: no
+/// spec — however deep or adversarial — can overflow the stack, because the recursive work always
+/// runs here.
 const FRONTEND_STACK: usize = 64 * 1024 * 1024;
 
 /// Run `f` (the whole recursive frontend/pipeline) on a dedicated thread with a large, fixed stack,
 /// decoupling spargen's recursion budget from the caller's stack size. This is the mechanism behind
-/// the no-overflow invariant: combined with the lowering depth cap, it makes stack exhaustion on any
-/// input impossible for every entry point. A panic inside the worker is propagated to the caller
-/// unchanged (so genuine bugs still surface). Thread creation is not input-driven; the only way it
-/// fails is OS resource exhaustion, which is outside the "no input crashes the generator" contract.
+/// the no-overflow invariant: combined with the parsers' and lowering's depth caps, it makes stack
+/// exhaustion on any input impossible for every entry point. A panic inside the worker is
+/// propagated to the caller unchanged (so genuine bugs still surface). Thread creation is not
+/// input-driven; the only way it fails is OS resource exhaustion, which is outside the "no input
+/// crashes the generator" contract.
 fn run_on_frontend_stack<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send,
@@ -582,12 +523,12 @@ where
     })
 }
 
-/// The result of a [`diff`] run: the semver-impact report when both specs lowered, plus each
-/// spec's rejection [`Report`] when it failed to lower.
+/// The `Err` of a [`diff`] run: at least one spec failed to lower, so the two surfaces are not
+/// comparable and no [`DiffReport`] is produced.
 ///
-/// `report` is `Some` iff **both** specs lowered successfully. When a spec rejects (used an R-class
-/// construct, failed validation, …), its diagnostics are surfaced in `old_rejection` / `new_rejection`
-/// and no diff is produced — the surfaces are simply not comparable. `diff` never panics on a bad spec.
+/// Each side that failed to lower carries its rejection [`Report`], read through
+/// [`old_spec`](Self::old_spec), [`new_spec`](Self::new_spec), or [`rejections`](Self::rejections)
+/// for every failed side in turn. `diff` never panics on a bad spec.
 #[derive(Debug, Clone)]
 pub struct DiffRejection {
     old: Option<Report>,
@@ -669,12 +610,7 @@ pub fn diff(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
 }
 
 fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
-    let mut old_diags = diag::Diagnostics::new(old.batch_cap);
-    let mut new_diags = diag::Diagnostics::new(new.batch_cap);
-    let old_lowered = lower_frontend(old, &mut old_diags);
-    let new_lowered = lower_frontend(new, &mut new_diags);
-
-    match (old_lowered, new_lowered) {
+    match (lower_side(old), lower_side(new)) {
         (Ok((old_api, old_names)), Ok((new_api, new_names))) => {
             let old_surface = surface::build(&old_api, &old_names);
             let new_surface = surface::build(&new_api, &new_names);
@@ -682,39 +618,29 @@ fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
         }
         // A spec that failed to lower has no surface, so the two are simply not comparable.
         (old_lowered, new_lowered) => Err(DiffRejection {
-            old: old_lowered
-                .is_err()
-                .then(|| report(old_diags, Outcome::Rejected)),
-            new: new_lowered
-                .is_err()
-                .then(|| report(new_diags, Outcome::Rejected)),
+            old: old_lowered.err(),
+            new: new_lowered.err(),
         }),
     }
 }
 
-/// The filesystem paths generation reads for `spec`: the root spec, every relative-file `$ref`
-/// target reachable from it, and each vendored remote copy.
-///
-/// Best-effort and side-effect-free: it loads the bundle only (no lowering, no output, no
-/// network). If the spec cannot even be loaded (e.g. it is momentarily malformed mid-edit), the
-/// returned list is just the spec path, so a watcher can still wait for it to be fixed.
-/// Deterministic for a given on-disk state.
-fn source_files(spec: &Spec) -> Vec<Utf8PathBuf> {
+/// Lower one side of a [`diff`]: through the carve driver when `spec.carve` asks for it, as
+/// [`run_mode`] does for every other entry point, and the plain frontend otherwise. A side that
+/// does not lower returns its rejection [`Report`].
+fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names), Report> {
+    let carved;
+    let spec = if spec.carve {
+        carved = carve_spec(spec)?;
+        &carved
+    } else {
+        spec
+    };
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
-    match source::InputBundle::load(&spec.path, &mut diags) {
-        Ok(bundle) => {
-            let mut paths: Vec<Utf8PathBuf> =
-                bundle.source_paths().map(Utf8Path::to_path_buf).collect();
-            if !paths.iter().any(|path| path == &spec.path) {
-                paths.push(spec.path.clone());
-            }
-            paths
-        }
-        Err(_) => vec![spec.path.clone()],
-    }
+    lower_frontend(spec, &mut diags).map_err(|()| report(diags, Outcome::Rejected))
 }
 
-/// Private cross-crate bridge used exclusively by `spargen-macro`.
+/// Private cross-crate bridge for `spargen-macro`; `preview` is also called by this crate's
+/// integration tests.
 #[doc(hidden)]
 pub mod __private {
     use camino::{Utf8Path, Utf8PathBuf};
@@ -740,30 +666,29 @@ pub mod __private {
 
     fn preview_impl(spec: &Spec, manifest: Option<&Utf8Path>) -> MacroPreview {
         let preview = super::preview_inner(spec);
-        let contents = preview.files.first().cloned();
-        let mut source_files = super::source_files(spec);
+        let contents = preview.contents;
+        // The files a generation reads are the build cache's inputs: the root spec, every
+        // relative-file `$ref` target and vendored remote copy, `spargen.lock`, and the applied
+        // config files, whose edit changes what was generated and so re-expands. An input set that
+        // does not load (a spec malformed mid-edit) leaves the root spec alone, so the macro still
+        // waits for it to be fixed.
+        let mut source_files = match super::cache::InputSnapshot::load(spec) {
+            Ok(snapshot) => snapshot.paths,
+            Err(_) => vec![spec.path.clone()],
+        };
+        source_files.push(spec.path.clone());
         let mut report = preview.report;
         if report.outcome == Outcome::Generated {
             if let (Some(manifest), Some(requirements)) = (manifest, preview.requirements.as_ref())
             {
-                let audit = super::runtime_contract::audit(manifest, requirements);
-                source_files.extend(audit.manifests);
-                if !audit.diagnostics.is_empty() {
-                    report.diagnostics.extend(audit.diagnostics);
+                let audited = super::apply_audit(&mut report, manifest, requirements);
+                source_files.extend(audited.manifests);
+                // The macro rejects on any audit finding.
+                if audited.found {
                     report.outcome = Outcome::Rejected;
                 }
             }
         }
-        let spec_dir = spec
-            .path
-            .parent()
-            .unwrap_or_else(|| camino::Utf8Path::new(""));
-        let lock = spec_dir.join("spargen.lock");
-        if lock.is_file() {
-            source_files.push(lock);
-        }
-        // The applied config files changed what was generated, so an edit to one re-expands.
-        source_files.extend(spec.config_files.iter().cloned());
         source_files.sort();
         source_files.dedup();
         if report.outcome != Outcome::Generated {
@@ -777,13 +702,13 @@ pub mod __private {
     }
 }
 
-/// The exact `[dependencies]` block generated output from `spec` requires — what backs
-/// `spargen deps`.
+/// The dependency tables generated output from `spec` requires — what backs `spargen deps`.
 ///
 /// Generated output is freestanding, so the consuming package declares its own runtime
 /// dependencies. Which ones depends on the API: multipart bodies pull in a `reqwest` feature,
-/// `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`. Until now that
-/// set could only be discovered reactively, one `E023` at a time; this returns all of it at once.
+/// `format: uuid` pulls in `uuid`, sequential responses pull in `futures-core`. This returns the
+/// whole set before a build, rather than leaving `E023` to report what the consuming package
+/// lacks.
 ///
 /// The spec must lower — a rejection is returned as the [`Report`] that explains why.
 pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {
@@ -794,8 +719,8 @@ pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {
     }
 }
 
-/// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
-/// published errors index.
+/// Extended documentation for a stable diagnostic code, backing `spargen explain E###`. The
+/// published errors index, `docs/errors.md`, lists each code's severity and title.
 pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
     Code::from_str(code).map(Code::explain)
 }
@@ -803,9 +728,9 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `spec.path`,
 /// writing copies under `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec.
 ///
-/// This is the **only** spargen entry point that performs network I/O — `generate` and `check`
-/// resolve remote refs purely from the vendored, pinned copies this step produces, so builds stay
-/// hermetic. Backed by `reqwest` and gated behind the `remote-fetch` feature (implied by `cli`).
+/// This step fetches each remote document over HTTP(S) through `reqwest`; `generate` and `check`
+/// resolve remote refs purely from the vendored, pinned copies it produces, so builds stay
+/// hermetic. Gated behind the `remote-fetch` feature (implied by `cli`).
 #[cfg(feature = "remote-fetch")]
 pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
@@ -818,17 +743,16 @@ pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
 
 #[derive(Debug, Clone, Copy)]
 enum PipelineMode {
-    /// Frontend audit only, no codegen (`spargen::check`).
-    Check,
-    /// Lower far enough to derive the runtime dependency set, no codegen (`spargen::requirements`).
+    /// Lower far enough to derive the runtime dependency set, no codegen (`spargen::check` and
+    /// `spargen::requirements`).
     Requirements,
     /// Render in memory for the build cache or private proc-macro bridge.
     Preview,
 }
 
-/// The result of a pipeline run: the user-facing [`Report`] plus, when the run rendered code in
-/// [`PipelineMode::Preview`], the in-memory [`emit::EmitPlan`]. `plan` is `None` for `check`,
-/// On-disk writes and rejections retain no plan; only a preview keeps it.
+/// The result of a pipeline run: the user-facing [`Report`], the runtime requirements of an API
+/// that lowered, and, when the run rendered code in [`PipelineMode::Preview`], the in-memory
+/// [`emit::EmitPlan`]. A [`PipelineMode::Requirements`] run and a rejection carry no plan.
 struct PipelineResult {
     report: Report,
     plan: Option<emit::EmitPlan>,
@@ -903,23 +827,14 @@ fn lower_bundle(
         return Err(());
     }
 
-    let names = name::allocate(&api, diags);
-    if diags.has_errors() {
-        return Err(());
-    }
-
+    // Allocation is total: every API that lowered gets its names.
+    let names = name::allocate(&api);
     Ok((api, names))
 }
 
 /// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// the internal preview. Returns the fully rendered module plan or `Err(())` with the layout error
-/// already pushed onto `diags`.
-fn build_emit_plan(
-    spec: &Spec,
-    api: &ir::Api,
-    names: &name::Names,
-    diags: &mut diag::Diagnostics,
-) -> Result<emit::EmitPlan, ()> {
+/// the internal preview. Returns the fully rendered module plan.
+fn build_emit_plan(spec: &Spec, api: &ir::Api, names: &name::Names) -> emit::EmitPlan {
     let code = codegen::generate(
         api,
         names,
@@ -941,14 +856,13 @@ fn build_emit_plan(
         },
     };
 
-    emit::plan(&code, &emit_options).map_err(|error| {
-        emit_pipeline_error(diags, error.to_string());
-    })
+    emit::plan(&code, &emit_options)
 }
 
 /// Run `mode` over `spec` on the dedicated frontend stack, through the auto-carve driver when
 /// `spec.carve` asks for it and the plain pipeline otherwise. Every public entry point that runs
-/// the pipeline dispatches here, so the carve decision is made in one place.
+/// the pipeline dispatches here; [`diff`], which lowers two specs and runs no mode, makes the same
+/// decision per side in [`lower_side`], through the same [`carve_spec`] fixpoint.
 fn run_mode(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     run_on_frontend_stack(|| {
         if spec.carve {
@@ -969,31 +883,16 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     let requirements = runtime_contract::RuntimeRequirements::for_api(&api, spec);
 
     match mode {
-        PipelineMode::Check => return PipelineResult::bare(report(diags, Outcome::Clean)),
-        PipelineMode::Requirements => {
-            return PipelineResult {
-                report: report(diags, Outcome::Clean),
-                plan: None,
-                requirements: Some(requirements),
-            };
-        }
-        PipelineMode::Preview => {}
-    }
-
-    let plan = match build_emit_plan(spec, &api, &names, &mut diags) {
-        Ok(plan) => plan,
-        Err(()) => return PipelineResult::bare(report(diags, Outcome::Rejected)),
-    };
-
-    match mode {
-        // Handled above; `plan` was never built for them.
-        PipelineMode::Check | PipelineMode::Requirements => {
-            unreachable!("check and requirements return before codegen")
-        }
+        // Requirements stops before codegen.
+        PipelineMode::Requirements => PipelineResult {
+            report: report(diags, Outcome::Clean),
+            plan: None,
+            requirements: Some(requirements),
+        },
         // Preview keeps the rendered plan and writes nothing.
         PipelineMode::Preview => PipelineResult {
+            plan: Some(build_emit_plan(spec, &api, &names)),
             report: report(diags, Outcome::Generated),
-            plan: Some(plan),
             requirements: Some(requirements),
         },
     }
@@ -1002,7 +901,7 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
 /// Auto-carve driver: iterate the frontend to a fixpoint, omitting the smallest enclosing
 /// omittable construct for each rejection, then run `mode` for real with the carved omit set.
 ///
-/// Each round runs the frontend (in `Check` mode — no output is written while carving) with the
+/// Each round runs the frontend alone (no codegen, and no output is written while carving) with the
 /// current omit set. If it is not rejected, the carve converged and we run `mode` once with that
 /// omit set (which re-applies every omit rule, emitting a `W009` for each carved construct — carving
 /// is never silent). If it is rejected, we map the error pointers to omittable constructs
@@ -1014,6 +913,16 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
 /// is omitted) or, if un-carvable, reported honestly — the document is never emitted broken. The
 /// round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
 fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
+    match carve_spec(spec) {
+        Ok(resolved) => run_pipeline(&resolved, mode),
+        Err(report) => PipelineResult::bare(report),
+    }
+}
+
+/// The carve fixpoint [`run_carve`] describes, without the final run: `spec` with `carve` off and
+/// the carved omit set in place of its own once the frontend lowers under it, or the rejection
+/// [`Report`] of the round that could make no progress (or of the last round, at the cap).
+fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     let mut omit = spec.omit.clone();
     let mut last_rejection: Option<Report> = None;
 
@@ -1023,7 +932,7 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             carve: false,
             ..spec.clone()
         };
-        // The probe is the frontend alone — what a `Check` run does — kept by hand rather than
+        // The probe is the frontend alone — what a `check` run lowers — kept by hand rather than
         // through `run_pipeline` because the carve mapper needs the bundle it ran over: a
         // diagnostic's pointer addresses the file its span lies in, and only the bundle can name
         // that file in a rule or find the `$ref`s that reach it. The mapper must also see *every*
@@ -1035,13 +944,12 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             .as_ref()
             .is_some_and(|bundle| lower_bundle(&probe, bundle, &mut diags).is_ok());
         if lowered {
-            // Converged: generate/preview/check for real with the carved omit set.
-            let resolved = Spec {
+            // Converged: the caller runs for real with the carved omit set.
+            return Ok(Spec {
                 omit,
                 carve: false,
                 ..spec.clone()
-            };
-            return run_pipeline(&resolved, mode);
+            });
         }
         let report = report(diags, Outcome::Rejected);
 
@@ -1055,26 +963,25 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             .collect();
         if new_rules.is_empty() {
             // No progress possible — report the residual rejections (and any carved W009s) honestly.
-            return PipelineResult::bare(report);
+            return Err(report);
         }
         omit.rules.extend(new_rules);
         last_rejection = Some(report);
     }
 
     // Exhausted the round cap while still rejecting: return the last honest rejection report.
+    // With no round run at all, nothing was carved.
     match last_rejection {
-        Some(report) => PipelineResult::bare(report),
-        None => run_pipeline(spec, PipelineMode::Check),
+        Some(report) => Err(report),
+        None => Ok(Spec {
+            carve: false,
+            ..spec.clone()
+        }),
     }
 }
 
 fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
-    diag::Diagnostic::error(
-        Code::InvalidInput,
-        diag::Provenance::new(JsonPointer::root(), None),
-    )
-    .message(message)
-    .emit(diags);
+    Diagnostic::at_root(Code::InvalidInput, message).emit(diags);
 }
 
 fn pipeline_error_report(message: String) -> Report {
@@ -1094,14 +1001,6 @@ fn report(diags: diag::Diagnostics, outcome: Outcome) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn codes(environment: &CargoEnvironment) -> Vec<&'static str> {
-        environment
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
-            .collect()
-    }
 
     /// Build a report with no diagnostics and the given outcome.
     fn report(outcome: Outcome) -> Report {
@@ -1165,104 +1064,56 @@ mod tests {
     }
 
     /// A rejection announced as a warning looks like the diagnostics that do *not* stop
-    /// generation. Each diagnostic goes out at its own severity.
+    /// generation. Each diagnostic goes out at its own severity, and so does every line of it:
+    /// Cargo shows a build script's non-directive stdout only under `-vv`, so an unprefixed
+    /// location or `help:` line would be invisible in an ordinary build. A truncated report also
+    /// says so, as a warning.
     #[test]
     fn cargo_directives_carry_each_diagnostics_own_severity() {
-        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let span = diag::Span::point(
+            diag::FileId(0),
+            diag::Loc {
+                line: 3,
+                col: 5,
+                offset: 20,
+            },
+        );
+        let provenance =
+            diag::Provenance::new(JsonPointer::root().push("paths").push("/pets"), Some(span));
         let report = Report {
             diagnostics: vec![
                 Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
                     .message("a rejection")
+                    .remedy("fix the rejection")
                     .build(),
                 Diagnostic::warning(Code::ServerInitiatedFlowIgnored, provenance)
                     .message("a warning")
+                    .remedy("fix the warning")
                     .build(),
             ],
             outcome: Outcome::Rejected,
-            truncated: false,
+            truncated: true,
         };
 
         let lines = report.cargo_directive_lines();
-        assert_eq!(lines.len(), 2, "{lines:#?}");
-        assert!(lines[0].starts_with("cargo::error="), "{lines:#?}");
-        assert!(lines[1].starts_with("cargo::warning="), "{lines:#?}");
-    }
-
-    /// Every Cargo-integration branch, without touching process-global environment state.
-    #[test]
-    fn cargo_integration_policy_covers_each_environment() {
-        let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
-
-        // A real build script: directives are emitted and the manifest is audited, silently.
-        let ideal = resolve_cargo_environment(CargoIntegration::Auto, true, manifest.clone());
-        assert!(ideal.directives);
-        assert_eq!(ideal.manifest, manifest);
-        assert!(codes(&ideal).is_empty());
-        assert!(!ideal.fatal);
-
-        // A build script with no discoverable manifest: nothing to audit, said out loud.
-        let unauditable = resolve_cargo_environment(CargoIntegration::Auto, true, None);
-        assert!(unauditable.directives);
-        assert_eq!(codes(&unauditable), ["W012"]);
-        assert!(!unauditable.fatal);
-
-        // Not a build script: no directives, no audit — the degraded default.
-        let degraded = resolve_cargo_environment(CargoIntegration::Auto, false, manifest.clone());
-        assert!(!degraded.directives);
-        assert!(degraded.manifest.is_none());
-        assert_eq!(codes(&degraded), ["W013"]);
-        assert!(!degraded.fatal);
-
-        // The same, but the caller declared it must not happen.
-        let required =
-            resolve_cargo_environment(CargoIntegration::Required, false, manifest.clone());
-        assert_eq!(codes(&required), ["E024"]);
-        assert!(required.fatal);
-
-        // Required *and* under a build script, but unauditable: also fatal, by request.
-        let unauditable_required =
-            resolve_cargo_environment(CargoIntegration::Required, true, None);
-        assert_eq!(codes(&unauditable_required), ["E024"]);
-        assert!(unauditable_required.fatal);
-
-        // Off says nothing in any environment — that is the whole point of it.
-        for under_build_script in [true, false] {
-            let off = resolve_cargo_environment(
-                CargoIntegration::Off,
-                under_build_script,
-                manifest.clone(),
-            );
-            assert!(!off.directives);
-            assert!(off.manifest.is_none());
-            assert!(codes(&off).is_empty());
-            assert!(!off.fatal);
+        assert_eq!(
+            lines,
+            [
+                "cargo::error=error[E001]: a rejection",
+                "cargo::error=  --> 3:5",
+                "cargo::error=  at /paths/~1pets",
+                "cargo::error=  help: fix the rejection",
+                "cargo::warning=warning[W002]: a warning",
+                "cargo::warning=  --> 3:5",
+                "cargo::warning=  at /paths/~1pets",
+                "cargo::warning=  help: fix the warning",
+                "cargo::warning=spargen: diagnostic list truncated at batch_cap (2 shown); raise batch_cap to see the rest",
+            ],
+            "{lines:#?}"
+        );
+        for line in &lines {
+            assert!(!line.contains('\n'), "a directive is one line: {line:?}");
         }
-    }
-
-    /// Each Cargo-integration message reads as one single-spaced sentence: a lost `\` line
-    /// continuation in a wrapped literal leaves its indentation mid-sentence instead.
-    #[test]
-    fn cargo_integration_messages_are_single_spaced() {
-        let manifest = Some(Utf8PathBuf::from("Cargo.toml"));
-        let environments = [
-            resolve_cargo_environment(CargoIntegration::Auto, true, None),
-            resolve_cargo_environment(CargoIntegration::Auto, false, manifest.clone()),
-            resolve_cargo_environment(CargoIntegration::Required, false, manifest),
-            resolve_cargo_environment(CargoIntegration::Required, true, None),
-        ];
-        let mut seen = Vec::new();
-        for environment in &environments {
-            for diagnostic in &environment.diagnostics {
-                seen.push(diagnostic.code.as_str());
-                let message = &diagnostic.message;
-                assert!(
-                    !message.contains("  ") && message.trim() == message,
-                    "{}: {message:?}",
-                    diagnostic.code.as_str()
-                );
-            }
-        }
-        assert_eq!(seen, ["W012", "W013", "E024", "E024"]);
     }
 
     /// `check` with auto-carve on, over `contents` written as the root document in `dir`.

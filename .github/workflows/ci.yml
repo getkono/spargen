@@ -41,9 +41,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
+      # The wasm32 target is what `generated_crate_compiles_for_wasm32_browser_target` compiles
+      # for; without it that test fails here rather than skipping (it skips only off CI).
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
       # Compile (do not run) the benchmarks so they cannot silently rot; the timed run and its
@@ -151,33 +154,28 @@ jobs:
           lfs: true
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      # `mise run corpus-smoke`'s commands, byte for byte. Each case's expected outcome, and why,
+      # is in `corpus/README.md`.
       - run: mkdir -p target/corpus-smoke
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1
       - run: grep -q E001 target/corpus-smoke/github-30.json
-      # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
-      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json
-      # ollama generates: check must succeed with no rejection.
+      # `corpus/github-api-3-1/spargen.toml`, discovered beside the spec, raises the batch cap so the
+      # warning volume cannot hide a terminal diagnostic; the output is kept for inspection.
+      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json > target/corpus-smoke/github-31.json
       - run: cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
-      # openai is 3.1 and past the version gate, but `POST /realtime/calls` documents
-      # `application/sdp` as its only 201 content entry, and there is no codec for it. The cap is
-      # raised for the same reason as GitHub 3.1: the warning volume would otherwise truncate the
-      # batch before the terminal E009.
+      # `--batch-cap 100000` raises the cap as `corpus/github-api-3-1/spargen.toml` does for GitHub
+      # 3.1: at the default of 100 the warning volume truncates the batch before the terminal E009.
       - run: cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > target/corpus-smoke/openai.json || test $? -eq 1
       - run: grep -q E009 target/corpus-smoke/openai.json
-      # Stripe (3.0.0), Twilio (3.0.1), Kubernetes API-group (3.0.0): rejected at the version gate.
       - run: cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > target/corpus-smoke/stripe.json || test $? -eq 1
       - run: grep -q E001 target/corpus-smoke/stripe.json
       - run: cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > target/corpus-smoke/twilio.json || test $? -eq 1
       - run: grep -q E001 target/corpus-smoke/twilio.json
       - run: cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > target/corpus-smoke/k8s.json || test $? -eq 1
       - run: grep -q E001 target/corpus-smoke/k8s.json
-      # meilisearch is 3.1.0 and clears the version gate, but its null externalDocs descriptions
-      # fail the official 3.1 document schema before lowering.
       - run: cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1
       - run: grep -q E011 target/corpus-smoke/meili.json
-      # Mastodon is 3.1.0 and generates: its recursive-nullable `$ref`s and `$ref`-with-`type`
-      # siblings must keep clearing lowering, so check must succeed with no rejection.
       - run: cargo run -q -p spargen --features cli -- check corpus/mastodon-openapi/schema.json --format json
 
   github-api:

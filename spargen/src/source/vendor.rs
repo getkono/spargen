@@ -1,8 +1,7 @@
 //! The network-only vendor step behind `spargen lock`.
 //!
-//! This is the ONLY place spargen performs network I/O, and only through the injected
-//! [`RemoteFetch`] seam — so `generate`/`check` stay hermetic and tests exercise the walk with a
-//! stub instead of real HTTP. It walks every remote `$ref` reachable from the spec (recursing
+//! It fetches through the injected [`RemoteFetch`] seam, whose real implementation is
+//! [`ReqwestFetcher`], so tests exercise the walk with a stub instead of real HTTP. It walks every remote `$ref` reachable from the spec (recursing
 //! through local sub-files and through fetched remote documents), fetches each once, writes the
 //! bytes under `.spargen/vendor/`, and records a hash pin in `spargen.lock`.
 
@@ -12,14 +11,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
-use super::bundle::{local_identity, working_dir};
+use super::bundle::{local_identity, parse_by_extension, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, is_http_url, resolve_ref_url, split_fragment,
-    RefTarget,
+    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
+    split_fragment, RefTarget,
 };
 use super::sha256::sha256_hex;
-use super::{parse_json, parse_yaml, SpannedValue};
+use super::SpannedValue;
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
@@ -40,7 +39,10 @@ pub(crate) struct Fetched {
 }
 
 /// One vendored remote document, reported back from [`crate::vendor`].
+///
+/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct VendoredRef {
     /// The absolute URL that was pinned.
     pub url: String,
@@ -51,7 +53,10 @@ pub struct VendoredRef {
 }
 
 /// The result of a successful [`crate::vendor`] run.
+///
+/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct VendorReport {
     /// Every remote document that was fetched and pinned, in URL order.
     pub refs: Vec<VendoredRef>,
@@ -93,7 +98,7 @@ fn serialize_path<S: serde::Serializer>(
 }
 
 #[derive(Clone)]
-enum Base {
+pub(super) enum Base {
     Local(Utf8PathBuf),
     Remote(String),
 }
@@ -106,7 +111,7 @@ struct ScanDoc {
 /// What a document's OpenAPI 3.2 `$self` makes it, read exactly as the build's
 /// `InputBundle::register_self_identity` reads it, so `spargen lock` resolves each relative `$ref`
 /// to the document the build will ask for (#426).
-enum SelfIdentity {
+pub(super) enum SelfIdentity {
     /// An `http`/`https` URL: the base the document's relative references resolve against, and a
     /// URL a reference reaches the document by.
     Remote(String),
@@ -119,14 +124,18 @@ enum SelfIdentity {
 }
 
 /// The identity `value`'s `$self` gives a document reached at `base`, or `None` where it carries
-/// none (or an empty or fragment-only one). A remote document's `$self` is resolved against the
-/// URL it was retrieved from; a local document's relative `$self` against its own path.
-fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
+/// none (or an empty or fragment-only one). A remote document's relative `$self` is resolved
+/// against the URL it was retrieved from; a local document's relative `$self` against its own
+/// path. A non-`http(s)` `$self` with a scheme is opaque in either.
+pub(super) fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
     let (identity, _) = split_fragment(value.get("$self")?.as_str()?);
     if identity.is_empty() {
         return None;
     }
     Some(match base {
+        Base::Remote(_) if !is_http_url(identity) && has_uri_scheme(identity) => {
+            SelfIdentity::Opaque(identity.to_owned())
+        }
         Base::Remote(retrieved) => SelfIdentity::Remote(resolve_ref_url(retrieved, identity)),
         Base::Local(_) if is_http_url(identity) => SelfIdentity::Remote(identity.to_owned()),
         Base::Local(path) if !identity.contains(':') => SelfIdentity::Local(
@@ -198,8 +207,8 @@ impl Scanned {
 }
 
 /// Fetch and hash-pin every remote `$ref` reachable from `spec`, writing the vendored copies under
-/// `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec. This is the ONLY function
-/// that performs network I/O, and only through the injected `fetcher`.
+/// `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec. Every fetch goes through the
+/// injected `fetcher`; the `vendor` facade in `lib.rs` passes [`ReqwestFetcher`].
 ///
 /// The walk recurses through relative-file refs (to catch remote refs nested in local sub-files)
 /// and through fetched remote documents (whose relative refs resolve against each one's `$self`,
@@ -209,6 +218,9 @@ impl Scanned {
 /// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
 /// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
 /// remote ref it hides surfaces later as an actionable `E003` on the next `generate`.
+///
+/// A fetch that fails is `E025`, and the lock is still written: every document fetched is pinned
+/// at what it served, and every pin of the earlier lock for a URL this run left unpinned is kept.
 pub(crate) fn vendor(
     spec: &Utf8Path,
     fetcher: &dyn RemoteFetch,
@@ -221,15 +233,19 @@ pub(crate) fn vendor(
         input_error(diags, format!("failed to read `{spec}`: {error}"));
         Aborted
     })?;
-    let Some(root_value) = parse_scratch(spec.as_str(), &root_text) else {
+    let Some(root_value) = parse_scratch_local(spec.as_str(), &root_text) else {
         input_error(
             diags,
             format!("failed to parse `{spec}` while scanning for remote $refs"),
         );
         return Err(Aborted);
     };
+    // Only the root's spans are kept (`parse_scratch` parses every document as `FileId(0)`), so
+    // the root is the one file a vendoring diagnostic's span can name.
+    diags.register_file(crate::diag::FileId(0), spec.to_path_buf());
 
     let mut lock = Lock::default();
+    let mut fetch_failed = false;
     let mut refs: Vec<VendoredRef> = Vec::new();
     let mut scanned = Scanned {
         working_dir: working_dir(),
@@ -267,7 +283,7 @@ pub(crate) fn vendor(
                         let identity = scanned.identity(&target);
                         if scanned.seen_local.insert(identity.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
-                                if let Some(value) = parse_scratch(target.as_str(), &text) {
+                                if let Some(value) = parse_scratch_local(target.as_str(), &text) {
                                     scanned.local_docs.insert(identity, scanned.docs.len());
                                     let loaded = scanned.add(value, Base::Local(target));
                                     queue.push_back((loaded, JsonPointer::root()));
@@ -303,9 +319,12 @@ pub(crate) fn vendor(
                         Err(error) => {
                             // A fetch failure is a fact about the network, not the document:
                             // the ref is well-formed and exactly what this step exists to pin.
+                            // Located at the reference, as `E003` above is: only the root's
+                            // references carry a span, for the reason given there.
+                            let span = (index == root).then_some(collected.span);
                             Diagnostic::error(
                                 Code::RemoteFetchFailed,
-                                Provenance::new(JsonPointer::root(), None),
+                                Provenance::new(collected.pointer.clone(), span),
                             )
                             .message(format!("failed to fetch remote $ref `{url}`: {error}"))
                             .remedy(
@@ -314,6 +333,7 @@ pub(crate) fn vendor(
                                  relative $ref",
                             )
                             .emit(diags);
+                            fetch_failed = true;
                             continue;
                         }
                     };
@@ -359,7 +379,7 @@ pub(crate) fn vendor(
                         sha256,
                     });
                     if let Ok(text) = String::from_utf8(bytes) {
-                        if let Some(value) = parse_scratch(&url, &text) {
+                        if let Some(value) = parse_scratch_remote(&url, &text) {
                             let next = scanned.docs.len();
                             scanned.remote_docs.insert(url.clone(), next);
                             scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
@@ -403,6 +423,18 @@ pub(crate) fn vendor(
     }
 
     let lock_path = spec_dir.join(LOCK_FILE_NAME);
+    if fetch_failed {
+        // A failed fetch leaves the run's walk incomplete: the document it could not fetch, and
+        // every document reachable only through it, went unpinned. Their earlier pins are kept,
+        // beside the vendored copies this run did not touch, so a transient network failure leaves
+        // the lock the build reads as usable as it was (#714). A document this run did fetch keeps
+        // its new pin. A lock that cannot be read keeps nothing.
+        let earlier = std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|text| Lock::parse(&text).ok())
+            .unwrap_or_default();
+        lock.keep_unpinned_from(earlier);
+    }
     std::fs::write(&lock_path, lock.to_toml()).map_err(|error| {
         input_error(diags, format!("failed to write `{lock_path}`: {error}"));
         Aborted
@@ -416,24 +448,35 @@ pub(crate) fn vendor(
     })
 }
 
-/// Parse text into a value tree for ref-scanning only, discarding parse diagnostics. Chooses the
-/// format by the `.json`/`.yaml`/`.yml` suffix of `name` (a path or URL), else tries YAML then JSON.
-fn parse_scratch(name: &str, text: &str) -> Option<SpannedValue> {
-    let id = crate::diag::FileId(0);
-    let lowered = name
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(name)
-        .to_ascii_lowercase();
-    if lowered.ends_with(".json") {
-        parse_json(id, text, &mut Diagnostics::default()).ok()
-    } else if lowered.ends_with(".yaml") || lowered.ends_with(".yml") {
-        parse_yaml(id, text, &mut Diagnostics::default()).ok()
-    } else {
-        parse_yaml(id, text, &mut Diagnostics::default())
-            .ok()
-            .or_else(|| parse_json(id, text, &mut Diagnostics::default()).ok())
-    }
+/// Parse a local document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from `path`, the reading the build's `parse_by_name`
+/// makes: a name that is only a dot and an extension, such as `.json`, has none (#917). A `?` or
+/// `#` in a local path is part of the file's name (a relative `$ref` such as `api.yaml?v=1` keeps
+/// its query in the path it names), so it is read through rather than cut off: `api.json?v=1`
+/// names no recognised extension (#916).
+pub(super) fn parse_scratch_local(path: &str, text: &str) -> Option<SpannedValue> {
+    parse_scratch(Utf8Path::new(path).extension(), text)
+}
+
+/// Parse a fetched document's text into a value tree for ref-scanning only, discarding parse
+/// diagnostics. Chooses the format the way the build does ([`parse_by_extension`]), from the
+/// extension `Utf8Path::extension` reads from [`vendor_path_for_url`]'s path for `url`, which is
+/// the name the build parses the vendored copy by. That path drops a `?` query, a `#` fragment and
+/// any empty segment, so `api.json/` is read as JSON, as the build reads it (#918); a name that is
+/// only a dot and an extension, such as `.json`, has none, as it has none to the build (#917).
+pub(super) fn parse_scratch_remote(url: &str, text: &str) -> Option<SpannedValue> {
+    parse_scratch(Utf8Path::new(&vendor_path_for_url(url)).extension(), text)
+}
+
+fn parse_scratch(extension: Option<&str>, text: &str) -> Option<SpannedValue> {
+    parse_by_extension(
+        crate::diag::FileId(0),
+        extension,
+        text,
+        &mut Diagnostics::default(),
+    )
+    .ok()
 }
 
 fn input_error(diags: &mut Diagnostics, message: String) {
@@ -446,11 +489,9 @@ fn input_error(diags: &mut Diagnostics, message: String) {
 }
 
 /// The real, reqwest-backed fetcher used by `spargen lock`. Present only under the `remote-fetch`
-/// feature so a library-only build carries no HTTP stack.
-#[cfg(feature = "remote-fetch")]
+/// feature, which gates this whole module, so a library-only build carries no HTTP stack.
 pub(crate) struct ReqwestFetcher;
 
-#[cfg(feature = "remote-fetch")]
 impl RemoteFetch for ReqwestFetcher {
     fn fetch(&self, url: &str) -> Result<Fetched, String> {
         // What `reqwest::blocking::get` does: a default client per fetch.
@@ -462,7 +503,6 @@ impl RemoteFetch for ReqwestFetcher {
 /// builder. The builder is the trust seam — the TLS test in this module adds its self-signed root
 /// to it and otherwise runs exactly the path `spargen lock` runs, so the handshake, the root
 /// store, and ALPN under the linked reqwest/rustls stack are reached by a test.
-#[cfg(feature = "remote-fetch")]
 fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fetched, String> {
     let response = builder
         .build()
@@ -492,7 +532,6 @@ fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fe
 /// A reqwest transport error displays only "error sending request for url (…)"; what actually
 /// failed — the refused connection, the DNS lookup, the TLS alert and its reason — is carried by
 /// its sources, and E025 promises to report it.
-#[cfg(feature = "remote-fetch")]
 fn with_causes(error: &dyn std::error::Error) -> String {
     let mut rendered = error.to_string();
     let mut source = error.source();
@@ -578,6 +617,54 @@ mod tests {
         assert!(vendor_dir
             .join(vendor_path_for_url("https://api.example.com/tag.yaml"))
             .exists());
+    }
+
+    /// Two URLs that differ only in their query are two documents (#713): each is vendored to a
+    /// file of its own, so every pin the lock records names a file holding exactly the bytes it
+    /// pins, and the lock `spargen lock` writes verifies.
+    #[test]
+    fn urls_differing_only_in_their_query_are_vendored_apart() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             components:\n\
+             \x20 schemas:\n\
+             \x20   A:\n\
+             \x20     $ref: \"https://api.example.com/a.yaml?v=1\"\n\
+             \x20   B:\n\
+             \x20     $ref: \"https://api.example.com/a.yaml?v=2\"\n",
+        )
+        .unwrap();
+        let mut docs = std::collections::HashMap::new();
+        docs.insert(
+            "https://api.example.com/a.yaml?v=1".to_owned(),
+            b"type: string\n".to_vec(),
+        );
+        docs.insert(
+            "https://api.example.com/a.yaml?v=2".to_owned(),
+            b"type: integer\n".to_vec(),
+        );
+        let fetcher = StubFetcher { docs };
+
+        let mut diags = Diagnostics::default();
+        let report =
+            vendor(&spec, &fetcher, &mut diags).unwrap_or_else(|_| panic!("{:?}", diags.items()));
+
+        assert_eq!(report.refs.len(), 2, "{:?}", report.refs);
+        assert_ne!(report.refs[0].path, report.refs[1].path);
+        for vendored in &report.refs {
+            let on_disk = std::fs::read(report.vendor_dir.join(&vendored.path)).unwrap();
+            assert_eq!(
+                sha256_hex(&on_disk),
+                vendored.sha256,
+                "`{}` no longer holds the bytes pinned for `{}`",
+                vendored.path,
+                vendored.url
+            );
+        }
     }
 
     /// A redirect whose end carries a fragment is pinned with the fragment dropped: the lock's
@@ -1171,7 +1258,6 @@ mod tests {
     /// plain HTTP only, because the fetcher trusts only the bundled `webpki-roots` and a local
     /// server's certificate is self-signed; here the certificate's root is added to the client
     /// builder through `fetch_with`, and nothing else differs from `ReqwestFetcher`.
-    #[cfg(feature = "remote-fetch")]
     mod tls {
         use std::io::{Read, Write};
         use std::net::TcpListener;

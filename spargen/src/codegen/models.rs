@@ -35,7 +35,7 @@ pub(super) fn emit_models(
     });
     quote! {
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_imports)]
+        #[allow(dead_code, deprecated, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
@@ -76,20 +76,7 @@ fn emit_open_string_enum(
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
-    let listed: Vec<(&String, &crate::name::Ident)> = enumeration
-        .variants
-        .iter()
-        .map(|variant| {
-            let ScalarValue::String(value) = variant else {
-                unreachable!("an open enum is a string enum");
-            };
-            let variant_ident = names
-                .variants
-                .get(&(id, value.clone()))
-                .expect("variant name allocated");
-            (value, variant_ident)
-        })
-        .collect();
+    let listed = string_variants(id, enumeration, names);
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
@@ -148,6 +135,30 @@ fn emit_open_string_enum(
     }
 }
 
+/// Each listed value of string enum `id` beside the variant identifier `name` allocated for it,
+/// in declaration order. An open enum is a string enum too, so both shapes read their variants
+/// here.
+fn string_variants<'a>(
+    id: crate::ir::TypeId,
+    enumeration: &'a crate::ir::ScalarEnum,
+    names: &'a Names,
+) -> Vec<(&'a String, &'a crate::name::Ident)> {
+    enumeration
+        .variants
+        .iter()
+        .map(|variant| {
+            let ScalarValue::String(value) = variant else {
+                unreachable!("a string enum lists only string values");
+            };
+            let variant_ident = names
+                .variants
+                .get(&(id, value.clone()))
+                .expect("variant name allocated");
+            (value, variant_ident)
+        })
+        .collect()
+}
+
 /// Emit the model for one definition: a struct, a string enum (closed or open), an integer or
 /// boolean enum's alias, an uninhabited enum, a union enum, an alias of the type it lowered to, or
 /// — for an array or tuple that [closes an alias cycle](TypeGraph::closes_alias_cycle) — a
@@ -166,11 +177,13 @@ fn emit_type_def(
         TypeKind::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
-            // A root `xml.name` names the element quick-xml writes for this struct at the root of
-            // an XML body. serde hands a struct's (renamed) name to the serializer, and only
-            // quick-xml reads it, so this changes no other wire.
+            // A root `xml.name`, or a component's inferred one, names the element quick-xml writes
+            // for this struct at the root of an XML body. serde hands a struct's (renamed) name to
+            // the serializer, and only quick-xml reads it, so this changes no other wire. A name
+            // equal to the identifier is the serde name already.
             let xml_root = types
                 .xml_root_name(id)
+                .filter(|name| *name != ident.to_string())
                 .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
@@ -205,26 +218,11 @@ fn emit_type_def(
             }
         }
         TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
-            let variants = enumeration.variants.iter().map(|variant| {
-                let value = match variant {
-                    ScalarValue::String(value) => value,
-                    _ => unreachable!("string repr has string variants"),
-                };
-                let ident = names
-                    .variants
-                    .get(&(id, value.clone()))
-                    .expect("variant name allocated");
-                quote! { #[serde(rename = #value)] #ident, }
+            let listed = string_variants(id, enumeration, names);
+            let variants = listed.iter().map(|(value, variant_ident)| {
+                quote! { #[serde(rename = #value)] #variant_ident, }
             });
-            let display_arms = enumeration.variants.iter().map(|variant| {
-                let value = match variant {
-                    ScalarValue::String(value) => value,
-                    _ => unreachable!("string repr has string variants"),
-                };
-                let variant_ident = names
-                    .variants
-                    .get(&(id, value.clone()))
-                    .expect("variant name allocated");
+            let display_arms = listed.iter().map(|(value, variant_ident)| {
                 quote! { #ident::#variant_ident => #value, }
             });
             if enumeration.is_open() {
@@ -257,11 +255,11 @@ fn emit_type_def(
         }
         TypeKind::Enum(enumeration) => {
             let ty = match enumeration.repr {
-                ScalarRepr::String => quote! { String },
+                ScalarRepr::String => unreachable!("a string enum is emitted by the arm above"),
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
         TypeKind::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
@@ -305,6 +303,7 @@ fn emit_type_def(
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
+                #deprecated
                 #[derive(Debug, Clone, Serialize, Deserialize)]
                 #[serde(transparent)]
                 pub struct #ident(pub #ty);
@@ -312,7 +311,7 @@ fn emit_type_def(
         }
         _ => {
             let ty = type_kind_tokens(&def.kind, names, options);
-            quote! { #docs pub type #ident = #ty; }
+            quote! { #docs #deprecated pub type #ident = #ty; }
         }
     }
 }
@@ -494,7 +493,7 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::CodegenOptions;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{Api, Docs, Info, Prim, Ty, TypeDef, TypeGraph, TypeKind};
 
     /// Every capitalised identifier in `tokens` that is written bare — not after `::` or `.`, and
@@ -602,7 +601,7 @@ mod tests {
             types,
             security_schemes: IndexMap::new(),
         };
-        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let names = crate::name::allocate(&api);
         let file: syn::File = syn::parse2(super::emit_models(
             &api,
             &names,

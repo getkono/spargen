@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use secrecy::SecretString;
@@ -37,6 +37,14 @@ static MOCK_REQUESTS: AtomicU32 = AtomicU32::new(0);
 
 /// How many times the token provider has been asked for a token.
 static PROVIDER_CALLS: AtomicU32 = AtomicU32::new(0);
+
+/// The `X-Request-ID` header the last `GET /pets` carried, or `None` when it carried none, so the
+/// list scenario can assert that its header parameter reached the wire.
+static LIST_REQUEST_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// The body the mock answers an unauthorized request with, so the 401 scenario can assert that
+/// the client preserved it byte for byte.
+const UNAUTHORIZED_BODY: &str = r#"{"message":"unauthorized"}"#;
 
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
@@ -104,6 +112,12 @@ async fn main() {
     // A documented response header is read through a typed accessor — an explicit second step, so a
     // malformed header can never turn a successful call into a failure.
     let totals = petstore::ListPetsStatus200Headers::from_response(&pets).expect("typed headers");
+    // The header parameter reached the wire under its declared name, with the value set above.
+    assert_eq!(
+        LIST_REQUEST_ID.lock().unwrap().as_deref(),
+        Some("example-1"),
+        "list_pets must send its x-request-id header parameter"
+    );
     assert_eq!(totals.x_total_count, 1);
     let pets = pets.into_inner();
     assert_eq!(pets.len(), 1);
@@ -319,6 +333,14 @@ async fn main() {
     match wrong.get_pet("1").await {
         Err(error @ Error::UnexpectedStatus { status, .. }) if status == 401 => {
             assert!(!error.is_transient());
+            let Error::UnexpectedStatus { body, .. } = &error else {
+                unreachable!("matched as an unexpected status above")
+            };
+            assert_eq!(
+                body.as_ref(),
+                UNAUTHORIZED_BODY.as_bytes(),
+                "the undocumented 401's body must be preserved raw"
+            );
             println!("undocumented 401 preserved for forensics");
         }
         other => panic!("expected an unexpected-status error, got {other:?}"),
@@ -402,6 +424,7 @@ fn handle(mut stream: TcpStream) {
 
     let mut authorization = String::new();
     let mut content_type = String::new();
+    let mut request_id = None;
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -414,6 +437,7 @@ fn handle(mut stream: TcpStream) {
         match name.to_ascii_lowercase().as_str() {
             "authorization" => authorization = value.trim().to_owned(),
             "content-type" => content_type = value.trim().to_owned(),
+            "x-request-id" => request_id = Some(value.trim().to_owned()),
             "content-length" => content_length = value.trim().parse().unwrap_or(0),
             _ => {}
         }
@@ -427,13 +451,11 @@ fn handle(mut stream: TcpStream) {
     let mut extra_headers = String::new();
 
     let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
-        (
-            "401 Unauthorized",
-            r#"{"message":"unauthorized"}"#.to_owned(),
-        )
+        ("401 Unauthorized", UNAUTHORIZED_BODY.to_owned())
     } else {
         match (method, path) {
             ("GET", "/pets") => {
+                *LIST_REQUEST_ID.lock().unwrap() = request_id;
                 // `deepObject` sends one bracketed pair per member, and an absent member sends
                 // nothing at all — a JSON blob or a `filter=name,Rex` join would both be wrong.
                 assert!(

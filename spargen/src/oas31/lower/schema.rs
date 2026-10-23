@@ -10,11 +10,11 @@ use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::all_of::MetUnionMember;
-use super::combine::{schema_has_union, sole_union_member};
+use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
-use super::shape::schema_has_shape_constraint;
+use super::shape::{schema_has_shape_constraint, schema_has_union};
 use super::{LowerCtx, MetUnion, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -48,8 +48,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower the body of a type whose root id `ensure_component`, `ensure_remote` or
-    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] empty for the
-    /// duration and restored after.
+    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] and
+    /// [`Self::union_member_stack`] empty for the duration and restored after.
     ///
     /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
     /// a member target flattened by an enclosing expansion and met again inside this body is a
@@ -58,8 +58,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every loop that crosses this boundary is still caught, as the root document catches it.
     pub(super) fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let enclosing = std::mem::take(&mut self.resolved_member_stack);
+        let enclosing_unions = std::mem::take(&mut self.union_member_stack);
         let lowered = self.lower_schema(schema, hint);
         self.resolved_member_stack = enclosing;
+        self.union_member_stack = enclosing_unions;
         lowered
     }
 
@@ -80,6 +82,268 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Lower `schema`, which carries `reference` as its `$ref`: the target alone where nothing
+    /// beside it bears shape, and otherwise the intersection of the target with the sibling
+    /// keywords, rejected (`E013`) where the target closes a reference cycle or the two have no
+    /// single typed intersection.
+    fn lower_ref_with_siblings(
+        &mut self,
+        schema: &Schema,
+        reference: &str,
+        hint: &str,
+    ) -> Option<Ty> {
+        let referenced = self.ensure_reference(reference, &schema.provenance, hint)?;
+
+        // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
+        // schema. Intersect every shape-bearing sibling instead of silently discarding it.
+        let mut sibling = schema.clone();
+        sibling.reference = None;
+        if !schema_has_shape_constraint(&sibling) {
+            // No shape to compose, so a cycle-closing reference here is the ordinary recursive
+            // schema: it boxes and generates. Only the intersection below needs a real target.
+            self.record_ref_xml(schema, referenced.id);
+            return Some(referenced);
+        }
+        // Whether this `$ref` closes a reference cycle back through a schema whose lowering
+        // encloses it. A target inside the cycle cannot be composed with: its definition
+        // depends on the very result being computed, so `intersect_non_null`'s `(Any, _)` arm
+        // would return the sibling and silently discard the target.
+        //
+        // It is asked of the DOCUMENT, for every spelling alike. A lowering-order test — "is the
+        // target mid-flight" — gives two byte-identical documents opposite verdicts when only
+        // the order of two map entries differs (decision 23), and so does a document test that
+        // only one spelling can reach: the sub-file spelling used to fall back to
+        // `is_in_progress_root`, so with siblings on one edge of a two-schema cycle the verdict
+        // followed which end lowering happened to enter first. `ref_closes_a_cycle` walks
+        // resolved identities across every file instead.
+        //
+        // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
+        // still being lowered is one whose lowering reached this site, which is a cycle the walk
+        // finds. Kept so that a walk which ever missed one reports the recursion, rather than
+        // leaving `intersect_types`' fail-closed arm to report it as a failed intersection.
+        let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
+            || self.is_in_progress_root(referenced.id);
+        if back_edge {
+            // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
+            // conjunction has always rejected this rather than composing against a placeholder,
+            // and the alternative here is not "compose anyway" but "discard the target", which
+            // produces a type accepting documents the description forbids — a recursive `Node`
+            // flattened to a one-off struct, or to the sibling's own scalar.
+            // The wording is chosen by what the reference RESOLVES TO, not by how it was
+            // spelled. It used to branch on whether the string began `#/components/schemas/`,
+            // which is a fact about the author's typing: the explicit `./lib.yaml#/…` spelling
+            // of a sub-file component was therefore described to the reader as *remote*, which
+            // it is not, while the bare spelling of the same target in the same file was
+            // described correctly. One reference, two spellings, two different accounts of one
+            // fact — the mistake decision 23 removed from the verdict, left standing in the
+            // explanation.
+            //
+            // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
+            // so the message and the code path now agree by construction. A genuinely remote
+            // target still says so; every local target, however addressed, says the same thing.
+            // The local noun is "schema", not "component": a local target need not be a
+            // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
+            // a two-way predicate cannot tell that case apart, so the wording must hold for it.
+            return self.reject_ref_sibling_cycle(
+                schema,
+                if is_remote_ref(reference) {
+                    "this remote `$ref` closes a reference cycle back to the schema that \
+                         encloses it, so its shape-bearing siblings would have to be intersected \
+                         with a target whose own definition depends on the result"
+                } else {
+                    "this `$ref` closes a reference cycle back to the schema that encloses it, \
+                         so its shape-bearing siblings would have to be intersected with a target \
+                         whose own definition depends on the result"
+                },
+            );
+        }
+        // A sibling carrying only object or only array applicators names no `type`, so
+        // `lower_schema` would lower it to an object or an array that denies `null` (#613,
+        // #614), and before those to `TypeKind::Any` — which intersects as identity,
+        // discarding the keywords with no diagnostic (#140). The applicators establish the category they apply to, as an untyped
+        // `properties` already does, and say nothing about `null` (the same reading
+        // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+        //
+        // Against a union target that reading would drop every branch of another category in
+        // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
+        // and reject the strings the target accepts. There the applicators refine the branches
+        // of their own category, as they do beside an inline union (#282).
+        let category = implied_applicator_category(&sibling);
+        if category.is_some() {
+            if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {
+                let union = union.clone();
+                return self.refine_union_target(schema, hint, referenced, &union, &sibling);
+            }
+        }
+        let mut inferred_category = None;
+        match category {
+            Some(ImpliedCategory::Only(category)) => {
+                sibling.types.types = vec![category, JsonType::Null];
+                inferred_category = Some(category);
+            }
+            Some(ImpliedCategory::Conflicting) => {
+                return self.reject_ref_sibling_category(
+                    schema,
+                    "this `$ref`'s untyped sibling keywords are both object keywords \
+                         (`properties`, `patternProperties`, `required`, `additionalProperties`) \
+                         and array keywords (`items`, `prefixItems`) with no `type` to choose \
+                         between them, so no single Rust type represents what they constrain",
+                );
+            }
+            None => {}
+        }
+        // An untyped object target admits `null` without deciding it, as the same conjunct
+        // written inline as an `allOf` member does (#541), so beside a sibling typed `object`
+        // the sibling's own answer about `null` is the meet's. Read before the union-sibling
+        // dispatch below, so a sibling carrying a `oneOf`/`anyOf` meets the same target. Only
+        // there: what an untyped target means beside another category is not an object meet,
+        // and keeps its verdict.
+        let referenced = if schema.types.types.contains(&JsonType::Object)
+            && matches!(
+                self.graph.get(referenced.id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            )
+            && !self.ref_target_decides_null(reference, &schema.provenance)
+        {
+            Ty {
+                nullable: true,
+                ..referenced
+            }
+        } else {
+            referenced
+        };
+        let has_union_sibling = schema_has_union(schema);
+        // Beside a union sibling and no `type`, the untyped target leaves `null` to the
+        // union, as the same target written as an `allOf` member beside it does
+        // ([`Self::composition_takes_union_null`], #586): where a branch admits `null` itself
+        // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
+        // union's answer.
+        let referenced = if has_union_sibling
+            && schema.types.types.is_empty()
+            && !referenced.nullable
+            && matches!(
+                self.graph.get(referenced.id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            )
+            && !self.ref_target_decides_null(reference, &schema.provenance)
+            && union_branch_admits_null(schema)
+        {
+            Ty {
+                nullable: true,
+                ..referenced
+            }
+        } else {
+            referenced
+        };
+        if has_union_sibling {
+            let (keywords, union) = split_union_sibling(&sibling);
+            if schema_has_shape_constraint(&keywords) {
+                return self.meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
+            }
+        }
+        let enclosing_unmerged = std::mem::replace(
+            &mut self.unmerged_union,
+            has_union_sibling.then(|| schema.provenance.clone()),
+        );
+        let enclosing_meets_null =
+            std::mem::replace(&mut self.unmerged_union_meets_null, referenced.nullable);
+        let sibling_mark = self.graph_mark();
+        let sibling = self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
+        self.unmerged_union = enclosing_unmerged;
+        self.unmerged_union_meets_null = enclosing_meets_null;
+        let sibling = sibling?;
+        let mark = self.graph_mark();
+        let meets_from = self.variant_meets.len();
+        let intersection =
+            self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"));
+        // A branch of the union sibling the target excludes is reported as the inline sibling
+        // spelling reports it (#671).
+        if has_union_sibling && intersection.is_ok() {
+            let mut union = schema.clone();
+            union.reference = None;
+            let met = MetUnionMember {
+                union: sibling.id,
+                schema: union,
+                conjunct: self.union_sibling_null_admission(schema),
+                conjunct_is_null: self.is_exact_null(referenced),
+            };
+            self.warn_excluded_union_member_branches(schema, &[met], meets_from);
+        }
+        // A union sibling uninhabited on its own (a lone `false` branch) leaves the
+        // conjunction so (#615), as the `allOf` spellings of it do, rather than an empty meet
+        // that rejects it.
+        let intersection = if has_union_sibling {
+            self.uninhabited_union_meet(sibling, intersection)
+        } else {
+            intersection
+        };
+        let Ok(intersection) = intersection else {
+            // `$ref` is an applicator: the value must satisfy the target AND these siblings.
+            // `intersect_types` fails for two distinct conditions — the intersection is
+            // empty, so no value satisfies both, or it is inhabited but has no single Rust type
+            // — and this one message covers both, so it must not claim the first. Either way
+            // it is reported rather than dropped: dropping would silently delete a body,
+            // parameter or property from the generated client.
+            return self.reject_ref_sibling_intersection(schema);
+        };
+        // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
+        // beside a non-union sibling is an intersection this check was never meant for, and it
+        // keeps the shape it has always generated.
+        let intersection = if has_union_sibling {
+            let (collapsed, untyped_check) = self.collapse_met_union(
+                schema,
+                intersection,
+                !schema.one_of.is_empty(),
+                &format!("{hint}ReferenceIntersection"),
+                MetUnion::RefSibling,
+            );
+            // Nothing meets the union after the collapse here.
+            if untyped_check {
+                self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
+            }
+            collapsed
+        } else {
+            intersection
+        };
+        let kind = self.graph.get(intersection.id)?.kind.clone();
+        // The `null` the inferred category carries is there to leave the target's nullability
+        // alone, not to satisfy the intersection on its own. Against a nullable target of
+        // another category the two share only `null`, and typing that as the exact JSON null
+        // would silently replace, say, a nullable string with `()`: the category contradiction
+        // is the same empty intersection it is against the non-null target, and is reported
+        // the same way. A target that is itself exactly `null` keeps its type, and so does a
+        // nullable target OF the inferred category: there no category is contradicted, the
+        // object meet is empty, and `null` satisfies both, as it does when the same keywords
+        // are an untyped `allOf` member beside the target (#542).
+        let target_kind = &self.graph.get(referenced.id)?.kind;
+        let same_category = matches!(
+            (inferred_category, value_category(target_kind)),
+            (Some(JsonType::Object), Some(JsonCategory::Object))
+                | (Some(JsonType::Array), Some(JsonCategory::Array))
+        );
+        if inferred_category.is_some()
+            && !same_category
+            && matches!(kind, TypeKind::Null)
+            && !matches!(target_kind, TypeKind::Null)
+        {
+            return self.reject_ref_sibling_category(
+                schema,
+                "this `$ref`'s untyped sibling keywords establish a category its target does \
+                     not have, so the only value both accept is `null`; the intersection is empty \
+                     but for the target's nullability",
+            );
+        }
+        let mut ty = self.reemit_meet(schema, hint, mark, kind);
+        ty.nullable = intersection.nullable;
+        ty.boxed = intersection.boxed;
+        // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
+        // is, and the collapse re-emitted what the meet left of it (#561).
+        if has_union_sibling {
+            self.elide_unused_union_lowering(sibling_mark..mark);
+        }
+        Some(ty)
+    }
+
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         // Before any arm can return: a discriminator beside no union is dropped by every one of
         // them (a `$ref` with no other sibling, `allOf`, a type array, a plain object).
@@ -94,286 +358,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if let Some(reference) = &schema.reference {
-            let referenced = self.ensure_reference(reference, &schema.provenance, hint)?;
-
-            // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
-            // schema. Intersect every shape-bearing sibling instead of silently discarding it.
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            if !schema_has_shape_constraint(&sibling) {
-                // No shape to compose, so a cycle-closing reference here is the ordinary recursive
-                // schema: it boxes and generates. Only the intersection below needs a real target.
-                self.record_ref_xml(schema, referenced.id);
-                return Some(referenced);
-            }
-            // Whether this `$ref` closes a reference cycle back through a schema whose lowering
-            // encloses it. A target inside the cycle cannot be composed with: its definition
-            // depends on the very result being computed, so `intersect_non_null`'s `(Any, _)` arm
-            // would return the sibling and silently discard the target.
-            //
-            // It is asked of the DOCUMENT, for every spelling alike. A lowering-order test — "is the
-            // target mid-flight" — gives two byte-identical documents opposite verdicts when only
-            // the order of two map entries differs (decision 23), and so does a document test that
-            // only one spelling can reach: the sub-file spelling used to fall back to
-            // `is_in_progress_root`, so with siblings on one edge of a two-schema cycle the verdict
-            // followed which end lowering happened to enter first. `ref_closes_a_cycle` walks
-            // resolved identities across every file instead.
-            //
-            // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
-            // still being lowered is one whose lowering reached this site, which is a cycle the walk
-            // finds. Kept so that a walk which ever missed one reports the recursion, rather than
-            // leaving `intersect_types`' fail-closed arm to report it as a failed intersection.
-            let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
-                || self.is_in_progress_root(referenced.id);
-            if back_edge {
-                // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
-                // conjunction has always rejected this rather than composing against a placeholder,
-                // and the alternative here is not "compose anyway" but "discard the target", which
-                // produces a type accepting documents the description forbids — a recursive `Node`
-                // flattened to a one-off struct, or to the sibling's own scalar.
-                // The wording is chosen by what the reference RESOLVES TO, not by how it was
-                // spelled. It used to branch on whether the string began `#/components/schemas/`,
-                // which is a fact about the author's typing: the explicit `./lib.yaml#/…` spelling
-                // of a sub-file component was therefore described to the reader as *remote*, which
-                // it is not, while the bare spelling of the same target in the same file was
-                // described correctly. One reference, two spellings, two different accounts of one
-                // fact — the mistake decision 23 removed from the verdict, left standing in the
-                // explanation.
-                //
-                // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
-                // so the message and the code path now agree by construction. A genuinely remote
-                // target still says so; every local target, however addressed, says the same thing.
-                // The local noun is "schema", not "component": a local target need not be a
-                // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
-                // a two-way predicate cannot tell that case apart, so the wording must hold for it.
-                return self.reject_ref_sibling_cycle(
-                    schema,
-                    if is_remote_ref(reference) {
-                        "this remote `$ref` closes a reference cycle back to the schema that \
-                         encloses it, so its shape-bearing siblings would have to be intersected \
-                         with a target whose own definition depends on the result"
-                    } else {
-                        "this `$ref` closes a reference cycle back to the schema that encloses it, \
-                         so its shape-bearing siblings would have to be intersected with a target \
-                         whose own definition depends on the result"
-                    },
-                );
-            }
-            // A sibling carrying only object or only array applicators names no `type`, so
-            // `lower_schema` would lower it to an object or an array that denies `null` (#613,
-            // #614), and before those to `TypeKind::Any` — which intersects as identity,
-            // discarding the keywords with no diagnostic (#140). The applicators establish the category they apply to, as an untyped
-            // `properties` already does, and say nothing about `null` (the same reading
-            // `lower_union_sibling` takes), so the target's nullability survives the intersection.
-            //
-            // Against a union target that reading would drop every branch of another category in
-            // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
-            // and reject the strings the target accepts. There the applicators refine the branches
-            // of their own category, as they do beside an inline union (#282).
-            let category = implied_applicator_category(&sibling);
-            if category.is_some() {
-                if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {
-                    let union = union.clone();
-                    return self.refine_union_target(schema, hint, referenced, &union, &sibling);
-                }
-            }
-            let mut inferred_category = None;
-            match category {
-                Some(ImpliedCategory::Only(category)) => {
-                    sibling.types.types = vec![category, JsonType::Null];
-                    inferred_category = Some(category);
-                }
-                Some(ImpliedCategory::Conflicting) => {
-                    return self.reject_ref_sibling_category(
-                        schema,
-                        "this `$ref`'s untyped sibling keywords are both object keywords \
-                         (`properties`, `patternProperties`, `required`, `additionalProperties`) \
-                         and array keywords (`items`, `prefixItems`) with no `type` to choose \
-                         between them, so no single Rust type represents what they constrain",
-                    );
-                }
-                None => {}
-            }
-            // An untyped object target admits `null` without deciding it, as the same conjunct
-            // written inline as an `allOf` member does (#541), so beside a sibling typed `object`
-            // the sibling's own answer about `null` is the meet's. Read before the union-sibling
-            // dispatch below, so a sibling carrying a `oneOf`/`anyOf` meets the same target. Only
-            // there: what an untyped target means beside another category is not an object meet,
-            // and keeps its verdict.
-            let referenced = if schema.types.types.contains(&JsonType::Object)
-                && matches!(
-                    self.graph.get(referenced.id).map(|def| &def.kind),
-                    Some(TypeKind::Struct(_))
-                )
-                && !self.ref_target_decides_null(reference, &schema.provenance)
-            {
-                Ty {
-                    nullable: true,
-                    ..referenced
-                }
-            } else {
-                referenced
-            };
-            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
-            // Beside a union sibling and no `type`, the untyped target leaves `null` to the
-            // union, as the same target written as an `allOf` member beside it does
-            // ([`undecided_admits_null`], #586): where a branch admits `null` itself
-            // ([`union_branch_admits_null`]), the target admits it, and the meet keeps the
-            // union's answer.
-            let referenced = if has_union_sibling
-                && schema.types.types.is_empty()
-                && !referenced.nullable
-                && matches!(
-                    self.graph.get(referenced.id).map(|def| &def.kind),
-                    Some(TypeKind::Struct(_))
-                )
-                && !self.ref_target_decides_null(reference, &schema.provenance)
-                && union_branch_admits_null(schema)
-            {
-                Ty {
-                    nullable: true,
-                    ..referenced
-                }
-            } else {
-                referenced
-            };
-            if has_union_sibling {
-                let (keywords, union) = split_union_sibling(&sibling);
-                if schema_has_shape_constraint(&keywords) {
-                    return self
-                        .meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
-                }
-            }
-            let enclosing_unmerged = std::mem::replace(
-                &mut self.unmerged_union,
-                has_union_sibling.then(|| schema.provenance.clone()),
-            );
-            let enclosing_meets_null =
-                std::mem::replace(&mut self.unmerged_union_meets_null, referenced.nullable);
-            let sibling_mark = self.graph_mark();
-            let sibling =
-                self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
-            self.unmerged_union = enclosing_unmerged;
-            self.unmerged_union_meets_null = enclosing_meets_null;
-            let untyped_beside_null_member =
-                self.untyped_beside_null_member.take() == Some(schema.provenance.clone());
-            let stated_nothing_took_null = self.take_stated_nothing_took_null(&schema.provenance);
-            let sibling = sibling?;
-            let mark = self.graph_mark();
-            let meets_from = self.variant_meets.len();
-            let intersection =
-                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"));
-            // A branch of the union sibling the target excludes is reported as the inline sibling
-            // spelling reports it (#671).
-            if has_union_sibling && intersection.is_ok() {
-                let mut union = schema.clone();
-                union.reference = None;
-                let met = MetUnionMember {
-                    union: sibling.id,
-                    schema: union,
-                    conjunct: self.union_sibling_null_admission(schema),
-                    conjunct_is_null: self.is_exact_null(referenced),
-                };
-                self.warn_excluded_union_member_branches(schema, &[met], meets_from);
-            }
-            // A union sibling uninhabited on its own (a lone `false` branch) leaves the
-            // conjunction so (#615), as the `allOf` spellings of it do, rather than an empty meet
-            // that rejects it.
-            let intersection = if has_union_sibling {
-                self.uninhabited_union_meet(sibling, intersection)
-            } else {
-                intersection
-            };
-            let Ok(intersection) = intersection else {
-                // `$ref` is an applicator: the value must satisfy the target AND these siblings.
-                // `intersect_types` fails for two distinct conditions — the intersection is
-                // empty, so no value satisfies both, or it is inhabited but has no single Rust type
-                // — and this one message covers both, so it must not claim the first. Either way
-                // it is reported rather than dropped: dropping would silently delete a body,
-                // parameter or property from the generated client.
-                return self.reject_ref_sibling_intersection(schema);
-            };
-            // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
-            // beside a non-union sibling is an intersection this check was never meant for, and it
-            // keeps the shape it has always generated.
-            let intersection = if has_union_sibling {
-                let intersection = self.clear_counted_null(
-                    intersection,
-                    referenced,
-                    stated_nothing_took_null.as_ref(),
-                    &format!("{hint}ReferenceIntersection"),
-                );
-                let (collapsed, untyped_check) = self.collapse_met_union(
-                    schema,
-                    intersection,
-                    !schema.one_of.is_empty(),
-                    &format!("{hint}ReferenceIntersection"),
-                    MetUnion::RefSibling,
-                );
-                // Nothing meets the union after the collapse here.
-                if untyped_check {
-                    self.warn_untyped_met_variants(schema, collapsed, MetUnion::RefSibling);
-                }
-                // The meet gave the untyped member `null` exactly where it kept the `null`
-                // member's, so `null` is in two branches or none.
-                let mut collapsed = collapsed;
-                if untyped_beside_null_member {
-                    collapsed.nullable = false;
-                }
-                collapsed
-            } else {
-                intersection
-            };
-            let kind = self.graph.get(intersection.id)?.kind.clone();
-            // The `null` the inferred category carries is there to leave the target's nullability
-            // alone, not to satisfy the intersection on its own. Against a nullable target of
-            // another category the two share only `null`, and typing that as the exact JSON null
-            // would silently replace, say, a nullable string with `()`: the category contradiction
-            // is the same empty intersection it is against the non-null target, and is reported
-            // the same way. A target that is itself exactly `null` keeps its type, and so does a
-            // nullable target OF the inferred category: there no category is contradicted, the
-            // object meet is empty, and `null` satisfies both, as it does when the same keywords
-            // are an untyped `allOf` member beside the target (#542).
-            let target_kind = &self.graph.get(referenced.id)?.kind;
-            let same_category = matches!(
-                (inferred_category, value_category(target_kind)),
-                (Some(JsonType::Object), Some(JsonCategory::Object))
-                    | (Some(JsonType::Array), Some(JsonCategory::Array))
-            );
-            if inferred_category.is_some()
-                && !same_category
-                && matches!(kind, TypeKind::Null)
-                && !matches!(target_kind, TypeKind::Null)
-            {
-                return self.reject_ref_sibling_category(
-                    schema,
-                    "this `$ref`'s untyped sibling keywords establish a category its target does \
-                     not have, so the only value both accept is `null`; the intersection is empty \
-                     but for the target's nullability",
-                );
-            }
-            let mut ty = self.reemit_meet(schema, hint, mark, kind);
-            ty.nullable = intersection.nullable;
-            ty.boxed = intersection.boxed;
-            // The sibling's union was lowered with its merge held back, as the `allOf` spellings'
-            // is, and the collapse re-emitted what the meet left of it (#561).
-            if has_union_sibling {
-                self.elide_unused_union_lowering(sibling_mark..mark);
-            }
-            return Some(ty);
+            return self.lower_ref_with_siblings(schema, reference, hint);
         }
 
         if !schema.all_of.is_empty() {
             if schema_has_union(schema) {
                 return self.lower_all_of_beside_union(schema, hint);
             }
-            if let Some(index) = sole_union_member(schema) {
+            if let Some(index) = self.sole_union_member(schema) {
                 return self.lower_all_of_with_union_member(schema, hint, index);
             }
             return self.lower_all_of(schema, hint);
         }
 
-        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+        if schema_has_union(schema) {
             return self.lower_union(schema, hint);
         }
 
@@ -455,33 +453,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
             Some(JsonType::Array) => {
                 if !schema.prefix_items.is_empty() {
-                    // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
-                    // is fixed-length, so a typed remainder is not representable — except
-                    // `items: false`, which closes the array at the prefix and *is* a tuple.
-                    if let Some(rest) = &schema.items {
-                        if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
-                            Diagnostic::error(
-                                Code::TupleRestNotRepresentable,
-                                schema.provenance.clone(),
-                            )
-                            .message(
-                                "`items` beside `prefixItems` allows a typed variable-length \
-                                 remainder, which no single Rust type expresses",
-                            )
-                            .remedy(
-                                "use `items: false` to close the tuple, describe the whole array \
-                                 with `items`, or omit this API segment with spargen::omit!",
-                            )
-                            .emit(self.diags);
-                            return None;
-                        }
-                    }
-                    let mut items = Vec::new();
-                    for (index, child) in schema.prefix_items.iter().enumerate() {
-                        items.push(self.lower_schema_or(child, &format!("{hint}Item{index}"))?);
-                        self.warn_structural_default_or(child, "a tuple `prefixItems` entry");
-                    }
-                    self.insert_schema_type(schema, hint, TypeKind::Tuple(items))
+                    self.lower_tuple(schema, hint)?
                 } else {
                     let mut item = match &schema.items {
                         Some(items) => {
@@ -576,6 +548,35 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.lower_union(&union, hint)
     }
 
+    /// Lower an array schema with `prefixItems` to a tuple of its entries' types, rejected
+    /// (`E015`) where an `items` other than `false` allows a typed remainder beside them.
+    fn lower_tuple(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
+        // is fixed-length, so a typed remainder is not representable — except
+        // `items: false`, which closes the array at the prefix and *is* a tuple.
+        if let Some(rest) = &schema.items {
+            if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
+                Diagnostic::error(Code::TupleRestNotRepresentable, schema.provenance.clone())
+                    .message(
+                        "`items` beside `prefixItems` allows a typed variable-length \
+                         remainder, which no single Rust type expresses",
+                    )
+                    .remedy(
+                        "use `items: false` to close the tuple, describe the whole array \
+                         with `items`, or omit this API segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        let mut items = Vec::new();
+        for (index, child) in schema.prefix_items.iter().enumerate() {
+            items.push(self.lower_schema_or(child, &format!("{hint}Item{index}"))?);
+            self.warn_structural_default_or(child, "a tuple `prefixItems` entry");
+        }
+        Some(self.insert_schema_type(schema, hint, TypeKind::Tuple(items)))
+    }
+
     fn lower_object(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let (fields, additional) = self.object_body(schema, hint)?;
         Some(self.insert_schema_type(
@@ -604,14 +605,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
+        // On a schema whose `type` names `integer`, an integral float member is the integer it
+        // equals, as an integral float `default` on an `integer` field is (#828).
+        let integer = schema.types.types.contains(&JsonType::Integer);
         let mut variants = Vec::new();
         let mut repr = None;
         for value in remainder {
-            let scalar = match scalar_value(value) {
+            let scalar = match scalar_value(value, integer) {
                 Some(value) => value,
                 None => {
                     Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
-                        .message(non_scalar_enum_message(value))
+                        .message(non_scalar_enum_message(value, integer))
                         .emit(self.diags);
                     return None;
                 }
@@ -701,10 +705,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         provenance: Option<crate::diag::Provenance>,
     ) -> Ty {
         let provenance = provenance.unwrap_or_else(|| self.document.provenance.clone());
-        let document = provenance
-            .span
-            .map(|span| self.resolver.document_key(span.file))
-            .unwrap_or_default();
+        let document = self
+            .resolver
+            .document_key(self.resolver.written_in(&provenance));
         let id = self.graph.insert(TypeDef {
             name_hint: hint.to_owned(),
             kind,
@@ -720,11 +723,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 }
 
-fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
+/// The enum variant an `enum`/`const` member becomes, or `None` where it has none. `integer` says
+/// the schema's `type` names `integer`: a float member is then read by [`exact_integer`], the rule
+/// an integral float `default` is read by, so `1.0` is the variant `1`.
+fn scalar_value(value: &SpannedValue, integer: bool) -> Option<ScalarValue> {
     match &value.node {
         Node::Bool(value) => Some(ScalarValue::Bool(*value)),
         Node::Number(Number::Int(value)) => Some(ScalarValue::Int(*value)),
         Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarValue::Int),
+        Node::Number(Number::Float(value)) if integer => {
+            exact_integer(*value).map(ScalarValue::Int)
+        }
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
     }
@@ -733,13 +742,19 @@ fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
 /// The `E008` message for an enum/const member `scalar_value` rejected, naming the reason that
 /// member is not representable: an object/array member, a float, and an integer above `i64::MAX`
 /// fail for different reasons, and a message blaming the wrong one misdirects the fix.
-fn non_scalar_enum_message(value: &SpannedValue) -> String {
+fn non_scalar_enum_message(value: &SpannedValue, integer: bool) -> String {
     match &value.node {
         Node::Number(Number::Float(float)) => format!(
             // `Debug`, so `1.0` reads as the float it is rather than `Display`'s `1`.
             "enum/const value {float:?} is a floating-point number, which has no Rust enum \
              discriminant (only string, integer, and boolean members are representable as enum \
-             variants)"
+             variants){}",
+            if integer || exact_integer(*float).is_none() {
+                ""
+            } else {
+                "; an integral float is read as the integer it equals only on a schema whose \
+                 `type` names `integer`"
+            }
         ),
         Node::Number(Number::UInt(uint)) => format!(
             "enum/const value {uint} exceeds i64::MAX, so it is not representable as an integer \

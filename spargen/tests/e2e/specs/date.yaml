@@ -1,0 +1,33 @@
+
+openapi: 3.1.0
+info: { title: Dates, version: 1.0.0 }
+paths:
+  /events:
+    post:
+      operationId: createEvent
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: on
+          in: query
+          schema: { type: string, format: date }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Event" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+components:
+  schemas:
+    Event:
+      type: object
+      required: [at, day]
+      properties:
+        at: { type: string, format: date-time }
+        day: { type: string, format: date }

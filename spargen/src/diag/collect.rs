@@ -1,4 +1,4 @@
-use super::Diagnostic;
+use super::{Diagnostic, FileId};
 
 /// A capped batch of diagnostics collected during one pipeline run.
 ///
@@ -17,6 +17,9 @@ pub(crate) struct Diagnostics {
     cap: usize,
     error_count: usize,
     cap_reached: bool,
+    /// The path of each file the run loaded, indexed by its [`FileId`]: what names the file a
+    /// recorded diagnostic's span lies in.
+    files: Vec<Option<String>>,
 }
 
 /// A fatal-outcome marker returned when a pipeline stage recorded an error and cannot continue.
@@ -32,11 +35,35 @@ impl Diagnostics {
             cap,
             error_count: 0,
             cap_reached: false,
+            files: Vec::new(),
         }
     }
 
-    /// Record a diagnostic. Ignored once the cap is reached, but sets the cap-reached flag.
-    pub(crate) fn emit(&mut self, diagnostic: Diagnostic) {
+    /// Record that `file` was loaded from `path`, so every diagnostic recorded from here on whose
+    /// span lies in `file` names that path. The source layer calls this as it assigns the id,
+    /// before parsing, so a parse diagnostic names its file too.
+    pub(crate) fn register_file(&mut self, file: FileId, path: impl Into<String>) {
+        let index = file.0 as usize;
+        if self.files.len() <= index {
+            self.files.resize(index + 1, None);
+        }
+        self.files[index] = Some(path.into());
+    }
+
+    /// Record a diagnostic.
+    ///
+    /// A diagnostic identical to one already recorded (same code, pointer, span, message, and
+    /// remedy) is ignored. Past the cap, a diagnostic is dropped and sets the cap-reached flag,
+    /// but an error still counts toward [`Self::has_errors`].
+    ///
+    /// A diagnostic with a span and no file is given the path [`Self::register_file`] recorded
+    /// for the span's file, when one was.
+    pub(crate) fn emit(&mut self, mut diagnostic: Diagnostic) {
+        if diagnostic.file.is_none() {
+            diagnostic.file = diagnostic
+                .span
+                .and_then(|span| self.files.get(span.file.0 as usize).cloned().flatten());
+        }
         if self
             .items
             .iter()
@@ -174,6 +201,73 @@ mod tests {
         }
 
         assert_eq!(diagnostics.items().len(), 6);
+    }
+
+    /// A diagnostic names the file its span lies in once that file is registered, and the
+    /// rendering puts the path before the line and column; one with no span, or a span in a file
+    /// the run never registered, names none and renders as before (#727).
+    #[test]
+    fn a_spanned_diagnostic_names_the_registered_file_its_span_lies_in() {
+        let at = |file: u32, line: u32| {
+            Provenance::new(
+                JsonPointer::from("/Pet"),
+                Some(crate::diag::Span::point(
+                    crate::diag::FileId(file),
+                    crate::diag::Loc {
+                        line,
+                        col: 5,
+                        offset: 0,
+                    },
+                )),
+            )
+        };
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.register_file(crate::diag::FileId(0), "api/openapi.yaml");
+        diagnostics.register_file(crate::diag::FileId(1), "api/schemas.yaml");
+
+        Diagnostic::error(Code::InvalidInput, at(1, 12))
+            .message("in the referenced file")
+            .emit(&mut diagnostics);
+        Diagnostic::error(Code::InvalidInput, at(0, 3))
+            .message("in the root")
+            .emit(&mut diagnostics);
+        Diagnostic::error(Code::InvalidInput, at(7, 2))
+            .message("in a file never registered")
+            .emit(&mut diagnostics);
+        diagnostics.emit(diagnostic("with no span"));
+
+        let files: Vec<Option<&str>> = diagnostics
+            .items()
+            .iter()
+            .map(|item| item.file.as_deref())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                Some("api/schemas.yaml"),
+                Some("api/openapi.yaml"),
+                None,
+                None
+            ]
+        );
+        let locations: Vec<Option<String>> = diagnostics
+            .items()
+            .iter()
+            .map(|item| {
+                item.to_string()
+                    .lines()
+                    .find_map(|line| line.trim_start().strip_prefix("--> ").map(str::to_owned))
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                Some("api/schemas.yaml:12:5".to_owned()),
+                Some("api/openapi.yaml:3:5".to_owned()),
+                Some("2:5".to_owned()),
+                None
+            ]
+        );
     }
 
     #[test]

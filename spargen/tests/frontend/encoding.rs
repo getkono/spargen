@@ -24,13 +24,12 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -56,11 +55,71 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn encoding_on_a_form_or_multipart_key_in_another_letter_case_takes_effect() {
+    // A media key's type and subtype are case-insensitive, so `Multipart/Form-Data` is the
+    // multipart body `multipart/form-data` is: its `encoding` is applied, not a `W011`.
+    let spec = |media: &str, encoding: &str| {
+        format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                sdp: {{ type: string }}
+                tags: {{ type: array, items: {{ type: string }} }}
+            encoding:
+              {encoding}
+      responses:
+        '204': {{ description: ok }}
+"##
+        )
+    };
+    for (lower, media, encoding) in [
+        (
+            "multipart/form-data",
+            "Multipart/Form-Data",
+            "sdp: { contentType: application/sdp }",
+        ),
+        (
+            "application/x-www-form-urlencoded",
+            "Application/X-WWW-Form-Urlencoded",
+            "tags: { style: form, explode: true }",
+        ),
+    ] {
+        let (lower_report, lower_code) = generate_with_code(&spec(lower, encoding));
+        assert_ne!(
+            lower_report.outcome(),
+            Outcome::Rejected,
+            "{lower_report:#?}"
+        );
+        let spec = spec(media, encoding);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
         assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{media}: {report:#?}"
+        );
+        assert_eq!(
+            module_body(&code.replace(media, lower)),
+            module_body(&lower_code),
+            "{media} must generate what {lower} does"
         );
     }
 }
@@ -84,13 +143,12 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -112,13 +170,12 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -174,10 +231,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -196,10 +252,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -233,13 +288,6 @@ paths:
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
-    );
-
-    let checked = check(spec);
-    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        !has_code(&checked, Code::UnsupportedMediaType),
-        "{checked:#?}"
     );
 }
 
@@ -332,10 +380,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -365,10 +412,9 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -439,9 +485,8 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
 }
 
 #[test]
@@ -540,6 +585,83 @@ paths:
 }
 
 #[test]
+fn e009_a_form_urlencoded_binary_additional_properties_value() {
+    // #697: the members of a typed `additionalProperties` overflow are sent in their type's
+    // default encoding, so a binary overflow on a form body is refused as a binary property is,
+    // rather than generated and dropped from the wire.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              additionalProperties: { type: string, contentEncoding: base64 }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`additionalProperties`")
+                    && d.message.contains(
+                        "is binary, which has no `application/x-www-form-urlencoded` \
+                         representation",
+                    )
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn typed_additional_properties_on_form_and_multipart_bodies_generate() {
+    // #697: a scalar or composite overflow has a default encoding on both media, so both bodies
+    // generate with no diagnostic about the overflow.
+    for media in ["application/x-www-form-urlencoded", "multipart/form-data"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          {media}:
+            schema:
+              type: object
+              properties:
+                name: {{ type: string }}
+              additionalProperties: {{ type: array, items: {{ type: integer }} }}
+      responses:
+        '204': {{ description: ok }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .all(|d| !d.message.contains("additionalProperties")),
+                "{media}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively() {
     // #399: a binary property's declared `contentType` is classified lowercased, so `Text/Plain`
     // reaches the outcome `text/plain` does. Before, the mixed-case spelling missed the `text/`
@@ -548,7 +670,6 @@ fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively
     let binary = "{ type: string, contentEncoding: base64 }";
     for declared in ["text/plain", "Text/Plain", "TEXT/PLAIN"] {
         let spec = form_field_declaring(binary, declared);
-        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{declared}");
         let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
@@ -714,11 +835,6 @@ fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
     ];
     for (schema, declared, rendering) in cases {
         let spec = multipart_part_declaring(schema, declared);
-        assert_ne!(
-            check(&spec).outcome(),
-            Outcome::Rejected,
-            "{schema} / {declared}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
@@ -831,11 +947,6 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
     ];
     for (schema, declared, rendering) in cases {
         let spec = form_field_declaring(schema, declared);
-        assert_ne!(
-            check(&spec).outcome(),
-            Outcome::Rejected,
-            "{schema} / {declared}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
@@ -953,13 +1064,12 @@ paths:
     // is sent, both still generate.
     for content_type in ["text/plain; charset=utf-8", "text/plain, text/plain/extra"] {
         let spec = body("multipart/form-data", content_type);
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(
-                !has_code(&report, Code::UnsupportedMediaType),
-                "{content_type:?}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{content_type:?}: {report:#?}"
+        );
     }
     // A parameter that is not `token "=" ( token / quoted-string )` used to generate silently and
     // fail in `mime_str` (`text/plain; foo` is mime's `MissingEqual`). Each case names the element
@@ -1035,16 +1145,6 @@ paths:
     // reject the document.
     for content_type in unsendable {
         let spec = body("application/x-www-form-urlencoded", content_type);
-        let report = check(&spec);
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{content_type:?}: {report:#?}"
-        );
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{content_type:?}: {report:#?}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
@@ -1085,12 +1185,6 @@ paths:
         ("text/plain; a=\"x;y\"", "text/plain; a=\"x;y\""),
     ] {
         let spec = body("multipart/form-data", content_type);
-        let report = check(&spec);
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{content_type:?}: {report:#?}"
-        );
         let (report, code) = generate_with_code(&spec);
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
@@ -1155,13 +1249,12 @@ paths:
               encoding:
                 a: { contentType: text/plain }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1183,13 +1276,12 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1215,13 +1307,12 @@ components:
       encoding:
         a: { contentType: text/plain }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1246,13 +1337,12 @@ components:
     Payload:
       schema: { type: object, properties: { a: { type: string } } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// A Header Object `$ref` with its own `summary`/`description` is `W011`'s reference-docs case,
@@ -1324,13 +1414,12 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1350,10 +1439,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -1372,10 +1460,9 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
 #[test]
@@ -1431,13 +1518,12 @@ paths:
             application/json:
               schema: { type: string }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1461,11 +1547,10 @@ paths:
             application/json:
               schema: { type: string }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::Oas32ConstructIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
 }

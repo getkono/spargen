@@ -1,17 +1,16 @@
 //! # support-runtime
 //!
-//! The freestanding runtime support code shipped *inside* every spargen-generated client: the
-//! dispatch routines, the error taxonomy, [`ResponseValue<T>`], and auth plumbing. It is real,
+//! The freestanding runtime support code shipped *inside* every spargen-generated client. It is real,
 //! standalone-compilable source (compiled and linted here in its own right) that spargen embeds
 //! into generated output: its `support` subsystem carries each file via `include_str!`, and
 //! `codegen` emits the text above each file's test module, with `crate::` rewritten to
 //! `super::`.
 //!
 //! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`.
-//! Its unconditional dependencies are `reqwest` / `serde` / `serde_json` / `bytes` / `secrecy` /
-//! `futures-core`; the `stream` module, the only user of `futures-core`, is embedded only for APIs
-//! with sequential responses. Three optional dependencies sit behind the features that gate the
-//! conditionally embedded modules: `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`).
+//! The dependency set a generated client needs, and what each conditionally embedded module adds
+//! to it, is stated in the book's runtime chapter (`docs/book/src/runtime.md`) and printed for one
+//! spec by `spargen deps`; here, each optional dependency sits behind the feature that gates its
+//! module, and the comment on that module's `mod` below names it.
 //!
 //! ## Fault-tolerance guarantees
 //!
@@ -67,10 +66,9 @@ pub use client::{ClientConfig, ClientCore};
 #[cfg(feature = "time")]
 pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
-    build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on,
-    classify_error, classify_error_bytes, classify_error_text, decode_success,
-    decode_success_bytes, decode_success_text, decode_success_with, decode_text_body,
-    read_error_body, send, unexpected_status, StatusSpec,
+    build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes,
+    classify_error_text, decode_success, decode_success_bytes, decode_success_text,
+    decode_success_with, decode_text_body, read_error_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
@@ -82,7 +80,7 @@ pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
     encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body,
     serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
-    FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding,
+    FormMode, FormProperty, FormStyle, PercentEncoding,
 };
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};

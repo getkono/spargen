@@ -5,7 +5,7 @@ use crate::tests::poll_ready;
 use crate::{ClientCore, RequestError};
 use bytes::Bytes;
 
-use super::{build_url, build_url_on, build_url_with_query_string, is_dot_segment, StatusSpec};
+use super::{build_url_on, build_url_with_query_string_on, is_dot_segment, StatusSpec};
 
 fn core() -> ClientCore {
     ClientCore::new("https://example.com").unwrap()
@@ -18,7 +18,7 @@ fn core_at(base: &str) -> ClientCore {
 #[test]
 fn build_url_collapses_double_slash_at_join() {
     let core = core_at("https://example.com/");
-    let url = build_url(&core, "/foo", &[]).unwrap();
+    let url = build_url_on(&core, None, "/foo", &[]).unwrap();
     // Trailing base slash + leading path slash collapse to a single separator.
     assert_eq!(url.path(), "/foo");
     // An empty query must not stamp a trailing `?` onto the serialized URL.
@@ -28,17 +28,20 @@ fn build_url_collapses_double_slash_at_join() {
 #[test]
 fn build_url_preserves_base_path_prefix() {
     let core = core_at("https://example.com/api");
-    let url = build_url(&core, "foo", &[]).unwrap();
+    let url = build_url_on(&core, None, "foo", &[]).unwrap();
     assert_eq!(url.path(), "/api/foo");
 }
 
 #[test]
 fn build_url_empty_path_keeps_base_path() {
     let prefixed = core_at("https://example.com/api");
-    assert_eq!(build_url(&prefixed, "", &[]).unwrap().path(), "/api");
+    assert_eq!(
+        build_url_on(&prefixed, None, "", &[]).unwrap().path(),
+        "/api"
+    );
 
     let root = core_at("https://example.com");
-    assert_eq!(build_url(&root, "", &[]).unwrap().path(), "/");
+    assert_eq!(build_url_on(&root, None, "", &[]).unwrap().path(), "/");
 }
 
 #[test]
@@ -46,8 +49,9 @@ fn build_url_installs_pre_encoded_query_fragments_verbatim() {
     let core = core_at("https://example.com");
     // The caller has already encoded the data and left the style delimiter literal; the two
     // commas here must stay distinguishable all the way onto the wire.
-    let url = build_url(
+    let url = build_url_on(
         &core,
+        None,
         "/search",
         &["q=a%20b%26c".to_owned(), "tags=x%2Cy,z".to_owned()],
     )
@@ -69,7 +73,7 @@ fn build_url_installs_pre_encoded_query_fragments_verbatim() {
 #[test]
 fn build_url_appends_to_a_query_already_on_the_base_url() {
     let core = core_at("https://example.com?tenant=acme");
-    let url = build_url(&core, "/search", &["q=rust".to_owned()]).unwrap();
+    let url = build_url_on(&core, None, "/search", &["q=rust".to_owned()]).unwrap();
     assert_eq!(url.query(), Some("tenant=acme&q=rust"));
 }
 
@@ -79,7 +83,7 @@ fn build_url_does_not_join_onto_an_empty_query_on_the_base_url() {
     // join onto, so no leading `&` may appear.
     let core = core_at("https://example.com/?");
     assert_eq!(core.base_url().query(), Some(""));
-    let url = build_url(&core, "/search", &["q=rust".to_owned()]).unwrap();
+    let url = build_url_on(&core, None, "/search", &["q=rust".to_owned()]).unwrap();
     assert_eq!(url.query(), Some("q=rust"));
 }
 
@@ -87,9 +91,9 @@ fn build_url_does_not_join_onto_an_empty_query_on_the_base_url() {
 fn build_url_keeps_matrix_and_label_prefixes_in_the_path() {
     let core = core_at("https://example.com");
     // `set_path` must not disturb `;`, `=`, `,` or an existing percent-triple.
-    let url = build_url(&core, "/map/;position=B,150,R,100", &[]).unwrap();
+    let url = build_url_on(&core, None, "/map/;position=B,150,R,100", &[]).unwrap();
     assert_eq!(url.path(), "/map/;position=B,150,R,100");
-    let labelled = build_url(&core, "/files/.tar%2Egz", &[]).unwrap();
+    let labelled = build_url_on(&core, None, "/files/.tar%2Egz", &[]).unwrap();
     assert_eq!(labelled.path(), "/files/.tar%2Egz");
 }
 
@@ -126,12 +130,13 @@ fn dot_segments_spelled_with_tab_lf_or_cr_are_what_set_path_removes() {
 fn build_url_refuses_template_text_that_forms_a_dot_segment_once_whitespace_is_deleted() {
     let core = core_at("https://api.example.com/v1/");
     for segment in WHITESPACE_DOT_SEGMENTS {
-        let error = build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+        let error =
+            build_url_on(&core, None, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
         assert!(
             matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{segment:?}: {error:?}"
         );
-        build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
+        build_url_on(&core, None, &format!("/users/{segment}"), &[]).expect_err(segment);
     }
 }
 
@@ -145,7 +150,8 @@ fn the_dot_segment_refusal_escapes_the_segments_tab_lf_and_cr() {
         ("..\n", r#""..\n""#),
         ("\r..", r#""\r..""#),
     ] {
-        let error = build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+        let error =
+            build_url_on(&core, None, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
         let cause = std::error::Error::source(&error)
             .map(ToString::to_string)
             .expect("a refusal carries its message");
@@ -221,7 +227,8 @@ fn build_url_refuses_a_path_value_that_forms_a_dot_segment() {
     // #406: `/users/{p}/keys` with `p = ".."` must not be sent to `/v1/keys`.
     let core = core_at("https://api.example.com/v1/");
     for segment in DOT_SEGMENTS {
-        let error = build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+        let error =
+            build_url_on(&core, None, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
         assert!(
             matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{segment}: {error:?}"
@@ -232,14 +239,14 @@ fn build_url_refuses_a_path_value_that_forms_a_dot_segment() {
             "{cause:?}"
         );
         // The trailing segment, and the whole request path, are segments too.
-        build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
-        build_url(&core, segment, &[]).expect_err(segment);
+        build_url_on(&core, None, &format!("/users/{segment}"), &[]).expect_err(segment);
+        build_url_on(&core, None, segment, &[]).expect_err(segment);
     }
     // A special-scheme URL treats `\` as a separator as well.
-    build_url(&core, "/users\\..\\keys", &[]).expect_err("backslash");
+    build_url_on(&core, None, "/users\\..\\keys", &[]).expect_err("backslash");
     // Through every builder.
     build_url_on(&core, Some("/v2/"), "/users/../keys", &[]).expect_err("override");
-    build_url_with_query_string(&core, "/users/%2E%2E/keys", &[], Some("a=b"))
+    build_url_with_query_string_on(&core, None, "/users/%2E%2E/keys", &[], Some("a=b"))
         .expect_err("querystring");
 }
 
@@ -255,7 +262,7 @@ fn a_label_value_that_is_only_its_prefix_is_refused_as_a_whole_segment() {
     .unwrap();
     assert_eq!(rendered, ".");
     let core = core_at("https://example.com/v1");
-    build_url(&core, &format!("/colors/{rendered}/shades"), &[]).expect_err("label");
+    build_url_on(&core, None, &format!("/colors/{rendered}/shades"), &[]).expect_err("label");
 }
 
 #[test]
@@ -268,7 +275,7 @@ fn build_url_keeps_dots_that_do_not_form_a_whole_segment() {
         "/a/.%2e%2e",
         "/x.",
     ] {
-        let url = build_url(&core, path, &[]).unwrap();
+        let url = build_url_on(&core, None, path, &[]).unwrap();
         assert_eq!(url.path(), format!("/v1{path}"));
     }
 }
@@ -291,8 +298,9 @@ fn build_url_on_joins_a_relative_server_override_onto_the_base() {
 fn build_url_with_query_string_installs_a_whole_query_verbatim() {
     let core = core_at("https://example.com?stale=server-value");
     // The whole-query value arrives already encoded by the generated method.
-    let url = build_url_with_query_string(
+    let url = build_url_with_query_string_on(
         &core,
+        None,
         "/search",
         &[],
         Some("%7B%22numbers%22%3A%5B1%2C2%5D%7D"),
@@ -304,8 +312,14 @@ fn build_url_with_query_string_installs_a_whole_query_verbatim() {
 #[test]
 fn build_url_replaces_the_server_query_with_a_form_whole_query_string() {
     let core = core_at("https://example.com?stale=server-value");
-    let url = build_url_with_query_string(&core, "/search", &["term=rust%20api".to_owned()], None)
-        .unwrap();
+    let url = build_url_with_query_string_on(
+        &core,
+        None,
+        "/search",
+        &["term=rust%20api".to_owned()],
+        None,
+    )
+    .unwrap();
     assert_eq!(url.query(), Some("term=rust%20api"));
 }
 
@@ -319,12 +333,13 @@ fn build_url_replaces_the_server_query_with_a_form_whole_query_string() {
 fn build_url_with_query_string_joins_the_whole_query_after_any_fragments() {
     let core = core_at("https://example.com?stale=server-value");
     let whole = Some("b=2");
-    let joined = build_url_with_query_string(&core, "/search", &["a=1".to_owned()], whole).unwrap();
+    let joined =
+        build_url_with_query_string_on(&core, None, "/search", &["a=1".to_owned()], whole).unwrap();
     assert_eq!(joined.query(), Some("a=1&b=2"));
     let after_empty =
-        build_url_with_query_string(&core, "/search", &[String::new()], whole).unwrap();
+        build_url_with_query_string_on(&core, None, "/search", &[String::new()], whole).unwrap();
     assert_eq!(after_empty.query(), Some("b=2"));
-    let alone = build_url_with_query_string(&core, "/search", &[], whole).unwrap();
+    let alone = build_url_with_query_string_on(&core, None, "/search", &[], whole).unwrap();
     assert_eq!(alone.query(), Some("b=2"));
 }
 
@@ -1143,7 +1158,7 @@ impl std::fmt::Display for Listed {
 impl std::error::Error for Listed {}
 
 proptest::proptest! {
-    /// `build_url` refuses a path value that forms a dot segment by quoting the segment, and
+    /// `build_url_on` refuses a path value that forms a dot segment by quoting the segment, and
     /// a server override that does not parse through `url`'s error: whatever the text holds,
     /// every message in the refusal's chain stays on one line (#452).
     #[test]
@@ -1154,10 +1169,10 @@ proptest::proptest! {
         let core = core_at("https://api.example.com/v1/");
         let path = format!("/users/{segment}/keys");
         let refusals = [
-            build_url(&core, &path, &[]).err(),
-            build_url(&core, &segment, &[]).err(),
+            build_url_on(&core, None, &path, &[]).err(),
+            build_url_on(&core, None, &segment, &[]).err(),
             build_url_on(&core, Some(&server), &path, &[]).err(),
-            build_url_with_query_string(&core, &path, &[], Some(&segment)).err(),
+            build_url_with_query_string_on(&core, None, &path, &[], Some(&segment)).err(),
         ];
         for error in refusals.iter().flatten() {
             proptest::prop_assert_eq!(single_line(error), Ok(()));

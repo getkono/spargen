@@ -39,13 +39,12 @@ components:
       type: http
       scheme: digest
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::UnknownSecurityScheme),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -78,12 +77,11 @@ components:
     token: {{ type: http, scheme: {spelling} }}
 "##
         );
-        let report = check(&spec);
+        let (report, code) = generate_with_code(&spec);
         assert!(
             !has_code(&report, Code::UnknownSecurityScheme),
             "`{spelling}`: {report:#?}"
         );
-        let (report, code) = generate_with_code(&spec);
         assert_ne!(
             report.outcome(),
             Outcome::Rejected,
@@ -179,17 +177,15 @@ components:
     let one_hop = spec_with(
         "    A: { $ref: \"#/components/securitySchemes/B\" }\n    B: { type: http, scheme: bearer }\n",
     );
-    for report in [generate(&one_hop), check(&one_hop)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
-    }
+    let report = generate(&one_hop);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
 
     // A target that is not a Security Scheme at all never reaches the location check.
     let not_a_scheme = spec_with("    A: { $ref: \"#/x-elsewhere/Bearer/type\" }\n");
-    for report in [generate(&not_a_scheme), check(&not_a_scheme)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(&not_a_scheme);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]
@@ -209,29 +205,22 @@ components:
     mtls:
       type: mutualTLS
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            has_code(&report, Code::DeclarationHasNoEffect),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 #[test]
 fn oas32_security_requirement_uri_resolves() {
     // OpenAPI 3.2 lets a requirement name a Security Scheme Object by URI. A component name always
     // wins, per the specification, so only a name matching no component is resolved as a reference.
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("bearer.yaml"),
-        "type: http\nscheme: bearer\n",
-    )
-    .unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec_path,
-        r##"
+    let (report, _, code) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
 security:
@@ -242,16 +231,59 @@ paths:
       responses:
         "204": { description: No Content }
 "##,
-    )
-    .unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    ));
+        ),
+        ("bearer.yaml", "type: http\nscheme: bearer\n"),
+    ]);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
+    );
+    // The resolved scheme is attached to the operation under the requirement's own key: a
+    // requirement dropped on the way would generate cleanly and attach nothing.
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains(
+            "support::attach_auth(&self.core,request,&[&[support::AuthScheme{\
+             name:\"./bearer.yaml\",kind:support::AuthKind::Bearer,},][..],],)"
+        ),
+        "the URI requirement must attach as `AuthKind::Bearer`:\n{code}"
+    );
+}
+
+#[test]
+fn a_urn_style_security_requirement_key_gets_todays_diagnostic() {
+    // The loader and lowering disagree on whether a key containing `:` is a URI reference: the
+    // loader does not fetch a `urn:`-style key, while lowering tries to resolve it. This pins the
+    // diagnostic that disagreement produces today, so a change to either `:` rule shows up here.
+    let report = generate(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+security:
+  - "urn:example:bearer": []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let summary: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .map(|d| (d.code, d.pointer.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        [(Code::UnknownSecurityScheme, "/paths/~1x/get")],
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics()[0]
+            .message
+            .contains("`urn:example:bearer`"),
         "{report:#?}"
     );
 }

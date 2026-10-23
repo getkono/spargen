@@ -5,19 +5,18 @@ use crate::diag::{Code, Diagnostic};
 use crate::ir::{JsonCategory, TypeKind, UnionMode, UnionStrategy, UnionVariant};
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
+    resolve_discriminator_targets,
 };
-use crate::oas31::{Schema, SchemaOr};
+use crate::oas31::{Resolver, Schema, SchemaOr};
 
+use super::shape::schema_has_union;
 use super::{DiscriminatorMembers, LowerCtx};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Resolve every schema a union's Discriminator Object names — each `mapping` value, then
     /// `defaultMapping` — to the union member it denotes.
     ///
-    /// A value is a component name or a URI reference. The specification recommends reading a value
-    /// that could be either as a name, and a name is exactly a Components Object key, so a value
-    /// made only of key characters is `#/components/schemas/<value>` and anything else is a
-    /// reference, written relative to the file the discriminator sits in. The two sides are compared
+    /// Each value is read as [`discriminator_target_identity`] reads it. The two sides are compared
     /// by resolved `file#pointer` ([`crate::oas31::Resolver::schema_reference_identity`]), never by spelling, so
     /// `Cat`, `#/components/schemas/Cat` and `./openapi.yaml#/components/schemas/Cat` all name one
     /// member. Only `$ref` members can be named: the specification excludes inline members from
@@ -45,25 +44,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 SchemaOr::Bool(_) => None,
             })
             .collect();
-        let entries = discriminator
-            .mapping
-            .iter()
-            .map(|(tag, target)| (Some(tag), target))
-            .chain(
-                discriminator
-                    .default_mapping
-                    .iter()
-                    .map(|target| (None, target)),
-            );
         let mut resolved = DiscriminatorMembers {
             mapping: Vec::new(),
             default: None,
         };
         let mut failed = false;
-        for (tag, target) in entries {
+        for (tag, target) in discriminator.entries() {
             let entry = discriminator_entry(tag);
             let value = &target.value;
-            let Some(identity) = self.discriminator_target_identity(&entry, target) else {
+            let Some(identity) =
+                discriminator_target_identity(self.resolver, self.diags, &entry, target)
+            else {
                 failed = true;
                 continue;
             };
@@ -97,15 +88,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         (!failed).then_some(resolved)
     }
 
-    /// [`discriminator_target_identity`] against this lowering's document and resolver.
-    fn discriminator_target_identity(
-        &mut self,
-        entry: &str,
-        target: &crate::oas31::schema::DiscriminatorTarget,
-    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        discriminator_target_identity(self.resolver, self.diags, entry, target)
-    }
-
     /// Give a `discriminator` on a schema with no `oneOf`/`anyOf` of its own a disposition (#264).
     ///
     /// spargen dispatches by discriminator only across the members of the union it sits beside,
@@ -124,22 +106,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(discriminator) = &schema.discriminator else {
             return;
         };
-        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+        if schema_has_union(schema) {
             return;
         }
-        let entries = discriminator
-            .mapping
-            .iter()
-            .map(|(tag, target)| (Some(tag), target))
-            .chain(
-                discriminator
-                    .default_mapping
-                    .iter()
-                    .map(|target| (None, target)),
-            );
-        for (tag, target) in entries {
-            self.discriminator_target_identity(&discriminator_entry(tag), target);
-        }
+        resolve_discriminator_targets(self.resolver, self.diags, discriminator);
         // W011 case: standalone-discriminator
         Diagnostic::warning(
             Code::DeclarationHasNoEffect,
@@ -248,6 +218,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     target.value
                 ),
             ),
+            // The caller passes only a component member left with no tag, and such a member's
+            // name is claimed by a `mapping` key, so this arm is not reached; it stays as the
+            // refusal for a caller that passes another member.
             None => (
                 schema.provenance.clone(),
                 format!("no discriminator value selects union member {member}"),
@@ -346,11 +319,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// Dropping the name there would rename those variants in documents that generate today; the
 /// root-only filter confines the change to what previously rejected. The name is no component
 /// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
-pub(super) fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
+pub(super) fn member_component_name<'m>(
+    member: &'m SchemaOr,
+    resolver: &Resolver<'_>,
+) -> Option<&'m str> {
     let SchemaOr::Schema(schema) = member else {
         return None;
     };
-    let in_sub_file = schema.provenance.span.is_some_and(|span| span.file != root);
+    let in_sub_file = resolver.written_in(&schema.provenance) != resolver.root_id();
     schema
         .reference
         .as_deref()?

@@ -3,10 +3,10 @@
 
 use std::borrow::Cow;
 
-/// One exact compatibility omission.
+/// One compatibility omission (exact or glob).
 /// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
 /// still be built from data at runtime — the CLI, the config file, and the carve driver all derive
-/// rules dynamically, and each previously leaked a `String` to fake a `&'static str`.
+/// rules dynamically.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum OmitRule {
@@ -261,7 +261,7 @@ impl ComponentKind {
     }
 }
 
-/// Build an exact compatibility omit profile.
+/// Build a compatibility omit profile (exact or glob rules).
 #[macro_export]
 macro_rules! omit {
     () => {

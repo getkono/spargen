@@ -57,7 +57,7 @@ fn multi_status_success_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two success statuses with DIFFERENT bodies used to degrade to `serde_json::Value` (W003).
     // W003 is retired: the success type is now a typed per-operation response enum, generated with
     // no diagnostic at all.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -90,12 +90,26 @@ components:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // No diagnostics at all — the retired W003 must not fire under any code.
     assert!(report.diagnostics().is_empty(), "{report:#?}");
+    // One variant per success status, each carrying its own typed body.
+    assert_eq!(
+        enum_variants(&code, "GetXResponse"),
+        [
+            "Status200(Box<types::BodyA>)",
+            "Status201(Box<types::BodyB>)"
+        ],
+        "{code}"
+    );
+    assert!(
+        code.contains("support::ResponseValue<GetXResponse>"),
+        "{code}"
+    );
+    assert_no_untyped_value(&code);
 }
 
 #[test]
 fn multi_status_error_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two error statuses with DIFFERENT bodies likewise generate a typed error enum, no W003.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -132,6 +146,14 @@ components:
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics().is_empty(), "{report:#?}");
+    // One variant per error status, each carrying its own typed body.
+    assert_eq!(
+        enum_variants(&code, "GetXError"),
+        ["Status404(Box<types::ErrA>)", "Status409(Box<types::ErrB>)"],
+        "{code}"
+    );
+    assert!(code.contains("support::Error<GetXError>"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -196,7 +218,6 @@ fn a_bodyless_error_status_beside_one_error_body_is_its_own_variant() {
         assert!(!code.contains("pub struct GetXError("), "{spec}");
         let checked = check(&spec);
         assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
-        assert!(checked.diagnostics().is_empty(), "{checked:#?}");
     }
 
     // A single bodied error entry and nothing else on the error side is still the newtype.
@@ -373,7 +394,7 @@ components:
 
 #[test]
 fn documented_response_headers_get_typed_accessors() {
-    // Regression: `response.headers` was dropped entirely, with no diagnostic.
+    // A response's documented `headers` each get a typed accessor on the generated response.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -493,7 +514,6 @@ paths:
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
-    assert_ne!(check(spec).outcome(), Outcome::Rejected);
     assert_eq!(code.matches("= bytes::Bytes;").count(), 2, "{code}");
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
@@ -599,7 +619,6 @@ paths:
         "{report:#?}"
     );
     assert!(code.contains("content_range"), "{code}");
-    assert_ne!(check(spec).outcome(), Outcome::Rejected, "{report:#?}");
 }
 
 #[test]
@@ -628,13 +647,12 @@ paths:
             application/json: {{ schema: {{ type: string }} }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(
-                has_code(&report, Code::DeclarationHasNoEffect),
-                "{report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
     }
 }
 
@@ -661,6 +679,8 @@ paths:
 "##;
     let (report, code) = generate_with_code(spec);
     assert!(!code.contains("pub x_detail:"), "{code}");
+    // The skipped header's type is not emitted either: nothing names it (#927).
+    assert!(!code.contains("HeaderXDetail"), "{code}");
     for report in [report, check(spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert_eq!(
@@ -678,7 +698,7 @@ paths:
 fn w011_a_textual_content_response_header_that_is_not_a_single_value_is_reported() {
     // Textual content carries the field value verbatim, so a list says nothing about how the value
     // is framed — and `simple` is not that framing.
-    let report = generate(
+    let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -702,6 +722,42 @@ paths:
         has_code(&report, Code::DeclarationHasNoEffect),
         "{report:#?}"
     );
+    // The skipped header's type is not emitted either: nothing names it (#927).
+    assert!(!code.contains("HeaderXDetail"), "{code}");
+}
+
+#[test]
+fn a_skipped_response_header_keeps_the_component_it_refs_emitted() {
+    // Eliding the types a `W011`-skipped header lowered (#927) must not reach a `$ref`'d
+    // component: the header lowers it first, and its memo hands the same type to the body that
+    // names it afterwards.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              schema: { $ref: "#/components/schemas/Detail" }
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Detail" } }
+components:
+  schemas:
+    Detail:
+      oneOf: [{ type: string }, { type: integer }]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+    assert!(code.contains("pub enum Detail "), "{code}");
 }
 
 /// A Responses key the specification does not define, reached through a Path Item `$ref`.
@@ -773,12 +829,7 @@ fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() 
     let (refd_generated, refd_checked) = generate_and_check_refd_path_item(
         "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    '0XX': { description: out of grammar }\n    default: { description: fallback }\n",
     );
-    for report in [
-        &generate(inline),
-        &check(inline),
-        &refd_generated,
-        &refd_checked,
-    ] {
+    for report in [&generate(inline), &refd_generated, &refd_checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }

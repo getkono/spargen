@@ -27,9 +27,6 @@ fn the_location_oracle_sees_each_lost_location() {
     let root = b"openapi: 3.1.0\ncomponents: {}\n";
     let reasons = |diagnostic: Diagnostic| -> Vec<String> {
         oracles::location_violations(&[diagnostic], root)
-            .into_iter()
-            .map(|violation| violation.reason)
-            .collect()
     };
     let at = "/components/schemas/Pet";
     // The three #454 shapes: an empty pointer, an empty name, a span over the whole root.
@@ -90,22 +87,75 @@ fn the_location_oracle_sees_each_lost_location() {
     ))
     .is_empty());
     assert!(reasons(located(Code::InvalidInput, "", 0, (1, 0, 29), "m")).is_empty());
-    // `E003` and `E021` are no longer known gaps (#534): each rule they break is a violation of
-    // its own, the empty pointer and the whole-root span as much as an empty name.
-    for code in [Code::AbsoluteRefUnsupported, Code::VendoredRefDrift] {
-        let all: Vec<Option<u32>> =
-            oracles::location_violations(&[located(code, "", 0, (1, 0, 29), "in ``")], root)
-                .into_iter()
-                .map(|violation| violation.known)
-                .collect();
-        assert_eq!(all, [None, None, None], "{code:?}: {all:?}");
+    // So is an `E011` the root document could not be read for (no span), and a syntax error the
+    // parser places only at a point of the root.
+    let mut unread = located(Code::InvalidInput, "", 0, (1, 0, 0), "m");
+    unread.span = None;
+    assert!(reasons(unread).is_empty());
+    assert!(reasons(located(Code::InvalidInput, "", 0, (2, 15, 15), "m")).is_empty());
+    // An `E011` with an empty pointer whose span covers one construct below the root, such as a
+    // mapping key that is not a string, is not about the document as a whole: that construct has
+    // a pointer of its own.
+    let key = reasons(located(Code::InvalidInput, "", 0, (2, 15, 16), "m"));
+    assert_eq!(key.len(), 1, "{key:?}");
+    assert!(key[0].contains("the pointer is empty"), "{key:?}");
+    // A non-string key is addressed by the mapping that holds it (#923): the empty pointer is its
+    // location only where the root mapping itself holds such a key.
+    let non_string = located(
+        Code::InvalidInput,
+        "",
+        0,
+        (2, 15, 16),
+        "YAML object keys must be strings",
+    );
+    let nested = oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\nx: { 1: one }\n",
+    );
+    assert_eq!(nested.len(), 1, "{nested:?}");
+    assert!(oracles::location_violations(
+        std::slice::from_ref(&non_string),
+        b"openapi: 3.1.0\n1: one\n"
+    )
+    .is_empty());
+    // The validator's verdict on the root value is about the root, however short the YAML parser
+    // spans a flow collection (`[]` to its closing bracket's start), and so is a stream that is
+    // not one document.
+    for message in [
+        "OpenAPI structure violation: [] is not of type \"object\"",
+        "YAML input must contain exactly one document",
+    ] {
+        assert!(
+            reasons(located(Code::InvalidInput, "", 0, (1, 0, 1), message)).is_empty(),
+            "{message}"
+        );
     }
-    // `E022` is no longer a known gap (#533): its empty pointer is a violation of its own.
+    // A message may quote an empty backtick pair the root document itself holds.
+    let quoting = located(
+        Code::SchemaDefaultNotApplied,
+        at,
+        0,
+        (2, 15, 28),
+        "`` is no type",
+    );
+    assert!(oracles::location_violations(
+        std::slice::from_ref(&quoting),
+        b"openapi: 3.1.0\nx: '``'\n"
+    )
+    .is_empty());
+    assert_eq!(reasons(quoting).len(), 1);
+    // Each rule an `E003` or `E021` breaks is a violation of its own (#534), the empty pointer and
+    // the whole-root span as much as an empty name.
+    for code in [Code::AbsoluteRefUnsupported, Code::VendoredRefDrift] {
+        let all = oracles::location_violations(&[located(code, "", 0, (1, 0, 29), "in ``")], root);
+        assert_eq!(all.len(), 3, "{code:?}: {all:?}");
+    }
+    // An `E022`'s empty pointer is a violation of its own (#533).
     let duplicate = oracles::location_violations(
         &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
         root,
     );
-    assert_eq!(duplicate[0].known, None, "{:?}", duplicate[0].reason);
+    assert_eq!(duplicate.len(), 1, "{duplicate:?}");
     let unlocated = reasons(located(
         Code::SchemaDefaultNotApplied,
         "",
@@ -118,38 +168,6 @@ fn the_location_oracle_sees_each_lost_location() {
         unlocated[1].contains("whole root document"),
         "{unlocated:?}"
     );
-}
-
-/// `E022` points at the duplicate key itself (#533), in YAML and in JSON, through `check` and
-/// `generate` alike, so the location oracle finds nothing to report.
-#[test]
-fn e022_points_at_the_duplicate_key() {
-    let yaml = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      type: object\n      type: string\n";
-    let json = r#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1.0.0"}, "paths": {}, "components": {"schemas": {"Foo": {"type": "object", "type": "string"}}}}"#;
-    // The parser is chosen by extension, and the shared helpers write `openapi.yaml`, so the JSON
-    // document is written as `openapi.json` here to reach the JSON parser.
-    for (name, spec) in [("openapi.yaml", yaml), ("openapi.json", json)] {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-        std::fs::write(dir.join(name), spec).unwrap();
-        let generated = run_generate(&build(dir.join(name), dir.join("client.rs")));
-        let checked = run_check(&Spec::new(dir.join(name)));
-        for report in [checked, generated] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            let duplicate = report
-                .diagnostics()
-                .iter()
-                .find(|d| d.code == Code::DuplicateObjectKey)
-                .expect("duplicate-key diagnostic");
-            assert_eq!(
-                duplicate.pointer.as_str(),
-                "/components/schemas/Foo/type",
-                "{duplicate:#?}"
-            );
-            let violations = oracles::location_violations(report.diagnostics(), spec.as_bytes());
-            assert!(violations.is_empty(), "{violations:?}");
-        }
-    }
 }
 
 /// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
@@ -170,12 +188,7 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
                 pub struct B {\n    pub a: Ba,\n}\n\
                 pub type C = serde_json::Value;\n\
                 }\n";
-    let reasons = |code: &str| -> Vec<String> {
-        oracles::indistinguishable_variants(code)
-            .into_iter()
-            .map(|violation| violation.reason)
-            .collect()
-    };
+    let reasons = |code: &str| -> Vec<String> { oracles::indistinguishable_variants(code) };
     let found = reasons(code);
     assert_eq!(found.len(), 2, "{found:#?}");
     assert!(
@@ -189,16 +202,67 @@ fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
     // `serde_json::Value` payload make another variant undecodable (#535).
     let any_of = code.replace("exactly one", "at least one");
     assert!(reasons(&any_of).is_empty(), "{:#?}", reasons(&any_of));
-    // No issue tracks either defect, so neither is known.
-    assert!(oracles::indistinguishable_variants(code)
-        .iter()
-        .all(|violation| violation.known.is_none()));
     // An enum with no `Deserialize` impl of its own is not a union.
     let not_a_union = code.replace("serde::Deserialize<'de> for U", "Other");
     assert!(
         reasons(&not_a_union).is_empty(),
         "{:#?}",
         reasons(&not_a_union)
+    );
+}
+
+/// [`oracles::unexplained_variants`] excuses a union only for a `W001` that explains it at the
+/// union's own pointer, one union per warning: a warning at another component, a `W001` of another
+/// kind, or one warning shared by two unions leaves the union unexplained.
+#[test]
+fn the_unexplained_variant_oracle_excuses_only_the_union_its_warning_is_at() {
+    let doc = |schemas: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n{schemas}"
+        )
+    };
+    let untyped_u = "    U: { oneOf: [{ type: string }, {}] }\n";
+    let untyped_ub = "    Ub: { oneOf: [{ type: integer }, {}] }\n";
+    let (report, code) = generate_with_code(&doc(&format!("{untyped_u}{untyped_ub}")));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        oracles::indistinguishable_variants(&code).len(),
+        2,
+        "{code}"
+    );
+    // Each union's own warning excuses it.
+    let unexplained = oracles::unexplained_variants(&report, &code);
+    assert!(unexplained.is_empty(), "{unexplained:#?}");
+    // `U`'s warning alone excuses one union, not both.
+    let (only_u, _) = generate_with_code(&doc(untyped_u));
+    assert_eq!(
+        oracles::unexplained_variants(&only_u, &code).len(),
+        1,
+        "{only_u:#?}"
+    );
+    // A warning at another component excuses neither.
+    let elsewhere = generate(&doc("    X: { oneOf: [{ type: string }, {}] }\n"));
+    assert_eq!(
+        oracles::unexplained_variants(&elsewhere, &code).len(),
+        2,
+        "{elsewhere:#?}"
+    );
+    // Nor does a `W001` at the union that is not about its variants.
+    let validation = generate(&doc(
+        "    U: { type: string, pattern: '^a' }\n    Ub: { type: string, pattern: '^a' }\n",
+    ));
+    assert!(
+        validation
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::ValidationKeywordIgnored),
+        "{validation:#?}"
+    );
+    assert_eq!(
+        oracles::unexplained_variants(&validation, &code).len(),
+        2,
+        "{validation:#?}"
     );
 }
 
@@ -263,16 +327,12 @@ fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
         assert_eq!(w014.claim, OutcomeClaim::Independent, "{w014:#?}");
         assert!(claim_violations(*outcome, std::slice::from_ref(w014)).is_empty());
         // As #174 found it, with the claim declared: the outcome refuses it.
-        let declared = Diagnostic {
-            message: W014_GENERATION_WORDING.to_owned(),
-            claim: OutcomeClaim::Generated,
-            ..w014.clone()
-        };
+        let mut declared = w014.clone();
+        declared.message = W014_GENERATION_WORDING.to_owned();
+        declared.claim = OutcomeClaim::Generated;
         // As #174 found it, undeclared: the message states a claim the field does not carry.
-        let undeclared = Diagnostic {
-            message: W014_GENERATION_WORDING.to_owned(),
-            ..w014.clone()
-        };
+        let mut undeclared = w014.clone();
+        undeclared.message = W014_GENERATION_WORDING.to_owned();
         for diagnostic in [declared, undeclared] {
             assert_eq!(
                 claim_violations(*outcome, std::slice::from_ref(&diagnostic)).len(),
@@ -291,11 +351,9 @@ fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
         .iter()
         .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
         .unwrap_or_else(|| panic!("{generated:#?}"));
-    let declared = Diagnostic {
-        message: W014_GENERATION_WORDING.to_owned(),
-        claim: OutcomeClaim::Generated,
-        ..w014.clone()
-    };
+    let mut declared = w014.clone();
+    declared.message = W014_GENERATION_WORDING.to_owned();
+    declared.claim = OutcomeClaim::Generated;
     assert!(claim_violations(Outcome::Generated, &[declared]).is_empty());
 }
 
@@ -587,4 +645,27 @@ fn relocation_moves_every_schema_behind_a_reference() {
     assert_eq!(root["openapi"], "3.1.0");
     let bare = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n";
     assert!(oracles::relocate(bare).is_none());
+}
+
+/// [`oracles::unreferenced_copies`] reports a hash-suffixed copy of a component that nothing names
+/// (#926), and passes the same copy once something names it, a component allocated a suffixed
+/// name because its own collides with a reserved one (`Box`), and an unreferenced
+/// `<Hint>Constraint` copy, which is #924's.
+#[test]
+fn the_unreferenced_copy_oracle_sees_a_copy_nothing_names() {
+    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+                schemas:\n    S0: { type: object }\n    Box: { type: object }\n";
+    let module = |items: &str| format!("pub mod types {{\n{items}\n}}\npub fn op() {{}}\n");
+    let copy =
+        module("    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub struct Box00ba9f5f {}");
+    assert_eq!(
+        oracles::unreferenced_copies(&copy, spec),
+        ["`S071def3c4` is emitted, but nothing names it and it is no component"],
+    );
+    let named = module(
+        "    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub type Alias = S071def3c4;",
+    );
+    assert!(oracles::unreferenced_copies(&named, spec).is_empty());
+    let constraint = module("    pub struct S0 {}\n    pub type S0ConstraintD3cb2251 = f64;");
+    assert!(oracles::unreferenced_copies(&constraint, spec).is_empty());
 }

@@ -19,7 +19,25 @@ exclude_re = [
   # the wasm body's line and column: the native one stays tested, and once an edit moves the line
   # the pattern matches nothing and the two mutants fail the run as missed until it is updated,
   # rather than excluding whatever moved onto that line.
-  '^support-runtime/src/dispatch\.rs:664:5: replace read_capped -> ',
+  '^support-runtime/src/dispatch\.rs:451:5: replace read_capped -> ',
+  # `support-runtime/src/paginate.rs`, the guard on `split_outside`'s `>` arm: whenever
+  # `respect_angles && !in_quote` is false, `in_angle` is already false, so the arm's
+  # `in_angle = false` changes nothing and no input can tell the guard from `true` (or its `&&` from
+  # `||`). Only the `<` arm sets `in_angle`, and it needs `respect_angles`; a quoted string opens
+  # only outside `<…>`, and inside one the `<` arm sets nothing. The `<` arm carries the same
+  # guard text and is tested, so the pattern is anchored on the `>` arm's line and columns, as the
+  # `read_capped` entry above is.
+  '^support-runtime/src/paginate\.rs:240:21: replace match guard respect_angles && !in_quote with true in split_outside$',
+  '^support-runtime/src/paginate\.rs:240:36: replace && with \|\| in split_outside$',
+  # `support-runtime/src/stream.rs`, `json_sequence_next`'s `first > 0` to `>=`: the comparison
+  # admits `first == 0` only to drain `..0`, which removes nothing.
+  '^support-runtime/src/stream\.rs:512:18: replace > with >= in json_sequence_next$',
+  # `support-runtime/src/stream.rs`, `sse_next`'s `pos < buffer.len()` to `<=`: at
+  # `pos == buffer.len()` the field appended is the empty line, whose empty name matches no field,
+  # so `append_sse_field` leaves the event's fields as they were. Both stream entries are anchored
+  # on line and column like the ones above, so an edit that moves either fails the run instead of
+  # excluding another comparison of the same kind in the same function.
+  '^support-runtime/src/stream\.rs:594:20: replace < with <= in sse_next$',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
   # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
   # and no test or caller can observe what the body returns.

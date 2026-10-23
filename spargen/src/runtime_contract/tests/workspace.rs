@@ -44,6 +44,52 @@ enum RootDefaults {
     Off,
 }
 
+#[test]
+fn the_manifests_reported_in_issue_71_pass_as_written() {
+    // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
+    // and `uuid` as a table with its own features; the member inherits both beside the five
+    // core crates. The report said both came back as "generated client requires …". The
+    // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
+    // needs and the half of it no other fixture exercises.
+    let directory = Sandbox::new();
+    let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+    let member_dir = directory.path().join("client");
+    std::fs::create_dir(&member_dir).unwrap();
+    let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+    std::fs::write(
+        &root,
+        format!(
+            "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+             futures-core = \"{}\"\n\
+             uuid = {{ version = \"1.26.0\", features = [\"v4\", \"serde\"] }}\n",
+            core_workspace_dependencies(),
+            FUTURES_CORE.floor
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &member,
+        format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}\
+             futures-core = {{ workspace = true }}\nuuid = {{ workspace = true }}\n",
+            CORE_INHERITED.replace(
+                "reqwest.workspace = true",
+                "reqwest = { workspace = true, features = [\"stream\"] }"
+            )
+        ),
+    )
+    .unwrap();
+
+    let requirements = RuntimeRequirements {
+        streams: true,
+        uuid: true,
+        ..RuntimeRequirements::default()
+    };
+    let result = directory.audit(&member, &requirements);
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    assert_eq!(result.manifests, vec![root, member]);
+}
+
 /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
 /// declared, and returns every diagnostic message the audit produced.
 ///
@@ -1087,8 +1133,9 @@ fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() 
         directory.path().join("Cargo.toml"),
         format!(
             "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-             tokio = {{ version = \"1.53.1\", features = [\"rt\"], optional = true }}\n",
-            core_workspace_dependencies()
+             tokio = {{ version = \"{}\", features = [\"rt\"], optional = true }}\n",
+            core_workspace_dependencies(),
+            TOKIO.floor
         ),
     )
     .unwrap();

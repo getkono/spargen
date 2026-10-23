@@ -2,17 +2,15 @@
 //! and dispatch the response by status into the typed success value or the typed error.
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use crate::ir::{
     Api, ApiKeyLoc, ErrorShape, HttpScheme, MediaType, Operation, SecurityScheme, SuccessShape, Ty,
-    TypeKind,
 };
 use crate::name::{Names, OperationBindings};
 
-use super::responses::response_payload_ty_tokens;
-use super::runtime::to_pascal;
-use super::ty::ty_tokens;
+use super::idents::{status_variant_ident, success_enum_ident};
+use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
 /// `security` alternative whose schemes are all registered, through `support::attach_auth`. Empty
@@ -69,7 +67,7 @@ pub(super) fn error_branch_tokens(
     operation: &Operation,
     api: &Api,
     names: &Names,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> TokenStream {
     let error_ty = quote! { #error_ident };
     let error_shape = operation.responses.error();
@@ -88,45 +86,27 @@ pub(super) fn error_branch_tokens(
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
                 .map(|(status, _)| runtime_status_spec(status))
                 .collect::<Vec<_>>();
-            let classify = if is_bytes_ty(api, *body_ty) {
-                quote! {
-                    support::classify_error_bytes(
-                        &self.core,
-                        response,
-                        &[#(#documented),*],
-                    )
-                    .await
-                }
+            // The raw-bytes classifier builds the newtype through `From<Bytes>` and takes no type
+            // argument; every other codec's classifier decodes into the aliased `E`.
+            let classifier = if is_bytes_ty(api, *body_ty) {
+                quote! { classify_error_bytes }
             } else {
                 match operation.responses.single_error_media() {
-                    Some(MediaType::Xml) => quote! {
-                        support::classify_error_xml::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
-                    Some(MediaType::Text) => quote! {
-                        support::classify_error_text::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
+                    Some(MediaType::Xml) => quote! { classify_error_xml::<#error_ty> },
+                    Some(MediaType::Text) => quote! { classify_error_text::<#error_ty> },
                     // JSON. A streaming error media never reaches this arm: lowering rejects a
                     // bodied stream on the error side (`Responses::stream_outside_single_success`),
                     // since a stream cannot be classified as one whole body.
-                    _ => quote! {
-                        support::classify_error::<#error_ty>(
-                            &self.core,
-                            response,
-                            &[#(#documented),*],
-                        )
-                        .await
-                    },
+                    _ => quote! { classify_error::<#error_ty> },
                 }
+            };
+            let classify = quote! {
+                support::#classifier(
+                    &self.core,
+                    response,
+                    &[#(#documented),*],
+                )
+                .await
             };
             quote! {
                 Err(#classify)
@@ -198,7 +178,7 @@ pub(super) fn success_decode_tokens(
     names: &Names,
     bindings: &OperationBindings,
     success_ty: &TokenStream,
-    error_ident: &proc_macro2::Ident,
+    error_ident: &crate::name::Ident,
 ) -> (TokenStream, Option<TokenStream>) {
     let request_binding = &bindings.request;
     let reconnect_request_binding = &bindings.reconnect_request;
@@ -234,11 +214,7 @@ pub(super) fn success_decode_tokens(
         // variant is an unexpected-status error — there is no untyped fallback. Every body an
         // error keeps goes through a runtime helper that caps it at `max_error_body`.
         SuccessShape::Enum(entries) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let enum_ident = success_enum_ident(method_ident);
+            let enum_ident = success_enum_ident(operation, names);
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
@@ -340,7 +316,7 @@ fn variant_body_decode(
     body_ty: Ty,
     success_variant: Option<TokenStream>,
 ) -> TokenStream {
-    let ty = response_payload_ty_tokens(body_ty, names, true);
+    let ty = boxed_ty_tokens(body_ty, names, true);
     let media = response_media_for_spec(&operation.responses, spec);
     let bytes = if success_variant.is_some() {
         quote! { body }
@@ -379,33 +355,10 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
-            let method_ident = names
-                .operations
-                .get(&operation.id)
-                .expect("operation name allocated");
-            let ident = success_enum_ident(method_ident);
+            let ident = success_enum_ident(operation, names);
             quote! { #ident }
         }
     }
-}
-
-/// The type name of an operation's multi-status success response enum, derived from the method name
-/// (mirroring how the error enum is named `{Method}Error`).
-pub(super) fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
-    format_ident!("{}Response", to_pascal(method_ident.as_str()))
-}
-
-/// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
-/// code, `Status2xx` for a range, and `Default` for [`StatusSpec::Default`](crate::ir::StatusSpec)
-/// — the label [`crate::name::status_label`] gives the same selector's header struct.
-/// Deterministic and, within one enum, unique by construction (each selector appears once).
-/// Routed through the `name` escaper for validity.
-pub(super) fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
-    let raw = crate::name::status_label(spec);
-    format_ident!(
-        "{}",
-        crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
-    )
 }
 
 /// The runtime `support::StatusSpec` tokens for a documented status selector. `default` maps to
@@ -427,24 +380,13 @@ fn response_media_for_spec(
     responses.get(spec).and_then(|response| response.media)
 }
 
-/// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
-/// only the definition's kind, which is sound because `LowerCtx::lower_response` (in
-/// `oas31/lower/response.rs`) refuses a nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>`
-/// body reaches these decode sites.
-pub(super) fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
-    matches!(
-        api.types.get(ty.id).map(|definition| &definition.kind),
-        Some(TypeKind::Bytes)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use crate::ir::{MediaType, Response, Responses, StatusSpec, Ty, TypeId};
 
-    /// Issue #233: `default` was once the selector `Range(0)`, so a `0XX` entry decoded under the
-    /// `default` response's codec (or the fallback, with no `default`), and its variant and
-    /// runtime selector collided with `default`'s. Each selector now reads only its own response.
+    /// Issue #233: each status selector reads only its own response, so a `0XX` entry decodes
+    /// under its own codec, not the `default` response's (or the fallback, with no `default`), and
+    /// its variant and runtime selector stay distinct from `default`'s.
     #[test]
     fn each_status_selector_reads_its_own_response_media_and_label() {
         let response = |media| Response {
@@ -455,6 +397,7 @@ mod tests {
             }),
             media: Some(media),
             stream: None,
+            accept: None,
             headers: Vec::new(),
         };
         let with_default = Responses {
@@ -495,8 +438,6 @@ mod tests {
             super::status_variant_ident(StatusSpec::Range(0)).to_string(),
             "Status0xx"
         );
-        assert_eq!(StatusSpec::Default.display_label(), "default");
-        assert_eq!(StatusSpec::Range(0).display_label(), "0XX");
         assert_eq!(
             super::runtime_status_spec(StatusSpec::Default).to_string(),
             quote::quote! { support::StatusSpec::Any }.to_string()

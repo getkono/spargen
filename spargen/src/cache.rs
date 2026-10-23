@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
-use crate::source::{sha256_hex, InputBundle};
+use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
 use crate::{Build, Code, Spec};
 
-const CACHE_FORMAT: u32 = 3;
+const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -34,7 +34,7 @@ impl InputSnapshot {
             .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
             .collect::<Vec<_>>();
         let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
-        let lock = spec_dir.join("spargen.lock");
+        let lock = spec_dir.join(LOCK_FILE_NAME);
         // The applied config files are read like `spargen.lock`: a file that existed when it was
         // applied and cannot be read now fails the build rather than dropping out of the inputs.
         let lock = lock.is_file().then_some(lock);
@@ -42,9 +42,11 @@ impl InputSnapshot {
             match std::fs::read(path) {
                 Ok(bytes) => inputs.push((path.clone(), bytes)),
                 Err(error) => {
-                    diagnostics.emit(cache_diagnostic(format!(
-                        "failed to read build input `{path}`: {error}"
-                    )));
+                    Diagnostic::at_root(
+                        Code::InvalidInput,
+                        format!("failed to read build input `{path}`: {error}"),
+                    )
+                    .emit(&mut diagnostics);
                     return Err(diagnostics);
                 }
             }
@@ -122,6 +124,10 @@ pub(crate) fn finalized(rendered: &str, input_digest: &str) -> (String, String) 
     )
 }
 
+/// The content digest of the generated file at `path` when it is still the output of
+/// `input_digest`. `None`, which makes the caller regenerate, when the file is unreadable, lacks
+/// either header line, records a different input digest, or its body does not hash to the
+/// recorded content digest (a manual edit).
 pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let first = bytes.iter().position(|byte| *byte == b'\n')?;
@@ -139,9 +145,14 @@ pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<Str
 
 pub(crate) struct CachedRun {
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Whether the seeding run's diagnostic list was cut at `batch_cap`.
+    pub(crate) truncated: bool,
     pub(crate) requirements: RuntimeRequirements,
 }
 
+/// The recorded run for this input and output. `None`, which makes the caller rerun the pipeline,
+/// when the cache file is unreadable or does not parse, or its format, input digest or content
+/// digest differs from the current one.
 pub(crate) fn read_cache(
     path: &Utf8Path,
     input_digest: &str,
@@ -166,6 +177,7 @@ pub(crate) fn read_cache(
         .collect();
     Some(CachedRun {
         diagnostics,
+        truncated: record.truncated,
         requirements: record.requirements,
     })
 }
@@ -175,6 +187,7 @@ pub(crate) fn write_cache(
     input_digest: &str,
     content_digest: &str,
     diagnostics: &[Diagnostic],
+    truncated: bool,
     requirements: &RuntimeRequirements,
 ) -> Result<(), String> {
     let record = CacheRecord {
@@ -182,12 +195,16 @@ pub(crate) fn write_cache(
         input_sha256: input_digest.to_owned(),
         content_sha256: content_digest.to_owned(),
         diagnostics: diagnostics.iter().map(CachedDiagnostic::from).collect(),
+        truncated,
         requirements: requirements.clone(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
 }
 
+/// Write the rendered module to `path`, leaving the file untouched when it already holds exactly
+/// `contents`, so an [`Outcome::Generated`](crate::Outcome::Generated) run rewrites the output
+/// only when its bytes change.
 pub(crate) fn write_output(path: &Utf8Path, contents: &str) -> Result<(), String> {
     if std::fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
         return Ok(());
@@ -241,25 +258,14 @@ fn append(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(bytes);
 }
 
-fn cache_diagnostic(message: String) -> Diagnostic {
-    Diagnostic {
-        code: Code::InvalidInput,
-        severity: Code::InvalidInput.severity(),
-        pointer: JsonPointer::root(),
-        span: None,
-        message,
-        remedy: None,
-        interpretation: None,
-        claim: OutcomeClaim::of(Code::InvalidInput.severity()),
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct CacheRecord {
     format: u32,
     input_sha256: String,
     content_sha256: String,
     diagnostics: Vec<CachedDiagnostic>,
+    /// Stored so a cache hit reports the truncation of the run it replays.
+    truncated: bool,
     requirements: RuntimeRequirements,
 }
 
@@ -268,6 +274,7 @@ struct CachedDiagnostic {
     code: String,
     pointer: String,
     span: Option<CachedSpan>,
+    file: Option<String>,
     message: String,
     remedy: Option<String>,
     interpretation: Option<u16>,
@@ -282,6 +289,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             code: value.code.as_str().to_owned(),
             pointer: value.pointer.as_str().to_owned(),
             span: value.span.map(CachedSpan::from),
+            file: value.file.clone(),
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
@@ -298,6 +306,7 @@ impl CachedDiagnostic {
             severity: code.severity(),
             pointer: JsonPointer::from(self.pointer),
             span: self.span.map(CachedSpan::into_span),
+            file: self.file,
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),
@@ -608,7 +617,8 @@ components:
     fn a_cache_hit_replays_the_diagnostics_of_the_run_that_seeded_it() {
         // A cached run reports what the original run reported. Without this a warning would be
         // announced once and then vanish on every later build, which is worse than never
-        // reporting it — the spec still contains the construct.
+        // reporting it — the spec still contains the construct. The warning sits in a `$ref`'d
+        // file, so the replay must also keep the file its span lies in (the record's `file`).
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openapi.yaml");
         std::fs::write(
@@ -618,8 +628,13 @@ info: { title: Cache, version: 1.0.0 }
 paths: {}
 components:
   schemas:
-    Capped: { type: string, minLength: 3 }
+    Capped: { $ref: './schemas.yaml#/Capped' }
 "#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("schemas.yaml"),
+            "Capped: { type: string, minLength: 3 }\n",
         )
         .unwrap();
         let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
@@ -629,28 +644,85 @@ components:
 
         let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
-        let mut seeded: Vec<&str> = first
+        let mut seeded: Vec<(&str, Option<&str>)> = first
             .diagnostics()
             .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.file.as_deref()))
             .collect();
         seeded.sort_unstable();
+        let warned_in = seeded
+            .iter()
+            .find(|(code, _)| *code == "W001")
+            .unwrap_or_else(|| {
+                panic!("the fixture must warn so there is something to replay: {seeded:?}")
+            })
+            .1;
         assert!(
-            seeded.contains(&"W001"),
-            "the fixture must warn so there is something to replay: {seeded:?}"
+            warned_in.is_some_and(|file| file.ends_with("schemas.yaml")),
+            "the seeding run must name the referenced file the warning lies in: {seeded:?}"
         );
 
         let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
-        let mut replayed: Vec<&str> = second
+        let mut replayed: Vec<(&str, Option<&str>)> = second
             .diagnostics()
             .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
+            .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.file.as_deref()))
             .collect();
         replayed.sort_unstable();
         assert_eq!(
             replayed, seeded,
-            "a cache hit lost the original diagnostics"
+            "a cache hit lost the original diagnostics or the files they lie in"
+        );
+    }
+
+    #[test]
+    fn a_cache_hit_replays_the_truncation_of_the_run_that_seeded_it() {
+        // The record once stored the diagnostics but not whether they were cut at `batch_cap`,
+        // so a second build presented a partial list as the whole one (#724).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openapi.yaml");
+        std::fs::write(
+            &root,
+            r#"openapi: 3.1.0
+info: { title: Cache, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    First: { type: string, minLength: 3 }
+    Second: { type: string, maxLength: 5 }
+"#,
+        )
+        .unwrap();
+        let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
+            .batch_cap(1)
+            .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
+            .cargo(CargoIntegration::Off);
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        assert!(
+            first.truncated(),
+            "the fixture must warn past batch_cap: {first:#?}"
+        );
+
+        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
+        assert!(
+            second.truncated(),
+            "a cache hit presented a truncated list as complete: {second:#?}"
+        );
+        // Past the outcome line, which says `cached` rather than `generated`, the hit prints what
+        // the seeding run printed: the same diagnostics and the same truncation notice.
+        let body = |report: &crate::Report| {
+            let text = report.to_string();
+            text.split_once('\n').map(|(_, rest)| rest.to_owned())
+        };
+        assert_eq!(body(&second), body(&first));
+        assert!(
+            body(&second).is_some_and(|text| text.contains("truncated at batch_cap")),
+            "{second}"
         );
     }
 

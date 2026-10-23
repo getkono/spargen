@@ -1,5 +1,5 @@
 //! # Subsystem: codegen
-//! layer-deps: ir, name, support, diag
+//! layer-deps: ir, name, support
 //!
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
 //! deterministic item ordering and `prettyplease` formatting. Codegen never
@@ -11,7 +11,9 @@
 //! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
 //! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
-//! module and the root re-exports), and the shared [`docs`] and [`ty`] renderers.
+//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, and [`idents`] (the
+//! allocated-name lookups and status variant names the operation, blocking-client, parameter,
+//! response and dispatch emitters read).
 
 mod blocking;
 mod body;
@@ -19,6 +21,7 @@ mod client;
 mod dispatch;
 mod docs;
 mod format;
+mod idents;
 mod models;
 mod operation;
 mod params;
@@ -33,8 +36,9 @@ use quote::{format_ident, quote};
 
 use format::format_tokens;
 
-/// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
-/// features: when off, the corresponding `format` mappings fall back to `String`.
+/// Options controlling code generation. The `uuid`/`time` flags carry the `Spec::uuid` /
+/// `Spec::time` knobs into the one generated module: when off, the corresponding `format`
+/// mappings fall back to `String`.
 #[derive(Debug, Clone)]
 pub(crate) struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).
@@ -46,36 +50,35 @@ pub(crate) struct CodegenOptions {
     pub(crate) error_body_cap: usize,
 }
 
+/// The default cap on bytes of a response body retained on generated error variants, which
+/// [`crate::Spec`] starts from.
+pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
+
+/// The options a `Spec` with every knob at its default selects; only tests build them this way.
+#[cfg(test)]
 impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
             feature_uuid: true,
             feature_time: true,
-            error_body_cap: 64 * 1024,
+            error_body_cap: DEFAULT_ERROR_BODY_CAP,
         }
     }
 }
 
-/// A single generated source file, already formatted rustfmt-clean via `prettyplease`.
-#[derive(Debug, Clone)]
-pub(crate) struct GeneratedFile {
-    /// The formatted source.
-    pub(crate) contents: String,
-}
-
-/// The complete generated code for one client (models, client, embedded support).
+/// The complete generated code for one client (models, client, embedded support): one module.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GeneratedCode {
-    /// The generated files, in deterministic order.
-    pub(crate) files: Vec<GeneratedFile>,
+    /// The module's source, already formatted rustfmt-clean via `prettyplease`.
+    pub(crate) contents: String,
 }
 
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
 /// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
-/// `W003`, lower to typed per-operation response enums).
+/// lowering, so it takes no `Diagnostics` (multi-status responses lower to typed per-operation
+/// response enums).
 pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> GeneratedCode {
     let uses_streams = api.uses_streams();
     // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
@@ -89,8 +92,8 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
     let blocking = blocking::emit_blocking_client(api, names);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
-    // The root surface is emitted from the lists `runtime` owns, which `error_type_ident` also
-    // reads.
+    // The root surface is emitted from the lists `name` owns, whose root scope reserves them before
+    // allocating the operation types declared beside them.
     let root_reexport = |names: &[&str]| {
         let idents = names.iter().map(|name| format_ident!("{}", name));
         quote! {
@@ -98,9 +101,9 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
             pub use support::{ #(#idents),* };
         }
     };
-    let root_exports = root_reexport(runtime::ROOT_REEXPORTS);
-    let stream_exports = uses_streams.then(|| root_reexport(runtime::STREAM_ROOT_REEXPORTS));
-    let datetime_exports = uses_time.then(|| root_reexport(runtime::DATETIME_ROOT_REEXPORTS));
+    let root_exports = root_reexport(crate::name::ROOT_REEXPORTS);
+    let stream_exports = uses_streams.then(|| root_reexport(crate::name::STREAM_ROOT_REEXPORTS));
+    let datetime_exports = uses_time.then(|| root_reexport(crate::name::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
         #root_exports
         #stream_exports
@@ -117,7 +120,5 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
             format!("spargen internal codegen error: {error}")
         )
     });
-    GeneratedCode {
-        files: vec![GeneratedFile { contents }],
-    }
+    GeneratedCode { contents }
 }

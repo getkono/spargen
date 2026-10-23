@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Docs, Field, FieldDefault, JsonCategory, Openness, Prim, ScalarEnum,
-    ScalarRepr, ScalarValue, Struct, Ty, TypeId, TypeKind, Union,
+    ScalarRepr, ScalarValue, Struct, Ty, TypeKind, Union,
 };
 
 use super::defaults::reclassify_default;
@@ -14,6 +14,17 @@ use super::nullability::{non_nullable, type_accepts_null};
 use super::{LowerCtx, Refiner, ScopeReach};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// Where the schema `ty` lowers from was authored: the location [`Self::meet_locations`]
+    /// recorded for a meet struct, else the type's own provenance, unless that is the document root
+    /// every synthesized type falls back to.
+    fn authored_location(&self, ty: Ty) -> Option<Provenance> {
+        if let Some(location) = self.meet_locations.get(&ty.id) {
+            return Some(location.clone());
+        }
+        let def = self.graph.get(ty.id)?;
+        (!def.provenance.pointer.as_str().is_empty()).then(|| def.provenance.clone())
+    }
+
     /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
     /// value must satisfy every member, so any member denying unknown keys forbids them outright),
     /// whatever the other side's value schema is. Two typed value schemas merge to their typed
@@ -92,10 +103,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // made about the intersection — `is_in_progress_root`'s own documentation says the only
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
-        // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` found no meet for it
-        // (it now refuses by a `Reserved` arm of its own), and the null rescue typed the
-        // position as the exact JSON null type. The result was `pub type X = ();` — a client that
+        // identity lets one through, and the rescue below would convert that unanswerable
+        // intersection into a confident wrong answer: finding no non-null meet (which
+        // `intersect_non_null` refuses by a `Reserved` arm of its own), the null rescue would type
+        // the position as the exact JSON null type. That is `pub type X = ();` — a client that
         // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
         // which is the standing invariant's fourth, silent behaviour.
         //
@@ -129,6 +140,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
+        // The exact JSON `null` has no non-null value, so its non-null meet with anything is empty;
+        // the `null` both sides may admit is settled below.
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
             Err(NoMeet::Empty)
         } else {
@@ -383,11 +396,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         existing.required = existing.required || field.required;
         Some(intersection.map(|met| {
             existing.ty = met;
-            if existing.required {
-                if let Some(default) = &mut existing.default {
-                    default.applied = None;
-                }
-            }
+            drop_applied_default_if_required(existing);
         }))
     }
 
@@ -541,70 +550,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         Ok(meet)
     }
-
-    /// Whether two lowered value types would emit the *same* Rust type as a shared map value, so
-    /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
-    /// overflow map. A bounded structural equivalence:
-    ///
-    /// * different `nullable` — never the same;
-    /// * equal `TypeId` (with equal `nullable`) — a shared `$ref` or the single-entry case;
-    /// * otherwise, for distinct ids with equal `nullable`, compare the def kinds structurally but
-    ///   only for *leaf* shapes that have no per-inline-schema identity: `Primitive` (same `Prim`),
-    ///   `Bytes`, `Null`, `Never`, `Any`, and `Array` (recursing on the element). Composite kinds
-    ///   (`Struct`/`Enum`/`Tuple`/`Union`) generate a distinct named Rust type per inline schema,
-    ///   so two such inline shapes are treated as heterogeneous (→ `E005`) rather than silently
-    ///   merged, and so is a pair either side of which is an unlowered reservation or has no def.
-    ///
-    /// `boxed` is deliberately ignored: it is a use-site indirection modifier, not part of the map
-    /// value's emitted type (the map value is never boxed).
-    ///
-    /// The `Array` recursion is *not* structurally bounded — array element types can form `$ref`
-    /// cycles (`A = [B]`, `B = [A]`) — so a visited-pair guard makes it terminate: an `(a.id, b.id)`
-    /// pair already on the comparison stack is a co-recursive back-edge and compares equal (the two
-    /// types are being compared identically along the cycle, so they are structurally equal there).
-    pub(super) fn same_map_value_type(&self, a: Ty, b: Ty) -> bool {
-        self.same_map_value_type_guarded(a, b, &mut Vec::new())
-    }
-
-    fn same_map_value_type_guarded(
-        &self,
-        a: Ty,
-        b: Ty,
-        visiting: &mut Vec<(TypeId, TypeId)>,
-    ) -> bool {
-        if a.nullable != b.nullable {
-            return false;
-        }
-        if a.id == b.id {
-            return true;
-        }
-        let pair = (a.id, b.id);
-        if visiting.contains(&pair) {
-            // Co-recursive back-edge: the same pair is already being compared further up the stack.
-            // Along a cycle the two types are compared identically, so they are structurally equal.
-            return true;
-        }
-        visiting.push(pair);
-        let result = match (self.graph.get(a.id), self.graph.get(b.id)) {
-            (Some(a_def), Some(b_def)) => match (&a_def.kind, &b_def.kind) {
-                (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
-                (TypeKind::Bytes, TypeKind::Bytes) => true,
-                (TypeKind::Null, TypeKind::Null) | (TypeKind::Never, TypeKind::Never) => true,
-                (TypeKind::Any, TypeKind::Any) => true,
-                (TypeKind::Array(x), TypeKind::Array(y)) => {
-                    self.same_map_value_type_guarded(**x, **y, visiting)
-                }
-                // An unlowered body cannot be proven the same value type as anything else, so the
-                // pair is heterogeneous and the map is rejected with `E005` rather than merged on
-                // a guess. The same reservation on both sides already answered `true` by id.
-                (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => false,
-                _ => false,
-            },
-            _ => false,
-        };
-        visiting.pop();
-        result
-    }
 }
 
 /// Why two lowered types have no typed intersection. The two answers call for different handling,
@@ -616,8 +561,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// every caller reports it (`E013`) instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NoMeet {
-    /// No JSON value satisfies both sides: their value categories are disjoint (a string and an
-    /// integer), or their scalar `enum` sets share no value.
+    /// No non-null JSON value satisfies both sides: their value categories are disjoint (a string
+    /// and an integer), their scalar `enum` sets share no value, one side is the exact JSON `null`
+    /// or uninhabited (`Never`), a property one side requires has no value both admit, or no
+    /// branch of a union side meets the other side. [`LowerCtx::intersect_types`] still answers
+    /// `null` for it where both sides admit `null`.
     Empty,
     /// The sides may share values, but no single Rust type represents the ones they share — `uuid`
     /// and `contentEncoding: base64` are both annotations on a string, so every string satisfies
@@ -631,15 +579,9 @@ pub(super) enum NoMeet {
 /// a (base64) JSON string.
 pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
     match kind {
-        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
-        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
-        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
-        | TypeKind::Bytes => Some(JsonCategory::String),
-        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
-            ScalarRepr::String => JsonCategory::String,
-            ScalarRepr::Int => JsonCategory::Number,
-            ScalarRepr::Bool => JsonCategory::Boolean,
-        }),
+        TypeKind::Primitive(primitive) => Some(primitive_category(*primitive)),
+        TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(repr_category(enumeration.repr)),
         TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
         TypeKind::Struct(_) => Some(JsonCategory::Object),
         // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
@@ -653,9 +595,9 @@ pub(super) fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
 }
 
 /// Why two non-null kinds that no intersection rule meets do not meet: empty when one side is
-/// uninhabited or the two sit in disjoint JSON categories, and otherwise unrepresentable — two
-/// strings of different formats, tuples of different lengths — because nothing here proves that
-/// no value satisfies both.
+/// uninhabited (`Never`) or the two sit in disjoint JSON categories, and otherwise unrepresentable
+/// — two strings of different formats, tuples of different lengths — because nothing here proves
+/// that no value satisfies both.
 pub(super) fn no_meet(left: &TypeKind, right: &TypeKind) -> NoMeet {
     if matches!(left, TypeKind::Never) || matches!(right, TypeKind::Never) {
         return NoMeet::Empty;
@@ -687,15 +629,28 @@ fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     })
 }
 
-fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
-    match repr {
-        ScalarRepr::String => matches!(
-            primitive,
-            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
-        ),
-        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
-        ScalarRepr::Bool => primitive == Prim::Bool,
+/// The JSON category every value of a scalar primitive falls in.
+fn primitive_category(primitive: Prim) -> JsonCategory {
+    match primitive {
+        Prim::Bool => JsonCategory::Boolean,
+        Prim::I32 | Prim::I64 | Prim::F64 => JsonCategory::Number,
+        Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date => JsonCategory::String,
     }
+}
+
+/// The JSON category every member of a scalar enum backed by `repr` falls in.
+fn repr_category(repr: ScalarRepr) -> JsonCategory {
+    match repr {
+        ScalarRepr::String => JsonCategory::String,
+        ScalarRepr::Int => JsonCategory::Number,
+        ScalarRepr::Bool => JsonCategory::Boolean,
+    }
+}
+
+/// Whether an enum backed by `repr` and a `primitive` sit in one JSON category, so their
+/// intersection narrows the enum to the primitive.
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    repr_category(repr) == primitive_category(primitive)
 }
 
 /// Whether one side of an intersection carries a field for the wire name `wire`, declared or only
@@ -713,7 +668,7 @@ pub(super) fn carries_key(fields: &[Field], wire: &str) -> bool {
 /// only the keys no side declares) does not reach a property the other side declares. So the
 /// declared field is kept whole — its type, default, flags and `xml` hints — and the requirement
 /// is added to it. Two declarations, or two undeclared fields, are left to the caller to intersect.
-pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
+fn take_declaration(existing: &mut Field, other: &Field) -> bool {
     if existing.undeclared == other.undeclared {
         return false;
     }
@@ -722,12 +677,19 @@ pub(super) fn take_declaration(existing: &mut Field, other: &Field) -> bool {
         *existing = other.clone();
     }
     existing.required = required;
-    if required {
-        if let Some(default) = &mut existing.default {
+    drop_applied_default_if_required(existing);
+    true
+}
+
+/// Keep a required field consistent with its default: a serde default fires only for an absent
+/// optional field, so a required field drops its applied `default`, which stays documented in
+/// rustdoc.
+pub(super) fn drop_applied_default_if_required(field: &mut Field) {
+    if field.required {
+        if let Some(default) = &mut field.default {
             default.applied = None;
         }
     }
-    true
 }
 
 /// The `default` the merged field of an intersection keeps for a repeated property, given every

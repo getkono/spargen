@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|server-variable-type-changed|servers::Prod::region|server variable type `servers::ProdRegion` -> `servers::ProdRegion84222325`
+minor|server-added|servers::ProdRegion|new server builder
+bump=major

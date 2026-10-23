@@ -11,16 +11,15 @@ use super::*;
 /// comment beside it.** Clauses that give advice, describe how the crate is built, give a
 /// rationale, or restate what Cargo and rustc do afterwards are not asserted, because nothing
 /// in this module observes them — but each is still *listed*, by `unasserted`, with the reason
-/// it is exempt. No count of the body's propositions is offered: three counts have been
-/// produced for this text and each was wrong.
+/// it is exempt. No count of the body's propositions is offered.
 ///
 /// The listing is what makes the rule total. The body is claimed byte by byte: every
 /// `promises` and `unasserted` entry marks the one span it matches, and outside those spans
 /// only punctuation and the connectives in `CONNECTIVES` may stand. So a sentence typed into
 /// the body — and into the expected file beside it — fails here until its author either cites
 /// the fixture that makes it true or states, in an `unasserted` entry, why nothing observes it.
-/// Without that coverage check, a sentence added to both copies left every assertion here
-/// passing, however little of it was true (#209). What the check cannot do is judge a
+/// Without that coverage check, a sentence added to both copies would leave every assertion
+/// here passing, however little of it is true (#209). What the check cannot do is judge a
 /// classification: listing a resolver claim as `unasserted` passes, and only review of that
 /// entry catches it. Nor does it judge the connectives, which may be swapped for one another.
 ///
@@ -47,24 +46,21 @@ use super::*;
 ///
 /// What the three therefore deliver, exactly: **no clause can change, and none can be added,
 /// without someone re-typing it in the test and classifying it there.** They do not make the
-/// body true. A clause that is false today stays false with every guard green — the promise
-/// that a root which cannot be *found* is reported differently from one that cannot be *read*
-/// was exactly that, pinned here and mirrored in the expected file while contradicting
-/// `workspace_root`, until the resolver was made to keep it (#171) — and a maintainer who
+/// body true. A false clause stays false with every guard green (#171), and a maintainer who
 /// re-types a change into the expected file has made this test agree with it, not verified
-/// it. Holding the prose to the code is a wider question than this one code, and is **#137**.
+/// it.
 #[test]
 fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     let explain = Code::RuntimeDependencyContract.explain();
     // The expected body lives in its own file, not in this one, and that placement is the
-    // guard. With the mirror inline, a single find-and-replace over the module's source
-    // rewrote the mirror and every clause assertion in one stroke — negating "taking the
-    // version from there" that way left the suite green. An edit to `code.rs` must now be
-    // re-typed in a second file that no edit to this module can reach.
+    // guard. With the mirror inline, a single find-and-replace over the module's source would
+    // rewrite the mirror and every clause assertion in one stroke, and leave the suite green.
+    // An edit to `code.rs` must be re-typed in a second file that no edit to this module can
+    // reach.
     // It sits beside `runtime_contract/`, under `src/`, so it ships in the published crate and
     // this test still compiles there. Being test-only, it is not needed to build the packaged
-    // library, so `every_included_file_ships_in_the_published_crate` in `tests/layering.rs`
-    // is what holds it in the package.
+    // library, so `every_included_file_ships_in_the_published_crate` in
+    // `tests/layering/packaging.rs` is what holds it in the package.
     // The file carries a trailing newline, as a text file should; the explain body does not.
     let expected = include_str!("../../runtime_contract_e023_explain.txt").trim_end_matches('\n');
 
@@ -228,7 +224,7 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
 
     // The outcomes a *found* root has, and the promise that the diagnostic tells them apart
     // instead of reporting the crate as missing. Each fixture below observes one of them, and
-    // the clause now says only what the resolver does: `check_declaration` renders
+    // the clause says only what the resolver does: `check_declaration` renders
     // `WorkspaceOrigin::Resolved` as "declares no `x` there" and `Unreadable` as "could not be
     // read", so a found root's two failures are distinguished.
     let unresolved_outcomes: &[&str] = &[

@@ -1,9 +1,11 @@
 //! The generation inputs: [`Spec`] (*what* is generated) and [`Build`] (*where* it is written).
 //!
-//! Every entry point takes one of these two. [`check`](crate::check), [`diff`](crate::diff),
-//! [`vendor`](crate::vendor) and [`requirements`](crate::requirements) analyse a spec and write
-//! nothing, so they take a `Spec`; only [`generate`](crate::generate) writes a file, so only it
-//! takes a `Build`, and the analysis entry points demand no output path they would never use.
+//! Every entry point takes one of these two. [`check`](crate::check), [`diff`](crate::diff) and
+//! [`requirements`](crate::requirements) analyse a spec and write nothing, so they take a `Spec`.
+//! [`vendor`](crate::vendor) takes a `Spec` too: it writes only beside the spec
+//! (`.spargen/vendor/` and `spargen.lock`). [`generate`](crate::generate) writes the generated
+//! module, so it takes a `Build`, and the other entry points demand no output path they would
+//! never use.
 //!
 //! Both types have private fields and chained setters, so a new knob is an additive change rather
 //! than a breaking one.
@@ -23,9 +25,10 @@
 //! carve = false           # auto-carve unsupported constructs (same as `--carve`)
 //! batch_cap = 100         # max diagnostics collected before batching stops
 //! error_body_cap = 65536  # max bytes of a response body retained on error variants
-//! open_narrowing = false  # open a response body's string `const` narrowings (default false)
+//! open_narrowing = false  # open response-body string `enum`/`const` narrowings (default false)
 //!
-//! # Zero or more omit rules. The rule KIND is discriminated by field presence. A path/name (or
+//! # Zero or more omit rules. The rule KIND is discriminated by field presence, and a key that
+//! # kind does not use (`file` beside `path`, say) is an error. A path/name (or
 //! # pointer) value that contains a glob metacharacter (`*`, `**`, `?`) is matched as a glob and
 //! # removes EVERY matching construct (bulk); a value with no metacharacter is an exact rule.
 //! [[omit]]
@@ -45,10 +48,9 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{Omit, OmitRule, UnknownOmitToken};
 
-/// The default cap on bytes of a response body retained on generated error variants.
-pub(crate) const DEFAULT_ERROR_BODY_CAP: usize = 64 * 1024;
 /// The default cap on diagnostics collected before batching stops.
 pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 
@@ -208,7 +210,8 @@ impl Spec {
     }
 
     /// Apply `spargen.toml` from beside the spec, if one is there. A missing file is not an
-    /// error — this is the discovery path every entry point uses by default.
+    /// error. `generate_api!` always calls this, and the CLI does when no `--config` is given; a
+    /// `build.rs` that wants the file calls it explicitly.
     ///
     /// A file that is found is recorded as [`config_file`](Self::config_file) records it. A
     /// missing one records nothing: creating `spargen.toml` later does not rerun a build on its
@@ -233,7 +236,7 @@ impl Spec {
             .map_err(|error| ConfigError::new(format!("invalid config file `{path}`: {error}")))?;
         if file.features.is_some() {
             // `deny_unknown_fields` alone would say "unknown field `features`", which does not
-            // tell a 0.2 user what to do. The keys moved to the top level in 0.3.
+            // tell the author of a file that still carries the table where its keys belong.
             return Err(ConfigError::new(format!(
                 "invalid config file `{path}`: the `[features]` table was removed; \
                  move its keys (`carve`, `batch_cap`, …) to the top level of the file"
@@ -279,8 +282,9 @@ impl Spec {
 /// degradation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CargoIntegration {
-    /// Integrate when running under a build script; otherwise degrade with `W013` (directives)
-    /// and `W012` (audit). The right choice for a `build.rs`.
+    /// Integrate when running under a build script, degrading with `W012` (audit skipped) when
+    /// that build script locates no consumer manifest; outside a build script, degrade with
+    /// `W013` (no directives, audit skipped). The right choice for a `build.rs`.
     #[default]
     Auto,
     /// Integrate, or fail with `E024`. Use this when a missing rebuild trigger would ship a
@@ -377,7 +381,7 @@ struct FileConfig {
 
 /// An `[[omit]]` entry. The rule kind is discriminated by which fields are present (TOML has no
 /// native enums): `pointer` ⇒ Pointer, `component`+`name` ⇒ Component, `method`+`path` ⇒
-/// Operation, `path` alone ⇒ Path.
+/// Operation, `path` alone ⇒ Path. A key the selected kind does not use is an error.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OmitToml {
@@ -391,10 +395,8 @@ struct OmitToml {
 
 impl OmitToml {
     fn to_rule(&self) -> Result<OmitRule, String> {
+        self.reject_foreign_keys()?;
         if let Some(pointer) = &self.pointer {
-            if self.path.is_some() || self.method.is_some() || self.component.is_some() {
-                return Err("`pointer` cannot be combined with path/method/component".to_owned());
-            }
             return Ok(OmitRule::Pointer {
                 file: self.file.clone().map(Into::into),
                 pointer: pointer.clone().into(),
@@ -423,6 +425,48 @@ impl OmitToml {
             };
         }
         Err("must specify one of `path`, `component` (+`name`), or `pointer`".to_owned())
+    }
+
+    /// Reject a key the entry's kind does not use. The kind is picked by the same presence order
+    /// [`to_rule`](Self::to_rule) dispatches on, so a well-spelled key in the wrong kind (`file`
+    /// beside `path`) fails here, as a misspelled one fails `deny_unknown_fields`, instead of
+    /// being dropped.
+    fn reject_foreign_keys(&self) -> Result<(), String> {
+        let (kind, takes): (&str, &[&str]) = if self.pointer.is_some() {
+            ("pointer", &["pointer", "file"])
+        } else if self.component.is_some() {
+            ("component", &["component", "name"])
+        } else if self.path.is_some() {
+            if self.method.is_some() {
+                ("operation", &["method", "path"])
+            } else {
+                ("path", &["path"])
+            }
+        } else {
+            return Ok(());
+        };
+        let present = [
+            ("path", self.path.is_some()),
+            ("method", self.method.is_some()),
+            ("component", self.component.is_some()),
+            ("name", self.name.is_some()),
+            ("pointer", self.pointer.is_some()),
+            ("file", self.file.is_some()),
+        ];
+        match present
+            .iter()
+            .find(|(key, set)| *set && !takes.contains(key))
+        {
+            Some((key, _)) => Err(format!(
+                "`{key}` does not apply to a {kind} rule, which takes only {}",
+                takes
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -539,6 +583,26 @@ mod tests {
         assert!(apply("[[omit]]\ncomponent = \"schema\"\n").is_err());
         assert!(apply("[[omit]]\n").is_err());
         assert!(apply("[[omit]]\npointer = \"/x\"\npath = \"/y\"\n").is_err());
+    }
+
+    #[test]
+    fn a_key_the_omit_kind_does_not_use_names_the_key_and_the_kind() {
+        let error = apply("[[omit]]\npath = \"/pets\"\nfile = \"extra.yaml\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid config file `spargen.toml`: omit rule #1: `file` does not apply to a path \
+             rule, which takes only `path`"
+        );
+        let error = apply("[[omit]]\npointer = \"/x\"\nname = \"X\"\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid config file `spargen.toml`: omit rule #1: `name` does not apply to a \
+             pointer rule, which takes only `pointer` and `file`"
+        );
     }
 
     #[test]

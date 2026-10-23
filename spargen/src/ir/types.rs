@@ -19,7 +19,7 @@ pub(crate) struct TypeGraph {
     /// The definitions [`elide`](Self::elide) withheld from the output.
     elided: BTreeSet<TypeId>,
     /// The XML element name a struct serializes as at the root of an XML body, from the root
-    /// `xml.name` of the schema it was lowered from (see
+    /// `xml.name` of the schema it was lowered from or, for a component, its component name (see
     /// [`set_xml_root_name`](Self::set_xml_root_name)).
     xml_root_names: BTreeMap<TypeId, String>,
 }
@@ -40,14 +40,9 @@ impl TypeGraph {
     /// recursive schema generates a finite Rust type instead of being rejected. Every reserved id
     /// must be filled before it can be emitted.
     ///
-    /// The placeholder kind is [`TypeKind::Reserved`] and **not** a legitimate kind. It used to be
-    /// `TypeKind::Any`, which every `match` already handled, so a site that read a reservation got a
-    /// plausible answer — "untyped value" — instead of a compile error. Four separate sites did
-    /// exactly that over three review rounds, each silently: an `allOf` member became a scalar, a
-    /// `$ref` applicator with siblings was discarded, an octet use retyped a shared component, and a
-    /// `oneOf` variant became the union itself. A dedicated variant makes each of those a compile
-    /// error wherever the `match` is exhaustive, so that part of the audit is the compiler's rather
-    /// than a reviewer's — see [`TypeKind::Reserved`] for what it does not cover.
+    /// The placeholder kind is [`TypeKind::Reserved`], a variant of its own rather than a
+    /// legitimate kind, so an exhaustive `match` that reads a reservation must state its answer for
+    /// one. [`TypeKind::Reserved`] states the rule for a `match` with a catch-all arm.
     pub(crate) fn reserve(&mut self) -> TypeId {
         self.insert(TypeDef {
             name_hint: String::new(),
@@ -166,6 +161,13 @@ impl TypeGraph {
                  rejected it"
             )
         })
+    }
+
+    /// Whether `id`'s alias walk reaches a reservation — `id` itself, or an array or tuple item
+    /// along the way — so a `false` from [`same_generated_type`](Self::same_generated_type) for it
+    /// is not final: it may answer `true` once the reservation is filled.
+    pub(crate) fn reaches_reservation(&self, id: TypeId) -> bool {
+        self.alias_cycle(id).is_none()
     }
 
     /// [`closes_alias_cycle`](Self::closes_alias_cycle), or `None` where the walk reaches a
@@ -428,14 +430,13 @@ pub(crate) enum TypeKind {
     /// This is not a type. It exists so that a cycle-closing `$ref` can box a reference to a
     /// component while that component is still being lowered, and it is replaced by
     /// [`TypeGraph::fill`] as soon as the body finishes. No reservation survives a successful
-    /// lowering — `Api::check_invariants` proves it — so no consumer of a finished [`TypeGraph`]
-    /// ever observes one.
+    /// lowering — [`check_invariants`](super::check_invariants) reports a surviving one — so no
+    /// consumer of a finished [`TypeGraph`] observes one.
     ///
-    /// It is a variant of its own rather than a reuse of [`Self::Any`] deliberately. Reading a
-    /// reservation as `Any` is a silent wrong answer, and every `match` in the crate already handled
-    /// `Any`; four sites over three review rounds read one and produced plausible, wrong output with
-    /// no diagnostic. Every **exhaustive** `match` on [`TypeKind`] must now state what it does with a
-    /// back edge, and the compiler will not let a new one omit it.
+    /// It is a variant of its own rather than a reuse of [`Self::Any`], because reading a
+    /// reservation as `Any` is a plausible, wrong answer with no diagnostic. Every **exhaustive**
+    /// `match` on [`TypeKind`] states what it does with a back edge, and the compiler holds a new
+    /// one to the same.
     ///
     /// **Where the compiler stops, a test takes over.** A dedicated variant turns a read site into
     /// a compile error only where the `match` is exhaustive; a catch-all arm (`_`, a bare binding,
@@ -447,8 +448,7 @@ pub(crate) enum TypeKind {
     /// with no stated answer for a reservation. A site is a `match` at least one of whose arm
     /// patterns names a `TypeKind` variant; `matches!` and `if let`, which test for one variant
     /// rather than classify, are not sites, and a catch-all in one position of a tuple pattern
-    /// is not seen. The population is therefore the test's to count, not this comment's — an
-    /// earlier revision published a hand count here and got its breakdown wrong.
+    /// is not seen. The population is the test's to count.
     ///
     /// The answers fall into three kinds. Sites that run only on a checked `Api` — codegen,
     /// `name`, `surface`, `Api::uses_bytes_serde` — refuse with `unreachable!`, as
@@ -456,57 +456,18 @@ pub(crate) enum TypeKind {
     /// `oas31::lower`, where a reservation really is live, answer "not proven": not the same type,
     /// not string-like, no `simple` shape, no representable default, no required-key
     /// discriminator — each routing to the refusal or warning that answer already had. And
-    /// `push_ref_member`, the historical origin of the defect class, refuses an in-progress member
+    /// `push_ref_member` refuses an in-progress member
     /// itself (`E013`'s `allOf` unit rejection) rather than trusting each caller to have guarded
     /// it, so a new caller inherits the refusal. `intersect_non_null` likewise answers
     /// `Err(NoMeet::Unrepresentable)` for a reservation in its own first arm instead of relying
     /// on `intersect_types`' guard alone.
     ///
-    /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
-    /// said "two" where it should have said what follows. Making the placeholder unreadable did not
-    /// by itself move a snapshot, but the branch it landed on moves generated output in four ways,
-    /// and nothing but this list records them together.
-    ///
-    /// 1. A `$ref` carrying shape siblings whose target is still being lowered, previously generated
-    ///    untyped, now `E013`.
-    /// 2. A `oneOf` member that is the union being lowered, previously generated and undecodable,
-    ///    now `E007`. Neither shape contains an `allOf` keyword, so neither is covered by the scope
-    ///    stated on the earlier footers.
-    /// 3. Giving a resolved `$ref` one identity and one type: `snapshot__openapi_boilerplate_surface`
-    ///    moved from 35 public types to 25 on the corpus's only multi-file case. Duplicated types
-    ///    disappearing is an improvement and is still a Major break, because a consumer naming one
-    ///    of them no longer compiles.
-    /// 4. Reading a reservation where one may not be read. A union whose only non-null member is a
-    ///    cycle-closing `$ref` — the canonical 3.1 spelling of a nullable recursive reference, since
-    ///    3.1 removed `nullable: true` — cloned the placeholder's kind into a definition nothing
-    ///    would ever `fill`, and seven such documents were rejected with `E011` against input that
-    ///    is not malformed. They generate as `Option<Box<T>>`, which the support matrix promises and
-    ///    which the direct `{$ref: T}` spelling already produced. Where the same construct cannot be
-    ///    answered truthfully it is refused instead: the union that is a component's whole body and
-    ///    refers only to itself (`E007`), and a sibling keyword that would have to be intersected
-    ///    against an unlowered target (`E013`). The second of those *is* a break — such documents
-    ///    generated before, by guessing.
-    ///
-    ///    The line between the two was first drawn on the `$ref`'s **spelling**, and that was
-    ///    wrong: only a member written `#/components/schemas/…` against the root component map was
-    ///    recognised as an alias, so the same target addressed by relative file, by a sub-file's
-    ///    own sibling reference, or by a whole-file reference was refused by the `E007` above —
-    ///    whose sentence the same binary disproves for the one spelling it did recognise. It is
-    ///    drawn on the resolved target's identity now, so every spelling of one target gets one
-    ///    answer, which is the rule `ensure_resolved` already states for the types themselves. The
-    ///    remote spelling had no line at all: it reached neither guard and aborted the process on
-    ///    an `assert_eq!` instead.
-    ///
-    /// **The invariant's own status.** `Api::check_invariants`' reservation arm is the proof that no
-    /// consumer of a finished graph observes a placeholder, and it is not a user-facing spec
-    /// diagnostic: it reports under `Code::InvalidInput`, whose explain text describes malformed
-    /// input, which is never what a surviving reservation means. It carries that code because after
-    /// the refusals above no document reaches it, so a code of its own would have no fixture that
-    /// could assert it and would fail the test that every declared code is asserted by the suite
-    /// owning it. That argument holds only while the arm stays unreachable — an earlier revision of
-    /// this record asserted the arm was unreachable and it was reachable seven ways, so the claim is
-    /// stated here as a condition rather than as a fact, and the seven documents are fixtures in
-    /// `spargen/tests/frontend/` precisely so that it cannot quietly stop being true again.
+    /// **The invariant's own status.** The reservation arm of
+    /// [`check_invariants`](super::check_invariants) reports a surviving reservation as `E011`
+    /// (`Code::InvalidInput`): a frontend bug, not a spec problem. It shares that code because the
+    /// refusals above keep every document from reaching it, so a code of its own would have no
+    /// fixture to assert it. That holds only while the arm stays unreachable; the documents that
+    /// would reach it without those refusals are fixtures in `spargen/tests/frontend/`.
     Reserved,
 }
 
@@ -690,8 +651,18 @@ pub(crate) struct Field {
 pub(crate) struct XmlField {
     /// The wire element (or attribute) name, overriding the property name: the property's
     /// `xml.name`, or for an array property, whose items are emitted directly under the parent,
-    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to.
+    /// its `items`' `xml.name`, or else the XML root name of the struct its items resolve to; under
+    /// OpenAPI 3.2, also the XML root name of the struct a [`Self::by_reference`] field resolves to.
     pub(crate) name: Option<String>,
+    /// Whether the property's schema — or, for an array property, its `items` — is a `$ref` whose
+    /// node type is `none`, as OpenAPI 3.2 defaults it: the node names no element, and the
+    /// referenced schema's own element stands in its place. An explicit `xml.nodeType` other than
+    /// `none` on that node leaves this `false`.
+    pub(crate) by_reference: bool,
+    /// Whether that same node is a `$ref` with an explicit `xml.nodeType: element`: under OpenAPI
+    /// 3.2 the reference is then an element of its own, named after the property, so the field
+    /// takes no name from the struct it resolves to, not even an array item's root `xml.name`.
+    pub(crate) element_reference: bool,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub(crate) attribute: bool,
@@ -857,26 +828,12 @@ mod tests {
     //! reservation, so the audit is checked rather than counted by hand. The graph's elision
     //! bookkeeping is pinned here too.
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use proc_macro2::{Delimiter, TokenStream, TokenTree};
     use syn::{Arm, ExprMatch, Pat};
 
-    /// Every `.rs` file under `dir`, recursively, in a stable order.
-    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-            .map(|entry| entry.expect("directory entry").path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            if path.is_dir() {
-                rust_sources(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-    }
+    use crate::test_support::rust_sources;
 
     /// Every `match` expression in `tokens`, at any nesting depth, re-parsed on its own.
     ///
@@ -985,8 +942,7 @@ mod tests {
     #[test]
     fn every_type_kind_match_states_its_answer_for_a_reservation() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rust_sources(&src, &mut files);
+        let files = rust_sources(&src);
 
         let mut sites = 0usize;
         let mut absorbers = Vec::new();
