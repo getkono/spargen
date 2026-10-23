@@ -2,7 +2,7 @@
 
 use crate::diag::{Code, Diagnostic};
 use crate::ir::{Docs, MediaType, Response, ResponseHeader, Responses, StatusSpec, Ty, TypeKind};
-use crate::oas31::media::media_object_is_opaque;
+use crate::oas31::media::{is_cbor, media_essence, media_object_is_opaque};
 use crate::oas31::{MediaTypeObject, ResponseObject};
 
 use super::content::{choose_media, lower_media_type, BodyPosition, ChosenMedia};
@@ -54,9 +54,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if let Some(narrowing) = narrowing {
                     self.diags.emit(narrowing);
                 }
-                Some(lowered)
+                // A CBOR body is read as opaque octets, so its key is announced in `Accept`: the
+                // media type is the only place the response's representation is stated.
+                let essence = media_essence(media_name);
+                let accept = is_cbor(essence).then(|| essence.to_owned());
+                Some((lowered, accept))
             },
         );
+        let (body, accept) = match body {
+            Some((body, accept)) => (Some(body), accept),
+            None => (None, None),
+        };
         // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
         // framing; the body is then the streamed item type `T`. A whole-body response has no
         // framing. Framing is recorded in every response position; streaming only takes effect when
@@ -67,6 +75,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             media: body.map(|(media, _, _)| media),
             body: body.and_then(|(_, ty, _)| ty),
             stream: body.and_then(|(_, _, stream)| stream),
+            accept,
             headers,
         }
     }

@@ -18,6 +18,7 @@ fn resp(body: Option<u32>) -> Response {
         media: body.map(|_| super::MediaType::Json),
         body: body.map(ty),
         stream: None,
+        accept: None,
         headers: Vec::new(),
     }
 }
@@ -27,8 +28,78 @@ fn stream_resp(body: Option<u32>) -> Response {
         media: Some(super::MediaType::EventStream),
         body: body.map(ty),
         stream: Some(super::Framing::Sse),
+        accept: None,
         headers: Vec::new(),
     }
+}
+
+/// A bodied octet response whose key is announced in `Accept`, as lowering records a CBOR key.
+fn announced(key: &str) -> Response {
+    Response {
+        media: Some(super::MediaType::OctetStream),
+        accept: Some(key.to_owned()),
+        ..resp(Some(1))
+    }
+}
+
+/// `Accept` names the success side's announced keys, once each in document order, only while
+/// every bodied success response announces one; bodyless and error responses do not count.
+#[test]
+fn accept_names_the_announced_success_keys_only_when_every_bodied_success_announces_one() {
+    let responses =
+        |by_status: Vec<(StatusSpec, Response)>, default| Responses { by_status, default };
+    let cbor = "application/cbor";
+    let cose = "application/cose+cbor";
+    assert_eq!(
+        responses(vec![(StatusSpec::Exact(200), announced(cbor))], None).accept(),
+        Some(cbor.to_owned())
+    );
+    assert_eq!(
+        responses(
+            vec![
+                (StatusSpec::Exact(200), announced(cose)),
+                (StatusSpec::Exact(201), announced(cbor)),
+                (StatusSpec::Exact(202), announced(cose)),
+                (StatusSpec::Exact(204), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(2))),
+            ],
+            Some(resp(Some(3))),
+        )
+        .accept(),
+        Some(format!("{cose}, {cbor}"))
+    );
+    // A JSON success beside the CBOR one would be refused by `Accept: application/cbor`.
+    assert_eq!(
+        responses(
+            vec![
+                (StatusSpec::Exact(200), announced(cbor)),
+                (StatusSpec::Exact(201), resp(Some(2))),
+            ],
+            None,
+        )
+        .accept(),
+        None
+    );
+    // `default` is the success source only when no 2xx is declared.
+    assert_eq!(
+        responses(Vec::new(), Some(announced(cbor))).accept(),
+        Some(cbor.to_owned())
+    );
+    assert_eq!(
+        responses(vec![(StatusSpec::Exact(204), resp(None))], None).accept(),
+        None
+    );
+    assert_eq!(
+        responses(
+            vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(409), announced(cbor)),
+            ],
+            None,
+        )
+        .accept(),
+        None
+    );
 }
 
 #[test]

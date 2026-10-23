@@ -426,6 +426,7 @@ mod tests {
                         body: Some(body),
                         media: Some(MediaType::Json),
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],

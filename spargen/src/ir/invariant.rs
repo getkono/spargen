@@ -238,6 +238,7 @@ mod tests {
                             }),
                             media: Some(MediaType::Json),
                             stream: None,
+                            accept: None,
                             headers: vec![ResponseHeader {
                                 name: "X-Total-Count".to_owned(),
                                 ty: header,

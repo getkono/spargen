@@ -64,6 +64,11 @@ pub(crate) struct Response {
     /// a bodied stream anywhere but the operation's single bodied success (see
     /// [`Responses::stream_outside_single_success`]).
     pub(crate) stream: Option<Framing>,
+    /// The selected content key's essence when the request announces it in `Accept`, which
+    /// lowering does for a CBOR key (`application/cbor`, or a `+cbor` suffix): such a body is
+    /// read as opaque octets, so the media type is the one place its representation is stated.
+    /// `None` for every other media, and for a bodyless response. See [`Responses::accept`].
+    pub(crate) accept: Option<String>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
     pub(crate) headers: Vec<ResponseHeader>,
@@ -289,6 +294,25 @@ impl Responses {
     /// instead). `None` when there is no single bodied success.
     pub(crate) fn single_success_media(&self) -> Option<MediaType> {
         sole_bodied(self.success_responses())?.media
+    }
+
+    /// The `Accept` header value the operation's request sends: the distinct
+    /// [`Response::accept`] keys of the bodied success responses, comma-joined in document order,
+    /// when every bodied success response carries one. `None` when any bodied success response
+    /// carries none, so a success representation the document declares is never refused by the
+    /// header, and when no success response is bodied. Error responses do not contribute.
+    pub(crate) fn accept(&self) -> Option<String> {
+        let mut announced: Vec<&str> = Vec::new();
+        for response in self.success_responses() {
+            if response.media.is_none() {
+                continue;
+            }
+            let key = response.accept.as_deref()?;
+            if !announced.contains(&key) {
+                announced.push(key);
+            }
+        }
+        (!announced.is_empty()).then(|| announced.join(", "))
     }
 
     /// The media type of the operation's single bodied error response, when exactly one error

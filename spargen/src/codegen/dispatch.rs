@@ -397,6 +397,7 @@ mod tests {
             }),
             media: Some(media),
             stream: None,
+            accept: None,
             headers: Vec::new(),
         };
         let with_default = Responses {
