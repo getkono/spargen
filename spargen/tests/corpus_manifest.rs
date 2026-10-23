@@ -12,7 +12,8 @@
 //! corpus row names this file and every test here
 //! (`the_testing_strategy_table_names_every_test_in_its_suite`).
 //!
-//! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
+//! One manifest field is held only to its `corpus/README.md` mirror, never to the files it hashes:
+//! `tree_sha256`, carried by `openapi-boilerplate` alone. How
 //! it was constructed is recorded nowhere, and no natural definition over that directory
 //! reproduces it, so verifying it would mean inventing a rule and calling the result a guarantee.
 //! Every case's `sha256` — the per-file pin the support documents cite — is verified below.
@@ -241,6 +242,10 @@ fn assert_smoke_expectation_reads_the_commands_a_case_needs() {
         id: "pet".to_owned(),
         path: "pet/openapi.yaml".to_owned(),
         sha256: String::new(),
+        upstream: String::new(),
+        revision: String::new(),
+        upstream_path: String::new(),
+        tree_sha256: None,
         expect: expect.to_owned(),
     };
     let commands = |lines: &[&str]| {
@@ -399,10 +404,10 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
 
 #[test]
 fn the_corpus_readme_mirrors_the_manifest() {
-    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". The table
-    // row of each case is read for its `Expected` cell, so a mirror that names the case but states
-    // another outcome fails too.
-    let rows = readme_expectations(&read("corpus/README.md"));
+    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". Every cell
+    // of each case's table row is read against the manifest field it restates, so a mirror that
+    // names the case but states another outcome, upstream, revision, path or hash fails too.
+    let rows = readme_rows(&read("corpus/README.md"));
     let cases = manifest().cases;
     for case in &cases {
         let row = rows.get(&case.id).unwrap_or_else(|| {
@@ -411,11 +416,24 @@ fn the_corpus_readme_mirrors_the_manifest() {
                 case.id
             )
         });
-        assert_eq!(
-            row, &case.expect,
-            "corpus/README.md says `{}` is expected to `{row}`, and the manifest says `{}`",
-            case.id, case.expect
-        );
+        let sha256 = match &case.tree_sha256 {
+            Some(tree) => format!("tree `{tree}`; root `{}`", case.sha256),
+            None => format!("`{}`", case.sha256),
+        };
+        for (column, cell, manifest) in [
+            ("Upstream", &row.upstream, format!("`{}`", case.upstream)),
+            ("Revision", &row.revision, format!("`{}`", case.revision)),
+            ("Path", &row.path, format!("`{}`", case.upstream_path)),
+            ("SHA-256", &row.sha256, sha256),
+            ("Expected", &row.expect, case.expect.clone()),
+        ] {
+            assert_eq!(
+                cell, &manifest,
+                "corpus/README.md's `{}` row says {cell} in its {column} column, and the \
+                 manifest says {manifest}",
+                case.id
+            );
+        }
     }
     let stale: Vec<&String> = rows
         .keys()
@@ -427,14 +445,24 @@ fn the_corpus_readme_mirrors_the_manifest() {
     );
 }
 
-/// The `Expected` column of corpus/README.md's case table, by case ID, in the manifest's grammar:
-/// `Generate` reads as `generate`, and `Reject `E###` …` as `reject:E###`.
-fn readme_expectations(readme: &str) -> BTreeMap<String, String> {
+/// One case row of corpus/README.md's table, each cell trimmed and kept verbatim except
+/// `expect`, which is the `Expected` cell read in the manifest's grammar.
+struct ReadmeRow {
+    upstream: String,
+    revision: String,
+    path: String,
+    sha256: String,
+    expect: String,
+}
+
+/// corpus/README.md's case table, by case ID. The `Expected` column reads in the manifest's
+/// grammar: `Generate` as `generate`, and `Reject `E###` …` as `reject:E###`.
+fn readme_rows(readme: &str) -> BTreeMap<String, ReadmeRow> {
     let mut rows = BTreeMap::new();
     for line in readme.lines() {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         // `| ID | Upstream | Revision | Path | SHA-256 | Expected |`, the outer two cells empty.
-        let [_, id, _, _, _, _, expected, _] = cells.as_slice() else {
+        let [_, id, upstream, revision, path, sha256, expected, _] = cells.as_slice() else {
             continue;
         };
         let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
@@ -452,8 +480,15 @@ fn readme_expectations(readme: &str) -> BTreeMap<String, String> {
                 });
             format!("reject:{code}")
         };
+        let row = ReadmeRow {
+            upstream: (*upstream).to_owned(),
+            revision: (*revision).to_owned(),
+            path: (*path).to_owned(),
+            sha256: (*sha256).to_owned(),
+            expect,
+        };
         assert!(
-            rows.insert(id.to_owned(), expect).is_none(),
+            rows.insert(id.to_owned(), row).is_none(),
             "corpus/README.md lists `{id}` twice"
         );
     }

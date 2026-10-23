@@ -22,6 +22,14 @@ pub struct Case {
     /// The pinned content hash of `path`. Not optional: a case that omits it would vendor a spec
     /// nothing pins, which is the drift this field exists to prevent.
     pub sha256: String,
+    /// The upstream repository the spec was fetched from, `owner/name`.
+    pub upstream: String,
+    /// The upstream commit or tag the spec was fetched at.
+    pub revision: String,
+    /// The spec's path (or glob, for a multi-file case) inside `upstream` at `revision`.
+    pub upstream_path: String,
+    /// The tree hash of a multi-file case, beside the root file's `sha256`.
+    pub tree_sha256: Option<String>,
     /// `generate` or `reject:E###`.
     pub expect: String,
 }
