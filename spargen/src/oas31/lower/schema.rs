@@ -10,7 +10,6 @@ use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::all_of::MetUnionMember;
-use super::combine::sole_union_member;
 use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
@@ -49,8 +48,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower the body of a type whose root id `ensure_component`, `ensure_remote` or
-    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] empty for the
-    /// duration and restored after.
+    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] and
+    /// [`Self::union_member_stack`] empty for the duration and restored after.
     ///
     /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
     /// a member target flattened by an enclosing expansion and met again inside this body is a
@@ -59,8 +58,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every loop that crosses this boundary is still caught, as the root document catches it.
     pub(super) fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let enclosing = std::mem::take(&mut self.resolved_member_stack);
+        let enclosing_unions = std::mem::take(&mut self.union_member_stack);
         let lowered = self.lower_schema(schema, hint);
         self.resolved_member_stack = enclosing;
+        self.union_member_stack = enclosing_unions;
         lowered
     }
 
@@ -360,7 +361,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if schema_has_union(schema) {
                 return self.lower_all_of_beside_union(schema, hint);
             }
-            if let Some(index) = sole_union_member(schema) {
+            if let Some(index) = self.sole_union_member(schema) {
                 return self.lower_all_of_with_union_member(schema, hint, index);
             }
             return self.lower_all_of(schema, hint);
