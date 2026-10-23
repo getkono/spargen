@@ -470,6 +470,7 @@ mod tests {
                         body: None,
                         media: None,
                         stream: None,
+                        accept: None,
                         headers: Vec::new(),
                     },
                 )],

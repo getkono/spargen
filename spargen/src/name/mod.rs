@@ -1213,6 +1213,7 @@ mod tests {
                         body: bodied.then_some(text),
                         media: bodied.then_some(MediaType::Json),
                         stream: None,
+                        accept: None,
                         headers: headers
                             .iter()
                             .map(|name| ResponseHeader {

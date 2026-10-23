@@ -319,7 +319,8 @@ pub(super) fn media_type_with_parameters(media: &str) -> Result<String, Paramete
 
 /// Classify a content type into its wire codec and deterministic preference rank. Structured JSON
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
-/// GitHub's documented octocat representation is a textual vendor media type. Concrete members of
+/// GitHub's documented octocat representation is a textual vendor media type. CBOR
+/// (`application/cbor` and any `+cbor` suffix) is opaque octets at octet-stream's rank. Concrete members of
 /// the `image`, `audio`, and `video` families are opaque octets, like the ranges naming them.
 ///
 /// Every caller that asks what a media key *is* asks this, so one case rule holds everywhere: type
@@ -342,6 +343,10 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         "multipart/form-data" => (MediaType::Multipart, 2),
         "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
         "application/octet-stream" => (MediaType::OctetStream, 4),
+        // CBOR is lowered as opaque octets at octet-stream's rank: no CBOR codec exists, and the
+        // bodies it carries are handed over byte for byte. Only the wire differs — the key goes
+        // out verbatim as `Content-Type`, and on a response as `Accept` (`is_cbor`).
+        media if is_cbor(media) => (MediaType::OctetStream, 4),
         // The sequential kinds are matched before the `text/` prefix arm so `text/event-stream` is
         // a stream, not text; their rank (6) still sits below text (5).
         "text/event-stream" => (MediaType::EventStream, 6),
@@ -360,6 +365,27 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         _ => return classify_binary_family(essence),
     };
     Some(classified)
+}
+
+/// Whether a media essence is CBOR (RFC 8949): `application/cbor`, or a concrete subtype carrying
+/// the `+cbor` structured-syntax suffix (RFC 6839) under any type, such as `application/cose+cbor`.
+/// A suffix *range* (`application/*+cbor`) is not concrete and is not CBOR here. Matched
+/// case-insensitively (RFC 9110 § 8.3.1).
+///
+/// `classify_media` reads CBOR as opaque octets; this is the one other question asked of it, by
+/// response lowering, which announces a CBOR response's key in the request's `Accept`.
+pub(super) fn is_cbor(essence: &str) -> bool {
+    let Some((family, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    if family.is_empty() || subtype.contains('*') {
+        return false;
+    }
+    let subtype = subtype.to_ascii_lowercase();
+    (family.eq_ignore_ascii_case("application") && subtype == "cbor")
+        || subtype
+            .strip_suffix("+cbor")
+            .is_some_and(|stem| !stem.is_empty())
 }
 
 /// Classify a media **range** — `type/*`, or `*/*` — which the specification permits as a `content`

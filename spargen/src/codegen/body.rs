@@ -152,6 +152,18 @@ pub(super) fn body_send_tokens(
     }
 }
 
+/// The statement that sets the request's `Accept` header to the media the success responses
+/// announce ([`Responses::accept`](crate::ir::Responses::accept)); empty when they announce none.
+pub(super) fn accept_tokens(operation: &Operation, bindings: &OperationBindings) -> TokenStream {
+    let request_binding = &bindings.request;
+    match operation.responses.accept() {
+        Some(accept) => quote! {
+            #request_binding = #request_binding.header(reqwest::header::ACCEPT, #accept);
+        },
+        None => quote! {},
+    }
+}
+
 /// Render one resolved [`BodyEncoding`](crate::ir::BodyEncoding) as `support::FormProperty`
 /// const entries.
 fn form_properties_tokens(encoding: &crate::ir::BodyEncoding) -> Vec<TokenStream> {
