@@ -920,18 +920,42 @@ fn advisory_floors_are_manifest_requirements() {
         "`deny.toml` no longer floors rustls at the release that clears RUSTSEC-2026-0285 (#179)"
     );
 
+    let features = manifest["features"]
+        .as_table()
+        .expect("spargen/Cargo.toml has a [features] table");
     for (name, floor) in floors {
-        let requirement = match dependencies.get(name) {
-            Some(toml::Value::String(requirement)) => Some(requirement.as_str()),
-            Some(toml::Value::Table(table)) => table.get("version").and_then(toml::Value::as_str),
-            _ => None,
-        };
+        // CLAUDE.md's shape for a floor: a direct requirement at exactly the patched release,
+        // default features off (so it adds no feature to what the parent selects), optional and
+        // enabled by the feature that reaches the crate (so it adds the crate to no build that
+        // did not already link it), and nothing else.
+        let expected: toml::Table = toml::from_str(&format!(
+            "version = \"{floor}\"\ndefault-features = false\noptional = true"
+        ))
+        .expect("the floor shape parses");
         assert_eq!(
-            requirement,
-            Some(floor),
+            dependencies.get(name).and_then(toml::Value::as_table),
+            Some(&expected),
             "`deny.toml` floors `{name}` at {floor}, so `spargen/Cargo.toml` must require \
-             `{name} = \"{floor}\"` directly: the ban guards only this repository's lockfile, and \
-             only the manifest requirement reaches a consumer's resolve"
+             `{name} = {{ version = \"{floor}\", default-features = false, optional = true }}` \
+             directly: the ban guards only this repository's lockfile, only the manifest \
+             requirement reaches a consumer's resolve, and a floor adds no feature and no crate \
+             to any build"
+        );
+        let enabling: Vec<&String> = features
+            .iter()
+            .filter(|(_, members)| {
+                members.as_array().is_some_and(|members| {
+                    members
+                        .iter()
+                        .any(|member| member.as_str() == Some(&format!("dep:{name}")))
+                })
+            })
+            .map(|(feature, _)| feature)
+            .collect();
+        assert!(
+            !enabling.is_empty(),
+            "the optional floor on `{name}` is enabled by no feature of `spargen/Cargo.toml`: a \
+             feature that reaches the crate must list `dep:{name}`, or the floor never applies"
         );
     }
 }
