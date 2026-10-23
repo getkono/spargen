@@ -789,34 +789,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .iter()
                 .all(|variant| self.is_exact_null(variant.ty))
         {
-            let mut dropped: Vec<usize> = Vec::new();
-            let entries = std::mem::take(&mut variants)
-                .into_iter()
-                .zip(std::mem::take(&mut ref_names))
-                .zip(std::mem::take(&mut variant_members));
-            for ((variant, ref_name), member) in entries {
-                if met_into_null.contains(&member) {
-                    dropped.push(member);
-                } else {
-                    variants.push(variant);
-                    ref_names.push(ref_name);
-                    variant_members.push(member);
-                }
-            }
+            let dropped: Vec<usize> = variant_members
+                .iter()
+                .copied()
+                .filter(|member| met_into_null.contains(member))
+                .collect();
+            retain_variants(
+                &mut variants,
+                &mut ref_names,
+                &mut variant_members,
+                |_, member| !met_into_null.contains(&member),
+            );
             nullable = !null_twice;
             if variants.len() > 1 {
                 let roots: Vec<TypeId> = variants.iter().map(|variant| variant.ty.id).collect();
                 let reached = reachable_types(&self.graph, &roots);
-                for member in dropped {
-                    let Some(range) = meet_inserts.get(member) else {
-                        continue;
-                    };
-                    for id in range.clone().map(TypeId) {
-                        if !reached.contains(&id) {
-                            self.graph.elide(id);
-                        }
-                    }
-                }
+                let inserts = dropped
+                    .iter()
+                    .filter_map(|&member| meet_inserts.get(member))
+                    .flat_map(|range| range.clone().map(TypeId));
+                self.elide_unreached(inserts, &reached);
             }
         }
         // A `oneOf` branch that is the exact null type on its own (`const: null`, `enum: [null]`),
@@ -832,17 +824,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             && !own_nulls.is_empty()
             && variant_members.iter().any(|member| !is_own_null(member))
         {
-            let entries = std::mem::take(&mut variants)
-                .into_iter()
-                .zip(std::mem::take(&mut ref_names))
-                .zip(std::mem::take(&mut variant_members));
-            for ((variant, ref_name), member) in entries {
-                if !is_own_null(&member) {
-                    variants.push(variant);
-                    ref_names.push(ref_name);
-                    variant_members.push(member);
-                }
-            }
+            retain_variants(
+                &mut variants,
+                &mut ref_names,
+                &mut variant_members,
+                |_, member| !is_own_null(&member),
+            );
             for (_, lowered) in own_nulls {
                 self.elide_unused_union_lowering(lowered);
             }
@@ -901,11 +888,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the surviving variant's `…Constrained` def, and whatever an excluded member's meet
             // left — are unused unless `kind` reaches them (#462).
             let reached = reachable_types(&self.graph, &kind_edges(&kind));
-            for id in meet_inserts.into_iter().flatten().map(TypeId) {
-                if !reached.contains(&id) {
-                    self.graph.elide(id);
-                }
-            }
+            self.elide_unreached(meet_inserts.into_iter().flatten().map(TypeId), &reached);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             // So is the sole variant's own type, whose kind the union now is, unless something
             // else names it, as a union the one decision collapses to one variant leaves it
@@ -1224,17 +1207,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ))
             .remedy("keep producer-side validation for the union's branch constraints")
             .emit(self.diags);
-        fn keep<T>(items: &mut Vec<T>, kept: &HashSet<usize>) {
-            *items = std::mem::take(items)
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, item)| kept.contains(&index).then_some(item))
-                .collect();
-        }
         let kept: HashSet<usize> = groups.iter().map(|(kept, _)| *kept).collect();
-        keep(variants, &kept);
-        keep(ref_names, &kept);
-        keep(variant_members, &kept);
+        retain_variants(variants, ref_names, variant_members, |index, _| {
+            kept.contains(&index)
+        });
         groups.into_iter().map(|(_, members)| members).collect()
     }
 
@@ -1268,4 +1244,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let ty = self.lower_schema_or(member, hint)?;
         Some((ty, None))
     }
+}
+
+/// Keep the union variants for which `keep` holds of their position and the member they came
+/// from, in order, with `ref_names` and `variant_members` kept aligned with `variants`.
+fn retain_variants(
+    variants: &mut Vec<UnionVariant>,
+    ref_names: &mut Vec<Option<String>>,
+    variant_members: &mut Vec<usize>,
+    mut keep: impl FnMut(usize, usize) -> bool,
+) {
+    let kept: Vec<bool> = variant_members
+        .iter()
+        .enumerate()
+        .map(|(index, &member)| keep(index, member))
+        .collect();
+    fn retain<T>(items: &mut Vec<T>, kept: &[bool]) {
+        let mut kept = kept.iter();
+        items.retain(|_| kept.next().copied().unwrap_or(false));
+    }
+    retain(variants, &kept);
+    retain(ref_names, &kept);
+    retain(variant_members, &kept);
 }

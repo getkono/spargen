@@ -94,7 +94,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
         if reached.iter().any(|id| id.0 >= mark) {
-            self.elide_unreached(mark, &reached);
+            self.elide_unreached((mark..self.graph_mark()).map(TypeId), &reached);
             return;
         }
         while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
@@ -131,15 +131,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept.
     pub(super) fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
-        self.elide_unreached(mark, &reached);
+        self.elide_unreached((mark..self.graph_mark()).map(TypeId), &reached);
     }
 
-    /// Elide every type inserted since `mark` that is not in `reached`.
-    fn elide_unreached(&mut self, mark: u32, reached: &HashSet<TypeId>) {
-        let Some(last) = self.graph.last_id() else {
-            return;
-        };
-        for id in (mark..=last.0).map(TypeId) {
+    /// [Elide](TypeGraph::elide) every type in `ids` that is not in `reached`: the inserts since
+    /// a mark, or the ones a union's sibling meets made, that the type kept in their place does not
+    /// reach.
+    pub(super) fn elide_unreached(
+        &mut self,
+        ids: impl IntoIterator<Item = TypeId>,
+        reached: &HashSet<TypeId>,
+    ) {
+        for id in ids {
             if !reached.contains(&id) {
                 self.graph.elide(id);
             }
