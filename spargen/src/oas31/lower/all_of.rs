@@ -565,17 +565,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union_members: &mut Vec<(usize, &'s Schema)>,
         lowerings: &mut Vec<(Provenance, Range<u32>)>,
     ) -> Option<()> {
-        for (index, member) in schema.all_of.iter().enumerate() {
-            let member_hint = format!("{hint}Member{index}");
-            self.gather_member_recording_unions(
-                member,
-                (&schema.provenance, index),
-                &member_hint,
-                out,
-                union_members,
-                lowerings,
-            )?;
-        }
+        self.with_xml_holder(schema, |ctx| {
+            for (index, member) in schema.all_of.iter().enumerate() {
+                let member_hint = format!("{hint}Member{index}");
+                ctx.gather_member_recording_unions(
+                    member,
+                    (&schema.provenance, index),
+                    &member_hint,
+                    out,
+                    union_members,
+                    lowerings,
+                )?;
+            }
+            Some(())
+        })?;
         let mut siblings = schema.clone();
         siblings.all_of.clear();
         self.gather_all_of(&siblings, hint, out)
@@ -597,8 +600,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let SchemaOr::Schema(nested) = member {
             if nested.reference.is_none() && !nested.all_of.is_empty() && !schema_has_union(nested)
             {
-                // The check `gather_member` makes of a member it reads by its keywords.
+                // The checks `gather_member` makes of a member it reads by its keywords.
                 self.diagnose_standalone_discriminator(nested);
+                self.record_member_xml(nested);
                 return self.gather_all_of_recording_unions(
                     nested,
                     hint,

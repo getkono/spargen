@@ -412,14 +412,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        for (index, member) in schema.all_of.iter().enumerate() {
-            self.gather_member(
-                member,
-                (&schema.provenance, index),
-                &format!("{hint}Member{index}"),
-                out,
-            )?;
-        }
+        self.with_xml_holder(schema, |ctx| {
+            for (index, member) in schema.all_of.iter().enumerate() {
+                ctx.gather_member(
+                    member,
+                    (&schema.provenance, index),
+                    &format!("{hint}Member{index}"),
+                    out,
+                )?;
+            }
+            Some(())
+        })?;
         // The enclosing schema may carry its own object keywords beside `allOf`; fold them in last.
         if schema_is_object_like(schema) {
             let (member_fields, member_additional) = self.object_body(schema, hint)?;
@@ -471,6 +474,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // An inline member, or a non-component target expanded in place, is read by its keywords
         // here rather than lowered through `lower_schema_inner`, which would report this.
         self.diagnose_standalone_discriminator(schema);
+        // Nor does it insert a definition of its own to read its `xml` object as a root (#824).
+        self.record_member_xml(schema);
 
         if let Some(reference) = &schema.reference {
             self.gather_ref_target(schema, reference, hint, out)?;
@@ -520,6 +525,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
             }
             let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             // The pre-check above sees root components only. A name the root does not declare
             // is a *sub-file* component, and it reaches its own reservation through
@@ -543,6 +549,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // type contributes its fields.
         if is_remote_ref(reference) {
             let ty = self.ensure_remote(reference, &schema.provenance)?;
+            self.record_xml_merger(ty.id);
             let decides_null = self.ref_target_decides_null(reference, &schema.provenance);
             return self.push_ref_member(
                 RefMember {
