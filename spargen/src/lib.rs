@@ -833,8 +833,14 @@ fn lower_bundle(
 }
 
 /// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// the internal preview. Returns the fully rendered module plan.
-fn build_emit_plan(spec: &Spec, api: &ir::Api, names: &name::Names) -> emit::EmitPlan {
+/// the internal preview. Returns the fully rendered module plan or `Err(())` with the codegen
+/// error already pushed onto `diags` as `E011`, so nothing is written or cached.
+fn build_emit_plan(
+    spec: &Spec,
+    api: &ir::Api,
+    names: &name::Names,
+    diags: &mut diag::Diagnostics,
+) -> Result<emit::EmitPlan, ()> {
     let code = codegen::generate(
         api,
         names,
@@ -843,7 +849,8 @@ fn build_emit_plan(spec: &Spec, api: &ir::Api, names: &name::Names) -> emit::Emi
             feature_time: spec.time,
             error_body_cap: spec.error_body_cap,
         },
-    );
+    )
+    .map_err(|error| emit_pipeline_error(diags, error.to_string()))?;
 
     let emit_options = emit::EmitOptions {
         spec: emit::SpecMeta {
@@ -856,7 +863,7 @@ fn build_emit_plan(spec: &Spec, api: &ir::Api, names: &name::Names) -> emit::Emi
         },
     };
 
-    emit::plan(&code, &emit_options)
+    Ok(emit::plan(&code, &emit_options))
 }
 
 /// Run `mode` over `spec` on the dedicated frontend stack, through the auto-carve driver when
@@ -890,10 +897,13 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             requirements: Some(requirements),
         },
         // Preview keeps the rendered plan and writes nothing.
-        PipelineMode::Preview => PipelineResult {
-            plan: Some(build_emit_plan(spec, &api, &names)),
-            report: report(diags, Outcome::Generated),
-            requirements: Some(requirements),
+        PipelineMode::Preview => match build_emit_plan(spec, &api, &names, &mut diags) {
+            Ok(plan) => PipelineResult {
+                plan: Some(plan),
+                report: report(diags, Outcome::Generated),
+                requirements: Some(requirements),
+            },
+            Err(()) => PipelineResult::bare(report(diags, Outcome::Rejected)),
         },
     }
 }

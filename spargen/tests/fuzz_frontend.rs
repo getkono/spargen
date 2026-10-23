@@ -146,6 +146,11 @@ fn deterministic_runner(cases: u32) -> TestRunner {
 /// and a test beside it holds this declaration to that value.
 const INVARIANT_FAILURE: &str = "IR invariant failed";
 
+/// The prefix of the `E011` message the pipeline reports when codegen's own tokens do not parse as
+/// a Rust file, a codegen bug rather than a rejection. `codegen`'s own `CODEGEN_FAILURE` is the
+/// prefix the message is built from, and a test beside it holds this declaration to that value.
+const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
+
 /// Fail unless `report`, a run over the root document `bytes`, carries no [`INVARIANT_FAILURE`] and
 /// every diagnostic it carries names a real location ([`oracles::location_violations`]). `what`
 /// says which run it was.
@@ -546,10 +551,9 @@ fn check_never_panics_on_skeleton_documents() {
 
 /// `generate` over the documents that reach lowering. Its report is held to [`hold_report`], as a
 /// `check` report is, and must reach the same verdict and report the same sorted codes as `check`
-/// over the same document, which runs the same frontend without emitting. A `Generated` run must
-/// have written a module that parses as Rust and is not the `compile_error!` stub codegen falls
-/// back to when its own tokens fail to format, which keeps the outcome `Generated`, and whose
-/// unions a value can tell apart unless a `W001` at the union says why
+/// over the same document, which runs the same frontend without emitting. No run may report a
+/// codegen failure ([`CODEGEN_FAILURE`]), and a `Generated` run must have written a module that
+/// parses as Rust and whose unions a value can tell apart unless a `W001` at the union says why
 /// ([`oracles::unexplained_variants`]).
 #[test]
 fn generate_writes_parseable_rust_for_skeleton_documents() {
@@ -569,6 +573,20 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                     .cargo(CargoIntegration::Off),
             );
             hold_report(&report, text.as_bytes(), "`generate`")?;
+            let failed: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code == Code::InvalidInput
+                        && diagnostic.message.starts_with(CODEGEN_FAILURE)
+                })
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect();
+            prop_assert!(
+                failed.is_empty(),
+                "codegen rendered tokens that do not parse as Rust: {:#?}",
+                failed
+            );
             let checked = check(&Spec::new(spec.clone()));
             prop_assert_eq!(
                 report.outcome() == Outcome::Rejected,
@@ -588,10 +606,6 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                         "a `Generated` run wrote unparseable Rust ({error})"
                     )));
                 }
-                prop_assert!(
-                    !code.contains("compile_error!"),
-                    "a `Generated` run wrote the codegen fallback stub"
-                );
                 let unexplained = oracles::unexplained_variants(&report, &code);
                 prop_assert!(
                     unexplained.is_empty(),

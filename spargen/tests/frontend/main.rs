@@ -3,7 +3,8 @@
 //! `generate`. Check/generate parity is a property of the harness rather than a remark about one
 //! case: every inline spec `generate` or `generate_with_code` runs is also run through `check`,
 //! which must reach the same accept/reject verdict and report the same sorted codes, and every
-//! `Generated` module must parse as Rust with no `compile_error!` fallback. `PARITY_FIXTURES` adds
+//! `Generated` module must parse as Rust, and no `generate` run may report a codegen failure
+//! (`CODEGEN_FAILURE`, an `E011`). `PARITY_FIXTURES` adds
 //! a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
@@ -214,8 +215,9 @@ fn stated_claim(message: &str) -> Option<OutcomeClaim> {
 
 /// `generate` on an inline spec, holding the run to the two oracles every fixture gets for free:
 /// `check` over the same document reaches the same accept/reject verdict and reports the same
-/// sorted codes ([`assert_check_agrees`]), and a `Generated` run wrote parseable Rust that is not
-/// the `compile_error!` stub codegen falls back to ([`assert_parseable`]).
+/// sorted codes ([`assert_check_agrees`]), the run reports no codegen failure
+/// ([`assert_no_codegen_failure`]), and a `Generated` run wrote parseable Rust
+/// ([`assert_parseable`]).
 fn generate(spec: &str) -> Report {
     generate_with_code(spec).0
 }
@@ -236,6 +238,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
     let report = run_generate(&build(spec_path.clone(), out.clone()));
     let code = std::fs::read_to_string(out).unwrap_or_default();
+    assert_no_codegen_failure(&report);
     assert_check_agrees(&report, &run_check(&Spec::new(spec_path)));
     if report.outcome() == Outcome::Generated {
         assert_parseable(&code);
@@ -270,16 +273,33 @@ fn assert_check_agrees(generated: &Report, checked: &Report) {
     );
 }
 
-/// A `Generated` run's module parses as a Rust file and is not the `compile_error!` stub codegen
-/// emits when its own tokens fail to format, which keeps the outcome `Generated`.
+/// The prefix of the `E011` message the pipeline reports when codegen's own tokens do not parse as
+/// a Rust file, a codegen bug rather than a rejection. `codegen`'s own `CODEGEN_FAILURE` is the
+/// prefix the message is built from, and a test beside it holds this declaration to that value.
+const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
+
+/// No fixture's `generate` run reports a codegen failure: every input either is rejected by the
+/// frontend or renders a module that parses.
+fn assert_no_codegen_failure(report: &Report) {
+    let failed: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == Code::InvalidInput && diagnostic.message.starts_with(CODEGEN_FAILURE)
+        })
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "codegen rendered tokens that do not parse as Rust: {failed:#?}"
+    );
+}
+
+/// A `Generated` run's module parses as a Rust file.
 fn assert_parseable(code: &str) {
     if let Err(error) = syn::parse_file(code) {
         panic!("a `Generated` run wrote unparseable Rust ({error}):\n{code}");
     }
-    assert!(
-        !code.contains("compile_error!"),
-        "a `Generated` run wrote the codegen fallback stub:\n{code}"
-    );
 }
 
 fn has_code(report: &Report, code: Code) -> bool {

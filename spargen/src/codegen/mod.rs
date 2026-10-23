@@ -73,13 +73,34 @@ pub(crate) struct GeneratedCode {
     pub(crate) contents: String,
 }
 
+/// The prefix of the message a [`CodegenError`] displays. The frontend and fuzz harnesses
+/// (`tests/frontend/main.rs`, `tests/fuzz_frontend.rs`) declare the same literal to recognise a
+/// report that carries one, and a test in this module holds the declarations equal.
+pub(crate) const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
+
+/// The assembled token stream did not parse as a Rust file: a codegen bug, not a spec problem.
+/// The pipeline reports it as `E011` and writes and caches nothing.
+#[derive(Debug)]
+pub(crate) struct CodegenError(syn::Error);
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{CODEGEN_FAILURE} (a spargen bug): {}", self.0)
+    }
+}
+
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
 /// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses lower to typed per-operation
-/// response enums).
-pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> GeneratedCode {
+/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
+/// `W003`, lower to typed per-operation response enums). Its one failure is a token stream that
+/// does not parse as a Rust file, returned as a [`CodegenError`] for the caller to report.
+pub(crate) fn generate(
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> Result<GeneratedCode, CodegenError> {
     let uses_streams = api.uses_streams();
     // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
     // and the newtypes would be dead weight.
@@ -114,11 +135,45 @@ pub(crate) fn generate(api: &Api, names: &Names, options: &CodegenOptions) -> Ge
         #client
         #blocking
     };
-    let contents = format_tokens(tokens).unwrap_or_else(|error| {
-        format!(
-            "compile_error!({:?});\n",
-            format!("spargen internal codegen error: {error}")
-        )
-    });
-    GeneratedCode { contents }
+    render(tokens)
+}
+
+/// Format the assembled module into the one generated file, or the [`CodegenError`] its tokens
+/// raise when they are not a parseable Rust file.
+fn render(tokens: proc_macro2::TokenStream) -> Result<GeneratedCode, CodegenError> {
+    let contents = format_tokens(tokens).map_err(CodegenError)?;
+    Ok(GeneratedCode { contents })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render, CODEGEN_FAILURE};
+    use quote::quote;
+
+    /// No known spec reaches it, so the failure is pinned here: a token stream that is not a Rust
+    /// file comes back as an error carrying [`CODEGEN_FAILURE`], not as a module.
+    #[test]
+    fn an_unparseable_token_stream_is_an_error_not_a_module() {
+        let error = render(quote! { fn }).expect_err("`fn` alone is not a Rust file");
+        assert!(error.to_string().starts_with(CODEGEN_FAILURE), "{error}");
+        assert!(render(quote! { fn f() {} }).is_ok());
+    }
+
+    /// The frontend and fuzz harnesses match this very literal, so their no-codegen-failure
+    /// oracles see each one: renaming the prefix here without them fails this test rather than
+    /// silently blinding them.
+    #[test]
+    fn the_harnesses_match_the_codegen_failure_prefix() {
+        let declared = format!("const CODEGEN_FAILURE: &str = \"{CODEGEN_FAILURE}\";");
+        for harness in ["tests/frontend/main.rs", "tests/fuzz_frontend.rs"] {
+            let source = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(harness),
+            )
+            .expect("the harness is readable");
+            assert!(
+                source.contains(&declared),
+                "{harness} must declare `{declared}`"
+            );
+        }
+    }
 }
