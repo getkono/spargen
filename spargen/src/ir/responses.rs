@@ -65,9 +65,9 @@ pub(crate) struct Response {
     /// [`Responses::stream_outside_single_success`]).
     pub(crate) stream: Option<Framing>,
     /// The selected content key's essence when the request announces it in `Accept`, which
-    /// lowering does for a CBOR key (`application/cbor`, or a `+cbor` suffix) only: such a body is read as
-    /// opaque octets, so the media type is the one place its representation is stated. `None`
-    /// for every other media, and for a bodyless response. See [`Responses::accept`].
+    /// lowering does for a CBOR key (`application/cbor`, or a `+cbor` suffix): such a body is
+    /// read as opaque octets, so the media type is the one place its representation is stated.
+    /// `None` for every other media, and for a bodyless response. See [`Responses::accept`].
     pub(crate) accept: Option<String>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
