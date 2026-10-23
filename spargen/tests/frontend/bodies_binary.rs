@@ -1,6 +1,6 @@
 //! Request and response bodies, second part: `format: binary` in every position, optional request
 //! bodies, the basic `W014` alternative pair, byte bodies across the binary media families and
-//! their ranking against media ranges, and nullable raw bodies.
+//! their ranking against media ranges, CBOR as a byte body, and nullable raw bodies.
 
 use super::*;
 
@@ -918,6 +918,198 @@ paths:
             "{report:#?}"
         );
     }
+}
+
+/// The generated `pub async fn {name}` method, from its signature to the next method.
+fn method_source<'a>(code: &'a str, name: &str) -> &'a str {
+    let head = format!("pub async fn {name}(");
+    let start = code.find(&head).unwrap_or_else(|| panic!("{head}\n{code}"));
+    let rest = &code[start..];
+    let end = rest[head.len()..]
+        .find("pub async fn ")
+        .map_or(rest.len(), |end| end + head.len());
+    &rest[..end]
+}
+
+#[test]
+fn cbor_and_cbor_suffixed_bodies_are_byte_bodies_announced_by_their_own_name() {
+    // #900: CBOR has no codec here, and needs none: its bodies are handed over byte for byte. So
+    // `application/cbor` and any `+cbor` suffix lower exactly as `application/octet-stream` does,
+    // except that the key itself, not `application/octet-stream`, goes on the wire as the request
+    // `Content-Type` and the response `Accept`.
+    let operation = |path: &str, id: &str, media: &str| {
+        format!(
+            r##"
+  /{path}:
+    post:
+      operationId: {id}
+      requestBody:
+        required: true
+        content:
+          {media}: {{ schema: {{ type: string, format: binary }} }}
+      responses:
+        "200":
+          description: OK
+          content:
+            {media}: {{ schema: {{ type: string, format: binary }} }}"##
+        )
+    };
+    let spec = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:{}{}{}{}\n",
+        operation("octet", "sendOctets", "application/octet-stream"),
+        operation("cbor", "sendCbor", "application/cbor"),
+        operation("cose", "sendCose", "application/cose+cbor"),
+        operation("shouted", "sendShouted", "Application/CBOR"),
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    let octets = method_source(&code, "send_octets");
+    assert!(!octets.contains("ACCEPT"), "{octets}");
+    // The signature with each `types::` alias spelled as what it aliases, since every operation's
+    // body aliases are named for itself.
+    let signature = |method: &str| {
+        let mut signature = method[..method.find('{').unwrap()].to_owned();
+        while let Some(start) = signature.find("types::") {
+            let name_start = start + "types::".len();
+            let name_end = signature[name_start..]
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .map_or(signature.len(), |end| name_start + end);
+            let target = alias_target(&code, &signature[name_start..name_end])
+                .unwrap_or_else(|| panic!("an alias in {signature}"));
+            signature.replace_range(start..name_end, &target);
+        }
+        signature
+    };
+    assert!(
+        signature(octets).contains("body: &bytes::Bytes"),
+        "{octets}"
+    );
+    for (name, error, key) in [
+        ("send_cbor", "SendCborError", "application/cbor"),
+        ("send_cose", "SendCoseError", "application/cose+cbor"),
+        ("send_shouted", "SendShoutedError", "Application/CBOR"),
+    ] {
+        let method = method_source(&code, name);
+        // The same byte-body shape the octet-stream operation takes and returns.
+        assert_eq!(
+            signature(method).replacen(name, "send_octets", 1).replacen(
+                error,
+                "SendOctetsError",
+                1
+            ),
+            signature(octets),
+            "{method}"
+        );
+        assert!(
+            method.contains(&format!("reqwest::header::CONTENT_TYPE, \"{key}\"")),
+            "{method}"
+        );
+        assert!(
+            method.contains(&format!("reqwest::header::ACCEPT, \"{key}\"")),
+            "{method}"
+        );
+        assert!(!method.contains("application/octet-stream"), "{method}");
+    }
+}
+
+#[test]
+fn e009_a_cbor_body_still_needs_a_binary_schema() {
+    // A schema'd CBOR document would need a CBOR codec, which spargen does not have: an object
+    // under `application/cbor` meets the octet gate's refusal, on either side, as it would under
+    // `application/octet-stream`.
+    for (position, document) in [
+        (
+            "request",
+            r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /doc:
+    put:
+      operationId: putDoc
+      requestBody:
+        required: true
+        content:
+          application/cbor: { schema: { type: object, properties: { a: { type: string } } } }
+      responses:
+        "204": { description: No Content }
+"##,
+        ),
+        (
+            "response",
+            r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "200":
+          description: OK
+          content:
+            application/foo+cbor: { schema: { type: object, properties: { a: { type: string } } } }
+"##,
+        ),
+    ] {
+        for report in [generate(document), check(document)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{position}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::UnsupportedMediaType
+                        && d.message.contains("requires a string-like or binary")
+                }),
+                "{position}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn w014_reports_what_a_cbor_response_asks_against() {
+    // A selected CBOR response is announced in `Accept`, so a byte-identical alternative is asked
+    // against at the wire and is reported; one selected ahead of a CBOR alternative sends no
+    // `Accept`, and narrows nothing.
+    let document = |first: &str, second: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "200":
+          description: OK
+          content:
+            {first}: {{ schema: {{}} }}
+            {second}: {{ schema: {{}} }}
+"##
+        )
+    };
+    let report = generate(&document("application/cbor", "application/octet-stream"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::AlternativeMediaIgnored),
+        [
+            "`application/cbor` is selected; the alternative media type(s) \
+          `application/octet-stream` are not"
+        ],
+        "{report:#?}"
+    );
+    let report = generate(&document("application/octet-stream", "application/cbor"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 #[test]
