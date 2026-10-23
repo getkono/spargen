@@ -7,27 +7,28 @@ use crate::repo::{mise_commands, mise_tasks, read, workspace_root};
 
 #[test]
 fn the_quality_list_quotes_its_tasks_verbatim() {
-    // CLAUDE.md's Quality block glosses some tasks with the command they run. A gloss that is a
-    // command is a claim about the task, so it must be the task's command exactly.
+    // CLAUDE.md's Quality block lists the tasks, and glosses some with the command they run. The
+    // listed tasks are exactly mise.toml's, so a task added or removed on one side fails here. A
+    // gloss that is a command is a claim about the task, so it must be the task's command exactly.
     let tasks = mise_tasks();
     let claude = read("CLAUDE.md");
+    let block = quality_block(&claude);
+    let mut listed = BTreeSet::new();
     let mut quoted = 0usize;
-    for line in claude.lines() {
-        let Some(rest) = line.strip_prefix("mise run ") else {
-            continue;
-        };
-        let Some((task, gloss)) = rest.split_once('#') else {
-            continue;
-        };
+    for line in block {
+        let rest = line.strip_prefix("mise run ").unwrap_or_else(|| {
+            panic!("CLAUDE.md's Quality block carries `{line}`, which is no `mise run <task>` line")
+        });
+        let (task, gloss) = rest.split_once('#').unwrap_or((rest, ""));
         let (task, gloss) = (task.trim(), gloss.trim());
+        assert!(
+            listed.insert(task.to_owned()),
+            "CLAUDE.md's Quality block lists `mise run {task}` twice"
+        );
         // `cargo hack: every feature combination…` is prose about a command, not a command.
         if !gloss.starts_with("cargo ") || gloss.contains(':') {
             continue;
         }
-        assert!(
-            tasks.contains_key(task),
-            "CLAUDE.md lists `mise run {task}`, which mise.toml does not define"
-        );
         assert_eq!(
             mise_commands(&tasks, task),
             [gloss],
@@ -39,6 +40,34 @@ fn the_quality_list_quotes_its_tasks_verbatim() {
         quoted > 0,
         "CLAUDE.md's Quality block glosses no task with its command; this test reads nothing"
     );
+    let defined: BTreeSet<String> = tasks.keys().cloned().collect();
+    assert_eq!(
+        listed, defined,
+        "CLAUDE.md's Quality block (left) must list exactly the tasks mise.toml defines (right)"
+    );
+}
+
+/// The lines of the fenced block that opens CLAUDE.md's `## Quality` section, the fence lines
+/// excluded.
+fn quality_block(claude: &str) -> Vec<&str> {
+    let mut lines = claude
+        .lines()
+        .skip_while(|line| *line != "## Quality")
+        .skip(1)
+        .skip_while(|line| !line.starts_with("```"));
+    assert!(
+        lines.next().is_some(),
+        "CLAUDE.md carries no `## Quality` section opening a fenced block"
+    );
+    let block: Vec<&str> = lines
+        .by_ref()
+        .take_while(|line| !line.starts_with("```"))
+        .collect();
+    assert!(
+        !block.is_empty(),
+        "CLAUDE.md's Quality block is empty or unterminated; the scan has stopped reading it"
+    );
+    block
 }
 
 /// Does a backticked span in CLAUDE.md spell a test function's name? Every test here is a
