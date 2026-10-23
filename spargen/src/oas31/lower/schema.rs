@@ -48,8 +48,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower the body of a type whose root id `ensure_component`, `ensure_remote` or
-    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] empty for the
-    /// duration and restored after.
+    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] and
+    /// [`Self::union_member_stack`] empty for the duration and restored after.
     ///
     /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
     /// a member target flattened by an enclosing expansion and met again inside this body is a
@@ -58,8 +58,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every loop that crosses this boundary is still caught, as the root document catches it.
     pub(super) fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let enclosing = std::mem::take(&mut self.resolved_member_stack);
+        let enclosing_unions = std::mem::take(&mut self.union_member_stack);
         let lowered = self.lower_schema(schema, hint);
         self.resolved_member_stack = enclosing;
+        self.union_member_stack = enclosing_unions;
         lowered
     }
 

@@ -1021,7 +1021,19 @@ impl LowerCtx<'_, '_> {
     /// `allOf` with several union members is an ordinary `allOf`: its unions meet as scalar
     /// members, and beside object members they are `E013`
     /// ([`LowerCtx::reject_all_of_several_unions`]).
+    ///
+    /// Where every member is a union, inline or as a `$ref`, and the schema's own keywords bear
+    /// no shape, no object member is met with them: only the one inline union is the member,
+    /// as before #841, so `allOf: [{$ref: U}, {$ref: NullableOther}]` keeps the scalar meet it
+    /// generated through.
     pub(super) fn sole_union_member(&self, schema: &Schema) -> Option<usize> {
+        if self.every_member_is_a_union(schema) {
+            let mut inline = schema.all_of.iter().enumerate().filter(|(_, member)| {
+                matches!(member, SchemaOr::Schema(member) if member.reference.is_none() && schema_has_union(member))
+            });
+            let (index, _) = inline.next()?;
+            return inline.next().is_none().then_some(index);
+        }
         let unions: Vec<(usize, bool)> = schema
             .all_of
             .iter()
@@ -1034,9 +1046,13 @@ impl LowerCtx<'_, '_> {
                     return schema_has_union(member).then(|| (index, real_union(member)));
                 };
                 // A component still being lowered is a recursive member, which the gather
-                // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here.
+                // refuses ([`LowerCtx::gather_ref_target`]); its body is not expanded here. Nor
+                // is one whose body is already being expanded as a union member, which reserves
+                // nothing: the gather lowers it through its reservation, where a recursion stops.
                 let name = reference.strip_prefix("#/components/schemas/")?;
-                if self.in_progress.contains_key(name) {
+                if self.in_progress.contains_key(name)
+                    || self.union_member_stack.iter().any(|open| open == name)
+                {
                     return None;
                 }
                 let mut siblings = member.as_ref().clone();
@@ -1054,6 +1070,25 @@ impl LowerCtx<'_, '_> {
         let mut real = unions.iter().filter(|(_, real)| *real);
         let (index, _) = real.next()?;
         real.next().is_none().then_some(*index)
+    }
+
+    /// Whether every `allOf` member of `schema` is a `oneOf`/`anyOf`, inline or as the target of
+    /// a `$ref`, and its own keywords bear no shape ([`Self::sole_union_member`]).
+    fn every_member_is_a_union(&self, schema: &Schema) -> bool {
+        let mut own = schema.clone();
+        own.all_of.clear();
+        !schema_has_shape_constraint(&own)
+            && schema.all_of.iter().all(|member| {
+                let SchemaOr::Schema(member) = member else {
+                    return false;
+                };
+                match member.reference.as_deref() {
+                    None => schema_has_union(member),
+                    Some(reference) => self
+                        .ref_target_body(reference, &member.provenance)
+                        .is_some_and(|target| schema_has_union(&target)),
+                }
+            })
     }
 }
 

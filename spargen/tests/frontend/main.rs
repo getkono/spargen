@@ -31,6 +31,7 @@ mod all_of_meet_conflicts;
 mod all_of_merge;
 mod all_of_nullability;
 mod all_of_union_meet;
+mod all_of_union_spellings;
 mod audit_reach;
 mod bodies_binary;
 mod bodies_media_keys;

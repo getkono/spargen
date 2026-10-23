@@ -809,6 +809,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         union_index: usize,
     ) -> Option<Ty> {
+        // A `$ref` member's component stays open on [`Self::union_member_stack`] while its body
+        // is lowered here, so a `$ref` back to it inside that body is not expanded again.
+        let expanded = match &schema.all_of[union_index] {
+            SchemaOr::Schema(member) => member
+                .reference
+                .as_deref()
+                .and_then(|reference| reference.strip_prefix("#/components/schemas/")),
+            SchemaOr::Bool(_) => None,
+        };
+        let Some(name) = expanded else {
+            return self.meet_all_of_union_member(schema, hint, union_index);
+        };
+        self.union_member_stack.push(name.to_owned());
+        let lowered = self.meet_all_of_union_member(schema, hint, union_index);
+        self.union_member_stack.pop();
+        lowered
+    }
+
+    /// [`Self::lower_all_of_with_union_member`] with its `$ref` member's component, if any, open
+    /// on [`Self::union_member_stack`].
+    fn meet_all_of_union_member(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        union_index: usize,
+    ) -> Option<Ty> {
         let SchemaOr::Schema(member) = &schema.all_of[union_index] else {
             return self.lower_all_of(schema, hint);
         };

@@ -229,6 +229,7 @@ fn lower_pass(
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
+        union_member_stack: Vec::new(),
         gatherings: Vec::new(),
         target_decides_null_memo: RefCell::new(HashMap::new()),
         resolved_all_of_decides_null_memo: RefCell::new(HashMap::new()),
@@ -855,6 +856,13 @@ struct LowerCtx<'a, 'doc> {
     /// reservation, and a target reached through one sits on the stack of the type it was
     /// reached from only.
     resolved_member_stack: Vec<(String, bool)>,
+    /// The root components whose union bodies are being lowered inline right now as a `$ref`
+    /// `allOf` member's union ([`Self::lower_all_of_with_union_member`]), outermost first. The
+    /// expansion reserves nothing, so [`Self::sole_union_member`] reads this stack to leave a
+    /// `$ref` to one of them to the ordinary gather, which lowers the component through its
+    /// reservation and so meets the recursion there. Emptied for each reserved body, as
+    /// [`Self::resolved_member_stack`] is.
+    union_member_stack: Vec<String>,
     /// One [`Gathering`] per composition being gathered right now, innermost last: each `allOf`
     /// lowering opens one, and so does each bundle-`$ref` target expansion
     /// [`Self::gather_ref_target`] records, so the record does not depend on the use that first
