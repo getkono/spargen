@@ -305,7 +305,9 @@ fn the_snapshot_suite_covers_every_manifest_case() {
     // "Per-corpus outcome plus a sorted diagnostic histogram" — five of nine cases had one, so
     // four real-world specs could change what they produce with no reviewable diff anywhere.
     // Read as code, not text: a case counts only when a `#[test]` passes its path to
-    // `generate_corpus`, and that test asserts the outcome the manifest declares.
+    // `generate_corpus`, and that test asserts the outcome the manifest declares in an
+    // `assert_eq!`.
+    assert_snapshot_tests_count_only_asserted_outcomes();
     let tests = snapshot_tests(&read("spargen/tests/snapshot.rs"));
     let cases = manifest().cases;
     for case in &cases {
@@ -342,16 +344,34 @@ fn the_snapshot_suite_covers_every_manifest_case() {
 }
 
 /// Each `#[test]` in `source` that calls `generate_corpus("<path>", …)`, as the path and the
-/// `Outcome::` variants its body names, at any depth of the body.
+/// `Outcome::` variants its body names inside an `assert_eq!`'s arguments, at any depth of the
+/// body. A variant named anywhere else (a `match` arm, a `let`, an `assert_ne!`) asserts nothing
+/// the manifest declares, so it is not counted.
 fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
     use proc_macro2::{TokenStream, TokenTree};
     use quote::ToTokens;
 
-    fn walk(tokens: TokenStream, paths: &mut Vec<String>, outcomes: &mut BTreeSet<String>) {
+    /// `asserted` is whether `tokens` sit inside an `assert_eq!(…)` invocation's arguments.
+    fn walk(
+        tokens: TokenStream,
+        asserted: bool,
+        paths: &mut Vec<String>,
+        outcomes: &mut BTreeSet<String>,
+    ) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         for (at, tree) in trees.iter().enumerate() {
             match tree {
-                TokenTree::Group(group) => walk(group.stream(), paths, outcomes),
+                TokenTree::Group(group) => {
+                    let invokes_assert_eq = at >= 2
+                        && matches!(&trees[at - 1], TokenTree::Punct(p) if p.as_char() == '!')
+                        && matches!(&trees[at - 2], TokenTree::Ident(ident) if *ident == "assert_eq");
+                    walk(
+                        group.stream(),
+                        asserted || invokes_assert_eq,
+                        paths,
+                        outcomes,
+                    );
+                }
                 TokenTree::Ident(ident) if *ident == "generate_corpus" => {
                     let Some(TokenTree::Group(arguments)) = trees.get(at + 1) else {
                         continue;
@@ -363,7 +383,7 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
                         paths.push(path.value());
                     }
                 }
-                TokenTree::Ident(ident) if *ident == "Outcome" => {
+                TokenTree::Ident(ident) if asserted && *ident == "Outcome" => {
                     let colon = |at: usize| matches!(trees.get(at), Some(TokenTree::Punct(p)) if p.as_char() == ':');
                     if !(colon(at + 1) && colon(at + 2)) {
                         continue;
@@ -391,7 +411,12 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
             continue;
         }
         let (mut paths, mut outcomes) = (Vec::new(), BTreeSet::new());
-        walk(function.block.to_token_stream(), &mut paths, &mut outcomes);
+        walk(
+            function.block.to_token_stream(),
+            false,
+            &mut paths,
+            &mut outcomes,
+        );
         tests.extend(paths.into_iter().map(|path| (path, outcomes.clone())));
     }
     assert!(
@@ -400,6 +425,44 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
          the scan has stopped reading the suite"
     );
     tests
+}
+
+/// [`snapshot_tests`] pinned on fixtures, as [`assert_smoke_expectation_reads_the_commands_a_case_needs`]
+/// pins the smoke reader: called by the coverage test before its verdict on the real suite.
+fn assert_snapshot_tests_count_only_asserted_outcomes() {
+    let outcomes = |body: &str| {
+        let source = format!(
+            "#[test]\nfn case() {{\n    let (report, _) = generate_corpus(\"pet/openapi.yaml\", false);\n    {body}\n}}\n"
+        );
+        let tests = snapshot_tests(&source);
+        let [(path, outcomes)] = tests.as_slice() else {
+            panic!(
+                "the fixture holds one test, and the scan found {}",
+                tests.len()
+            );
+        };
+        assert_eq!(path, "pet/openapi.yaml");
+        outcomes.iter().cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcomes("assert_eq!(report.outcome(), Outcome::Rejected, \"{report:#?}\");"),
+        ["Rejected"]
+    );
+    assert_eq!(
+        outcomes("if true { assert_eq!(report.outcome(), Outcome::Generated); }"),
+        ["Generated"]
+    );
+    for body in [
+        "let _ = Outcome::Rejected;",
+        "assert_ne!(report.outcome(), Outcome::Rejected);",
+        "assert!(matches!(report.outcome(), Outcome::Rejected));",
+        "match report.outcome() { Outcome::Rejected => {}, _ => {} }",
+    ] {
+        assert!(
+            outcomes(body).is_empty(),
+            "`{body}` asserts no outcome, so it must not count as one"
+        );
+    }
 }
 
 #[test]
