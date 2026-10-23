@@ -1,25 +1,25 @@
 //! Collapsing a union a meet produced: variants that became indistinguishable, and the `null`
 //! a met union keeps or drops.
 
-use crate::diag::{Code, Diagnostic, Provenance};
-use crate::ir::{Docs, Ty, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant};
+use crate::diag::{Code, Diagnostic};
+use crate::ir::{Docs, Ty, TypeKind, Union, UnionMode, UnionStrategy};
 use crate::oas31::Schema;
 
 use super::meet::same_ty;
 use super::nullability::non_nullable;
 use super::strategy::retain_strategy;
-use super::{LowerCtx, MetUnion, StatedNothingNull};
+use super::{LowerCtx, MetUnion};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
-    /// are all the same type. No value can tell such variants apart, so the union adds nothing to
-    /// its common type — and a `oneOf` of them rejects every value its common type accepts.
-    /// `structural` also counts variants that are distinct definitions decoding the same values —
-    /// one Rust type, or distinct items of one structure (#492) — as the same
-    /// ([`Self::same_type_apart_from_null`]), unless a discriminator tells them apart by
-    /// tag. Returned with the number of variants that accept `null`: after the meet with a `$ref`
-    /// target each variant keeps its own nullability, so structurally shared variants need not
-    /// agree on it.
+    /// are all the same type once each one's own `null` is set aside. No non-null value can tell
+    /// such variants apart, so the union adds nothing to its common type — and a `oneOf` of them
+    /// rejects every value its common type accepts. `structural` also counts variants that are
+    /// distinct definitions decoding the same values — one Rust type, or distinct items of one
+    /// structure (#492) — as the same ([`Self::same_type_apart_from_null`]), unless a
+    /// discriminator tells them apart by tag. Returned with the number of variants that accept
+    /// `null`: after the meet each variant keeps its own nullability, such as a branch that states
+    /// nothing and takes the conjunct's `null`, so variants of one type need not agree on it.
     fn indistinguishable_union_variant(&self, ty: Ty, structural: bool) -> Option<(Ty, usize)> {
         let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
             return None;
@@ -34,7 +34,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .count();
         (!rest.is_empty()
             && rest.iter().all(|variant| {
-                same_ty(variant.ty, first.ty)
+                same_ty(non_nullable(variant.ty), non_nullable(first.ty))
                     || (structural && self.same_type_apart_from_null(variant.ty, first.ty))
             }))
         .then_some((first.ty, nullable))
@@ -169,81 +169,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.collapse_met_union(schema, ty, true, &hint, MetUnion::AllOfMember)
             .0
-    }
-
-    /// What [`Self::stated_nothing_took_null`] holds for the union lowered at `at`, taken so an
-    /// enclosing meet does not read it; `None` for any other union.
-    pub(super) fn take_stated_nothing_took_null(
-        &mut self,
-        at: &Provenance,
-    ) -> Option<StatedNothingNull> {
-        match self.stated_nothing_took_null.take() {
-            Some((provenance, stated)) if provenance == *at => Some(stated),
-            _ => None,
-        }
-    }
-
-    /// `met`, the meet of a union held back for it ([`Self::unmerged_union`]), with the `null` the
-    /// meet handed again to its branches that state nothing and lower to `Value` settled as
-    /// `stated` says ([`Self::stated_nothing_took_null`]). `Value` is the identity of the meet, so
-    /// the meet gave each the conjunct's `null` a second time.
-    ///
-    /// Where the union counted that `null` ([`StatedNothingNull::Counted`]) the copies in the
-    /// branches it names are cleared (#592): one would leave an `anyOf` variant accepting the
-    /// `null` its union already holds, and the `oneOf` counts after the meet
-    /// ([`Self::collapse_met_union`]) would read it as `null` matching that branch only. Where a
-    /// `oneOf` counted the one such branch as the only branch `null` matches
-    /// ([`StatedNothingNull::Sole`]) and the meet narrowed the union to a single branch, that
-    /// branch is the one: a branch that states nothing meets every conjunct, so it survives every
-    /// meet. The position then accepts the `null` the meet gave it (#597), which the union's own
-    /// nullability, not hoisted, does not carry. The meet's variants are the held-back union's
-    /// only where `conjunct`, what it was met with, is no union itself; otherwise, or where there
-    /// is nothing to settle, `met` is returned as it is.
-    pub(super) fn clear_counted_null(
-        &mut self,
-        met: Ty,
-        conjunct: Ty,
-        stated: Option<&StatedNothingNull>,
-        hint: &str,
-    ) -> Ty {
-        let Some(stated) = stated else {
-            return met;
-        };
-        if matches!(
-            self.graph.get(conjunct.id).map(|def| &def.kind),
-            Some(TypeKind::Union(_))
-        ) {
-            return met;
-        }
-        let met_kind = self.graph.get(met.id).map(|def| &def.kind);
-        let hints = match stated {
-            StatedNothingNull::Sole => {
-                let mut met = met;
-                if !matches!(met_kind, Some(TypeKind::Union(_))) {
-                    met.nullable = met.nullable || conjunct.nullable;
-                }
-                return met;
-            }
-            StatedNothingNull::Counted(hints) => hints,
-        };
-        let Some(TypeKind::Union(union)) = met_kind else {
-            return met;
-        };
-        let counted =
-            |variant: &UnionVariant| variant.ty.nullable && hints.contains(&variant.name_hint);
-        if !union.variants.iter().any(counted) {
-            return met;
-        }
-        let mut union = union.clone();
-        for variant in &mut union.variants {
-            if hints.contains(&variant.name_hint) {
-                variant.ty.nullable = false;
-            }
-        }
-        let mut ty = self.insert_type(hint, TypeKind::Union(union), Docs::default(), None);
-        ty.nullable = met.nullable;
-        ty.boxed = met.boxed;
-        ty
     }
 
     /// Report, as the inline union reports them ([`Self::warn_untyped_one_of_variants`]), the

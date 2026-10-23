@@ -1055,7 +1055,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let lowered = self.lower_schema(union, union_hint);
         self.unmerged_union = enclosing_unmerged;
         self.unmerged_union_meets_null = enclosing_meets_null;
-        let stated_nothing_took_null = self.take_stated_nothing_took_null(&union.provenance);
         let lowered = lowered?;
         let mark = self.graph_mark();
         let meets_from = self.variant_meets.len();
@@ -1067,12 +1066,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Ok(met) = self.uninhabited_union_meet(lowered, met) else {
                 return self.reject_all_of_union_meet(schema, spelling);
             };
-            meet = self.clear_counted_null(
-                met,
-                composed,
-                stated_nothing_took_null.as_ref(),
-                &meet_hint,
-            );
+            meet = met;
         }
         // Collapsed before the refiners, which meet each branch apart and so would give branches
         // the composition left as one type distinct definitions of the same shape: the refiners

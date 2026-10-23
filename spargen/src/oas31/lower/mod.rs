@@ -246,7 +246,6 @@ fn lower_pass(
         field_xml_sites: HashSet::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
-        stated_nothing_took_null: None,
         held_untyped_warnings: None,
         scalar_meet_union: None,
         scalar_meet_unmerged: HashSet::new(),
@@ -694,21 +693,6 @@ struct ScopeReach {
     uncategorised: bool,
 }
 
-/// What the meet a union is held back for ([`LowerCtx::unmerged_union`]) does with the conjunct's
-/// `null` it hands the union's branches that state nothing and lower to `Value` (`true`, `{}`),
-/// whose `null` the union settled before the meet (#592, #597). `Value` is the identity of the
-/// meet, so the meet gives each such branch that `null` again ([`LowerCtx::clear_counted_null`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum StatedNothingNull {
-    /// The branches with these variant hints took `null` that an `anyOf` hoisted, or that a
-    /// `oneOf` counted beside another branch `null` matches, so the meet's copy is cleared.
-    Counted(Vec<String>),
-    /// A `oneOf` counted one such branch as the only branch `null` matches, so the meet's copy is
-    /// that branch's answer: kept in the variant where the meet leaves a union, and on the
-    /// position where it narrows the union to that branch alone.
-    Sole,
-}
-
 /// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
 /// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
 /// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
@@ -937,16 +921,6 @@ struct LowerCtx<'a, 'doc> {
     /// `null` from the meet (#567); where every conjunct is untyped, nothing admits it, and every
     /// spelling keeps the non-null struct an untyped object lowers to.
     unmerged_union_meets_null: bool,
-    /// The [`Self::unmerged_union`] just lowered, with the variant hints of its branches that
-    /// state nothing and lower to `Value` (`true`, `{}`) and took `null` from the conjunct it is
-    /// held back for (#592), where that `null` was settled before the meet: hoisted onto an
-    /// `anyOf`, as an untyped object branch's is (#567), or counted by a `oneOf` that the count
-    /// makes refuse `null`. `Value` is the identity of the meet, so the meet hands the branch the
-    /// conjunct's `null` a second time, and the caller clears it there
-    /// ([`Self::clear_counted_null`]) so `null` is counted once per branch. A `oneOf` whose only
-    /// branch `null` matches is one of these records that too ([`StatedNothingNull::Sole`]), so
-    /// a meet that narrows the union to that branch keeps the `null` it gave it (#597).
-    stated_nothing_took_null: Option<(Provenance, StatedNothingNull)>,
     /// The `W001`s inline `oneOf`s raise for their `serde_json::Value` variants while an `allOf`
     /// gathers its members, held back where `Some` ([`HeldUntypedWarning`]). A union member the
     /// `allOf`'s scalar meet meets lowers on its own first, where a branch that states nothing

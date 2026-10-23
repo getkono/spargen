@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
-use crate::ir::{Ty, TypeId, TypeKind, Union};
+use crate::ir::{Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
@@ -197,10 +197,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///   variant is that variant's type, and one left with none — the exact null type was all the
     ///   lowering found — admits no value at all, which is rejected (`E013`);
     /// * where `null` satisfies it unstated, the type is not `Option` and no variant is;
-    /// * where it admits `null`, the type carries it once: as the `Option` of the union, as a `()`
-    ///   variant, or as the `Option` of the one merged variant `null` matches, and it is made
-    ///   `Option` where none of them does. A `()` variant wins over the union's `Option`: a
-    ///   union holding one is not made `Option` and does not stay one.
+    /// * where it admits `null`, the type carries it once: as a `()` variant, which wins over
+    ///   every `Option` (a union holding one is not made `Option` and does not stay one, and no
+    ///   other variant stays one); as the `Option` of the union, which an `anyOf` of this
+    ///   lowering's own also takes from a variant that accepts `null`; or as the `Option` of the
+    ///   one merged `oneOf` variant `null` matches. It is made `Option` where none of them does.
     ///
     /// A `type` naming only `null` beside an `allOf` whose members lowered to a non-null type,
     /// which admits no value under 2020-12, is applied as the decision reads it: that type or
@@ -248,12 +249,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         match admission {
             NullAdmission::Admits => {
-                if ty.nullable {
-                    // A `()` arm already carries the `null`, so the union is no `Option` as well,
-                    // as an `allOf` spelling of the same constraints settles it (Decision 3).
-                    if self.has_exact_null_variant(ty) {
-                        ty.nullable = false;
-                    }
+                if self.has_exact_null_variant(ty) {
+                    // A `()` arm carries the `null`, so neither the union nor another variant is
+                    // an `Option` as well, as an `allOf` spelling of the same constraints settles
+                    // it (Decision 3).
+                    ty.nullable = false;
+                    self.clear_variant_nulls(ty.id, mark, false);
+                } else if ty.nullable || self.any_of_variant_carries_null(ty, mark) {
+                    // The union's `Option` carries the `null`. An `anyOf` of this lowering's own
+                    // takes it from a variant that accepts it, since one match admits it.
+                    ty.nullable = true;
                     self.clear_variant_nulls(ty.id, mark, false);
                 } else if !self.carries_null(ty) {
                     ty.nullable = true;
@@ -362,6 +367,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// being lowered: a type other uses share, which one use's lowering does not change.
     fn is_component_def(&self, id: TypeId) -> bool {
         self.reservation_roots().any(|component| component == id)
+    }
+
+    /// Whether `ty` is an `anyOf` union this lowering inserted (at or above `mark`), no component,
+    /// with a variant that accepts `null` ([`Self::carries_null`]).
+    fn any_of_variant_carries_null(&self, ty: Ty, mark: u32) -> bool {
+        ty.id.0 >= mark
+            && !self.is_component_def(ty.id)
+            && matches!(
+                self.graph.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Union(Union {
+                    strategy: UnionStrategy::Trial {
+                        mode: UnionMode::AnyOf,
+                        ..
+                    },
+                    ..
+                }))
+            )
+            && self.carries_null(ty)
     }
 
     /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).

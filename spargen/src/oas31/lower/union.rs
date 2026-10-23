@@ -16,7 +16,7 @@ use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
 use super::shape::ref_siblings_bear_shape;
-use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, StatedNothingNull, UnionSibling};
+use super::{HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower a `oneOf`/`anyOf` union, with `open_narrowing` out of effect.
@@ -448,9 +448,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // variant is a branch `null` matches beside it, so a `oneOf` counts them together (#563).
         let mut null_variants = 0usize;
         let mut null_from_conjunct = false;
-        // The variant hints of the branches that state nothing and took the conjunct's `null`, and
-        // how many of them a `oneOf` counts without hoisting (#592).
-        let mut stated_nothing_hints: Vec<String> = Vec::new();
+        // How many branches that state nothing and took the conjunct's `null` a `oneOf` counts
+        // without hoisting (#592).
         let mut stated_nothing_nulls = 0usize;
         // How many variants are an untyped object or array branch that still leaves `null`
         // undecided after its meet ([`Self::branch_leaves_null_undecided`]): its keywords constrain
@@ -543,12 +542,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A branch that states nothing (`true`, `{}`) accepts `null` there too, as it does
             // beside untyped sibling keywords (#592), but `Value` is the identity of the meet, so
             // the meet hands it the conjunct's `null` again. An `anyOf`, which needs one match,
-            // hoists it here, and the caller clears the meet's copy
-            // ([`Self::stated_nothing_took_null`]). A `oneOf` counts it here without hoisting it:
-            // where that puts `null` in two branches the caller clears the meet's copy too, and
-            // where it is the one branch `null` matches the meet's copy is its answer, as the
-            // `oneOf` counts after the meet read it ([`Self::collapse_met_union`]), and as the
-            // caller keeps on the position where the meet narrows the union to it (#597).
+            // hoists it here, and the one decision carries it once on the meet's position
+            // ([`Self::settle_null_admission`]). A `oneOf` counts it here without hoisting it:
+            // the meet's copy is then the branch's answer, which the `oneOf` counts after the meet
+            // read ([`Self::collapse_met_union`]) and the one decision settles (#597).
             let mut stated_nothing_took_null = false;
             if sibling.is_none()
                 && self.unmerged_union.as_ref() == Some(&schema.provenance)
@@ -715,9 +712,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 name_hint = format!("{base_hint}{disambiguator}");
                 disambiguator += 1;
             }
-            if stated_nothing_took_null {
-                stated_nothing_hints.push(name_hint.clone());
-            }
             variants.push(UnionVariant { name_hint, ty });
             ref_names.push(ref_name);
             variant_members.push(index);
@@ -755,9 +749,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // branch is settled by the one decision after it ([`Self::settle_null_admission`]).
         // An exact-`null` variant is counted only beside a branch that took `null` from a conjunct
         // (#586): elsewhere it stays the variant `null` decodes to. A branch that states nothing
-        // is counted where it took `null` from the conjunct (#592), and the meet's copy of that
-        // `null` is cleared where the count puts it in two branches, or where an `anyOf` hoisted
-        // it. An untyped object or array branch that hoisted nothing is counted
+        // is counted where it took `null` from the conjunct (#592). An untyped object or array
+        // branch that hoisted nothing is counted
         // too, since `null` matches it all the same (#622), and so is a nested union that hoisted
         // nothing and that `null` matches through its own branches (#628). A branch the sibling
         // meet narrowed to the exact null type is one branch `null` matches wherever it is, as a
@@ -781,17 +774,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 > 1;
         if null_twice {
             nullable = false;
-        }
-        // Otherwise a `oneOf` that counted such a branch counted it as the only branch `null`
-        // matches, and the meet's copy of that `null` is its answer.
-        if !stated_nothing_hints.is_empty() && (mode == UnionMode::AnyOf || null_twice) {
-            self.stated_nothing_took_null = Some((
-                schema.provenance.clone(),
-                StatedNothingNull::Counted(stated_nothing_hints),
-            ));
-        } else if stated_nothing_nulls > 0 {
-            self.stated_nothing_took_null =
-                Some((schema.provenance.clone(), StatedNothingNull::Sole));
         }
         // The sibling meet left every one of several `oneOf` branches the exact null type:
         // `type: [string, 'null']` beside untyped `items` branches, which constrain arrays alone,
@@ -872,8 +854,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // elided unless something else names them: a `$ref`'d component stays. Only where another
         // variant is left, which the count guarantees, since the branch it counts beside is no
         // exact-`null` variant of its own. Beside a branch that states nothing and took the
-        // conjunct's `null` (#592) the arm stays: that branch's copy of `null` is cleared by the
-        // caller only while the meet is still a union ([`Self::clear_counted_null`]).
+        // conjunct's `null` (#592) the arm stays, and the one decision settles it once the meet
+        // is lowered ([`Self::settle_null_admission`]).
         let is_own_null = |member: &usize| own_nulls.iter().any(|(own, _)| own == member);
         if mode == UnionMode::OneOf
             && null_twice

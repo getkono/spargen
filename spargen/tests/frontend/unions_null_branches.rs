@@ -1144,3 +1144,63 @@ components:
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #934: an `anyOf` whose branch states nothing or holds scalar keywords alone, met with a
+/// conjunct that admits `null`, carries that `null` once, as the one decision settles it. The
+/// meet hands such a branch the conjunct's `null`; an `anyOf` needs one match, so the `null` is
+/// the position's `Option` and no variant's, and beside an exact-`null` branch it is that `()`
+/// arm alone. The union written as a `$ref`'d component beside the conjunct gives the answer the
+/// sibling spelling gives.
+#[test]
+fn an_any_of_met_with_a_nullable_conjunct_carries_its_null_once() {
+    let mut mismatches = Vec::new();
+    for (union, optional, unit_arm) in [
+        ("anyOf: [ {}, { minLength: 1 } ]", true, false),
+        ("anyOf: [ true, { pattern: '^a' } ]", true, false),
+        ("anyOf: [ { const: null }, { minLength: 1 } ]", false, true),
+        ("anyOf: [ { enum: [null] }, {} ]", false, true),
+    ] {
+        for (site, extra) in [
+            (
+                format!("{{ type: [string, 'null'], {union} }}"),
+                String::new(),
+            ),
+            (
+                "{ type: [string, 'null'], $ref: '#/components/schemas/Un' }".to_owned(),
+                format!("    Un: {{ {union} }}\n"),
+            ),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pick: {site}\n{extra}    Holder:\n      type: object\n      \
+                     properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                     required: [pick]\n"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{site}: {report:#?}");
+            let types = types_module(&code);
+            let pick = field_type(&types, "pub pick")
+                .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
+            let variants = enum_variants(&types, "Pick");
+            let option_arms: Vec<&String> = variants
+                .iter()
+                .filter(|variant| variant.contains("(Option<"))
+                .collect();
+            let has_unit_arm = types.contains("pub type UnVariant0 = ();")
+                || types.contains("pub type PickVariant0 = ();");
+            if pick.starts_with("Option<") != optional
+                || !option_arms.is_empty()
+                || has_unit_arm != unit_arm
+            {
+                mismatches.push(format!(
+                    "{site} with {union}: `pick` is `{pick}`, `Option` arms {option_arms:?}, \
+                     `()` arm {has_unit_arm}; expected `Option` {optional}, no `Option` arm, `()` \
+                     arm {unit_arm}\n{types}"
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
