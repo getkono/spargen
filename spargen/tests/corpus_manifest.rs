@@ -12,7 +12,8 @@
 //! corpus row names this file and every test here
 //! (`the_testing_strategy_table_names_every_test_in_its_suite`).
 //!
-//! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
+//! One manifest field is held only to its `corpus/README.md` mirror, never to the files it hashes:
+//! `tree_sha256`, carried by `openapi-boilerplate` alone. How
 //! it was constructed is recorded nowhere, and no natural definition over that directory
 //! reproduces it, so verifying it would mean inventing a rule and calling the result a guarantee.
 //! Every case's `sha256` — the per-file pin the support documents cite — is verified below.
@@ -241,6 +242,10 @@ fn assert_smoke_expectation_reads_the_commands_a_case_needs() {
         id: "pet".to_owned(),
         path: "pet/openapi.yaml".to_owned(),
         sha256: String::new(),
+        upstream: String::new(),
+        revision: String::new(),
+        upstream_path: String::new(),
+        tree_sha256: None,
         expect: expect.to_owned(),
     };
     let commands = |lines: &[&str]| {
@@ -300,7 +305,9 @@ fn the_snapshot_suite_covers_every_manifest_case() {
     // "Per-corpus outcome plus a sorted diagnostic histogram" — five of nine cases had one, so
     // four real-world specs could change what they produce with no reviewable diff anywhere.
     // Read as code, not text: a case counts only when a `#[test]` passes its path to
-    // `generate_corpus`, and that test asserts the outcome the manifest declares.
+    // `generate_corpus`, and that test asserts the outcome the manifest declares in an
+    // `assert_eq!`.
+    assert_snapshot_tests_count_only_asserted_outcomes();
     let tests = snapshot_tests(&read("spargen/tests/snapshot.rs"));
     let cases = manifest().cases;
     for case in &cases {
@@ -337,16 +344,34 @@ fn the_snapshot_suite_covers_every_manifest_case() {
 }
 
 /// Each `#[test]` in `source` that calls `generate_corpus("<path>", …)`, as the path and the
-/// `Outcome::` variants its body names, at any depth of the body.
+/// `Outcome::` variants its body names inside an `assert_eq!`'s arguments, at any depth of the
+/// body. A variant named anywhere else (a `match` arm, a `let`, an `assert_ne!`) asserts nothing
+/// the manifest declares, so it is not counted.
 fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
     use proc_macro2::{TokenStream, TokenTree};
     use quote::ToTokens;
 
-    fn walk(tokens: TokenStream, paths: &mut Vec<String>, outcomes: &mut BTreeSet<String>) {
+    /// `asserted` is whether `tokens` sit inside an `assert_eq!(…)` invocation's arguments.
+    fn walk(
+        tokens: TokenStream,
+        asserted: bool,
+        paths: &mut Vec<String>,
+        outcomes: &mut BTreeSet<String>,
+    ) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         for (at, tree) in trees.iter().enumerate() {
             match tree {
-                TokenTree::Group(group) => walk(group.stream(), paths, outcomes),
+                TokenTree::Group(group) => {
+                    let invokes_assert_eq = at >= 2
+                        && matches!(&trees[at - 1], TokenTree::Punct(p) if p.as_char() == '!')
+                        && matches!(&trees[at - 2], TokenTree::Ident(ident) if *ident == "assert_eq");
+                    walk(
+                        group.stream(),
+                        asserted || invokes_assert_eq,
+                        paths,
+                        outcomes,
+                    );
+                }
                 TokenTree::Ident(ident) if *ident == "generate_corpus" => {
                     let Some(TokenTree::Group(arguments)) = trees.get(at + 1) else {
                         continue;
@@ -358,7 +383,7 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
                         paths.push(path.value());
                     }
                 }
-                TokenTree::Ident(ident) if *ident == "Outcome" => {
+                TokenTree::Ident(ident) if asserted && *ident == "Outcome" => {
                     let colon = |at: usize| matches!(trees.get(at), Some(TokenTree::Punct(p)) if p.as_char() == ':');
                     if !(colon(at + 1) && colon(at + 2)) {
                         continue;
@@ -386,7 +411,12 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
             continue;
         }
         let (mut paths, mut outcomes) = (Vec::new(), BTreeSet::new());
-        walk(function.block.to_token_stream(), &mut paths, &mut outcomes);
+        walk(
+            function.block.to_token_stream(),
+            false,
+            &mut paths,
+            &mut outcomes,
+        );
         tests.extend(paths.into_iter().map(|path| (path, outcomes.clone())));
     }
     assert!(
@@ -397,12 +427,50 @@ fn snapshot_tests(source: &str) -> Vec<(String, BTreeSet<String>)> {
     tests
 }
 
+/// [`snapshot_tests`] pinned on fixtures, as [`assert_smoke_expectation_reads_the_commands_a_case_needs`]
+/// pins the smoke reader: called by the coverage test before its verdict on the real suite.
+fn assert_snapshot_tests_count_only_asserted_outcomes() {
+    let outcomes = |body: &str| {
+        let source = format!(
+            "#[test]\nfn case() {{\n    let (report, _) = generate_corpus(\"pet/openapi.yaml\", false);\n    {body}\n}}\n"
+        );
+        let tests = snapshot_tests(&source);
+        let [(path, outcomes)] = tests.as_slice() else {
+            panic!(
+                "the fixture holds one test, and the scan found {}",
+                tests.len()
+            );
+        };
+        assert_eq!(path, "pet/openapi.yaml");
+        outcomes.iter().cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcomes("assert_eq!(report.outcome(), Outcome::Rejected, \"{report:#?}\");"),
+        ["Rejected"]
+    );
+    assert_eq!(
+        outcomes("if true { assert_eq!(report.outcome(), Outcome::Generated); }"),
+        ["Generated"]
+    );
+    for body in [
+        "let _ = Outcome::Rejected;",
+        "assert_ne!(report.outcome(), Outcome::Rejected);",
+        "assert!(matches!(report.outcome(), Outcome::Rejected));",
+        "match report.outcome() { Outcome::Rejected => {}, _ => {} }",
+    ] {
+        assert!(
+            outcomes(body).is_empty(),
+            "`{body}` asserts no outcome, so it must not count as one"
+        );
+    }
+}
+
 #[test]
 fn the_corpus_readme_mirrors_the_manifest() {
-    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". The table
-    // row of each case is read for its `Expected` cell, so a mirror that names the case but states
-    // another outcome fails too.
-    let rows = readme_expectations(&read("corpus/README.md"));
+    // CLAUDE.md says the manifest's expectations are "mirrored in `corpus/README.md`". Every cell
+    // of each case's table row is read against the manifest field it restates, so a mirror that
+    // names the case but states another outcome, upstream, revision, path or hash fails too.
+    let rows = readme_rows(&read("corpus/README.md"));
     let cases = manifest().cases;
     for case in &cases {
         let row = rows.get(&case.id).unwrap_or_else(|| {
@@ -411,11 +479,24 @@ fn the_corpus_readme_mirrors_the_manifest() {
                 case.id
             )
         });
-        assert_eq!(
-            row, &case.expect,
-            "corpus/README.md says `{}` is expected to `{row}`, and the manifest says `{}`",
-            case.id, case.expect
-        );
+        let sha256 = match &case.tree_sha256 {
+            Some(tree) => format!("tree `{tree}`; root `{}`", case.sha256),
+            None => format!("`{}`", case.sha256),
+        };
+        for (column, cell, manifest) in [
+            ("Upstream", &row.upstream, format!("`{}`", case.upstream)),
+            ("Revision", &row.revision, format!("`{}`", case.revision)),
+            ("Path", &row.path, format!("`{}`", case.upstream_path)),
+            ("SHA-256", &row.sha256, sha256),
+            ("Expected", &row.expect, case.expect.clone()),
+        ] {
+            assert_eq!(
+                cell, &manifest,
+                "corpus/README.md's `{}` row says {cell} in its {column} column, and the \
+                 manifest says {manifest}",
+                case.id
+            );
+        }
     }
     let stale: Vec<&String> = rows
         .keys()
@@ -427,14 +508,24 @@ fn the_corpus_readme_mirrors_the_manifest() {
     );
 }
 
-/// The `Expected` column of corpus/README.md's case table, by case ID, in the manifest's grammar:
-/// `Generate` reads as `generate`, and `Reject `E###` …` as `reject:E###`.
-fn readme_expectations(readme: &str) -> BTreeMap<String, String> {
+/// One case row of corpus/README.md's table, each cell trimmed and kept verbatim except
+/// `expect`, which is the `Expected` cell read in the manifest's grammar.
+struct ReadmeRow {
+    upstream: String,
+    revision: String,
+    path: String,
+    sha256: String,
+    expect: String,
+}
+
+/// corpus/README.md's case table, by case ID. The `Expected` column reads in the manifest's
+/// grammar: `Generate` as `generate`, and `Reject `E###` …` as `reject:E###`.
+fn readme_rows(readme: &str) -> BTreeMap<String, ReadmeRow> {
     let mut rows = BTreeMap::new();
     for line in readme.lines() {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         // `| ID | Upstream | Revision | Path | SHA-256 | Expected |`, the outer two cells empty.
-        let [_, id, _, _, _, _, expected, _] = cells.as_slice() else {
+        let [_, id, upstream, revision, path, sha256, expected, _] = cells.as_slice() else {
             continue;
         };
         let Some(id) = id.strip_prefix('`').and_then(|id| id.strip_suffix('`')) else {
@@ -452,8 +543,15 @@ fn readme_expectations(readme: &str) -> BTreeMap<String, String> {
                 });
             format!("reject:{code}")
         };
+        let row = ReadmeRow {
+            upstream: (*upstream).to_owned(),
+            revision: (*revision).to_owned(),
+            path: (*path).to_owned(),
+            sha256: (*sha256).to_owned(),
+            expect,
+        };
         assert!(
-            rows.insert(id.to_owned(), expect).is_none(),
+            rows.insert(id.to_owned(), row).is_none(),
             "corpus/README.md lists `{id}` twice"
         );
     }

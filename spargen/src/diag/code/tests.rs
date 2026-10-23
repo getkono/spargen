@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
 use super::Code;
+use crate::diag::Severity;
 use crate::test_support::{read_repo_file, repo_root, rust_sources};
 
-/// Every code must appear in the published index, with the same title, and nothing may appear
-/// there that is not a real code. The index is product surface — `spargen explain` and
+/// Every code must appear in the published index, with its severity and title, and nothing may
+/// appear there that is not a real code. The index is product surface — `spargen explain` and
 /// `docs/errors.md` are the same contract — and without this the two drift silently.
 #[test]
 fn the_published_index_lists_exactly_the_declared_codes() {
@@ -16,7 +17,7 @@ fn the_published_index_lists_exactly_the_declared_codes() {
         return;
     };
     let index = read_repo_file(&root, "docs/errors.md");
-    let rows: Vec<(String, String)> = index
+    let rows: Vec<(String, String, String)> = index
         .lines()
         .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
         .map(|line| {
@@ -27,24 +28,35 @@ fn the_published_index_lists_exactly_the_declared_codes() {
                 .unwrap_or_default()
                 .trim_matches('`')
                 .to_owned();
-            let _severity = cells.next();
+            let severity = cells.next().unwrap_or_default().to_owned();
             let title = cells.next().unwrap_or_default().to_owned();
-            (code, title)
+            (code, severity, title)
         })
         .collect();
 
     for code in Code::all() {
         let row = rows
             .iter()
-            .find(|(listed, _)| listed == code.as_str())
+            .find(|(listed, _, _)| listed == code.as_str())
             .unwrap_or_else(|| panic!("{} is missing from docs/errors.md", code.as_str()));
+        let severity = match code.severity() {
+            Severity::Error => "Error",
+            Severity::Warning => "Warning",
+        };
+        assert_eq!(
+            row.1,
+            severity,
+            "docs/errors.md lists {} as `{}`, but its severity is `{severity}`",
+            code.as_str(),
+            row.1
+        );
         // The index may elaborate ("… (3.1.x and 3.2.x are supported)") and may add markdown
         // code spans, but it must not describe a different thing than `spargen explain` does.
         assert!(
-            row.1.replace('`', "").contains(code.title()),
+            row.2.replace('`', "").contains(code.title()),
             "docs/errors.md describes {} as `{}`, but its title is `{}`",
             code.as_str(),
-            row.1,
+            row.2,
             code.title()
         );
         assert!(
@@ -53,7 +65,7 @@ fn the_published_index_lists_exactly_the_declared_codes() {
             code.as_str()
         );
     }
-    for (listed, _) in &rows {
+    for (listed, _, _) in &rows {
         assert!(
             Code::all().iter().any(|code| code.as_str() == listed),
             "docs/errors.md lists `{listed}`, which is not a declared code"

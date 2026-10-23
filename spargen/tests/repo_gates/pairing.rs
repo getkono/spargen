@@ -165,7 +165,7 @@ const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
         job: "test",
         tasks: &["test", "bench-build"],
-        ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY, CACHE],
+        ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY_WASM, CACHE],
         ..PAIR
     }),
     Pairing::Identical(Pair {
@@ -696,7 +696,8 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
 fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
     // A fixed name under the shared /tmp is owned by whoever ran the gate first; on a sticky
     // /tmp every later user's redirect fails with `Permission denied` before spargen runs
-    // (#93). Both copies of the gate write under the gitignored `target/corpus-smoke/`.
+    // (#93). Both copies of the gate write under the gitignored `target/corpus-smoke/`: every
+    // redirect either copy makes targets a path there, and neither file names `/tmp/` at all.
     for file in ["mise.toml", ".github/workflows/ci.yml"] {
         let text = read(file);
         assert!(
@@ -704,6 +705,60 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
             "`{file}` writes to a fixed `/tmp/` path; corpus-smoke outputs belong under `target/corpus-smoke/`"
         );
     }
+    let ci: Vec<String> = workflow("ci.yml")["jobs"]["corpus-smoke"]["steps"]
+        .as_vec()
+        .expect("ci.yml carries a `corpus-smoke` job with steps")
+        .iter()
+        .filter_map(|step| step["run"].as_str().map(str::to_owned))
+        .collect();
+    for (gate, commands) in [
+        (
+            "`mise run corpus-smoke`",
+            mise_commands(&mise_tasks(), "corpus-smoke"),
+        ),
+        ("the CI corpus-smoke job", ci),
+    ] {
+        let targets: Vec<&str> = commands
+            .iter()
+            .flat_map(|command| redirect_targets(command))
+            .collect();
+        assert!(
+            !targets.is_empty(),
+            "{gate} redirects no output; the scan has stopped reading its commands"
+        );
+        for target in targets {
+            assert!(
+                target.starts_with("target/corpus-smoke/")
+                    && !target.split('/').any(|segment| segment == ".."),
+                "{gate} redirects into `{target}`; corpus-smoke outputs belong under \
+                 `target/corpus-smoke/`"
+            );
+        }
+    }
+    assert_eq!(
+        redirect_targets("a > target/x.json 2>&1 || b >>/tmp/y 2> z"),
+        ["target/x.json", "/tmp/y", "z"],
+        "`redirect_targets` reads every `>`, `>>` and `N>` redirect, and no `>&` duplication"
+    );
+}
+
+/// The file each output redirect in the shell `command` writes to: the word after each `>` or
+/// `>>`, with or without a file-descriptor prefix or a space before it. A `>&N` duplication writes
+/// no file and is skipped.
+fn redirect_targets(command: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let mut rest = command;
+    while let Some(at) = rest.find('>') {
+        rest = rest[at + 1..].trim_start_matches('>');
+        if rest.starts_with('&') {
+            continue;
+        }
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        targets.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    targets
 }
 
 #[test]
