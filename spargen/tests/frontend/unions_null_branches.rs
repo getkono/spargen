@@ -1302,3 +1302,42 @@ fn a_one_of_exact_null_branch_beside_a_branch_null_matches_unstated_is_no_varian
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// Issue #934: an `anyOf` beside a `$ref` to a nullable conjunct, whose branches the meet leaves
+/// as the conjunct itself, collapses to that conjunct with `W001` even though the branches differ
+/// in `null`: a branch that states nothing takes the conjunct's `null`, and `{ type: array }`
+/// refuses it. The variants are compared with each one's own `null` set aside, so the position is
+/// the conjunct, `Option` because a branch admits `null`, and not an enum of two identical
+/// `Box<C>` variants.
+#[test]
+fn a_ref_beside_an_any_of_whose_branches_differ_only_in_null_collapses_to_the_conjunct() {
+    let mut mismatches = Vec::new();
+    for stated_nothing in ["{}", "true"] {
+        let union = format!("anyOf: [ {stated_nothing}, {{ type: array }} ]");
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    C: {{ type: [array, 'null'], items: {{ type: string }} }}\n    Pick: {{ $ref: \
+                 '#/components/schemas/C', {union} }}\n    Holder:\n      type: object\n      \
+                 properties:\n        pick: {{ $ref: '#/components/schemas/Pick' }}\n      \
+                 required: [pick]\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let collapsed = messages_for(&report, Code::ValidationKeywordIgnored)
+            .into_iter()
+            .any(|message| message.contains("differ only in keywords"));
+        if report.outcome() == Outcome::Rejected
+            || !collapsed
+            || !enum_variants(&types, "Pick").is_empty()
+            || alias_target(&types, "Pick").as_deref() != Some("Vec<Citem>")
+            || field_type(&types, "pub pick").as_deref() != Some("Option<Pick>")
+        {
+            mismatches.push(format!(
+                "{union}: not collapsed to `C`: {report:#?}\n{types}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
