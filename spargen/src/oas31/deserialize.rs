@@ -1094,6 +1094,21 @@ fn expect_string<'a>(
     found
 }
 
+/// The boolean at `value`, or `E011` at `pointer` when it is not one.
+fn expect_bool(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<bool> {
+    let found = value.as_bool();
+    if found.is_none() {
+        Diagnostic::error(Code::InvalidInput, provenance(pointer, value))
+            .message("expected a boolean")
+            .emit(diags);
+    }
+    found
+}
+
 fn parse_ref_array<T>(
     value: &SpannedValue,
     pointer: &JsonPointer,
