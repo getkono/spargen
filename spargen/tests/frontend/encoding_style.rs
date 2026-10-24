@@ -116,7 +116,8 @@ paths:
 /// array property stays supported: a `null` property is omitted from a form body, not serialized.
 /// A `oneOf` whose `null` member is reached through a `$ref` is the value itself: form-urlencoded
 /// omits it like a root `null`, but multipart sends it as an empty part, so only multipart
-/// rejects it.
+/// rejects it. A multipart part has no object representation, so there the delimited styles
+/// serialize only an array, and a union with an object member rejects too.
 #[test]
 fn e009_an_encoding_style_over_a_property_admitting_a_value_it_cannot_serialize() {
     const TEMPLATE: &str = r##"
@@ -170,13 +171,23 @@ components:
         (multipart, "spaceDelimited", "{ type: string }"),
         (multipart, "pipeDelimited", "{ type: boolean }"),
         (multipart, "spaceDelimited", member_null),
+        // A multipart part has no object representation, so a union with an object member is
+        // refused as well: it used to check clean and fail at request time with `NestedValue`.
+        (
+            multipart,
+            "pipeDelimited",
+            "{ oneOf: [{ type: array, items: { type: string } }, \
+             { type: object, properties: { a: { type: string } } }] }",
+        ),
     ];
     for (media, style, schema) in rejected {
         let spec = spec(media, style, schema);
-        let shape = if style == "deepObject" {
-            "only objects"
+        let (shape, wanted) = if style == "deepObject" {
+            ("only objects", "an object")
+        } else if media == multipart {
+            ("only arrays", "an array")
         } else {
-            "only arrays and objects"
+            ("only arrays and objects", "an array or object")
         };
         for report in [generate(&spec), check(&spec)] {
             assert_eq!(
@@ -189,6 +200,20 @@ components:
             assert!(
                 messages[0].contains(&format!("`encoding.p.style: {style}` serializes {shape}")),
                 "{media} {style} {schema}: {messages:?}"
+            );
+            // The remedy asks for a schema the earlier checks accept: never an object on
+            // multipart, which the object-property check refuses.
+            let remedies: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnsupportedMediaType)
+                .filter_map(|d| d.remedy.as_deref())
+                .collect();
+            assert!(
+                remedies.len() == 1
+                    && remedies[0]
+                        .starts_with(&format!("give the property {wanted} schema, or use")),
+                "{media} {style} {schema}: {remedies:?}"
             );
         }
     }

@@ -456,28 +456,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 parameter,
                 format!(
                     "`style: {style_name}` serializes {}, but the schema of parameter `{}` admits \
-                     another value ({}, or `null` on a required parameter), which the style has \
-                     no serialization for",
+                     another value ({}, a `oneOf`/`anyOf` member that is `null`, which is sent \
+                     even on an optional parameter, or a root `null` on a required parameter), \
+                     which the style has no serialization for",
                     domain.describe(),
                     parameter.name,
-                    match domain {
-                        StyleDomain::ArrayOrObject => "a scalar",
-                        StyleDomain::Object => "a scalar or an array",
-                    }
+                    domain.outside(),
                 ),
-                Some(
-                    match domain {
-                        StyleDomain::ArrayOrObject => {
-                            "give the parameter an array or object schema, nullable only if the \
-                             parameter is optional, or use `style: form`"
-                        }
-                        StyleDomain::Object => {
-                            "give the parameter an object schema, nullable only if the parameter \
-                             is optional, or use `style: form`"
-                        }
-                    }
-                    .to_owned(),
-                ),
+                Some(format!(
+                    "give the parameter {} schema with no `null` `oneOf`/`anyOf` member, \
+                     nullable at its root only if the parameter is optional, or use `style: form`",
+                    domain.schema()
+                )),
             );
         }
         Some(())
@@ -654,6 +644,8 @@ fn uninhabited_parameter_part_inner(
 pub(super) enum StyleDomain {
     /// `spaceDelimited` / `pipeDelimited`.
     ArrayOrObject,
+    /// `spaceDelimited` / `pipeDelimited` on a multipart part ([`Self::on_multipart`]).
+    Array,
     /// `deepObject`.
     Object,
 }
@@ -673,11 +665,40 @@ impl StyleDomain {
         }
     }
 
+    /// The domain a multipart part narrows this one to: a part carries one value and has no
+    /// object representation, so the delimited styles serialize only an array there. `deepObject`
+    /// is refused on multipart outright before this domain is read.
+    pub(super) fn on_multipart(self) -> Self {
+        match self {
+            Self::ArrayOrObject | Self::Array => Self::Array,
+            Self::Object => Self::Object,
+        }
+    }
+
     /// What the style serializes, as a diagnostic phrases it: "serializes {only ...}".
     pub(super) fn describe(self) -> &'static str {
         match self {
             Self::ArrayOrObject => "only arrays and objects",
+            Self::Array => "only arrays",
             Self::Object => "only objects",
+        }
+    }
+
+    /// The non-null kinds of value outside the domain, as a diagnostic lists them.
+    pub(super) fn outside(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "a scalar",
+            Self::Array => "a scalar or an object",
+            Self::Object => "a scalar or an array",
+        }
+    }
+
+    /// The schema a remedy asks for: "give the property {an ... schema}".
+    pub(super) fn schema(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "an array or object",
+            Self::Array => "an array",
+            Self::Object => "an object",
         }
     }
 
@@ -712,8 +733,8 @@ impl StyleDomain {
             return false;
         };
         match &definition.kind {
-            TypeKind::Struct(_) => true,
-            TypeKind::Array(_) | TypeKind::Tuple(_) => self == Self::ArrayOrObject,
+            TypeKind::Struct(_) => self != Self::Array,
+            TypeKind::Array(_) | TypeKind::Tuple(_) => self != Self::Object,
             TypeKind::Null => !null_sent,
             // A union admits exactly its members' values; one reached again through a member adds
             // none, so it holds no counterexample (`members` stops the walk).

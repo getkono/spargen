@@ -263,10 +263,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // objects (#696); the parameter-side construct is `E010`. A `null` at the property's root
         // is omitted from the body before any style sees it. A `oneOf`/`anyOf` member's `null` is
         // the whole value: a form-urlencoded body omits it like a root `null`, but multipart sends
-        // it as a part of its own, which these styles have no serialization for.
-        let member_null_sent = media == MediaType::Multipart;
+        // it as a part of its own, which these styles have no serialization for. A multipart part
+        // has no object representation either (the check above refuses a property that is one),
+        // so there the delimited styles serialize only an array, and a union with an object
+        // member is refused here rather than failing at request time with `NestedValue`.
+        let multipart = media == MediaType::Multipart;
         if let Some(domain) = StyleDomain::of(&style)
-            .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, member_null_sent))
+            .map(|domain| {
+                if multipart {
+                    domain.on_multipart()
+                } else {
+                    domain
+                }
+            })
+            .filter(|domain| !domain.admits_only(&self.graph, field_ty, false, multipart))
         {
             // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
@@ -276,14 +286,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      serialization for",
                     domain.describe()
                 ))
-                .remedy(match domain {
-                    StyleDomain::ArrayOrObject => {
-                        "give the property an array or object schema, or use `style: form`"
-                    }
-                    StyleDomain::Object => {
-                        "give the property an object schema, or use `style: form`"
-                    }
-                })
+                .remedy(format!(
+                    "give the property {} schema, or use `style: form`",
+                    domain.schema()
+                ))
                 .emit(self.diags);
             return None;
         }

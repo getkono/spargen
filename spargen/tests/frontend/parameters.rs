@@ -880,10 +880,28 @@ components:
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let messages = messages_for(&report, Code::UnsupportedParameterStyle);
         assert_eq!(messages.len(), 1, "{report:#?}");
+        // The parameter is optional, so the message and remedy must name the union's `null`
+        // member as the cause, not only a scalar or a required parameter's root `null`.
         assert!(
             messages[0].contains("`style: spaceDelimited` serializes only arrays and objects")
-                && messages[0].contains("`f`"),
+                && messages[0].contains("`f`")
+                && messages[0].contains(
+                    "a `oneOf`/`anyOf` member that is `null`, which is sent even on an optional \
+                     parameter"
+                ),
             "{messages:?}"
+        );
+        let remedies: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnsupportedParameterStyle)
+            .filter_map(|d| d.remedy.as_deref())
+            .collect();
+        assert!(
+            remedies.len() == 1
+                && remedies[0].contains("with no `null` `oneOf`/`anyOf` member")
+                && !remedies[0].contains("nullable only if the parameter is optional"),
+            "{remedies:?}"
         );
     }
 }
