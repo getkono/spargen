@@ -93,9 +93,9 @@ impl std::fmt::Display for CodegenError {
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
 /// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses, once degraded under the retired
-/// `W003`, lower to typed per-operation response enums). Its one failure is a token stream that
-/// does not parse as a Rust file, returned as a [`CodegenError`] for the caller to report.
+/// lowering, so it takes no `Diagnostics` (multi-status responses lower to typed per-operation
+/// response enums). Its one failure is a token stream that does not parse as a Rust file, returned
+/// as a [`CodegenError`] for the caller to report.
 pub(crate) fn generate(
     api: &Api,
     names: &Names,
