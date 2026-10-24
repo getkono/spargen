@@ -220,7 +220,7 @@ struct Stale {
 
 /// One lowering pass. `settled` holds the nullability an earlier pass's bodies decided for the
 /// reservations whose back-edges read a guess that turned out wrong, and `first` what the pass
-/// opens before it lowers the root components in document order ([`MemberOrder::opened_first`]).
+/// opens before it lowers the root components in document order ([`MemberOrders::opened_first`]).
 fn lower_pass(
     document: &Document,
     resolver: &Resolver,
