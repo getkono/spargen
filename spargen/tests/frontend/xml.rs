@@ -535,6 +535,64 @@ paths:
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
+/// Issue #704: a bodyless `application/xml: {}` status beside two bodied JSON statuses decodes no
+/// XML body, so it is a unit variant of the multi-status enum, not the rejected combination. Pinned
+/// on both sides, since the success and error enums share the rule.
+#[test]
+fn a_bodyless_xml_status_in_a_multi_status_enum_generates() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: a
+          content:
+            application/json:
+              schema: { type: object, required: [a], properties: { a: { type: string } } }
+        "201":
+          description: b
+          content:
+            application/json:
+              schema: { type: object, required: [b], properties: { b: { type: string } } }
+        "202":
+          description: c
+          content:
+            application/xml: {}
+        "404":
+          description: d
+          content:
+            application/json:
+              schema: { type: object, required: [d], properties: { d: { type: string } } }
+        "409":
+          description: e
+          content:
+            application/json:
+              schema: { type: object, required: [e], properties: { e: { type: string } } }
+        "410":
+          description: f
+          content:
+            application/xml: {}
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        enum_variants(&code, "GetXResponse").contains(&"Status202".to_owned()),
+        "{code}"
+    );
+    assert!(
+        enum_variants(&code, "GetXError").contains(&"Status410".to_owned()),
+        "{code}"
+    );
+}
+
 // --- OpenAPI 3.2 XML nodeType defaulting ----------------------------------------------------
 //
 // 3.2 replaced `attribute`/`wrapped` with `nodeType` and gave it a defaulting table: `$ref` and
