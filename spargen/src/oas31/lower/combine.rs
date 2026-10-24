@@ -207,6 +207,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         matches!(policy, AdditionalProps::Typed(ty) if self.is_reservation(ty.id))
                     });
                     if unlowered {
+                        // The value's target can be open only because of the order lowering
+                        // reached it in, as an `allOf` member's can (`record_open_member`).
+                        for policy in [&additional, member_additional] {
+                            if let AdditionalProps::Typed(ty) = policy {
+                                self.record_open_member(ty.id);
+                            }
+                        }
                         return self.reject_all_of_cycle(
                             schema.provenance.clone(),
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
@@ -243,6 +250,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 if self.is_reservation(existing.ty.id)
                                     || self.is_reservation(field.ty.id) =>
                             {
+                                self.record_open_member(existing.ty.id);
+                                self.record_open_member(field.ty.id);
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members is typed by a \
                                      `$ref` that closes a reference cycle back to the schema \
@@ -322,6 +331,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if self.is_reservation(field.ty.id)
                             || matches!(member_additional, AdditionalProps::Typed(value) if self.is_reservation(value.id)) =>
                     {
+                        self.record_open_member(field.ty.id);
+                        if let AdditionalProps::Typed(value) = member_additional {
+                            self.record_open_member(value.id);
+                        }
                         let message = format!(
                             "required property `{}`, which no `allOf` member declares, is typed by \
                              an `additionalProperties` value schema that is a `$ref` closing a \

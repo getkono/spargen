@@ -117,10 +117,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 }
 
 impl LowerCtx<'_, '_> {
-    /// Record that an `allOf` member of the body being lowered right now found `target`, the root
-    /// id of a reservation still open, and is about to refuse it (`E013`). Unless that body is the
-    /// target's own, the next pass opens it first ([`MemberOrder`]), so the member is reached fresh
-    /// there whichever of the two `components.schemas` declares first.
+    /// Record that an `allOf` composition in the body being lowered right now needs what `target`
+    /// lowers to — a member's target, or the type of a property or `additionalProperties` value two
+    /// members both constrain — and is about to refuse it (`E013`) because `target` is the root id
+    /// of a reservation still open. Unless that body is the target's own, the next pass opens it
+    /// first ([`MemberOrder`]), so the target is reached fresh there whichever of the two
+    /// `components.schemas` declares first. An id that is no open reservation records nothing.
     pub(super) fn record_open_member(&mut self, target: TypeId) {
         let Some(holder) = self.open_reservations.last() else {
             return;
@@ -192,29 +194,70 @@ pub(super) struct MemberOrder {
 }
 
 impl MemberOrder {
-    /// Whether `orders` lacks this ordering and taking it closes no loop: no chain of `orders`
-    /// leads from its target back to its holder. Each body on such a loop is composed of the next,
-    /// which no order lowers, so its refusal stands.
-    pub(super) fn extends(&self, orders: &[MemberOrder]) -> bool {
-        let known = orders.iter().any(|order| {
-            order.holder.reservation == self.holder.reservation && order.target == self.target
-        });
-        !known && !orders_reach(orders, &self.target, &self.holder.reservation)
+    /// The holder and the target, which identify the ordering.
+    fn pair(&self) -> (&Reservation, &Reservation) {
+        (&self.holder.reservation, &self.target)
+    }
+}
+
+/// What the passes of one [`lower`] have learned about [`MemberOrder`]s: the orderings they take,
+/// and the pairs found futile.
+///
+/// [`lower`]: super::lower
+#[derive(Default)]
+pub(super) struct MemberOrders {
+    taken: Vec<MemberOrder>,
+    /// Every ordering on a loop of orderings: each body on it is composed of the next, so no
+    /// order lowers it, and opening any of them first only moves the refusal.
+    futile: Vec<(Reservation, Reservation)>,
+}
+
+impl MemberOrders {
+    /// Learn `order`, a refusal a pass reported, and whether that changes what the next pass
+    /// opens first. An ordering already taken or found futile changes nothing. One that closes a
+    /// loop with the orderings taken makes the whole loop futile, and every ordering on it is
+    /// dropped, so the next pass lowers that loop in document order and refuses it as it would
+    /// have with no ordering at all. Any other is taken.
+    ///
+    /// Each change either takes an ordering not futile or makes at least one futile, and a futile
+    /// one is never taken again, so the passes that learn something are finite.
+    pub(super) fn learn(&mut self, order: MemberOrder) -> bool {
+        let (holder, target) = order.pair();
+        let known = self
+            .taken
+            .iter()
+            .any(|taken| taken.pair() == (holder, target))
+            || self.futile.iter().any(|(futile_holder, futile_target)| {
+                (futile_holder, futile_target) == (holder, target)
+            });
+        if known {
+            return false;
+        }
+        let Some(mut path) = order_path(&self.taken, target, holder) else {
+            self.taken.push(order);
+            return true;
+        };
+        path.sort_unstable();
+        for at in path.into_iter().rev() {
+            let dropped = self.taken.remove(at);
+            self.futile
+                .push((dropped.holder.reservation, dropped.target));
+        }
+        self.futile.push((order.holder.reservation, order.target));
+        true
     }
 
     /// What a pass opens before it lowers the root components in document order: every holder
-    /// `orders` names, each after the holders ordered before it, the root components among them in
-    /// document order and the rest by key, so the order is a function of the document and
-    /// `orders` alone.
+    /// an ordering taken names, each after the holders ordered before it, the root components among
+    /// them in document order and the rest by key, so the order is a function of the document and
+    /// the orderings alone.
     ///
     /// Every holder goes before every root component, not only before its target: the target
     /// was open because something lowered before the holder reached it, at the top level or
     /// inside any body that leads to it. Opened at the top level, a holder's own members are
     /// reached inside its own frame only, where the one open reservation they can find is its own.
-    pub(super) fn opened_first<'o>(
-        document: &Document,
-        orders: &'o [MemberOrder],
-    ) -> Vec<&'o Opening> {
+    pub(super) fn opened_first<'o>(&'o self, document: &Document) -> Vec<&'o Opening> {
+        let orders = self.taken.as_slice();
         let mut holders: Vec<&Opening> = Vec::new();
         for order in orders {
             if !holders
@@ -264,26 +307,28 @@ fn place_opening<'o>(
     first.push(opening);
 }
 
-/// Whether a chain of `orders`, each from its holder to its target, leads from `from` to `to`,
-/// `from` itself included.
-fn orders_reach(orders: &[MemberOrder], from: &Reservation, to: &Reservation) -> bool {
-    let mut stack = vec![from];
+/// The indices into `orders` of a chain of them, each from its holder to its target, that leads
+/// from `from` to `to`: empty when the two are one reservation, `None` when no chain does.
+fn order_path(orders: &[MemberOrder], from: &Reservation, to: &Reservation) -> Option<Vec<usize>> {
+    // Depth first, each reservation entered once, with the chain that reached it.
+    let mut stack = vec![(from, Vec::new())];
     let mut seen = HashSet::new();
-    while let Some(at) = stack.pop() {
+    while let Some((at, path)) = stack.pop() {
         if at == to {
-            return true;
+            return Some(path);
         }
         if !seen.insert(at) {
             continue;
         }
-        stack.extend(
-            orders
-                .iter()
-                .filter(|order| &order.holder.reservation == at)
-                .map(|order| &order.target),
-        );
+        for (index, order) in orders.iter().enumerate() {
+            if &order.holder.reservation == at {
+                let mut next = path.clone();
+                next.push(index);
+                stack.push((&order.target, next));
+            }
+        }
     }
-    false
+    None
 }
 
 /// The keywords whose value maps member names to subschemas that lowering descends into.

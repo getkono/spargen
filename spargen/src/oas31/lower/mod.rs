@@ -51,7 +51,7 @@ use super::{
 };
 
 use combine::{Gathering, RecordedContribution};
-use cycle::{MemberOrder, Opening};
+use cycle::{MemberOrder, MemberOrders, Opening};
 use defaults::retype_field_defaults;
 use reference::resolve_path_item;
 use security::{
@@ -136,20 +136,22 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 /// that found such a disagreement is discarded and the document is lowered again with the body's
 /// answer settled for that reservation, so the back-edge reads what a finished reference reads.
 ///
-/// A pass is also discarded when an `allOf` member's `$ref` found its target still being lowered
-/// from another reservation's body (#999). The member's fields are not known yet, so the pass
-/// refused it (`E013`), but whether the target is still open there says only which of the two
+/// A pass is also discarded when an `allOf` composition needed a reservation still open from
+/// another reservation's body (#999): a member's `$ref` target, or the type of a property or
+/// `additionalProperties` value two members both constrain. Its fields are not known yet, so the
+/// pass refused it (`E013`), but whether it is still open there says only which of the two
 /// lowering reached first, and that follows the order `components.schemas` declares them in:
-/// declared the other way round, the body reaches its member fresh, and the target's own
+/// declared the other way round, the body reaches its target fresh, and the target's own
 /// reference back to it is an ordinary boxed back-edge. So the next pass opens that body before
-/// anything else ([`MemberOrder`]), whatever the declaration order says. An ordering that would
-/// close a loop of such orderings is not taken: every body on that loop is composed of the next,
-/// which no order can lower, and the refusal stands.
+/// anything else ([`MemberOrder`]), whatever the declaration order says. An ordering that closes
+/// a loop of such orderings drops the loop instead ([`MemberOrders::learn`]): every body on it is
+/// composed of the next, which no order can lower, and the refusal stands as document order
+/// reports it.
 ///
-/// Each extra pass settles at least one reservation or takes at least one ordering it had not
-/// before, and neither is ever revised, so the loop ends. A document with no such back-edge and no
-/// refused member — every one without a recursive nullable component or a recursive `allOf` —
-/// is lowered exactly once.
+/// Each extra pass settles at least one reservation or learns an ordering it had not before, and
+/// [`MemberOrders::learn`] learns finitely many, so the loop ends. A document with no such
+/// back-edge and no refused composition — every one without a recursive nullable component or a
+/// recursive `allOf` — is lowered exactly once.
 pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
@@ -157,10 +159,10 @@ pub(crate) fn lower(
     options: LowerOptions,
 ) -> Result<Api, Aborted> {
     let mut settled = HashMap::new();
-    let mut orders: Vec<MemberOrder> = Vec::new();
+    let mut orders = MemberOrders::default();
     loop {
         let mut pass = diags.clone();
-        let first = MemberOrder::opened_first(document, &orders);
+        let first = orders.opened_first(document);
         let (api, stale) = lower_pass(document, resolver, &mut pass, &settled, &first, options);
         let mut changed = false;
         for (reservation, nullable) in stale.revisions {
@@ -170,10 +172,7 @@ pub(crate) fn lower(
             }
         }
         for order in stale.member_orders {
-            if order.extends(&orders) {
-                orders.push(order);
-                changed = true;
-            }
+            changed |= orders.learn(order);
         }
         if !changed {
             *diags = pass;

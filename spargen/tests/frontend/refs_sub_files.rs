@@ -595,21 +595,17 @@ paths:
     );
 }
 
-/// A direct recursive `allOf` member written in a sub-file as a bare `#/components/schemas/X`, where
-/// the sub-file also declares an `X` of its own, reads the root's `X` that is mid-lowering. The
-/// root-component pre-check in `gather_ref_target` rejects it before `ensure_component` runs, so the
-/// report is the one `E013` and no `W011` for the shadowed sub-file `X`. Removing that pre-check
-/// would add the `W011` (#992 tracks that decision); until then this pins the report unchanged.
-#[test]
-fn a_recursive_all_of_member_shadowed_by_the_root_reports_only_the_recursion() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+/// Write a root document whose component `X` has the body `x_body`, beside a `lib.yaml` whose `W`
+/// is an `allOf` of a bare `#/components/schemas/X` and more. `lib.yaml` declares an `X` of its own,
+/// which the root's `X` shadows, so that member reads the root's `X`.
+fn write_shadowed_all_of_member(dir: &camino::Utf8Path, x_body: &str) {
     std::fs::write(
         dir.join("openapi.yaml"),
-        r##"
+        format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
 paths:
   /u:
     get:
@@ -618,14 +614,13 @@ paths:
         '200':
           description: ok
           content:
-            application/json: { schema: { $ref: '#/components/schemas/X' } }
+            application/json: {{ schema: {{ $ref: '#/components/schemas/X' }} }}
 components:
   schemas:
     X:
-      type: object
-      properties:
-        w: { $ref: './lib.yaml#/components/schemas/W' }
-"##,
+{x_body}
+"##
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -642,6 +637,22 @@ components:
 "##,
     )
     .unwrap();
+}
+
+/// A direct recursive `allOf` member written in a sub-file as a bare `#/components/schemas/X`, where
+/// the sub-file also declares an `X` of its own, reads the root's `X` that is mid-lowering: the
+/// root's `X` is an `allOf` of that `W`, so each is composed of the other. The root-component
+/// pre-check in `gather_ref_target` rejects it before `ensure_component` runs, so the report is
+/// the one `E013` and no `W011` for the shadowed sub-file `X`. Removing that pre-check would add
+/// the `W011` (#992 tracks that decision); until then this pins the report unchanged.
+#[test]
+fn a_recursive_all_of_member_shadowed_by_the_root_reports_only_the_recursion() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    write_shadowed_all_of_member(
+        &dir,
+        "      allOf:\n        - { $ref: './lib.yaml#/components/schemas/W' }",
+    );
     let (generated, checked, _) = generate_and_check_dir(&dir, "openapi.yaml");
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
@@ -653,6 +664,27 @@ components:
             "{entry}: {report:#?}"
         );
     }
+}
+
+/// The same member, where the root's `X` reaches `W` through a field instead (#999). `X` is
+/// mid-lowering when `W`'s member reads it only because lowering entered at `X`; entered at `W`,
+/// the member reads `X` fresh and `X.w` is a boxed back-edge to `W`, so the next pass opens `W`
+/// first and the document generates. The member is then read, so the shadowed sub-file `X` is
+/// reported (`W011`).
+#[test]
+fn a_shadowed_all_of_member_reached_back_through_a_field_generates() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    write_shadowed_all_of_member(
+        &dir,
+        "      type: object\n      properties:\n        w: { $ref: './lib.yaml#/components/schemas/W' }",
+    );
+    let (generated, checked, source) = generate_and_check_dir(&dir, "openapi.yaml");
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert_eq!(codes(report), ["W011"], "{entry}: {report:#?}");
+    }
+    assert!(source.contains("pub w: Option<Box<"), "{source}");
 }
 
 /// The precondition `ensure_resolved`'s root-component routing rests on: a pointer deeper than a
