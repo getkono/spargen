@@ -693,9 +693,6 @@ pub fn unreferenced_types(code: &str, spec: &str) -> Vec<String> {
 /// name a first lowering already took is allocated that name with the stable 8-hex-digit suffix
 /// of its pointer (`S071def3c4`, `ResponseBody9c134e93`), and where the position takes the first
 /// lowering, the copy is elided (#926).
-///
-/// The copies of a `$ref`-sibling or `allOf` meet's `<Hint>Constraint` intermediate are left to
-/// that intermediate's own fix (#924), which removes the first lowering and its copies alike.
 pub fn unreferenced_copies(code: &str, spec: &str) -> Vec<String> {
     unreferenced_types(code, spec)
         .into_iter()
@@ -708,10 +705,9 @@ pub fn unreferenced_copies(code: &str, spec: &str) -> Vec<String> {
             else {
                 return false;
             };
-            let (base, suffix) = name.split_at(split);
+            let suffix = &name[split..];
             suffix.chars().all(|c| c.is_ascii_hexdigit())
                 && suffix.chars().any(|c| c.is_ascii_digit())
-                && !base.ends_with("Constraint")
         })
         .collect()
 }

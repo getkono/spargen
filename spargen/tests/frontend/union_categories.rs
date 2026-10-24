@@ -257,10 +257,12 @@ fn a_type_array_restating_its_union_branches_keeps_their_types() {
         let (_, bare) = generate_with_code(&with_schemas("3.1.0", &without_array));
         let mut expected = surface(&types_module(&bare));
         let actual = surface(&types);
-        // The one branch the `[string, integer]` row's array omits is no variant, with `W011`; its
-        // own type is lowered before the meet excludes it, as for any excluded branch.
+        // The one branch the `[string, integer]` row's array omits is no variant, with `W011`, and
+        // its own type, lowered before the meet excludes it, is no type of the output (#924).
         if excludes_boolean {
-            expected.retain(|line| !line.starts_with("PickVariant2("));
+            expected.retain(|line| {
+                !line.starts_with("PickVariant2(") && !line.starts_with("pub type PickVariant2 ")
+            });
             assert_eq!(
                 messages_for(&report, Code::DeclarationHasNoEffect).len(),
                 1,
