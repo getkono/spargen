@@ -494,6 +494,28 @@ fn a_lone_xml_body_beside_a_bodyless_sibling_is_not_a_multi_body_xml_enum() {
     assert!(matches!(json_only.success(), SuccessShape::Enum(_)));
     assert!(matches!(json_only.error(), ErrorShape::Enum(_)));
     assert!(!json_only.xml_in_multi_status());
+
+    // Issue #704: a bodyless XML response (`application/xml: {}`) decodes nothing, so beside
+    // two bodied JSON responses it is a unit variant, not the rejected combination — on either
+    // side.
+    let bodyless_xml = Response {
+        media: Some(super::MediaType::Xml),
+        ..resp(None)
+    };
+    let responses = Responses {
+        by_status: vec![
+            (StatusSpec::Exact(200), resp(Some(1))),
+            (StatusSpec::Exact(201), resp(Some(2))),
+            (StatusSpec::Exact(202), bodyless_xml.clone()),
+            (StatusSpec::Exact(404), resp(Some(3))),
+            (StatusSpec::Exact(409), resp(Some(4))),
+            (StatusSpec::Exact(410), bodyless_xml),
+        ],
+        default: None,
+    };
+    assert!(matches!(responses.success(), SuccessShape::Enum(_)));
+    assert!(matches!(responses.error(), ErrorShape::Enum(_)));
+    assert!(!responses.xml_in_multi_status());
 }
 
 /// Each sequential media maps to its own framing, and every other media to none.

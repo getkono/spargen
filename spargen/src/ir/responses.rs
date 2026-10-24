@@ -328,9 +328,12 @@ impl Responses {
     /// success/error paths — a lone XML body beside a bodyless sibling, on either side, is still
     /// that one body, decoded as XML by its enum arm — so this exotic combination is rejected
     /// cleanly during lowering (narrowed `E009`) rather than silently mis-decoding an XML body as
-    /// JSON.
+    /// JSON. A bodyless XML response (`application/xml: {}`) decodes nothing, so it is a unit
+    /// variant like any other bodyless status and is not counted.
     pub(crate) fn xml_in_multi_status(&self) -> bool {
-        let is_xml = |response: &&Response| response.media == Some(MediaType::Xml);
+        let is_xml = |response: &&Response| {
+            response.media == Some(MediaType::Xml) && response.body.is_some()
+        };
         let success_multi =
             self.multiple_success_bodies() && self.success_responses().iter().any(is_xml);
         let error_multi = self.multiple_error_bodies() && self.error_responses().iter().any(is_xml);
