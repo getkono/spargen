@@ -35,7 +35,13 @@ components:
 /// The disposition one member's hints take: rejected with `E009` naming `hint` under an XML body,
 /// and a `W006` naming it, with generation going ahead, under a JSON one.
 fn assert_member_hint_reported(schemas: &str, hint: &str) {
-    let report = generate(&member_document("application/xml", schemas));
+    assert_member_hint_reported_by(|media| generate(&member_document(media, schemas)), hint);
+}
+
+/// [`assert_member_hint_reported`] over whatever `run` reports for the document under each media
+/// type, so a fixture laid out beside vendored remote documents is judged by the same rule.
+fn assert_member_hint_reported_by(run: impl Fn(&str) -> Report, hint: &str) {
+    let report = run("application/xml");
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let errors = messages_for(&report, Code::UnsupportedMediaType);
     assert!(
@@ -45,7 +51,7 @@ fn assert_member_hint_reported(schemas: &str, hint: &str) {
         "{report:#?}"
     );
 
-    let report = generate(&member_document("application/json", schemas));
+    let report = run("application/json");
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let warnings = messages_for(&report, Code::XmlHintIgnored);
     assert!(
@@ -166,6 +172,47 @@ fn a_member_merged_through_a_component_ref_is_judged_by_the_type_merging_it() {
             id: { type: integer }"##,
         "prefix",
     );
+}
+
+/// The remote counterpart: `Both` merges a pinned remote document whose own `allOf` member
+/// carries the hint, and that document reaches the body only as `Both`'s `$ref` member, so the
+/// member is judged by `Both`'s XML body rather than by the remote type's own reachability.
+#[test]
+fn a_member_merged_through_a_remote_ref_is_judged_by_the_type_merging_it() {
+    const SHARED_URL: &str = "https://api.example.com/schemas/shared.yaml";
+    const SHARED_PATH: &str = "api.example.com/schemas/shared.yaml";
+    const SHARED_YAML: &str = "allOf:\n  - type: object\n    xml: { namespace: \"urn:remote\" }\n    properties:\n      id: { type: integer }\n";
+    const SHARED_SHA256: &str = "84ffeec6c43b14582abbb3e46efdac70ec2cec418926d3a2b0b666cdb810b577";
+
+    let lock = format!(
+        "version = 1\n\n[[remote]]\nurl = \"{SHARED_URL}\"\nsha256 = \"{SHARED_SHA256}\"\npath = \
+         \"{SHARED_PATH}\"\n"
+    );
+    let schemas = format!(
+        r##"    Both:
+      allOf:
+        - $ref: "{SHARED_URL}"
+        - $ref: "#/components/schemas/Pet""##
+    );
+    for check_only in [false, true] {
+        assert_member_hint_reported_by(
+            |media| {
+                let document = member_document(media, &schemas);
+                let vendor = [(SHARED_PATH, SHARED_YAML)];
+                let (report, _temp, _out) =
+                    super::refs_remote::run_layout(&document, Some(&lock), &vendor, check_only);
+                // The pin is live, so the document reaches lowering rather than being rejected
+                // for drift or for being unpinned.
+                assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+                assert!(
+                    !has_code(&report, Code::AbsoluteRefUnsupported),
+                    "{report:#?}"
+                );
+                report
+            },
+            "namespace",
+        );
+    }
 }
 
 /// `anyOf` branches that cannot be told apart merge into one type, which consumes each branch's
