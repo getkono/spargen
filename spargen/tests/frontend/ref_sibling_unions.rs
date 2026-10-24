@@ -1196,3 +1196,118 @@ fn an_all_of_member_ref_with_a_union_sibling_is_not_dropped() {
         }
     }
 }
+
+/// Each union `types` declares two of whose variants carry the same payload type, with its
+/// variants.
+fn unions_with_a_repeated_payload(types: &str) -> Vec<String> {
+    types
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("pub enum "))
+        .filter_map(|rest| rest.split([' ', '<', '{']).next())
+        .filter_map(|name| {
+            let variants = enum_variants(types, name);
+            let payloads: Vec<&str> = variants
+                .iter()
+                .filter_map(|variant| variant.split_once('(').map(|(_, payload)| payload))
+                .collect();
+            let repeated = payloads
+                .iter()
+                .enumerate()
+                .any(|(at, payload)| payloads[at + 1..].contains(payload));
+            repeated.then(|| format!("{name}: {variants:?}"))
+        })
+        .collect()
+}
+
+/// A `$ref` to a target of several `type`s meets its union sibling once per type the target
+/// allows, which nests the sibling's union under each of the target's variants (#998). A nested
+/// union whose branches that one type leaves alike is merged with `W001`, as the top-level union
+/// is: here `{ type: [string, integer] }` and `{ type: string }` both meet the string variant as
+/// `String`. Before, the string variant was a `oneOf` of two `String` aliases that rejected every
+/// string as matching both, with no warning, and the `anyOf` spelling an enum of one payload type
+/// twice. The same conjunction is written as a `$ref` with a shape sibling beside the union, and
+/// as both `allOf` spellings, which reach the same meet through a second site.
+#[test]
+fn a_ref_to_a_multi_type_target_merges_the_branches_one_target_type_leaves_alike() {
+    let target = "    C: { type: [string, integer, 'null'] }\n";
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    for (keyword, branches) in [
+        ("oneOf", "{ type: [string, integer] }, { type: string }"),
+        ("oneOf", "{ type: [string, integer] }, {}"),
+        ("anyOf", "{}, { type: number }"),
+    ] {
+        let union = format!("{keyword}: [ {branches} ]");
+        for (spelling, pick) in [
+            (
+                "a `$ref` beside the union",
+                format!("{{ $ref: '#/components/schemas/C', {union} }}"),
+            ),
+            (
+                "a `$ref` and a shape keyword beside the union",
+                format!("{{ $ref: '#/components/schemas/C', maxLength: 64, {union} }}"),
+            ),
+            (
+                "an `allOf` beside the union",
+                format!("{{ allOf: [ {{ $ref: '#/components/schemas/C' }} ], {union} }}"),
+            ),
+        ] {
+            let spec = with_schemas("3.1.0", &format!("{target}    Pick: {pick}\n{holder}"));
+            let (report, code) = generate_with_code(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Generated,
+                "{union} as {spelling}: {report:#?}"
+            );
+            let types = types_module(&code);
+            let repeated = unions_with_a_repeated_payload(&types);
+            assert!(
+                repeated.is_empty(),
+                "{union} as {spelling}: a union carries one payload type twice: \
+                 {repeated:#?}\n{types}"
+            );
+            assert!(
+                messages_for(&report, Code::ValidationKeywordIgnored)
+                    .iter()
+                    .any(|message| message.contains("differ only in keywords")),
+                "{union} as {spelling}: the merge must be reported: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The other conjunct #998 named, `{ enum: [a, b, null] }` as a `$ref` target beside a `oneOf` or
+/// `anyOf`, is one string enum rather than a union of target variants, so the sibling's union is
+/// met once and nothing is nested: no union it generates carries a payload type twice. Pinned
+/// across branches the enum keeps whole, keeps in part, keeps as `null` alone, or excludes.
+#[test]
+fn a_ref_to_a_nullable_enum_target_beside_a_union_repeats_no_payload_type() {
+    let target = "    C: { enum: [a, b, null] }\n";
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    let branches = [
+        "{ type: string }",
+        "{ enum: [a] }",
+        "{ enum: [a, b] }",
+        "{ enum: [b, null] }",
+        "{ const: a }",
+        "{ type: 'null' }",
+        "{}",
+    ];
+    for keyword in ["oneOf", "anyOf"] {
+        for first in branches {
+            for second in branches {
+                let pick = format!(
+                    "{{ $ref: '#/components/schemas/C', {keyword}: [ {first}, {second} ] }}"
+                );
+                let spec = with_schemas("3.1.0", &format!("{target}    Pick: {pick}\n{holder}"));
+                let (report, code) = generate_with_code(&spec);
+                let repeated = unions_with_a_repeated_payload(&types_module(&code));
+                assert!(
+                    repeated.is_empty(),
+                    "{pick}: a union carries one payload type twice: {repeated:#?}\n{report:#?}"
+                );
+            }
+        }
+    }
+}

@@ -290,6 +290,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // beside a non-union sibling is an intersection this check was never meant for, and it
         // keeps the shape it has always generated.
         let intersection = if has_union_sibling {
+            // A union target meets the sibling once per target variant, so the sibling's union is
+            // nested under each, and each nested copy collapses first (#998).
+            let intersection =
+                self.collapse_nested_met_unions(schema, intersection, mark, MetUnion::RefSibling);
             let (collapsed, untyped_check) = self.collapse_met_union(
                 schema,
                 intersection,

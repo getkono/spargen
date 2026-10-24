@@ -116,6 +116,66 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// `met` with every trial union nested in its variants that the meet inserted since `mark`
+    /// collapsed as [`Self::collapse_met_union`] collapses `met` itself, innermost first (#998).
+    /// A conjunct that is itself a union, such as a `$ref` target of several `type`s, meets the
+    /// union branch by branch per variant of its own, so the union the document wrote is nested
+    /// once per conjunct variant. With `C: { type: [string, integer] }`, the schema
+    /// `{ $ref: C, oneOf: [{ type: [string, integer] }, { type: string }] }` meets to a category
+    /// dispatch over a `oneOf` of two strings and an integer. Each nested `oneOf` is compared by generated type and each nested
+    /// `anyOf` by identity, as the top-level union is, so a nested union whose branches the meet
+    /// left alike is merged with `W001` rather than emitted as variants no value tells apart. A
+    /// union the meet did not make (one the conjunct already held) is left as it was lowered.
+    pub(super) fn collapse_nested_met_unions(
+        &mut self,
+        schema: &Schema,
+        met: Ty,
+        mark: u32,
+        spelling: MetUnion,
+    ) -> Ty {
+        if met.id.0 < mark {
+            return met;
+        }
+        let Some(def) = self.graph.get(met.id) else {
+            return met;
+        };
+        let TypeKind::Union(union) = &def.kind else {
+            return met;
+        };
+        let hint = def.name_hint.clone();
+        let mut union = union.clone();
+        let mut changed = false;
+        for variant in &mut union.variants {
+            let nested = self.collapse_nested_met_unions(schema, variant.ty, mark, spelling);
+            let collapsed = match self.graph.get(nested.id).map(|def| &def.kind) {
+                Some(TypeKind::Union(Union {
+                    strategy: UnionStrategy::Trial { mode, .. },
+                    ..
+                })) if nested.id.0 >= mark => {
+                    let one_of = matches!(mode, UnionMode::OneOf);
+                    let nested_hint = self
+                        .graph
+                        .get(nested.id)
+                        .map_or_else(|| hint.clone(), |def| def.name_hint.clone());
+                    self.collapse_met_union(schema, nested, one_of, &nested_hint, spelling)
+                        .0
+                }
+                _ => nested,
+            };
+            if !same_ty(collapsed, variant.ty) {
+                variant.ty = collapsed;
+                changed = true;
+            }
+        }
+        if !changed {
+            return met;
+        }
+        let mut ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
+        ty.nullable = met.nullable;
+        ty.boxed = met.boxed;
+        ty
+    }
+
     /// `met`, the meet an `allOf`'s scalar members leave ([`Self::combine_all_of`]), with every
     /// `oneOf` union that meet produced collapsed as [`Self::collapse_met_union`] collapses the
     /// meet of a union member (#643). The scalar meet intersects a union branch by branch, so an

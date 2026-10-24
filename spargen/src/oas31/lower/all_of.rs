@@ -1273,7 +1273,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Collapsed before the refiners, which meet each branch apart and so would give branches
         // the composition left as one type distinct definitions of the same shape: the refiners
         // constrain every branch of their category alike, so refining the collapsed type admits
-        // the same values.
+        // the same values. A union the meet nested once per variant of a union conjunct collapses
+        // first, so the comparison below reads the variants as they end up (#998).
+        meet = self.collapse_nested_met_unions(schema, meet, mark, spelling);
         let (collapsed, untyped_check) =
             self.collapse_met_union(schema, meet, !union.one_of.is_empty(), &meet_hint, spelling);
         meet = collapsed;
