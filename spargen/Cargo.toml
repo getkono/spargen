@@ -20,7 +20,7 @@ cli = ["dep:clap", "remote-fetch"]
 # generator touches the network; `generate`/`check` never do. It is pulled in by `cli` so the
 # installed binary can vendor remote `$ref`s, and kept as a separate feature so a library-only
 # build (e.g. from `build.rs`) can opt in without the whole CLI.
-remote-fetch = ["dep:reqwest", "dep:rustls", "dep:rustls-webpki", "dep:webpki-roots"]
+remote-fetch = ["dep:reqwest", "dep:rustls", "dep:rustls-webpki", "dep:webpki-roots", "dep:tokio"]
 
 [dependencies]
 # diag
@@ -69,6 +69,10 @@ rustls = { version = "0.23.46", default-features = false, optional = true }
 # entry in `deny.toml` naming its advisory.
 rustls-webpki = { version = "0.103.16", default-features = false, optional = true }
 webpki-roots = { version = "1.0.10", default-features = false, optional = true }
+# An advisory floor on the tokio reqwest's blocking client runs on, for the same reason: never
+# named in code, default features stay off so it adds no feature, and it is mirrored by a
+# `[bans] deny` entry in `deny.toml` naming its advisory.
+tokio = { version = "1.53.3", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
