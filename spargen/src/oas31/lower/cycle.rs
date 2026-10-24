@@ -1,12 +1,14 @@
-//! Detecting a `$ref` or union member that closes a cycle back into the schema being lowered.
+//! Detecting a `$ref` or union member that closes a cycle back into the schema being lowered, and
+//! ordering the bodies whose `allOf` member found its target still being lowered.
 
 use std::collections::HashSet;
 
 use crate::diag::Provenance;
-use crate::oas31::SchemaOr;
+use crate::ir::{Ty, TypeId};
+use crate::oas31::{Document, SchemaOr};
 use crate::source::SpannedValue;
 
-use super::LowerCtx;
+use super::{LowerCtx, Reservation};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `reference`, written at `at`, closes a reference cycle back through a schema whose
@@ -112,6 +114,176 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .and_then(|name| self.in_progress.get(name))
             .is_some_and(|&(id, _)| id == own)
     }
+}
+
+impl LowerCtx<'_, '_> {
+    /// Record that an `allOf` member of the body being lowered right now found `target`, the root
+    /// id of a reservation still open, and is about to refuse it (`E013`). Unless that body is the
+    /// target's own, the next pass opens it first ([`MemberOrder`]), so the member is reached fresh
+    /// there whichever of the two `components.schemas` declares first.
+    pub(super) fn record_open_member(&mut self, target: TypeId) {
+        let Some(holder) = self.open_reservations.last() else {
+            return;
+        };
+        let opened = self.open_reservations.iter().find(|open| {
+            let memo = match &open.reservation {
+                Reservation::Component(_) => &self.in_progress,
+                Reservation::Remote(_) => &self.remote_in_progress,
+                Reservation::Resolved(_) => &self.resolved_in_progress,
+            };
+            memo.get(open.reservation.key())
+                .is_some_and(|&(id, _)| id == target)
+        });
+        let Some(target) = opened else {
+            return;
+        };
+        if target.reservation == holder.reservation {
+            return;
+        }
+        let order = MemberOrder {
+            holder: holder.clone(),
+            target: target.reservation.clone(),
+        };
+        self.member_orders.push(order);
+    }
+
+    /// Open `opening` from the top level of a pass, as the `$ref` that first reached it did.
+    pub(super) fn open(&mut self, opening: &Opening) -> Option<Ty> {
+        let root = &self.document.provenance;
+        match (&opening.reservation, &opening.via) {
+            (Reservation::Component(name), _) => self.ensure_component(name, None, root),
+            (Reservation::Remote(reference), _) => self.ensure_remote(reference, root),
+            (Reservation::Resolved(_), Some(via)) => {
+                self.ensure_resolved(&via.reference, &via.at, &via.hint)
+            }
+            // `lower_into_reservation` is handed a `Via` for every bundle target it opens.
+            (Reservation::Resolved(_), None) => None,
+        }
+    }
+}
+
+/// A reservation, and how the top level of a pass opens it ([`MemberOrder`]).
+#[derive(Debug, Clone)]
+pub(super) struct Opening {
+    pub(super) reservation: Reservation,
+    /// How a bundle target was reached: its key is its resolved `file#pointer`, which is no `$ref`
+    /// to follow again. `None` for a root component and a remote target, each opened by its key.
+    pub(super) via: Option<Via>,
+}
+
+/// The `$ref` that opened a bundle target, where it is written, and the hint it was given: what
+/// [`LowerCtx::ensure_resolved`] opens it with again.
+#[derive(Debug, Clone)]
+pub(super) struct Via {
+    pub(super) reference: String,
+    pub(super) at: Provenance,
+    pub(super) hint: String,
+}
+
+/// A body to open before `target` (#999). An `allOf` member of the body found `target`'s
+/// reservation still open, so its fields were not known yet and the pass refused the member. The
+/// target was open only because something lowered before the body reached it: opened first, the
+/// body reaches its member fresh, and the member's own way back to the body is an ordinary boxed
+/// back-edge.
+#[derive(Debug, Clone)]
+pub(super) struct MemberOrder {
+    holder: Opening,
+    target: Reservation,
+}
+
+impl MemberOrder {
+    /// Whether `orders` lacks this ordering and taking it closes no loop: no chain of `orders`
+    /// leads from its target back to its holder. Each body on such a loop is composed of the next,
+    /// which no order lowers, so its refusal stands.
+    pub(super) fn extends(&self, orders: &[MemberOrder]) -> bool {
+        let known = orders.iter().any(|order| {
+            order.holder.reservation == self.holder.reservation && order.target == self.target
+        });
+        !known && !orders_reach(orders, &self.target, &self.holder.reservation)
+    }
+
+    /// What a pass opens before it lowers the root components in document order: every holder
+    /// `orders` names, each after the holders ordered before it, the root components among them in
+    /// document order and the rest by key, so the order is a function of the document and
+    /// `orders` alone.
+    ///
+    /// Every holder goes before every root component, not only before its target: the target
+    /// was open because something lowered before the holder reached it, at the top level or
+    /// inside any body that leads to it. Opened at the top level, a holder's own members are
+    /// reached inside its own frame only, where the one open reservation they can find is its own.
+    pub(super) fn opened_first<'o>(
+        document: &Document,
+        orders: &'o [MemberOrder],
+    ) -> Vec<&'o Opening> {
+        let mut holders: Vec<&Opening> = Vec::new();
+        for order in orders {
+            if !holders
+                .iter()
+                .any(|holder| holder.reservation == order.holder.reservation)
+            {
+                holders.push(&order.holder);
+            }
+        }
+        holders.sort_by_cached_key(|holder| match &holder.reservation {
+            Reservation::Component(name) => (
+                0,
+                document.components.schemas.get_index_of(name),
+                String::new(),
+            ),
+            other => (1, None, other.key().to_owned()),
+        });
+        let mut placing = HashSet::new();
+        let mut first = Vec::new();
+        for holder in &holders {
+            place_opening(holder, orders, &holders, &mut placing, &mut first);
+        }
+        first
+    }
+}
+
+/// Append `opening` to `first` after every holder `orders` opens before it, those in the order
+/// `holders` ranks them; `placing` holds what is placed already, or being placed.
+fn place_opening<'o>(
+    opening: &'o Opening,
+    orders: &[MemberOrder],
+    holders: &[&'o Opening],
+    placing: &mut HashSet<&'o Reservation>,
+    first: &mut Vec<&'o Opening>,
+) {
+    if !placing.insert(&opening.reservation) {
+        return;
+    }
+    for holder in holders {
+        let before = orders.iter().any(|order| {
+            order.holder.reservation == holder.reservation && order.target == opening.reservation
+        });
+        if before {
+            place_opening(holder, orders, holders, placing, first);
+        }
+    }
+    first.push(opening);
+}
+
+/// Whether a chain of `orders`, each from its holder to its target, leads from `from` to `to`,
+/// `from` itself included.
+fn orders_reach(orders: &[MemberOrder], from: &Reservation, to: &Reservation) -> bool {
+    let mut stack = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(at) = stack.pop() {
+        if at == to {
+            return true;
+        }
+        if !seen.insert(at) {
+            continue;
+        }
+        stack.extend(
+            orders
+                .iter()
+                .filter(|order| &order.holder.reservation == at)
+                .map(|order| &order.target),
+        );
+    }
+    false
 }
 
 /// The keywords whose value maps member names to subschemas that lowering descends into.

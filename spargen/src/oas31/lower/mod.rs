@@ -51,6 +51,7 @@ use super::{
 };
 
 use combine::{Gathering, RecordedContribution};
+use cycle::{MemberOrder, Opening};
 use defaults::retype_field_defaults;
 use reference::resolve_path_item;
 use security::{
@@ -135,9 +136,20 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 /// that found such a disagreement is discarded and the document is lowered again with the body's
 /// answer settled for that reservation, so the back-edge reads what a finished reference reads.
 ///
-/// Each extra pass settles at least one reservation it had not settled before, and a settled value
-/// is never revised, so the loop ends within one pass per reservation plus one. A document with no
-/// such back-edge — every one without a recursive nullable component — is lowered exactly once.
+/// A pass is also discarded when an `allOf` member's `$ref` found its target still being lowered
+/// from another reservation's body (#999). The member's fields are not known yet, so the pass
+/// refused it (`E013`), but whether the target is still open there says only which of the two
+/// lowering reached first, and that follows the order `components.schemas` declares them in:
+/// declared the other way round, the body reaches its member fresh, and the target's own
+/// reference back to it is an ordinary boxed back-edge. So the next pass opens that body before
+/// anything else ([`MemberOrder`]), whatever the declaration order says. An ordering that would
+/// close a loop of such orderings is not taken: every body on that loop is composed of the next,
+/// which no order can lower, and the refusal stands.
+///
+/// Each extra pass settles at least one reservation or takes at least one ordering it had not
+/// before, and neither is ever revised, so the loop ends. A document with no such back-edge and no
+/// refused member — every one without a recursive nullable component or a recursive `allOf` —
+/// is lowered exactly once.
 pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
@@ -145,13 +157,21 @@ pub(crate) fn lower(
     options: LowerOptions,
 ) -> Result<Api, Aborted> {
     let mut settled = HashMap::new();
+    let mut orders: Vec<MemberOrder> = Vec::new();
     loop {
         let mut pass = diags.clone();
-        let (api, revisions) = lower_pass(document, resolver, &mut pass, &settled, options);
+        let first = MemberOrder::opened_first(document, &orders);
+        let (api, stale) = lower_pass(document, resolver, &mut pass, &settled, &first, options);
         let mut changed = false;
-        for (reservation, nullable) in revisions {
+        for (reservation, nullable) in stale.revisions {
             if let std::collections::hash_map::Entry::Vacant(entry) = settled.entry(reservation) {
                 entry.insert(nullable);
+                changed = true;
+            }
+        }
+        for order in stale.member_orders {
+            if order.extends(&orders) {
+                orders.push(order);
                 changed = true;
             }
         }
@@ -189,16 +209,27 @@ impl Reservation {
     }
 }
 
+/// What one lowering pass found that makes it stale, for [`lower`] to run another with.
+struct Stale {
+    /// Every reservation whose body decided a nullability other than the guess a back-edge read,
+    /// with the body's answer ([`LowerCtx::revisions`]).
+    revisions: Vec<(Reservation, bool)>,
+    /// Every member the pass refused because its target was still being lowered
+    /// ([`LowerCtx::member_orders`]).
+    member_orders: Vec<MemberOrder>,
+}
+
 /// One lowering pass. `settled` holds the nullability an earlier pass's bodies decided for the
-/// reservations whose back-edges read a guess that turned out wrong; the second value returned is
-/// every such reservation this pass found (see [`lower`]).
+/// reservations whose back-edges read a guess that turned out wrong, and `first` what the pass
+/// opens before it lowers the root components in document order ([`MemberOrder::opened_first`]).
 fn lower_pass(
     document: &Document,
     resolver: &Resolver,
     diags: &mut Diagnostics,
     settled: &HashMap<Reservation, bool>,
+    first: &[&Opening],
     options: LowerOptions,
-) -> (Result<Api, Aborted>, Vec<(Reservation, bool)>) {
+) -> (Result<Api, Aborted>, Stale) {
     let mut security_schemes = lower_security_schemes(document, diags);
     // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
     // component name. A component name always wins — the specification is explicit that name
@@ -229,6 +260,8 @@ fn lower_pass(
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
+        open_reservations: Vec::new(),
+        member_orders: Vec::new(),
         depth: 0,
         open_narrowing: options.open_narrowing,
         narrowing_opens: false,
@@ -248,6 +281,9 @@ fn lower_pass(
         deferred_map_values: Vec::new(),
     };
 
+    for opening in first {
+        let _ = ctx.open(opening);
+    }
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
     // provenance is never used for a rejection; the document root is the only site there is.
     for name in document.components.schemas.keys() {
@@ -301,7 +337,10 @@ fn lower_pass(
         .iter()
         .filter_map(|server| lower_server(server, ctx.diags))
         .collect();
-    let revisions = std::mem::take(&mut ctx.revisions);
+    let stale = Stale {
+        revisions: std::mem::take(&mut ctx.revisions),
+        member_orders: std::mem::take(&mut ctx.member_orders),
+    };
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
@@ -313,7 +352,7 @@ fn lower_pass(
         types: ctx.graph,
         security_schemes,
     };
-    (ctx.diags.result(api), revisions)
+    (ctx.diags.result(api), stale)
 }
 
 /// Lower the `operation` declared under `method` on the path item `item` of the template `path`:
@@ -897,6 +936,13 @@ struct LowerCtx<'a, 'doc> {
     /// Reservations whose body decided a nullability other than the provisional one a back-edge
     /// read, with the body's answer: the pass is stale, and [`lower`] runs another.
     revisions: Vec<(Reservation, bool)>,
+    /// The reservations whose bodies are being lowered right now, outermost first: the frames
+    /// [`Self::lower_into_reservation`] has opened and not yet closed.
+    open_reservations: Vec<Opening>,
+    /// Each body an `allOf` member of which found its target's reservation still open, with that
+    /// target: the pass refused the member, and opening the body first lets the target be lowered
+    /// inside it instead ([`lower`]).
+    member_orders: Vec<MemberOrder>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
