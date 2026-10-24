@@ -243,8 +243,9 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     // `424` and `425` open in place too, as intermediates no field uses, which the output does not
     // carry (#924). The union members of `422`, `423`, `426`, and `427`, which keep two branches,
     // are met first in either order (#678), so those members meet them into closed branch sets as
-    // they are written, opening nothing (`tests/open.rs` decodes both). The `428`/`429` `kind`, narrowed against a `uuid`
-    // string, stays closed in either order. Only an open enum emits `as_str`.
+    // they are written, opening nothing (`tests/open.rs` decodes both). The `428`/`429` `kind`,
+    // narrowed against a `uuid` string, stays closed in either order. Only an open enum emits
+    // `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
         generated.matches("pub fn as_str(&self) -> &str").count(),
