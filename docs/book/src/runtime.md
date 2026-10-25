@@ -8,7 +8,6 @@ are in the contract linked below:
 
 | Capability | Adds |
 | --- | --- |
-| JSON request bodies | reqwest's `json` feature |
 | `multipart/form-data` request bodies | reqwest's `multipart` feature |
 | A `bytes` value serde encodes (in a model, a JSON `content` parameter, or a serde-encoded body) | `bytes`' `serde` feature |
 | [Streaming](#streaming) (sequential responses) | `futures-core` and reqwest's `stream` feature |
