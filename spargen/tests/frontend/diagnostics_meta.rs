@@ -170,6 +170,42 @@ fn the_location_oracle_sees_each_lost_location() {
     );
 }
 
+/// [`oracles::load_yaml`], the oracles' YAML reader, reads every document as `YamlLoader` does and
+/// fails where it fails (#1008). It differs only in which anchored nodes it keeps a copy of, which
+/// is visible only in memory. An alias still expands to its anchor's node, also one nested inside
+/// an unaliased anchor. A duplicate key, which `YamlLoader` stops at without the parser failing,
+/// is still a failure, as are a syntax error and an alias to an anchor its document does not
+/// declare before it.
+#[test]
+fn the_oracle_yaml_reader_reads_what_yaml_loader_reads() {
+    for text in [
+        "a: 1\n",
+        "a: &x [1, 2]\nb: *x\nc: *x\n",
+        "outer: &o\n  inner: &i { k: v }\n  again: *i\nnone: &n [x]\n",
+        "a: &s scalar\nb: [*s, &t 2, *t]\n",
+        "--- &d [1]\n--- { e: &e 2, f: *e }\n",
+        "&r [1, *r]\n",
+        "? &k key\n: value\nother: *k\n",
+        "",
+    ] {
+        let expected = yaml_rust2::YamlLoader::load_from_str(text).expect(text);
+        assert_eq!(oracles::load_yaml(text), Some(expected), "{text:?}");
+    }
+    for text in [
+        "a: 1\na: 2\n",
+        "--- a\n--- { b: 1, b: 2 }\n",
+        "a: [1\n",
+        "a: *missing\n",
+        "--- &d [1]\n--- [*d]\n",
+    ] {
+        assert!(
+            yaml_rust2::YamlLoader::load_from_str(text).is_err(),
+            "{text:?}"
+        );
+        assert_eq!(oracles::load_yaml(text), None, "{text:?}");
+    }
+}
+
 /// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
 /// named structs with one shape, and a variant that is `serde_json::Value`, both in a `oneOf`. A
 /// field of another type is another shape, and an `anyOf` is held to neither. Without this an
