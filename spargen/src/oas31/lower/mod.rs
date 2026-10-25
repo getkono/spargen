@@ -236,6 +236,8 @@ fn lower_pass(
         meet_locations: HashMap::new(),
         root_xml: HashMap::new(),
         field_xml_sites: HashSet::new(),
+        xml_holders: Vec::new(),
+        xml_mergers: HashMap::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
         held_untyped_warnings: None,
@@ -289,6 +291,7 @@ fn lower_pass(
         &ctx.meet_locations,
         &ctx.root_xml,
         &ctx.field_xml_sites,
+        &ctx.xml_mergers,
         document.is_oas32,
         ctx.diags,
     );
@@ -923,6 +926,14 @@ struct LowerCtx<'a, 'doc> {
     /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
     /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
     field_xml_sites: HashSet<XmlSite>,
+    /// The sites of the compositions being gathered, innermost last
+    /// ([`Self::with_xml_holder`]): a member [`Self::record_member_xml`] reads is attributed to
+    /// the last.
+    xml_holders: Vec<XmlSite>,
+    /// For each type a `$ref` member contributed to a composition, the sites of the compositions
+    /// that merged it ([`Self::record_xml_merger`]): a member merged into that type is merged into
+    /// theirs too.
+    xml_mergers: HashMap<TypeId, Vec<XmlSite>>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the

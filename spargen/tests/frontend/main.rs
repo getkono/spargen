@@ -70,6 +70,7 @@ mod unions_null_branches;
 mod unions_siblings;
 mod untyped_branch_nullability;
 mod xml;
+mod xml_members;
 mod xml_ref_elements;
 
 /// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
