@@ -19,7 +19,67 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use spargen::{Code, Diagnostic, Report};
+use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
+use yaml_rust2::scanner::Marker;
 use yaml_rust2::{Yaml, YamlLoader};
+
+/// The documents `text` holds, loaded as `YamlLoader::load_from_str` loads them, or `None` where
+/// that fails. Every oracle reads YAML through this function.
+///
+/// `YamlLoader` copies each anchored node into its anchor table when the node completes, even
+/// when no alias names it, so nested anchors each keep a copy of everything beneath them. A spec
+/// that spargen generates within its alias budget can then cost the oracle tens of gigabytes
+/// (#1008). Here the parser's events are read twice. The first pass collects the anchor ids that
+/// some alias names. The second hands every event to a `YamlLoader` with each other anchor id
+/// cleared, so only a node an alias copies is kept in the table.
+pub fn load_yaml(text: &str) -> Option<Vec<Yaml>> {
+    let mut aliased = BTreeSet::new();
+    let mut parser = Parser::new_from_str(text);
+    loop {
+        match parser.next_token().ok()?.0 {
+            Event::Alias(id) => {
+                aliased.insert(id);
+            }
+            Event::StreamEnd => break,
+            _ => {}
+        }
+    }
+    let mut receiver = AliasedAnchorsOnly {
+        loader: YamlLoader::default(),
+        aliased,
+        ended: 0,
+    };
+    Parser::new_from_str(text).load(&mut receiver, true).ok()?;
+    // `YamlLoader` stops at a duplicate mapping key and keeps its error private. Its documents
+    // then fall short of the ones the parser ended, which is where `load_from_str` returns `Err`.
+    let documents = receiver.loader.documents();
+    (documents.len() == receiver.ended).then(|| documents.to_vec())
+}
+
+/// A `YamlLoader` that only sees the anchor ids in `aliased`, for [`load_yaml`].
+struct AliasedAnchorsOnly {
+    loader: YamlLoader,
+    aliased: BTreeSet<usize>,
+    /// The `DocumentEnd` events handed to `loader`.
+    ended: usize,
+}
+
+impl MarkedEventReceiver for AliasedAnchorsOnly {
+    fn on_event(&mut self, event: Event, mark: Marker) {
+        let kept = |id: usize| if self.aliased.contains(&id) { id } else { 0 };
+        let event = match event {
+            Event::Scalar(value, style, id, tag) => Event::Scalar(value, style, kept(id), tag),
+            Event::SequenceStart(id, tag) => Event::SequenceStart(kept(id), tag),
+            Event::MappingStart(id, tag) => Event::MappingStart(kept(id), tag),
+            Event::DocumentEnd => {
+                self.ended += 1;
+                Event::DocumentEnd
+            }
+            other => other,
+        };
+        self.loader.on_event(event, mark);
+    }
+}
 
 /// Whether `diagnostic` is about the root document as a whole, so the root is its true location:
 /// an unsupported `openapi` version (`E001`), and an invalid input document (`E011`) with an empty
@@ -60,7 +120,7 @@ fn root_mapping_holds_a_non_string_key(root: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(root) else {
         return false;
     };
-    let Ok(documents) = YamlLoader::load_from_str(text) else {
+    let Some(documents) = load_yaml(text) else {
         return false;
     };
     match documents.as_slice() {
@@ -472,7 +532,7 @@ pub const RELOCATED_LIB: &str = "lib.yaml";
 /// and every reference the root makes still resolves to it. Both files are written as JSON, which
 /// YAML reads, with every key in its original order.
 pub fn relocate(spec: &str) -> Option<(String, String)> {
-    let mut root = YamlLoader::load_from_str(spec).ok()?.into_iter().next()?;
+    let mut root = load_yaml(spec)?.into_iter().next()?;
     let schemas = entry(entry(&mut root, "components")?, "schemas")?;
     if schemas.as_hash().is_none_or(|entries| entries.is_empty()) {
         return None;
@@ -538,10 +598,7 @@ pub fn write_relocated(dir: &Utf8Path, spec: &str) -> Option<Utf8PathBuf> {
 
 /// The names `spec` declares under `components.schemas`, in document order.
 pub fn schema_names(spec: &str) -> Vec<String> {
-    let Some(mut root) = YamlLoader::load_from_str(spec)
-        .ok()
-        .and_then(|documents| documents.into_iter().next())
-    else {
+    let Some(mut root) = load_yaml(spec).and_then(|documents| documents.into_iter().next()) else {
         return Vec::new();
     };
     match entry(&mut root, "components").and_then(|components| entry(components, "schemas")) {
@@ -719,10 +776,7 @@ pub fn unreferenced_copies(code: &str, spec: &str) -> Vec<String> {
 /// The names `spec` declares under any `components` section (`schemas`, `responses`, …), in
 /// document order.
 pub fn component_names(spec: &str) -> Vec<String> {
-    let Some(mut root) = YamlLoader::load_from_str(spec)
-        .ok()
-        .and_then(|documents| documents.into_iter().next())
-    else {
+    let Some(mut root) = load_yaml(spec).and_then(|documents| documents.into_iter().next()) else {
         return Vec::new();
     };
     let Some(Yaml::Hash(sections)) = entry(&mut root, "components") else {
