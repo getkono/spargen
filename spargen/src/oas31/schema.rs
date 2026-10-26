@@ -85,7 +85,8 @@ pub(crate) struct Schema {
 /// serialized as XML and warned (`W006`) as ignored elsewhere.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct XmlHints {
-    /// `xml.name`: overrides the element/attribute wire name.
+    /// `xml.name`: overrides the element/attribute wire name. The parser holds it to
+    /// [`is_xml_name`] (`E011` otherwise), wherever the `xml` object is written.
     pub(crate) name: Option<String>,
     /// `xml.attribute`: serialize as an XML attribute rather than a child element.
     pub(crate) attribute: bool,
@@ -97,6 +98,27 @@ pub(crate) struct XmlHints {
     pub(crate) prefix: Option<String>,
     /// `xml.wrapped`: wrap an array in an outer element (unsupported → `E009`/`W006`).
     pub(crate) wrapped: bool,
+}
+
+/// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
+/// holds every element and attribute name it writes to. A component key is not held to it:
+/// `[a-zA-Z0-9._-]+` admits a leading digit, `-` or `.`.
+pub(crate) fn is_xml_name(name: &str) -> bool {
+    fn is_start(ch: char) -> bool {
+        matches!(ch,
+            ':' | 'A'..='Z' | '_' | 'a'..='z'
+            | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+            | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+            | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+    }
+    fn is_char(ch: char) -> bool {
+        is_start(ch)
+            || matches!(ch,
+                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+    }
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_start) && chars.all(is_char)
 }
 
 impl Schema {

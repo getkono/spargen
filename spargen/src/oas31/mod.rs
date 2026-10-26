@@ -35,5 +35,5 @@ pub(crate) use lower::{lower, LowerOptions};
 pub(crate) use metaschema::MetaSchemaValidator;
 pub(crate) use resolve::Resolver;
 pub(crate) use schema::{
-    Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
+    is_xml_name, Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
 };
