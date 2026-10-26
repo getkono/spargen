@@ -83,11 +83,11 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
 }
 
 /// `spargen::generate`, then [`assert_claims_hold`] and [`assert_located`] on the report, and
-/// [`assert_distinguishable_variants`] and [`assert_no_unreferenced_copy`] on the module a
+/// [`assert_distinguishable_variants`] and [`assert_no_unreferenced_type`] on the module a
 /// `Generated` run wrote. Every fixture here reaches `generate` through this function, so every
 /// diagnostic any fixture provokes is held to its run, every union any fixture emits is held to
-/// variants a value can tell apart, and no module any fixture generates keeps a second lowering of
-/// a schema that nothing names.
+/// variants a value can tell apart, and every type any fixture's module emits is a component or
+/// named by another item of the module.
 fn run_generate(build: &Build) -> Report {
     let report = spargen::generate(build);
     assert_claims_hold(&report);
@@ -95,19 +95,19 @@ fn run_generate(build: &Build) -> Report {
     if report.outcome() == Outcome::Generated {
         let code = std::fs::read_to_string(build.output()).unwrap_or_default();
         assert_distinguishable_variants(&report, &code);
-        assert_no_unreferenced_copy(build.spec(), &code);
+        assert_no_unreferenced_type(build.spec(), &code);
     }
     report
 }
 
-/// Fail where `code`, the module generated from `spec`, emits a second copy of a type that nothing
-/// names ([`oracles::unreferenced_copies`], #926).
-fn assert_no_unreferenced_copy(spec: &Spec, code: &str) {
+/// Fail where `code`, the module generated from `spec`, emits a type that is no component and
+/// that nothing names ([`oracles::unreferenced_types`], #928).
+fn assert_no_unreferenced_type(spec: &Spec, code: &str) {
     let root = std::fs::read_to_string(spec.path()).unwrap_or_default();
-    let copies = oracles::unreferenced_copies(code, &root);
+    let unreferenced = oracles::unreferenced_types(code, &root);
     assert!(
-        copies.is_empty(),
-        "a schema lowered twice left its unused copy emitted: {copies:#?}"
+        unreferenced.is_empty(),
+        "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
     );
 }
 
