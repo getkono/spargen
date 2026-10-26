@@ -290,9 +290,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // parameter or property from the generated client.
             return self.reject_ref_sibling_intersection(schema);
         };
-        // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
-        // beside a non-union sibling is an intersection this check was never meant for, and it
-        // keeps the shape it has always generated.
+        // The met union is collapsed by which union it holds. Beside a `oneOf`/`anyOf` sibling it
+        // is the sibling's, lowered with its merge held back. Beside a non-union sibling it is a
+        // union target met branch by branch (#1014): the target merged the branches alike on
+        // their own when it was lowered, so what is left alike here the sibling made so.
         let intersection = if has_union_sibling {
             // A union target meets the sibling once per target variant, so the sibling's union is
             // nested under each, and each nested copy collapses first (#998).
@@ -311,7 +312,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             collapsed
         } else {
-            intersection
+            self.collapse_met_target_union(schema, intersection, mark, hint)
         };
         let kind = self.graph.get(intersection.id)?.kind.clone();
         // The `null` the inferred category carries is there to leave the target's nullability

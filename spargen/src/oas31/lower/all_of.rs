@@ -1234,7 +1234,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "the union beside the `allOf`",
                 "this `allOf` member's",
             ),
-            MetUnion::RefSibling => (
+            MetUnion::RefSibling | MetUnion::RefTarget => (
                 "the union beside this `$ref`",
                 "the union beside the `$ref`",
                 "this `$ref`'s sibling",
@@ -1310,7 +1310,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A branch the composition excludes is reported as the sibling spelling reports it (#671).
         let conjunct = match spelling {
             MetUnion::AllOfMember => self.null_admission_without(schema, &union.provenance),
-            MetUnion::BesideAllOf | MetUnion::RefSibling => {
+            MetUnion::BesideAllOf | MetUnion::RefSibling | MetUnion::RefTarget => {
                 self.union_sibling_null_admission(schema)
             }
         };
