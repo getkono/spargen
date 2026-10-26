@@ -835,6 +835,69 @@ fn a_ref_to_a_union_merges_the_branches_its_non_union_sibling_leaves_alike() {
     }
 }
 
+/// The test above, with untyped object applicators as the `$ref`'s siblings: they refine the
+/// target's object branches and leave the rest as they are, so two object branches the target
+/// keeps apart (`a` a string or an integer, and `a` a string) can meet to one structure. Those are
+/// merged with `W001` at the `$ref` as a typed sibling's meet merges them, rather than emitted as
+/// two variants that decode the same values and fail exactly-one on every one of them. A branch
+/// of another category the applicators do not reach stands as its own variant.
+#[test]
+fn a_ref_to_a_union_merges_the_branches_its_untyped_applicator_siblings_leave_alike() {
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    let wide = "{ type: object, properties: { a: { type: [string, integer] } }, required: [a] }";
+    let narrow = "{ type: object, properties: { a: { type: string } }, required: [a] }";
+    for (target, variants) in [
+        (format!("{{ oneOf: [ {wide}, {narrow} ] }}"), None),
+        (
+            format!("{{ oneOf: [ {wide}, {narrow}, {{ type: boolean }} ] }}"),
+            Some(2),
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    T: {target}\n    Pick: {{ $ref: '#/components/schemas/T', properties: {{ a: \
+                 {{ type: string }} }} }}\n{holder}"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Pick"
+                        && d.message
+                            .contains("this `$ref`'s target and its sibling keywords")
+                }),
+                "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let repeated = unions_with_a_repeated_payload(&types);
+        assert!(
+            repeated.is_empty(),
+            "{target}: a union carries one payload type twice: {repeated:#?}\n{types}"
+        );
+        match variants {
+            None => assert!(
+                types.contains("pub struct Pick {"),
+                "{target}: `Pick` must be the one struct its branches met to: {types}"
+            ),
+            Some(count) => assert_eq!(
+                enum_variants(&types, "Pick").len(),
+                count,
+                "{target}: the two object branches must be one variant: {types}"
+            ),
+        }
+    }
+}
+
 /// The diagnostics a `$ref` whose siblings are a union and further keywords draws once those
 /// keywords are met apart from the union (#538), in the `$ref` spelling's own words: typed
 /// keywords the target or the union cannot meet are `E013` with the `$ref`-sibling remedy, untyped
