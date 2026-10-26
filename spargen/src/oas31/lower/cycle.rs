@@ -254,8 +254,13 @@ impl MemberOrders {
     ///
     /// Every holder goes before every root component, not only before its target: the target
     /// was open because something lowered before the holder reached it, at the top level or
-    /// inside any body that leads to it. Opened at the top level, a holder's own members are
-    /// reached inside its own frame only, where the one open reservation they can find is its own.
+    /// inside any body that leads to it. Opened at the top level, a holder's members are reached
+    /// before anything else opens their targets. That gives the exact merge only where no target,
+    /// once open, leads through a field to another holder composed of it: in a diamond (`A` with
+    /// fields `b: B` and `c: C`, `B` and `C` each an `allOf` of `A`), the holder opened first opens
+    /// `A`, `A`'s field reaches the other holder, and that holder's member finds `A` still open,
+    /// so as root components the diamond is refused in every order
+    /// (`spargen/tests/lowering_props/declaration_order.rs`).
     pub(super) fn opened_first<'o>(&'o self, document: &Document) -> Vec<&'o Opening> {
         let orders = self.taken.as_slice();
         let mut holders: Vec<&Opening> = Vec::new();

@@ -42,6 +42,14 @@ const Z_HOLDS_A: (&str, &str) = (
     "type: object\nproperties:\n  a:\n    $ref: '#/components/schemas/A'",
 );
 
+/// `A` holds a field to each of `B` and `C`, and each is an `allOf` of `A`.
+const DIAMOND: &str = "a diamond: two compositions of one holder of a field to each";
+
+/// The cases whose schemas, moved into a referenced file, generate in every order though as root
+/// components they are rejected in every order: the two paths disagree. A case leaves this list
+/// when the root components generate it too.
+const GENERATES_RELOCATED: &[&str] = &[DIAMOND];
+
 const CYCLIC_CASES: &[CyclicCase] = &[
     CyclicCase {
         what: "a field to a component that is the field's holder and more",
@@ -150,6 +158,22 @@ const CYCLIC_CASES: &[CyclicCase] = &[
             ("A", "allOf:\n  - $ref: '#/components/schemas/B'"),
             ("B", "allOf:\n  - $ref: '#/components/schemas/A'"),
             Z_HOLDS_A,
+        ],
+        generates: false,
+    },
+    // An exact merge exists, but as root components no order lowers it: whichever of `B` and `C`
+    // is opened first opens `A` for its member, and `A`'s field to the other one reads `A` still
+    // open. Relocated, the same schemas generate that merge ([`GENERATES_RELOCATED`]). Pinned as
+    // rejected in every order, so a fix that generates it moves this case to `generates: true`.
+    CyclicCase {
+        what: DIAMOND,
+        components: &[
+            A_HOLDS_B_AND_C,
+            B_IS_A_AND_MORE,
+            (
+                "C",
+                "allOf:\n  - $ref: '#/components/schemas/A'\n  - type: object\n    properties:\n      more:\n        type: integer",
+            ),
         ],
         generates: false,
     },
@@ -277,7 +301,8 @@ fn unboxed(declared: &str) -> String {
 /// a target found mid-lowering through a field in one order is not mid-lowering in another. The
 /// verdict, the code multiset, and each schema's generated [`declaration`] (read [`unboxed`])
 /// agree in every order, and so does the verdict with the schemas moved into a referenced file
-/// (`oracles::relocate`), where each is a bundle target rather than a root component.
+/// (`oracles::relocate`), where each is a bundle target rather than a root component, except for
+/// the cases [`GENERATES_RELOCATED`] names, which generate there in every order.
 #[test]
 fn cyclic_compositions_do_not_depend_on_declaration_order() {
     for case in CYCLIC_CASES {
@@ -306,7 +331,7 @@ fn cyclic_compositions_do_not_depend_on_declaration_order() {
             let relocated = check_at(&root);
             assert_eq!(
                 !rejected(&relocated),
-                case.generates,
+                case.generates || GENERATES_RELOCATED.contains(&case.what),
                 "{}: relocated, in order {order:?}:\n{spec}\n{relocated:#?}",
                 case.what
             );
