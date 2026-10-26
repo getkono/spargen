@@ -1394,3 +1394,86 @@ fn an_all_of_type_array_naming_object_keeps_the_union_branches_of_its_categories
         "the member's own union is emitted unused:\n{code}"
     );
 }
+
+/// An untyped object applicator met with a union refines the union's object branches one by one,
+/// after the meet with any typed conjunct has been collapsed, so two branches the union keeps
+/// apart can be refined to one generated type. Here `a: [string, integer]` and `a: string` both
+/// become `struct { a: String }` once `a` is narrowed to a string, and a `oneOf` of the two
+/// rejects every value as matching both. The refined union is merged as every other meet of a
+/// union is, with `W001` at the schema, in each spelling that refines a union with untyped
+/// keywords: an `allOf` of a `$ref` to the union or of the union inline beside an untyped member
+/// (#1023), the union beside an `allOf` of an untyped member, and a `$ref` beside the union and
+/// untyped keywords. The `$ref`-sibling spelling of the same conjunction, `{ $ref: T, properties:
+/// … }`, is pinned in `ref_sibling_unions`
+/// (`a_ref_to_a_union_merges_the_branches_its_untyped_applicator_siblings_leave_alike`). A branch
+/// of another category stays its own variant.
+#[test]
+fn an_untyped_all_of_member_merges_the_union_branches_it_refines_alike() {
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    let wide = "{ type: object, properties: { a: { type: [string, integer] } }, required: [a] }";
+    let narrow = "{ type: object, properties: { a: { type: string } }, required: [a] }";
+    let refiner = "properties: { a: { type: string } }";
+    for (branches, variants) in [
+        (format!("{wide}, {narrow}"), None),
+        (format!("{wide}, {narrow}, {{ type: boolean }}"), Some(2)),
+    ] {
+        let union = format!("oneOf: [ {branches} ]");
+        for (spelling, pick) in [
+            (
+                "an `allOf` of a `$ref` to the union",
+                format!("{{ allOf: [ {{ $ref: '#/components/schemas/T' }}, {{ {refiner} }} ] }}"),
+            ),
+            (
+                "an `allOf` of the union inline",
+                format!("{{ allOf: [ {{ {union} }}, {{ {refiner} }} ] }}"),
+            ),
+            (
+                "the union beside an `allOf`",
+                format!("{{ {union}, allOf: [ {{ {refiner} }} ] }}"),
+            ),
+            (
+                "a `$ref` beside the union and untyped keywords",
+                format!("{{ $ref: '#/components/schemas/Base', {refiner}, {union} }}"),
+            ),
+        ] {
+            let spec = with_schemas(
+                "3.1.0",
+                &format!(
+                    "    T: {{ {union} }}\n    Base: {{ type: [object, boolean] }}\n    \
+                     Pick: {pick}\n{holder}"
+                ),
+            );
+            let (report, code) = generate_with_code(&spec);
+            for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{spelling}, {branches} via {entry}: {report:#?}"
+                );
+                assert!(
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::ValidationKeywordIgnored
+                            && d.pointer.as_str() == "/components/schemas/Pick"
+                    }),
+                    "{spelling}, {branches} via {entry}: the merge must be reported at `Pick`: \
+                     {report:#?}"
+                );
+            }
+            assert_distinguishable_variants(&report, &code);
+            let types = types_module(&code);
+            match variants {
+                None => assert!(
+                    types.contains("pub struct Pick {"),
+                    "{spelling}, {branches}: `Pick` must be the one struct its branches met \
+                     to:\n{types}"
+                ),
+                Some(count) => assert_eq!(
+                    enum_variants(&types, "Pick").len(),
+                    count,
+                    "{spelling}, {branches}: the two object branches must be one variant:\n{types}"
+                ),
+            }
+        }
+    }
+}
