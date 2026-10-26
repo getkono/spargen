@@ -28,10 +28,18 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
+            // A param that sends an explicit `null` is set through `Option<Option<T>>`, so the
+            // same nullable type behind another serialization is a different surface.
+            let ty = canon_ty(param.ty, api, names);
+            let ty = if param.sends_explicit_null() {
+                format!("Option<{ty}>")
+            } else {
+                ty
+            };
             params.insert(
                 (param.name.clone(), param.location.as_openapi_in()),
                 ParamSurface {
-                    ty: canon_ty(param.ty, api, names),
+                    ty,
                     required: param.required,
                 },
             );

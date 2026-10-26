@@ -1,5 +1,5 @@
-//! Values on the wire: dates, a per-operation server override, RFC 6570 multipart parts, and CBOR
-//! bodies.
+//! Values on the wire: dates, a per-operation server override, RFC 6570 multipart parts, CBOR
+//! bodies, and an explicit `null` content parameter.
 
 use super::*;
 
@@ -560,4 +560,126 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
         .status()
         .unwrap();
     assert!(status.success(), "the CBOR wire round-trip must pass");
+}
+
+/// An optional nullable JSON `content` parameter has three states on the wire (#996): absent, the
+/// JSON `null`, and a value. Its `…Params` field is `Option<Option<T>>`, so `Some(None)` must
+/// reach the server as the text `null` in every location that carries one, not as an omission.
+#[test]
+fn an_optional_nullable_json_content_parameter_sends_an_explicit_null() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Nulls, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+        - name: X-Tag
+          in: header
+          content:
+            application/json: { schema: { type: [string, 'null'] } }
+        - name: session
+          in: cookie
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+      responses:
+        "204": { description: No Content }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "nulls_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/nulls.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+/// Send one `listItems` call with `params` and return the lowercased request head it arrived as.
+fn request_head(params: nulls_client::ListItemsParams) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(read > 0, "the request ended before its head did");
+            received.extend_from_slice(&buf[..read]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        String::from_utf8_lossy(&received).to_ascii_lowercase()
+    });
+    let client = nulls_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client.list_items(params).expect("the call round-trips");
+    server.join().unwrap()
+}
+
+/// Every value of the header `name` in a lowercased request head, in order.
+fn header<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(field, _)| *field == name)
+        .map(|(_, value)| value.trim())
+        .collect()
+}
+
+#[test]
+fn absent_null_and_a_value_are_three_requests() {
+    let absent = request_head(nulls_client::ListItemsParams::default());
+    assert!(absent.starts_with("get /items http/1.1"), "{absent}");
+    assert!(header(&absent, "x-tag").is_empty(), "{absent}");
+    assert!(header(&absent, "cookie").is_empty(), "{absent}");
+
+    let null = request_head(
+        nulls_client::ListItemsParams::default()
+            .filter(None)
+            .x_tag(None)
+            .session(None),
+    );
+    assert!(null.starts_with("get /items?filter=null http/1.1"), "{null}");
+    assert_eq!(header(&null, "x-tag"), ["null"], "{null}");
+    assert_eq!(header(&null, "cookie"), ["session=null"], "{null}");
+
+    let value = request_head(
+        nulls_client::ListItemsParams::default()
+            .filter(Some(7))
+            .x_tag(Some("a".to_owned()))
+            .session(Some(3)),
+    );
+    assert!(value.starts_with("get /items?filter=7 http/1.1"), "{value}");
+    assert_eq!(header(&value, "x-tag"), ["\"a\""], "{value}");
+    assert_eq!(header(&value, "cookie"), ["session=3"], "{value}");
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "nulls"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the explicit-null wire round-trip must pass"
+    );
 }
