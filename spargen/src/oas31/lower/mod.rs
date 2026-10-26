@@ -935,9 +935,10 @@ struct LowerCtx<'a, 'doc> {
     /// ([`Self::with_xml_holder`]): a member [`Self::record_member_xml`] reads is attributed to
     /// the last.
     xml_holders: Vec<XmlSite>,
-    /// For each type a `$ref` member contributed to a composition, the sites of the compositions
-    /// that merged it ([`Self::record_xml_merger`]): a member merged into that type is merged into
-    /// theirs too.
+    /// For each type a `$ref` member contributed to an `allOf` composition, or a `$ref` target was
+    /// intersected with its shape-bearing siblings as ([`Self::record_ref_sibling_merger`]), the
+    /// sites of the compositions that merged it ([`Self::record_xml_merger`]), that `$ref` schema
+    /// itself counting as one: a member merged into that type is merged into theirs too.
     xml_mergers: HashMap<TypeId, Vec<XmlSite>>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
