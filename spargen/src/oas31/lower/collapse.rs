@@ -161,6 +161,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.collapse_met_union(schema, nested, one_of, &nested_hint, spelling)
                         .0
                 }
+                // A reservation's body is not known yet: no union the meet made is nested in it.
+                Some(TypeKind::Reserved) => nested,
                 _ => nested,
             };
             if !same_ty(collapsed, variant.ty) {
