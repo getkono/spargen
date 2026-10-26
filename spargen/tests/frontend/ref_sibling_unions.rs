@@ -809,7 +809,8 @@ fn a_ref_to_a_union_merges_the_branches_its_non_union_sibling_leaves_alike() {
                 report.diagnostics().iter().any(|d| {
                     d.code == Code::ValidationKeywordIgnored
                         && d.pointer.as_str() == "/components/schemas/Pick"
-                        && d.message.contains("`$ref`'s `oneOf`")
+                        && d.message
+                            .contains("this `$ref`'s target and its sibling keywords")
                 }),
                 "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
             );

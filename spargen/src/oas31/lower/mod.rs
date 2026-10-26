@@ -738,10 +738,11 @@ struct HeldUntypedWarning {
 /// The four spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
 /// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
 /// the union as its sibling, an `allOf` with the union beside it on one schema (#419), an
-/// `allOf` with the union as one of its members (#463), and a `$ref` whose target is the union,
-/// beside sibling keywords that are not one (#1014). The last is a meet with a union lowered on
-/// its own, so it only collapses, and never reaches the `allOf` meet or its rejection, which
-/// word it as [`MetUnion::RefSibling`]. The spelling decides three things:
+/// `allOf` with the union as one of its members (#463), and a `$ref` beside sibling keywords that
+/// are not a union, met with the union its target lowers to (#1014). The last meets a union
+/// lowered with its own merge, so it only collapses ([`LowerCtx::collapse_met_target_union`]),
+/// and never reaches the `allOf` meet or its rejection, which word it as
+/// [`MetUnion::RefSibling`]. The spelling decides three things:
 ///
 /// * the wording of the diagnostics the meet reports ([`Self::subject`], and the messages
 ///   [`LowerCtx::reject_all_of_union_meet`] and [`LowerCtx::meet_union_with_all_of`] pick), with
@@ -774,10 +775,7 @@ impl MetUnion {
                 "this `allOf`'s `oneOf`/`anyOf` member and its other members"
             }
             (MetUnion::AllOfMember, true) => "this `allOf`'s `oneOf` member and its other members",
-            (MetUnion::RefTarget, false) => {
-                "this `$ref`'s `oneOf`/`anyOf` target and its sibling keywords"
-            }
-            (MetUnion::RefTarget, true) => "this `$ref`'s `oneOf` target and its sibling keywords",
+            (MetUnion::RefTarget, _) => "this `$ref`'s target and its sibling keywords",
         }
     }
 
