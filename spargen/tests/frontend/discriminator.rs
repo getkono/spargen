@@ -1028,6 +1028,89 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
     }
 }
 
+/// The 3.2 `defaultMapping` member decodes every payload whose tag selects no tagged member, so it
+/// claims a pinned value its own tag property admits, as an untagged member does: with `Mail`'s
+/// `type` a plain string, `{type: webhook, to: x}` is valid only for `Mail` and reached it through
+/// the fallback, and tagging the inline `webhook` pin would route it there and refuse it. That
+/// member stays untagged (`W011`). A `Mail` whose tag property is a closed set without `webhook`
+/// refuses that payload anyway, so the pin is free and selects its member with no diagnostic.
+#[test]
+fn a_default_mapping_member_admitting_a_pinned_value_claims_it() {
+    let spec = |mail_tag: &str| {
+        format!(
+            "openapi: 3.2.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Config:\n      \
+             oneOf:\n        \
+             - {{ type: object, required: [type, url], properties: {{ type: {{ const: webhook }}, url: {{ type: string }} }} }}\n        \
+             - {{ $ref: '#/components/schemas/Mail' }}\n      \
+             discriminator:\n        \
+             propertyName: type\n        \
+             defaultMapping: Mail\n    \
+             Mail: {{ type: object, required: [type, to], properties: {{ type: {mail_tag}, to: {{ type: string }} }} }}\n"
+        )
+    };
+    for (what, mail_tag, warned, tagged) in [
+        (
+            "a plain string",
+            "{ type: string }",
+            true,
+            &[("Mail", "Mail")][..],
+        ),
+        (
+            "a closed set without the pin",
+            "{ enum: [Mail] }",
+            false,
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
+    ] {
+        let spec = spec(mail_tag);
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            if warned {
+                assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
+                assert!(
+                    w011[0]
+                        .message
+                        .contains("union member 0 is no schema component"),
+                    "{what} {entry}: {report:#?}"
+                );
+            } else {
+                assert!(
+                    report.diagnostics().is_empty(),
+                    "{what} {entry}: {report:#?}"
+                );
+            }
+        }
+        let arms = discriminated_arms(&code, "Config");
+        let mut decoded: Vec<_> = arms
+            .decode
+            .iter()
+            .map(|(variant, tags)| (variant.as_str(), tags.join("|")))
+            .collect();
+        decoded.sort();
+        let mut expected: Vec<_> = tagged
+            .iter()
+            .map(|(variant, tag)| (*variant, (*tag).to_owned()))
+            .collect();
+        expected.sort();
+        assert_eq!(decoded, expected, "{what}\n{code}");
+    }
+}
+
 /// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the
 /// discriminator for the whole union made `anyOf [Cat, Dog, inline]` decode by priority, then source
 /// order, so `{"kind": "Dog", …}` that `Cat` also accepts decoded as `Cat` against its own tag, and

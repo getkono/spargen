@@ -197,11 +197,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the member's field already holds. It is no implicit value the specification assigns,
         // so a value something else claims — a `mapping` key, another member's tag, or another
         // untagged member whose tag property admits the same string (a second pin of it, a plain
-        // `type: string`, or no declaration of the property at all) — keeps none of them: the
-        // member stays untagged and is reached as one with no such property is. That last claim
-        // matters because an untagged member is tried by its schema when the tag selects no
-        // tagged member, so tagging the pin would send a payload only that other member accepts
-        // to the pinned one instead.
+        // `type: string`, or no declaration of the property at all), or the 3.2 `defaultMapping`
+        // member when its tag property admits it — keeps none of them: the member stays untagged
+        // and is reached as one with no such property is. The last two claims matter because an
+        // untagged member is tried by its schema, and the `defaultMapping` member decodes the
+        // payload, when the tag selects no tagged member, so tagging the pin would send a payload
+        // only that other member accepts to the pinned one instead.
         let untagged_objects: Vec<bool> = tags
             .iter()
             .zip(&categories)
@@ -228,7 +229,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             && *untagged_object
                             && self.admits_tag(variant, tag_field, value)
                     },
-                );
+                )
+                || default_variant.is_some_and(|fallback| {
+                    fallback != index
+                        && categories[fallback].is_none()
+                        && self.admits_tag(&variants[fallback], tag_field, value)
+                });
             if !claimed {
                 tags[index].push(value.clone());
             }
