@@ -156,6 +156,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
+    /// `met`, the meet of a `$ref`'s union target with sibling keywords that are not a union, with
+    /// the branches that meet left alike merged as [`Self::collapse_met_union`] merges them
+    /// (#1014). The target meets the siblings branch by branch, so two branches the target keeps
+    /// apart can meet to one generated type: `oneOf: [{ type: [string, integer] }, { type: string
+    /// }]` beside `type: string` is two `String` variants, and every string fails exactly-one. A
+    /// `oneOf` is compared by generated type and an `anyOf` by identity, read from the met union's
+    /// own mode, and unions nested in its variants are collapsed first. Only a trial union the
+    /// meet inserted since `mark` is read: a target the siblings left as it was is the target's
+    /// own lowering, which merged its alike branches when it was lowered, and a discriminated or
+    /// disjoint union tells its variants apart by construction. The target's `serde_json::Value`
+    /// branches were reported when it was lowered, so no untyped-variant check is made here.
+    pub(super) fn collapse_met_target_union(
+        &mut self,
+        schema: &Schema,
+        met: Ty,
+        mark: u32,
+        hint: &str,
+    ) -> Ty {
+        if met.id.0 < mark {
+            return met;
+        }
+        let met = self.collapse_nested_met_unions(schema, met, mark, MetUnion::RefTarget);
+        let Some(TypeKind::Union(Union {
+            strategy: UnionStrategy::Trial { mode, .. },
+            ..
+        })) = self.graph.get(met.id).map(|def| &def.kind)
+        else {
+            return met;
+        };
+        let one_of = matches!(mode, UnionMode::OneOf);
+        let (collapsed, _) = self.collapse_met_union(
+            schema,
+            met,
+            one_of,
+            &format!("{hint}ReferenceIntersection"),
+            MetUnion::RefTarget,
+        );
+        collapsed
+    }
+
     /// `met`, the meet an `allOf`'s scalar members leave ([`Self::combine_all_of`]), with every
     /// `oneOf` union that meet produced collapsed as [`Self::collapse_met_union`] collapses the
     /// meet of a union member (#643). The scalar meet intersects a union branch by branch, so an

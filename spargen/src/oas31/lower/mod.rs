@@ -735,10 +735,14 @@ struct HeldUntypedWarning {
     untyped: Vec<(String, usize)>,
 }
 
-/// The three spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
+/// The four spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
 /// union branch by branch and then collapsed by [`LowerCtx::collapse_met_union`]: a `$ref` with
-/// the union as its sibling, an `allOf` with the union beside it on one schema (#419), and an
-/// `allOf` with the union as one of its members (#463). The spelling decides three things:
+/// the union as its sibling, an `allOf` with the union beside it on one schema (#419), an
+/// `allOf` with the union as one of its members (#463), and a `$ref` beside sibling keywords that
+/// are not a union, met with the union its target lowers to (#1014). The last meets a union
+/// lowered with its own merge, so it only collapses ([`LowerCtx::collapse_met_target_union`]),
+/// and never reaches the `allOf` meet or its rejection, which word it as
+/// [`MetUnion::RefSibling`]. The spelling decides three things:
 ///
 /// * the wording of the diagnostics the meet reports ([`Self::subject`], and the messages
 ///   [`LowerCtx::reject_all_of_union_meet`] and [`LowerCtx::meet_union_with_all_of`] pick), with
@@ -747,12 +751,13 @@ struct HeldUntypedWarning {
 ///   ([`Self::meet_suffix`]): `ReferenceIntersection` for a `$ref` sibling, `Intersection` for
 ///   either `allOf` spelling;
 /// * which conjunct a branch the meet excludes is read against: the `allOf`'s other members for
-///   [`MetUnion::AllOfMember`], the schema's own sibling keywords for the other two.
+///   [`MetUnion::AllOfMember`], the schema's own sibling keywords for the others.
 #[derive(Clone, Copy)]
 enum MetUnion {
     RefSibling,
     BesideAllOf,
     AllOfMember,
+    RefTarget,
 }
 
 impl MetUnion {
@@ -770,6 +775,7 @@ impl MetUnion {
                 "this `allOf`'s `oneOf`/`anyOf` member and its other members"
             }
             (MetUnion::AllOfMember, true) => "this `allOf`'s `oneOf` member and its other members",
+            (MetUnion::RefTarget, _) => "this `$ref`'s target and its sibling keywords",
         }
     }
 
@@ -777,7 +783,7 @@ impl MetUnion {
     /// branches take.
     fn meet_suffix(self) -> &'static str {
         match self {
-            MetUnion::RefSibling => "ReferenceIntersection",
+            MetUnion::RefSibling | MetUnion::RefTarget => "ReferenceIntersection",
             MetUnion::BesideAllOf | MetUnion::AllOfMember => "Intersection",
         }
     }

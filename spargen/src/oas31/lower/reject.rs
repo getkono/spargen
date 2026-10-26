@@ -281,7 +281,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  intersection is empty or unrepresentable",
                 ALL_OF_REMEDY,
             ),
-            MetUnion::RefSibling => (
+            MetUnion::RefSibling | MetUnion::RefTarget => (
                 "the `$ref` target, this schema's own sibling keywords and the `oneOf`/`anyOf` \
                  beside them all apply, and their intersection is empty or unrepresentable",
                 REF_SIBLING_REMEDY,

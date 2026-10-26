@@ -687,13 +687,17 @@ components:
     }
 }
 
-/// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
-/// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
-/// intersection this change does not touch: its branches may intersect to one type, but it must
-/// keep generating exactly what it did before — no `W001` at the `$ref`, and the same union shape.
+/// A `$ref` to a union component beside a non-union sibling (`U: oneOf/anyOf [...]`,
+/// `P: {$ref: U, const: x}`) is collapsed only where the meet with the sibling leaves branches
+/// alike that the target kept apart (#1014). `U`'s `oneOf` branches are one generated type on
+/// their own, so `U`'s lowering merges them and reports `W001` at `U`: `P` meets one `String`,
+/// is the const enum, and draws no second `W001`. `U`'s `anyOf` branches are distinct aliases,
+/// which an `anyOf`'s identity comparison keeps apart, and the `const` meets both to one type:
+/// emitted, `P` was an enum of that one payload type twice, and now it is that type, with the
+/// merge reported at `P`.
 #[test]
-fn a_ref_to_a_union_with_a_non_union_sibling_is_not_collapsed() {
-    for keyword in ["oneOf", "anyOf"] {
+fn a_ref_to_a_union_with_a_non_union_sibling_merges_only_what_the_meet_made_alike() {
+    for (keyword, warned_at_p) in [("oneOf", false), ("anyOf", true)] {
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -729,20 +733,168 @@ components:
                 Outcome::Rejected,
                 "{keyword} via {entry}: {report:#?}"
             );
-            assert!(
-                !report.diagnostics().iter().any(|d| {
+            let merged_at = |pointer: &str| {
+                report.diagnostics().iter().any(|d| {
                     d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/P"
-                }),
-                "{keyword} via {entry}: a `$ref` with no union sibling must not be collapsed or \
-                 warned about: {report:#?}"
+                        && d.pointer.as_str() == pointer
+                        && (d.message.contains("differ only in keywords")
+                            || d.message.contains("same generated type"))
+                })
+            };
+            assert_eq!(
+                merged_at("/components/schemas/P"),
+                warned_at_p,
+                "{keyword} via {entry}: `P` reports a merge exactly when its meet made two \
+                 branches alike: {report:#?}"
+            );
+            assert_eq!(
+                merged_at("/components/schemas/U"),
+                !warned_at_p,
+                "{keyword} via {entry}: `U` reports the merge its own branches take: {report:#?}"
             );
         }
         let types = types_module(&code);
         assert!(
             types.contains("pub enum P "),
-            "{keyword}: `P` must keep the union shape it generated before: {types}"
+            "{keyword}: `P` must be the const enum: {types}"
         );
+        assert_eq!(
+            enum_variants(&types, "P"),
+            ["X"],
+            "{keyword}: `P` must be the const enum, not a union of it: {types}"
+        );
+    }
+}
+
+/// A `$ref` to a union beside a non-union sibling meets the sibling with each branch of the
+/// target, and branches the target keeps distinct can meet to one generated type (#1014): with
+/// `T: oneOf [{ type: [string, integer] }, { type: string }]`, the sibling `type: string` leaves
+/// `String` twice. Emitted as two variants, every string would match both and fail exactly-one,
+/// so the met branches are merged and `W001` reported at the `$ref`, as the union-sibling
+/// spelling `{ $ref: C, oneOf: [...] }` merges them. Where every branch meets to one type the
+/// position takes that type; where only some do, they become one variant and the others stand.
+/// An `anyOf` target compares its met branches by identity, as every met `anyOf` does, which the
+/// test above pins.
+#[test]
+fn a_ref_to_a_union_merges_the_branches_its_non_union_sibling_leaves_alike() {
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    for (target, sibling, variants) in [
+        (
+            "{ oneOf: [ { type: [string, integer] }, { type: string } ] }",
+            "type: string",
+            None,
+        ),
+        (
+            "{ oneOf: [ { type: [string, integer] }, { type: string }, { type: boolean } ] }",
+            "type: [string, boolean]",
+            Some(2),
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    T: {target}\n    Pick: {{ $ref: '#/components/schemas/T', {sibling} \
+                 }}\n{holder}"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Pick"
+                        && d.message
+                            .contains("this `$ref`'s target and its sibling keywords")
+                }),
+                "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let repeated = unions_with_a_repeated_payload(&types);
+        assert!(
+            repeated.is_empty(),
+            "{target}: a union carries one payload type twice: {repeated:#?}\n{types}"
+        );
+        match variants {
+            None => assert!(
+                types.contains("pub type Pick = String;"),
+                "{target}: `Pick` must be the one type its branches met to: {types}"
+            ),
+            Some(count) => assert_eq!(
+                enum_variants(&types, "Pick").len(),
+                count,
+                "{target}: the two `String` branches must be one variant: {types}"
+            ),
+        }
+    }
+}
+
+/// The test above, with untyped object applicators as the `$ref`'s siblings: they refine the
+/// target's object branches and leave the rest as they are, so two object branches the target
+/// keeps apart (`a` a string or an integer, and `a` a string) can meet to one structure. Those are
+/// merged with `W001` at the `$ref` as a typed sibling's meet merges them, rather than emitted as
+/// two variants that decode the same values and fail exactly-one on every one of them. A branch
+/// of another category the applicators do not reach stands as its own variant.
+#[test]
+fn a_ref_to_a_union_merges_the_branches_its_untyped_applicator_siblings_leave_alike() {
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    let wide = "{ type: object, properties: { a: { type: [string, integer] } }, required: [a] }";
+    let narrow = "{ type: object, properties: { a: { type: string } }, required: [a] }";
+    for (target, variants) in [
+        (format!("{{ oneOf: [ {wide}, {narrow} ] }}"), None),
+        (
+            format!("{{ oneOf: [ {wide}, {narrow}, {{ type: boolean }} ] }}"),
+            Some(2),
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    T: {target}\n    Pick: {{ $ref: '#/components/schemas/T', properties: {{ a: \
+                 {{ type: string }} }} }}\n{holder}"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Pick"
+                        && d.message
+                            .contains("this `$ref`'s target and its sibling keywords")
+                }),
+                "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let repeated = unions_with_a_repeated_payload(&types);
+        assert!(
+            repeated.is_empty(),
+            "{target}: a union carries one payload type twice: {repeated:#?}\n{types}"
+        );
+        match variants {
+            None => assert!(
+                types.contains("pub struct Pick {"),
+                "{target}: `Pick` must be the one struct its branches met to: {types}"
+            ),
+            Some(count) => assert_eq!(
+                enum_variants(&types, "Pick").len(),
+                count,
+                "{target}: the two object branches must be one variant: {types}"
+            ),
+        }
     }
 }
 
