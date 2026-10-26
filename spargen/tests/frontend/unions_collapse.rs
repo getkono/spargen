@@ -801,7 +801,7 @@ components:
 /// member's own lowering, which took the same name first, is a second copy nothing names (#926):
 /// `S0` emitted `pub struct S071def3c4 {}` beside `pub struct S0 {}`. Only the re-emitted type is
 /// emitted, with or without a `null` member and a sibling meet; the harness's
-/// [`assert_no_unreferenced_copy`] holds every other fixture to the same.
+/// [`assert_no_unreferenced_type`] holds every other fixture to the same.
 #[test]
 fn a_union_with_one_real_member_emits_no_copy_of_it() {
     for (shape, body) in [

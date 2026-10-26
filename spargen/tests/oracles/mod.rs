@@ -5,8 +5,7 @@
 //! * [`location_violations`]: every diagnostic names a real location (#454);
 //! * [`indistinguishable_variants`]: every union's variants can be told apart (#402), unless a
 //!   `W001` at the union says why ([`unexplained_variants`]);
-//! * [`unreferenced_copies`]: no second lowering of a schema is emitted where nothing names it
-//!   (#926), a narrowing of [`unreferenced_types`];
+//! * [`unreferenced_types`]: every emitted type is a component or something names it (#928);
 //! * [`relocate`] and [`shape`]: moving a document's schemas into a referenced file changes no
 //!   verdict, code or shape (#446).
 //!
@@ -743,29 +742,6 @@ pub fn unreferenced_types(code: &str, spec: &str) -> Vec<String> {
                     .any(|(owner, text)| owner.as_deref() != Some(*name) && names(text, name))
         })
         .map(|name| format!("`{name}` is emitted, but nothing names it and it is no component"))
-        .collect()
-}
-
-/// The [`unreferenced_types`] that are a second copy of a type: a schema lowered again under the
-/// name a first lowering already took is allocated that name with the stable 8-hex-digit suffix
-/// of its pointer (`S071def3c4`, `ResponseBody9c134e93`), and where the position takes the first
-/// lowering, the copy is elided (#926).
-pub fn unreferenced_copies(code: &str, spec: &str) -> Vec<String> {
-    unreferenced_types(code, spec)
-        .into_iter()
-        .filter(|reason| {
-            let name = reason.split('`').nth(1).unwrap_or_default();
-            let Some(split) = name
-                .len()
-                .checked_sub(8)
-                .filter(|&split| split > 0 && name.is_char_boundary(split))
-            else {
-                return false;
-            };
-            let suffix = &name[split..];
-            suffix.chars().all(|c| c.is_ascii_hexdigit())
-                && suffix.chars().any(|c| c.is_ascii_digit())
-        })
         .collect()
 }
 
