@@ -415,7 +415,7 @@ fn a_vendored_documents_opaque_self_is_an_identity_a_reference_reaches() {
 /// Lay out `spec` + `lock` + arbitrary vendored files `(vendor-relative path, bytes)` in a
 /// fresh tempdir, then run the pipeline (no network). Returns the report and generated module
 /// path.
-fn run_layout(
+pub(super) fn run_layout(
     spec: &str,
     lock: Option<&str>,
     vendor: &[(&str, &str)],

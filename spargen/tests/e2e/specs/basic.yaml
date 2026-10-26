@@ -162,7 +162,8 @@ paths:
           schema:
             type: [integer, "null"]
         # Rust-keyword-named param: must escape to `r#type` (field, arg, setter, wire name `type`),
-        # not a bare `type` keyword token (which failed to parse -> a compile_error! safety net).
+        # not a bare `type` keyword token, which fails to parse and rejects the run as E011
+        # (`codegen produced unparseable Rust`).
         - name: type
           in: query
           schema:

@@ -306,7 +306,8 @@ ADDITIONAL      responses:
     }
     // The same object as a `oneOf`/`anyOf` member, directly or through a nested union, holds the
     // parameter's position (#435), so its unconstrained field is named the same way rather than as
-    // nesting; a scalar value schema makes the union generate.
+    // nesting; a scalar value schema clears that fault (the union then generates under `form`,
+    // and `deepObject` reports only its scalar member, as `assert_union_control` says).
     const UNION_TEMPLATE: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -354,12 +355,7 @@ paths:
                 }
             }
             let spec = union_spec(style, union, ", additionalProperties: { type: integer }");
-            let report = generate(&spec);
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{style} {union}: {report:#?}"
-            );
+            assert_union_control(style, &spec);
         }
     }
 }
@@ -478,7 +474,8 @@ paths:
 /// uninhabited property, item, or tuple position of a struct, array, or tuple member is a part of
 /// the parameter and is named as one (#435). Before, the part walk stopped at the union, and the
 /// only message was "nested arrays or objects", though nothing is nested: the same union with an
-/// inhabited part generates.
+/// inhabited part generates under `form` (under `deepObject` only its scalar member is left to
+/// report, as `assert_union_control` says).
 #[test]
 fn a_parameter_union_member_with_an_uninhabited_part_is_reported_as_uninhabited() {
     const TEMPLATE: &str = r##"
@@ -564,14 +561,28 @@ paths:
                 "{style} {schema}: {messages:?}"
             );
         }
-        // The control: the same union with the part inhabited is a supported shape.
+        // The control: the same union with the part inhabited loses this fault.
         let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", control);
-        let report = generate(&spec);
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "{style} {control}: {report:#?}"
-        );
+        assert_union_control(style, &spec);
+    }
+}
+
+/// The control of a fixture whose parameter schema is a union of an object and a scalar: with
+/// the fault the fixture is about removed, `form` generates, and `deepObject` is left with only
+/// the scalar member it cannot serialize (#696), reported as that and nothing else.
+fn assert_union_control(style: &str, spec: &str) {
+    for report in [generate(spec), check(spec)] {
+        if style == "deepObject" {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{spec}: {report:#?}");
+            assert!(
+                messages[0].contains("`style: deepObject` serializes only objects"),
+                "{spec}: {messages:?}"
+            );
+        } else {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}: {report:#?}");
+        }
     }
 }
 
@@ -719,6 +730,180 @@ paths:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedParameterStyle));
+}
+
+/// `spaceDelimited`/`pipeDelimited` are defined only for arrays and objects, and `deepObject`
+/// only for objects: the specification's serialization table gives no value for a primitive or
+/// an undefined (`null`) value under them (#696). A schema admitting such a value used to
+/// generate a client whose call failed at request time with the runtime's `ExpectedComposite`
+/// or `ExpectedObject` whenever it was sent — on every call for a scalar schema. So a schema
+/// that admits any value the style cannot serialize rejects with `E010`: a scalar, a
+/// `oneOf`/`anyOf` with a scalar member, `null` on a required parameter, or a `oneOf` member
+/// that is `null` (here through a `$ref`) on any parameter. An optional nullable parameter is
+/// fine, since its `None` is simply not sent.
+#[test]
+fn e010_a_query_style_over_a_schema_admitting_a_value_it_cannot_serialize() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          required: REQUIRED
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    let spec = |style: &str, required: bool, schema: &str| {
+        TEMPLATE
+            .replace("STYLE", style)
+            .replace("REQUIRED", &required.to_string())
+            .replace("SCHEMA", schema)
+    };
+    let array = "{ type: array, items: { type: string } }";
+    let object = "{ type: object, properties: { a: { type: string } } }";
+    let rejected = [
+        ("spaceDelimited", false, "{ type: string }"),
+        ("pipeDelimited", true, "{ type: integer }"),
+        ("spaceDelimited", false, "{ enum: [a, b] }"),
+        (
+            "pipeDelimited",
+            false,
+            "{ oneOf: [{ type: array, items: { type: string } }, { type: string }] }",
+        ),
+        (
+            "spaceDelimited",
+            true,
+            "{ type: [array, 'null'], items: { type: string } }",
+        ),
+        ("deepObject", false, "{ type: string }"),
+        ("deepObject", true, array),
+        (
+            "deepObject",
+            false,
+            "{ anyOf: [{ type: object, properties: { a: { type: string } } }, { type: integer }] }",
+        ),
+        (
+            "deepObject",
+            true,
+            "{ type: [object, 'null'], properties: { a: { type: string } } }",
+        ),
+    ];
+    for (style, required, schema) in rejected {
+        let spec = spec(style, required, schema);
+        let shape = if style == "deepObject" {
+            "only objects"
+        } else {
+            "only arrays and objects"
+        };
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(&format!("`style: {style}` serializes {shape}"))
+                    && messages[0].contains("`f`"),
+                "{style} {schema}: {messages:?}"
+            );
+        }
+    }
+    let accepted = [
+        ("spaceDelimited", true, array.to_owned()),
+        ("pipeDelimited", false, object.to_owned()),
+        (
+            "spaceDelimited",
+            false,
+            format!("{{ oneOf: [{array}, {object}] }}"),
+        ),
+        (
+            "pipeDelimited",
+            false,
+            "{ type: [array, 'null'], items: { type: string } }".to_owned(),
+        ),
+        (
+            "spaceDelimited",
+            false,
+            format!("{{ oneOf: [{array}, {{ type: 'null' }}] }}"),
+        ),
+        ("deepObject", true, object.to_owned()),
+        (
+            "deepObject",
+            false,
+            "{ type: [object, 'null'], properties: { a: { type: string } } }".to_owned(),
+        ),
+    ];
+    for (style, required, schema) in accepted {
+        let spec = spec(style, required, &schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnsupportedParameterStyle),
+                "{style} {schema}: {report:#?}"
+            );
+        }
+    }
+    // A `null` member reached through a `$ref` is not folded into the root the way the inline
+    // `{ type: 'null' }` control above is: it stays a union member, whose `null` is the whole
+    // value and is sent even on an optional parameter, so it rejects.
+    let member_null = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: spaceDelimited
+          required: false
+          schema: { oneOf: [{ $ref: '#/components/schemas/Arr' }, { $ref: '#/components/schemas/Nil' }] }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Arr: { type: array, items: { type: string } }
+    Nil: { type: 'null' }
+"##;
+    for report in [generate(member_null), check(member_null)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        // The parameter is optional, so the message and remedy must name the union's `null`
+        // member as the cause, not only a scalar or a required parameter's root `null`.
+        assert!(
+            messages[0].contains("`style: spaceDelimited` serializes only arrays and objects")
+                && messages[0].contains("`f`")
+                && messages[0].contains(
+                    "a `oneOf`/`anyOf` member that is `null`, which is sent even on an optional \
+                     parameter"
+                ),
+            "{messages:?}"
+        );
+        let remedies: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnsupportedParameterStyle)
+            .filter_map(|d| d.remedy.as_deref())
+            .collect();
+        assert!(
+            remedies.len() == 1
+                && remedies[0].contains("with no `null` `oneOf`/`anyOf` member")
+                && !remedies[0].contains("nullable only if the parameter is optional"),
+            "{remedies:?}"
+        );
+    }
 }
 
 #[test]

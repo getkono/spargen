@@ -74,7 +74,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
-        self.check_styled_parameter_shape(parameter, ty)?;
+        self.check_styled_parameter_shape(parameter, ty, &style)?;
         Some(self.lowered_parameter(
             parameter,
             location,
@@ -370,8 +370,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Refuse a styled parameter whose lowered type simple/form/deepObject serialization has no
-    /// token for: an uninhabited part, an unconstrained property, or nesting it cannot render.
-    fn check_styled_parameter_shape(&mut self, parameter: &ParameterObject, ty: Ty) -> Option<()> {
+    /// token for: an uninhabited part, an unconstrained property, nesting it cannot render, or a
+    /// value outside the domain `style` is defined for.
+    fn check_styled_parameter_shape(
+        &mut self,
+        parameter: &ParameterObject,
+        ty: Ty,
+        style: &ParamStyle,
+    ) -> Option<()> {
         if let Some((path, kind)) = uninhabited_parameter_part(&self.graph, ty) {
             // `false`, or an `allOf` whose members meet empty, admits no value at all (#407).
             // Nothing is nested, so "nested arrays or objects" would describe nothing the author
@@ -434,6 +440,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 parameter,
                 "simple/form parameter serialization does not support nested arrays or objects",
                 None,
+            );
+        }
+        // A `oneOf`/`anyOf` member's `null` is the value itself, so it is sent even on an
+        // optional parameter; only the root's `null` is the absent `None`.
+        if let Some(domain) = StyleDomain::of(style)
+            .filter(|domain| !domain.admits_only(&self.graph, ty, parameter.required, true))
+        {
+            // Both restricted styles are query-only and never a location's default, so the
+            // parameter names its style explicitly.
+            let style_name = parameter.style.as_deref().unwrap_or_default();
+            return self.reject_parameter(
+                // E010 case: style-domain
+                Code::UnsupportedParameterStyle,
+                parameter,
+                format!(
+                    "`style: {style_name}` serializes {}, but the schema of parameter `{}` admits \
+                     another value ({}, a `oneOf`/`anyOf` member that is `null`, which is sent \
+                     even on an optional parameter, or a root `null` on a required parameter), \
+                     which the style has no serialization for",
+                    domain.describe(),
+                    parameter.name,
+                    domain.outside(),
+                ),
+                Some(format!(
+                    "give the parameter {} schema with no `null` `oneOf`/`anyOf` member, \
+                     nullable at its root only if the parameter is optional, or use `style: form`",
+                    domain.schema()
+                )),
             );
         }
         Some(())
@@ -599,6 +633,136 @@ fn uninhabited_parameter_part_inner(
         // The parameter itself was classified above; a reservation has no parts to search.
         TypeKind::Reserved => None,
         _ => None,
+    }
+}
+
+/// The values a query style is defined for, beyond what [`parameter_shape_supported`] admits for
+/// every style: the specification's serialization table gives `spaceDelimited`/`pipeDelimited` a
+/// value only for an array or object, and `deepObject` only for an object (#696). The runtime's
+/// `serialize_delimited` and `serialize_deep_object` refuse any other value at request time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StyleDomain {
+    /// `spaceDelimited` / `pipeDelimited`.
+    ArrayOrObject,
+    /// `spaceDelimited` / `pipeDelimited` on a multipart part ([`Self::on_multipart`]).
+    Array,
+    /// `deepObject`.
+    Object,
+}
+
+impl StyleDomain {
+    /// The domain `style` is restricted to, or `None` for a style defined over scalars too.
+    pub(super) fn of(style: &ParamStyle) -> Option<Self> {
+        match style {
+            ParamStyle::Delimited(_) => Some(Self::ArrayOrObject),
+            ParamStyle::DeepObject => Some(Self::Object),
+            ParamStyle::Simple
+            | ParamStyle::Matrix
+            | ParamStyle::Label
+            | ParamStyle::Form
+            | ParamStyle::Cookie
+            | ParamStyle::Content(_) => None,
+        }
+    }
+
+    /// The domain a multipart part narrows this one to: a part carries one value and has no
+    /// object representation, so the delimited styles serialize only an array there. `deepObject`
+    /// is refused on multipart outright before this domain is read.
+    pub(super) fn on_multipart(self) -> Self {
+        match self {
+            Self::ArrayOrObject | Self::Array => Self::Array,
+            Self::Object => Self::Object,
+        }
+    }
+
+    /// What the style serializes, as a diagnostic phrases it: "serializes {only ...}".
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "only arrays and objects",
+            Self::Array => "only arrays",
+            Self::Object => "only objects",
+        }
+    }
+
+    /// The non-null kinds of value outside the domain, as a diagnostic lists them.
+    pub(super) fn outside(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "a scalar",
+            Self::Array => "a scalar or an object",
+            Self::Object => "a scalar or an array",
+        }
+    }
+
+    /// The schema a remedy asks for: "give the property {an ... schema}".
+    pub(super) fn schema(self) -> &'static str {
+        match self {
+            Self::ArrayOrObject => "an array or object",
+            Self::Array => "an array",
+            Self::Object => "an object",
+        }
+    }
+
+    /// Whether every value `ty` admits is one this domain holds. `null_sent` says whether a
+    /// `null` the root admits reaches the serializer: it does for a required parameter, while an
+    /// optional one's `None` is not sent and a form body omits a `null` property.
+    /// `member_null_sent` says the same of a `null` a `oneOf`/`anyOf` member admits, which is the
+    /// whole value: a parameter and a multipart part send it, optional or not, and a
+    /// form-urlencoded body omits it.
+    pub(super) fn admits_only(
+        self,
+        graph: &TypeGraph,
+        ty: Ty,
+        null_sent: bool,
+        member_null_sent: bool,
+    ) -> bool {
+        self.admits_only_inner(graph, ty, null_sent, member_null_sent, &mut HashSet::new())
+    }
+
+    fn admits_only_inner(
+        self,
+        graph: &TypeGraph,
+        ty: Ty,
+        null_sent: bool,
+        member_null_sent: bool,
+        members: &mut HashSet<TypeId>,
+    ) -> bool {
+        if ty.nullable && null_sent {
+            return false;
+        }
+        let Some(definition) = graph.get(ty.id) else {
+            return false;
+        };
+        match &definition.kind {
+            TypeKind::Struct(_) => self != Self::Array,
+            TypeKind::Array(_) | TypeKind::Tuple(_) => self != Self::Object,
+            TypeKind::Null => !null_sent,
+            // A union admits exactly its members' values; one reached again through a member adds
+            // none, so it holds no counterexample (`members` stops the walk).
+            TypeKind::Union(union) => {
+                if !members.insert(ty.id) {
+                    return true;
+                }
+                let all = union.variants.iter().all(|variant| {
+                    self.admits_only_inner(
+                        graph,
+                        variant.ty,
+                        member_null_sent,
+                        member_null_sent,
+                        members,
+                    )
+                });
+                members.remove(&ty.id);
+                all
+            }
+            // A reservation's shape is unknown, so it cannot be proved to hold only composites;
+            // `parameter_shape_supported` refuses it first on the parameter side.
+            TypeKind::Reserved
+            | TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Never
+            | TypeKind::Any => false,
+        }
     }
 }
 

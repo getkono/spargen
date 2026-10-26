@@ -2356,7 +2356,9 @@ mod support {
         /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
         ///
         /// Both styles are defined only for arrays and objects with `explode: false`, and any other value
-        /// is refused with `ParameterError::ExpectedComposite`.
+        /// is refused with `ParameterError::ExpectedComposite`. Generation rejects `explode: true` and a
+        /// schema that admits a scalar, or `null` on a required parameter, so a generated call never
+        /// receives that error.
         pub fn serialize_delimited<T: Serialize>(
             name: &str,
             value: &T,
@@ -2389,6 +2391,10 @@ mod support {
         /// `explode` has no effect on this style. The `[`/`]` are emitted as the literal delimiters
         /// `%5B`/`%5D`; a bracket inside a property key encodes to the same triple, an ambiguity the
         /// specification itself acknowledges as inherent to the style.
+        ///
+        /// The style is defined only for objects, and any other value is refused with
+        /// `ParameterError::ExpectedObject`. Generation rejects a schema that admits a non-object, or
+        /// `null` on a required parameter, so a generated call never receives that error.
         pub fn serialize_deep_object<T: Serialize>(
             name: &str,
             value: &T,
@@ -4294,16 +4300,7 @@ pub mod types {
         #[serde(rename = "empty_only")]
         pub empty_only: RefinedemptyOnlyIntersection,
     }
-    pub type RefinedMember0runId = f64;
-    pub type RefinedMember0status = String;
-    pub type RefinedMember0marker = String;
     pub type RefinedMember0labelsItem = String;
-    pub type RefinedMember0labels = Vec<Option<RefinedMember0labelsItem>>;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RefinedMember0stepsItem {}
-    pub type RefinedMember0steps = Vec<Option<RefinedMember0stepsItem>>;
-    pub type RefinedMember0emptyOnlyItem = String;
-    pub type RefinedMember0emptyOnly = Vec<RefinedMember0emptyOnlyItem>;
     pub type RefinedMember1runId = i64;
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub enum RefinedMember1status {
@@ -4322,18 +4319,7 @@ pub mod types {
             )
         }
     }
-    pub type RefinedMember1marker = ();
-    pub type RefinedMember1labelsItem = String;
-    pub type RefinedMember1labels = Vec<RefinedMember1labelsItem>;
     pub type RefinedMember1stepsItemname = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct RefinedMember1stepsItem {
-        #[serde(rename = "name")]
-        pub name: RefinedMember1stepsItemname,
-    }
-    pub type RefinedMember1steps = Vec<RefinedMember1stepsItem>;
-    pub type RefinedMember1emptyOnlyItem = ();
-    pub type RefinedMember1emptyOnly = Vec<Option<RefinedMember1emptyOnlyItem>>;
     pub type RefinedmarkerIntersection = ();
     pub type RefinedlabelsIntersection = Vec<RefinedMember0labelsItem>;
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4395,8 +4381,6 @@ pub mod types {
         )]
         pub x: Option<ConflictDefaultxIntersection>,
     }
-    pub type ConflictDefaultMember0x = String;
-    pub type ConflictDefaultMember1x = i64;
     #[derive(Debug, Clone)]
     pub enum ConflictDefaultxIntersection {}
     impl<'de> serde::Deserialize<'de> for ConflictDefaultxIntersection {
@@ -4433,17 +4417,6 @@ pub mod types {
             deserialize_with = "decode_present",
         )]
         pub x: Option<ConflictDefaultSiblingReferenceIntersectionx>,
-    }
-    pub type ConflictDefaultSiblingConstraintx = i64;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ConflictDefaultSiblingConstraint {
-        #[serde(
-            rename = "x",
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub x: Option<ConflictDefaultSiblingConstraintx>,
     }
     #[derive(Debug, Clone)]
     pub enum ConflictDefaultSiblingReferenceIntersectionx {}
@@ -4708,37 +4681,6 @@ pub mod types {
     pub type NarrowDefaultSiblingConstraintratio = i64;
     pub type NarrowDefaultSiblingConstraintfraction = i64;
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct NarrowDefaultSiblingConstraint {
-        #[serde(
-            rename = "valid",
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub valid: Option<NarrowDefaultSiblingConstraintvalid>,
-        #[serde(
-            rename = "bad",
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub bad: Option<NarrowDefaultSiblingConstraintbad>,
-        #[serde(
-            rename = "ratio",
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub ratio: Option<NarrowDefaultSiblingConstraintratio>,
-        #[serde(
-            rename = "fraction",
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub fraction: Option<NarrowDefaultSiblingConstraintfraction>,
-    }
-    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MergedDefaultNarrow {
         #[serde(
             rename = "p",
@@ -4805,21 +4747,6 @@ pub mod types {
         pub p: Option<MergedDefaultNarrowp>,
     }
     fn default_70_p() -> Option<MergedDefaultNarrowp> {
-        Some("hello".to_owned())
-    }
-    pub type MergedDefaultSiblingConstraintp = String;
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct MergedDefaultSiblingConstraint {
-        ///Default: `hello`.
-        #[serde(
-            rename = "p",
-            default = "default_72_p",
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "decode_present",
-        )]
-        pub p: Option<MergedDefaultSiblingConstraintp>,
-    }
-    fn default_72_p() -> Option<MergedDefaultSiblingConstraintp> {
         Some("hello".to_owned())
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]

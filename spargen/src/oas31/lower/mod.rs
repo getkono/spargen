@@ -312,6 +312,11 @@ fn lower_pass(
     // be decided.
     ctx.check_deferred_map_values();
 
+    // Every schema is lowered, so what neither a component nor an operation reaches is a type
+    // the output would carry with nothing naming it (#924). Withheld before the passes below,
+    // which read and report on the emitted definitions only.
+    ctx.elide_unreachable(&operations);
+
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
     retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);
