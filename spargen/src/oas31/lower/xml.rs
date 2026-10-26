@@ -320,26 +320,43 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
     }
 }
 
-/// The emitted definitions a merged member's `xml` object at `site` is reported against: those at
-/// its composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any,
-/// in the same document; and, for each of those a `$ref` member of another composition merged
+/// The definitions a merged member's `xml` object at `site` is reported against: those at its
+/// composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any, in
+/// the same document; and, for each of those a `$ref` member of another composition merged
 /// ([`LowerCtx::record_xml_merger`]), that composition's, transitively. None where no definition
 /// encloses it.
+///
+/// Each site is looked up among the emitted definitions (`emitted_sites`) and among every
+/// definition, elided ones included (`defined_sites`). A definition the output withholds is still
+/// a link of the walk: a remote document's type that only an `allOf` member reaches is elided
+/// ([`LowerCtx::elide_unreachable`]), and the composition that merged it is found only through it
+/// (#1017). An elided owner decides nothing itself, because no XML body reaches a type the output
+/// withholds.
 fn merged_into(
     site: &XmlSite,
     root: &RootXml,
     emitted_sites: &HashMap<XmlSite, Vec<TypeId>>,
+    defined_sites: &HashMap<XmlSite, Vec<TypeId>>,
     xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
 ) -> Vec<TypeId> {
+    let enclosing = |document: &str, pointer: Option<&JsonPointer>| {
+        let mut ids = enclosing_emitted(document, pointer, emitted_sites);
+        for id in enclosing_emitted(document, pointer, defined_sites) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    };
     let mut owners = match &root.holder {
-        Some((document, pointer)) => enclosing_emitted(document, Some(pointer), emitted_sites),
-        None => enclosing_emitted(&site.0, site.1.parent().as_ref(), emitted_sites),
+        Some((document, pointer)) => enclosing(document, Some(pointer)),
+        None => enclosing(&site.0, site.1.parent().as_ref()),
     };
     let mut next = 0;
     while let Some(&id) = owners.get(next) {
         next += 1;
         for (document, pointer) in xml_mergers.get(&id).into_iter().flatten() {
-            for merger in enclosing_emitted(document, Some(pointer), emitted_sites) {
+            for merger in enclosing(document, Some(pointer)) {
                 if !owners.contains(&merger) {
                     owners.push(merger);
                 }
@@ -465,6 +482,11 @@ pub(super) fn gate_xml_field_renames(
         let site = (def.document.clone(), def.provenance.pointer.clone());
         emitted_sites.entry(site).or_default().push(id);
     }
+    let mut defined_sites: HashMap<XmlSite, Vec<TypeId>> = HashMap::new();
+    for (id, def) in graph.iter() {
+        let site = (def.document.clone(), def.provenance.pointer.clone());
+        defined_sites.entry(site).or_default().push(id);
+    }
     let mut merged_sites: Vec<(&XmlSite, &RootXml, Vec<TypeId>)> = root_xml
         .iter()
         .filter(|(site, root)| {
@@ -474,7 +496,7 @@ pub(super) fn gate_xml_field_renames(
                 && (root.name.is_some() || !root.unsupported.is_empty())
         })
         .map(|(site, root)| {
-            let owners = merged_into(site, root, &emitted_sites, xml_mergers);
+            let owners = merged_into(site, root, &emitted_sites, &defined_sites, xml_mergers);
             (site, root, owners)
         })
         .collect();
