@@ -1024,3 +1024,76 @@ fn a_union_left_one_variant_emits_none_of_its_members_or_siblings_own_lowerings(
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+/// A union whose branches are merged (`W001`), collapsed to one type, or narrowed by a sibling to
+/// one variant emits only the type it became: the per-branch types it was lowered into
+/// (`Uvariant<N>` and what they hold) are elided rather than emitted as public types nothing
+/// names (#925), and so is the sibling's own lowering where a `$ref` with a non-union sibling
+/// meets the merged union. Every case is also held to [`oracles::unreferenced_types`].
+#[test]
+fn a_merged_collapsed_or_narrowed_union_emits_none_of_its_branch_types() {
+    let cases = [
+        (
+            "branches of one type merged",
+            "      oneOf:\n        - { type: string, minLength: 1 }\n        - { type: string, \
+             maxLength: 9 }\n",
+            Some("String"),
+        ),
+        (
+            "branches stating nothing collapsed",
+            "      oneOf: [ {}, {} ]\n",
+            None,
+        ),
+        (
+            "a sibling type excluding a branch",
+            "      type: string\n      oneOf: [ { type: string }, { type: integer } ]\n",
+            Some("String"),
+        ),
+        (
+            "a sibling type array narrowing a branch to null",
+            "      type: [string, 'null']\n      oneOf: [ { items: { type: string } }, { type: \
+             string } ]\n",
+            None,
+        ),
+        (
+            "a merged union a `$ref` with a non-union sibling meets",
+            "      oneOf:\n        - { type: string, minLength: 1 }\n        - { type: string, \
+             maxLength: 9 }\n    P: { $ref: '#/components/schemas/U', const: x }\n",
+            Some("String"),
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (case, body, alias) in cases {
+        let spec = single_component_document(body);
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
+        let types = types_module(&code);
+        let branch_types: Vec<&str> = types
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| {
+                ["pub type ", "pub struct ", "pub enum "]
+                    .iter()
+                    .find_map(|prefix| line.strip_prefix(prefix))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+            .filter(|name| {
+                name.to_ascii_lowercase()
+                    .split_once("variant")
+                    .is_some_and(|(_, tail)| tail.starts_with(|c: char| c.is_ascii_digit()))
+            })
+            .collect();
+        let unreferenced = oracles::unreferenced_types(&code, &spec);
+        if !branch_types.is_empty() || !unreferenced.is_empty() {
+            mismatches.push(format!(
+                "{case}: branch types {branch_types:?}, unreferenced {unreferenced:#?}\n{types}"
+            ));
+        }
+        if let Some(alias) = alias {
+            if alias_target(&types, "U").as_deref() != Some(alias) {
+                mismatches.push(format!("{case}: `U` is no alias of `{alias}`\n{types}"));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
