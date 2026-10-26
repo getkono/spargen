@@ -121,6 +121,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Note that `schema`, a `$ref` whose shape-bearing siblings are intersected with its target
+    /// `ty`, merges `ty` the way an `allOf` composition merges a `$ref` member's target
+    /// ([`Self::record_xml_merger`]), with `schema` itself as the composition.
+    pub(super) fn record_ref_sibling_merger(&mut self, schema: &Schema, ty: TypeId) {
+        self.with_xml_holder(schema, |ctx| ctx.record_xml_merger(ty));
+    }
+
     /// Read the `xml` object of `schema`, a `$ref` whose siblings bear no shape and so resolved to
     /// `target` itself. A name there would rename the element of a type every use of the target
     /// shares (OpenAPI 3.1 reads it so; 3.2 ignores it under the `none` node type a `$ref`

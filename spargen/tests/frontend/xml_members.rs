@@ -174,6 +174,61 @@ fn a_member_merged_through_a_component_ref_is_judged_by_the_type_merging_it() {
     );
 }
 
+/// The `$ref`-with-siblings spelling of the same merge: `Both` is `Shared` intersected with its
+/// shape-bearing siblings, so `Shared`'s `allOf` member is merged into `Both` and judged by
+/// `Both`'s body, exactly as when `Both` lists `Shared` as an `allOf` member (#1002).
+#[test]
+fn a_member_merged_through_a_ref_with_siblings_is_judged_by_the_type_merging_it() {
+    assert_member_hint_reported(
+        r##"    Both:
+      $ref: "#/components/schemas/Shared"
+      properties:
+        name: { type: string }
+    Shared:
+      allOf:
+        - type: object
+          xml: { namespace: "urn:shared" }
+          properties:
+            id: { type: integer }"##,
+        "namespace",
+    );
+    // Two hops: `Both` intersects `Middle`, which merges `Shared` as an `allOf` member.
+    assert_member_hint_reported(
+        r##"    Both:
+      $ref: "#/components/schemas/Middle"
+      properties:
+        name: { type: string }
+    Middle:
+      allOf:
+        - $ref: "#/components/schemas/Shared"
+    Shared:
+      allOf:
+        - type: object
+          xml: { prefix: s }
+          properties:
+            id: { type: integer }"##,
+        "prefix",
+    );
+    // Two hops the other way round: `Both` merges `Middle` as an `allOf` member, and `Middle`
+    // intersects `Shared` with its siblings.
+    assert_member_hint_reported(
+        r##"    Both:
+      allOf:
+        - $ref: "#/components/schemas/Middle"
+    Middle:
+      $ref: "#/components/schemas/Shared"
+      properties:
+        name: { type: string }
+    Shared:
+      allOf:
+        - type: object
+          xml: { prefix: s }
+          properties:
+            id: { type: integer }"##,
+        "prefix",
+    );
+}
+
 /// The remote counterpart: `Both` merges a pinned remote document whose own `allOf` member
 /// carries the hint, and that document reaches the body only as `Both`'s `$ref` member, so the
 /// member is judged by `Both`'s XML body rather than by the remote type's own reachability.

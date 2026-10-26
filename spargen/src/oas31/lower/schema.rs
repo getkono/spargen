@@ -157,6 +157,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 },
             );
         }
+        // From here the target is composed into the type this schema lowers to, as an `allOf`
+        // member's `$ref` target is into its composition's: a member that target merged is
+        // merged into this schema's type too, and is judged by its reachability (#1002).
+        self.record_ref_sibling_merger(schema, referenced.id);
         // A sibling carrying only object or only array applicators names no `type`, so
         // `lower_schema` would lower it to an object or an array that denies `null` (#613,
         // #614), and before those to `TypeKind::Any` — which intersects as identity,
