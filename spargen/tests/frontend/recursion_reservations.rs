@@ -1343,9 +1343,9 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
         next.contains("Box<Node>"),
         "`next` keeps the boxed cycle-closing `Node`: `{next}` in {types}"
     );
-    // The meet is the `prefixItems` member alone, which lowers on its own as `TupMember0`. `Tup`
-    // closes its own cycle through that tuple, so it is a transparent newtype over it (#648), and
-    // `TupMember0`, which only points into the cycle, stays an alias.
+    // The meet is the `prefixItems` member alone. `Tup` closes its own cycle through that tuple, so
+    // it is a transparent newtype over it (#648); the member's own lowering, `TupMember0`, which
+    // only pointed into the cycle, is no type of the output (#924).
     let line_after = |prefix: &str| {
         types
             .lines()
@@ -1361,10 +1361,10 @@ fn a_cycle_closing_ref_met_with_an_untyped_schema_keeps_the_ref_in_a_field_and_a
         "`Tup` keeps the cycle-closing position: `{tuple}`"
     );
     assert_eq!(
-        Some(tuple),
-        line_after("pub type TupMember0 = "),
+        tuple, "(Box<Tup>,);",
         "`Tup` is its `prefixItems` member, as without the untyped `items`: {types}"
     );
+    assert_eq!(line_after("pub type TupMember0 = "), None, "{types}");
 }
 
 /// The `additionalProperties` position of the same meet (#641): two `allOf` members both constrain

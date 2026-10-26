@@ -820,10 +820,10 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
             // `W006` are one diagnostic, at the hint the author wrote.
             1,
         ),
-        // Under an XML body the merged struct is XML-dedicated and keeps its rename. Both spellings
-        // report one `W006`, for the first member's own `inner` struct, which no body reaches. The
-        // superseded meet is reached from no body either, so a pass reading it would report a
-        // second `W006` for a type the output does not have.
+        // Under an XML body the merged struct is XML-dedicated and keeps its rename. The first
+        // member's own `inner` struct and the superseded meet are reached from no body, so neither
+        // is a type of the output (#924), and a pass reading either would report a `W006` for a
+        // hint the output honours.
         (
             "application/xml",
             [
@@ -835,7 +835,7 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
                 "{ type: string, xml: { name: kay } }",
                 "{ type: string, minLength: 1 }",
             ],
-            1,
+            0,
         ),
     ];
     for (media, three, two, count) in cases {

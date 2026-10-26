@@ -685,8 +685,8 @@ fn relocation_moves_every_schema_behind_a_reference() {
 
 /// [`oracles::unreferenced_copies`] reports a hash-suffixed copy of a component that nothing names
 /// (#926), and passes the same copy once something names it, a component allocated a suffixed
-/// name because its own collides with a reserved one (`Box`), and an unreferenced
-/// `<Hint>Constraint` copy, which is #924's.
+/// name because its own collides with a reserved one (`Box`). A copy of a meet's
+/// `<Hint>Constraint` intermediate is a copy like any other (#924).
 #[test]
 fn the_unreferenced_copy_oracle_sees_a_copy_nothing_names() {
     let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
@@ -703,5 +703,8 @@ fn the_unreferenced_copy_oracle_sees_a_copy_nothing_names() {
     );
     assert!(oracles::unreferenced_copies(&named, spec).is_empty());
     let constraint = module("    pub struct S0 {}\n    pub type S0ConstraintD3cb2251 = f64;");
-    assert!(oracles::unreferenced_copies(&constraint, spec).is_empty());
+    assert_eq!(
+        oracles::unreferenced_copies(&constraint, spec),
+        ["`S0ConstraintD3cb2251` is emitted, but nothing names it and it is no component"],
+    );
 }

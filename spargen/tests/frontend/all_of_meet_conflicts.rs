@@ -69,22 +69,20 @@ fn a_re_emitted_union_meet_emits_no_meet_its_result_does_not_use() {
         (
             "$ref to a union with untyped siblings",
             "{ $ref: '#/components/schemas/Target', required: [name] }",
-            &[
-                "HolderfieldConstraint",
-                "HolderfieldReferenceIntersectionVariant0",
-                "Holderfield",
-            ],
+            &["HolderfieldReferenceIntersectionVariant0", "Holderfield"],
             "HolderfieldReferenceIntersection",
         ),
     ];
     for (case, field, expected, discarded) in cases {
         let (report, code) = generate_with_code(&spec(field));
         assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
-        let mut lowered = field_types(&code);
-        // The sibling's own lowered field alias, which a `$ref`'s sibling keywords still emit, is
-        // not what this pins.
-        lowered.retain(|name| name != "HolderfieldConstraintname");
-        assert_eq!(lowered, expected, "{case}: `{discarded}` is unused");
+        // The `$ref` case's sibling keywords' own lowering (`HolderfieldConstraint`, and its
+        // field alias) is no input the result names either (#924).
+        assert_eq!(
+            field_types(&code),
+            expected,
+            "{case}: `{discarded}` is unused"
+        );
     }
 }
 
@@ -904,4 +902,118 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
             );
         }
     }
+}
+
+/// A meet consumes the types its inputs were lowered into, and each one it consumed used to stay
+/// in the output as a public type nothing names (#924): a `$ref` sibling's own lowering
+/// (`<Hint>Constraint`), the per-member property types an `allOf` merge replaced
+/// (`<Hint>Member<N><prop>`), the same inside an `allOf` member that is itself a `$ref` with
+/// siblings, and a referenced file's component met only as an `allOf` member. Each spelling now
+/// emits exactly the types something names, and the components stay.
+#[test]
+fn a_meet_emits_no_intermediate_its_result_does_not_name() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\n\
+                        servers: [{ url: 'https://e.com' }]\n";
+    let response = |schema: &str| {
+        format!(
+            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        \
+             '200':\n          description: ok\n          content:\n            \
+             application/json:\n              schema: {schema}\n"
+        )
+    };
+    let declares = |types: &str, name: &str| {
+        ["pub struct ", "pub enum ", "pub type "]
+            .iter()
+            .any(|item| {
+                types.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix(item)
+                        .and_then(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+                        == Some(name)
+                })
+            })
+    };
+    let cases: [(&str, String, &[&str], &[&str]); 4] = [
+        (
+            "a `$ref` with a shape-bearing sibling",
+            response("{ $ref: '#/components/schemas/Count', type: number }")
+                + "components:\n  schemas:\n    Count: { type: integer }\n",
+            &["ResponseBodyConstraint"],
+            &["Count", "ResponseBody"],
+        ),
+        (
+            "an `allOf` repeating a property",
+            format!(
+                "{HEAD}paths: {{}}\ncomponents:\n  schemas:\n    Pet:\n      allOf:\n        \
+                 - {{ type: object, properties: {{ p: {{ type: string }} }} }}\n        \
+                 - {{ type: object, properties: {{ p: {{ type: string, maxLength: 3 }} }} }}\n"
+            ),
+            &["PetMember1p", "PetMember0", "PetMember1"],
+            &["Pet", "PetMember0p"],
+        ),
+        (
+            "an `allOf` member `$ref` with a sibling property",
+            format!(
+                "{HEAD}paths: {{}}\ncomponents:\n  schemas:\n    \
+                 Base: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n    \
+                 Wrap:\n      allOf:\n        \
+                 - {{ $ref: '#/components/schemas/Base', properties: {{ a: {{ maxLength: 3 }} }} }}\n"
+            ),
+            &["WrapMember0Constraint", "WrapMember0Constrainta"],
+            &["Base", "Wrap"],
+        ),
+        (
+            "a `$ref` sibling inside a property",
+            format!(
+                "{HEAD}paths: {{}}\ncomponents:\n  schemas:\n    \
+                 Holder: {{ type: object, properties: {{ field: {{ $ref: '#/components/schemas/S', \
+                 maxLength: 3 }} }} }}\n    S: {{ type: string }}\n"
+            ),
+            &["HolderfieldConstraint"],
+            &["Holder", "S"],
+        ),
+    ];
+    for (case, spec, consumed, kept) in cases {
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{case}: {report:#?}");
+        let types = types_module(&code);
+        for name in consumed {
+            assert!(
+                !declares(&types, name),
+                "{case}: `{name}` is consumed by the meet and nothing names it:\n{types}"
+            );
+        }
+        for name in kept {
+            assert!(
+                declares(&types, name),
+                "{case}: `{name}` is not emitted:\n{types}"
+            );
+        }
+        let unreferenced = oracles::unreferenced_types(&code, &spec);
+        assert!(
+            unreferenced.is_empty(),
+            "{case}: {unreferenced:#?}\n{types}"
+        );
+    }
+
+    // A referenced file's component the root reaches only as an `allOf` member is merged into
+    // the member's struct; its own definition is no type of the output.
+    let lib = "components:\n  schemas:\n    \
+               Base: { type: object, properties: { a: { type: string } } }\n";
+    let root = format!(
+        "{HEAD}paths: {{}}\ncomponents:\n  schemas:\n    Pet:\n      allOf:\n        \
+         - $ref: './lib.yaml#/components/schemas/Base'\n        \
+         - {{ type: object, properties: {{ b: {{ type: integer }} }} }}\n"
+    );
+    let (generated, _, code) =
+        generate_and_check_files(&[("openapi.yaml", &root), ("lib.yaml", lib)]);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    let types = types_module(&code);
+    assert_eq!(declared_fields(&types, "Pet"), ["a", "b"], "{types}");
+    assert!(
+        !declares(&types, "Base"),
+        "the merged member's own definition is emitted:\n{types}"
+    );
+    let unreferenced = oracles::unreferenced_types(&code, &root);
+    assert!(unreferenced.is_empty(), "{unreferenced:#?}\n{types}");
 }
