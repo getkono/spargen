@@ -40,6 +40,7 @@ mod bodies_streaming;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;
+mod discriminator_pinned_tags;
 mod document;
 mod encoding;
 mod encoding_headers;
