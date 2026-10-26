@@ -697,32 +697,42 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
                 - { $ref: '#/components/schemas/Dog' }\n";
     let inline = "        - { $ref: '#/components/schemas/Dog' }\n        \
                   - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
-    // GitHub's `POST /repos/{owner}/{repo}/check-runs` body: two inline members, each pinning the
-    // discriminating property with an `enum` the discriminator never reads.
-    let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
+    // GitHub's `POST /repos/{owner}/{repo}/check-runs` body: two inline members. The first pins
+    // the required discriminating property to one value, which selects it (#1001); the second
+    // admits two and requires none, so no value selects it.
+    let github = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
+                  - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
+    let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { type: string }, done: { type: boolean } } }\n        \
                        - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
-    // Beside the tagged `Dog`, the untagged member keeps Dog's dispatch (`dispatches`); with no
-    // tagged member at all, the discriminator dispatches nothing.
-    for (what, members, subject, dispatches) in [
+    // Beside a tagged member, the untagged member keeps that member's dispatch (`decoded` names
+    // each tag arm); with no tagged member at all, the discriminator dispatches nothing.
+    for (what, members, subject, decoded) in [
         (
             "deep pointer",
             deep,
             "union member 0 is no schema component",
-            true,
+            &[("Dog", "Dog")][..],
         ),
         (
             "inline",
             inline,
             "union member 1 is no schema component",
-            true,
+            &[("Dog", "Dog")][..],
+        ),
+        (
+            "both inline, one pinned",
+            github,
+            "union member 1 is no schema component",
+            &[("PetVariant0", "completed")][..],
         ),
         (
             "both inline",
             both_inline,
             "union members 0, 1 are no schema components",
-            false,
+            &[][..],
         ),
     ] {
+        let dispatches = !decoded.is_empty();
         let spec = spec(members, "", "3.1.0");
         let (generated, code) = generate_with_code(&spec);
         for (entry, report) in [("generate", generated), ("check", check(&spec))] {
@@ -761,20 +771,21 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
             );
         }
         if dispatches {
-            // `Dog` keeps its implicit tag both ways; the untagged member is selected by no tag
+            // The tagged member keeps its tag both ways; the untagged member is selected by no tag
             // and written with none.
             let arms = discriminated_arms(&code, "Pet");
-            assert_eq!(
-                arms.decode,
-                vec![("Dog".to_owned(), vec!["Dog".to_owned()])],
-                "{what}\n{code}"
-            );
+            let expected: Vec<_> = decoded
+                .iter()
+                .map(|(variant, tag)| ((*variant).to_owned(), vec![(*tag).to_owned()]))
+                .collect();
+            assert_eq!(arms.decode, expected, "{what}\n{code}");
             let written: Vec<_> = arms
                 .encode
                 .iter()
                 .filter_map(|(_, tag)| tag.clone())
                 .collect();
-            assert_eq!(written, ["Dog"], "{what}\n{code}");
+            let tags: Vec<_> = decoded.iter().map(|(_, tag)| *tag).collect();
+            assert_eq!(written, tags, "{what}\n{code}");
             assert_eq!(arms.encode.len(), 2, "{what}\n{code}");
         } else {
             let de_impl = code
@@ -827,6 +838,167 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
         .collect();
     assert_eq!(tags, [vec!["Dog".to_owned()]], "{code}");
     assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+}
+
+/// Issue #1001: an internally tagged Rust enum's OpenAPI output — every branch inline, each pinning
+/// the required tag property with a `const` or a one-value `enum` — had no member a discriminator
+/// value selected, so it was `W011` and decoded by trial. Each member's pinned value selects it and
+/// is the tag it writes, with no diagnostic, in `check` as in `generate`. The value is read from the
+/// lowered member, so a pin a `$ref`d property or an `allOf` conjunct supplies counts too.
+#[test]
+fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
+    let spec = |members: &str, discriminator: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Config:\n      \
+             oneOf:\n{members}      \
+             discriminator:\n        \
+             propertyName: type\n{discriminator}    \
+             Base: {{ type: object, required: [url], properties: {{ url: {{ type: string }} }} }}\n    \
+             Email: {{ type: string, const: email }}\n"
+        )
+    };
+    let members = "        - { type: object, required: [type, url], properties: { type: { type: string, const: webhook }, url: { type: string } } }\n        \
+                   - { type: object, required: [type, url], properties: { type: { type: string, enum: [apprise] }, url: { type: string } } }\n        \
+                   - { type: object, required: [type, to], properties: { type: { $ref: '#/components/schemas/Email' }, to: { type: string } } }\n        \
+                   - allOf:\n            \
+                       - { $ref: '#/components/schemas/Base' }\n            \
+                       - { type: object, required: [type], properties: { type: { const: ntfy } } }\n";
+    let spec = spec(members, "");
+    let (generated, code) = generate_with_code(&spec);
+    for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(report.diagnostics().is_empty(), "{entry}: {report:#?}");
+    }
+    let arms = discriminated_arms(&code, "Config");
+    let expected = [
+        ("ConfigVariant0", "webhook"),
+        ("ConfigVariant1", "apprise"),
+        ("ConfigVariant2", "email"),
+        ("ConfigVariant3", "ntfy"),
+    ];
+    assert_eq!(
+        arms.decode,
+        expected
+            .iter()
+            .map(|(variant, tag)| ((*variant).to_owned(), vec![(*tag).to_owned()]))
+            .collect::<Vec<_>>(),
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        expected
+            .iter()
+            .map(|(variant, tag)| ((*variant).to_owned(), Some((*tag).to_owned())))
+            .collect::<Vec<_>>(),
+        "{code}"
+    );
+}
+
+/// The pinned value of #1001 selects a member only where it is the one value every payload the
+/// member accepts carries, and nothing else claims it. A tag property that is optional, nullable,
+/// or admits several values pins nothing; a value a `mapping` key, another member's tag, or a second
+/// member's pin claims is kept by none of the inline members. Each such member is the untagged one
+/// `W011` names, exactly as before, while the member that does pin a free value keeps its dispatch.
+#[test]
+fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
+    let union = |second: &str, mapping: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Config:\n      \
+             oneOf:\n        \
+             - {{ type: object, required: [type, url], properties: {{ type: {{ const: webhook }}, url: {{ type: string }} }} }}\n        \
+             - {second}\n        \
+             - {{ $ref: '#/components/schemas/Mail' }}\n      \
+             discriminator:\n        \
+             propertyName: type\n{mapping}    \
+             Mail: {{ type: object, required: [type, to], properties: {{ type: {{ type: string }}, to: {{ type: string }} }} }}\n"
+        )
+    };
+    for (what, second, mapping, tagged) in [
+        (
+            "optional",
+            "{ type: object, required: [port], properties: { type: { const: apprise }, port: { type: integer } } }",
+            "",
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
+        (
+            "nullable",
+            "{ type: object, required: [type, port], properties: { type: { type: [string, 'null'], enum: [apprise, null] }, port: { type: integer } } }",
+            "",
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
+        (
+            "several values",
+            "{ type: object, required: [type, port], properties: { type: { enum: [apprise, gotify] }, port: { type: integer } } }",
+            "",
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
+        (
+            "a component's tag",
+            "{ type: object, required: [type, port], properties: { type: { const: Mail }, port: { type: integer } } }",
+            "",
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
+        (
+            "a mapping key",
+            "{ type: object, required: [type, port], properties: { type: { const: apprise }, port: { type: integer } } }",
+            "        mapping:\n          apprise: Mail\n",
+            &[("ConfigVariant0", "webhook"), ("Mail", "apprise|Mail")][..],
+        ),
+        (
+            "another member's pin",
+            "{ type: object, required: [type, port], properties: { type: { const: webhook }, port: { type: integer } } }",
+            "",
+            &[("Mail", "Mail")][..],
+        ),
+    ] {
+        let spec = union(second, mapping);
+        let (generated, code) = generate_with_code(&spec);
+        let untagged = if what == "another member's pin" {
+            "union members 0, 1 are no schema components"
+        } else {
+            "union member 1 is no schema component"
+        };
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
+            assert!(
+                w011[0].message.contains(untagged),
+                "{what} {entry}: {report:#?}"
+            );
+        }
+        let arms = discriminated_arms(&code, "Config");
+        let mut decoded: Vec<_> = arms
+            .decode
+            .iter()
+            .map(|(variant, tags)| (variant.as_str(), tags.join("|")))
+            .collect();
+        decoded.sort();
+        let mut expected: Vec<_> = tagged
+            .iter()
+            .map(|(variant, tag)| (*variant, (*tag).to_owned()))
+            .collect();
+        expected.sort();
+        assert_eq!(decoded, expected, "{what}\n{code}");
+    }
 }
 
 /// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the

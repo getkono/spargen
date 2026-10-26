@@ -2,7 +2,7 @@
 //! standalone-discriminator warning, and the discriminated dispatch strategy.
 
 use crate::diag::{Code, Diagnostic};
-use crate::ir::{JsonCategory, TypeKind, UnionMode, UnionStrategy, UnionVariant};
+use crate::ir::{JsonCategory, ScalarValue, TypeKind, UnionMode, UnionStrategy, UnionVariant};
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
     resolve_discriminator_targets,
@@ -130,7 +130,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
     /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
     /// naming its member, in document order, and then by its own `$ref` component name unless a
-    /// mapping key claims that value; the first is the tag serialization writes. Every variant
+    /// mapping key claims that value; the first is the tag serialization writes. One left with
+    /// neither is selected by the one string its own required tag property admits, where no other
+    /// value claims it ([`Self::pinned_tag`]). Every variant
     /// starts with no `untagged` priority: the caller refuses a component variant left with no
     /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
     /// reached.
@@ -185,6 +187,40 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             tags.push(accepted);
             categories.push(None);
         }
+        // An object member left with no tag — no component name, no mapping key — may still pin
+        // the tag property to exactly one string itself (#1001): a required, non-nullable `const`
+        // or one-value `enum`, as an internally tagged Rust enum's OpenAPI output writes every
+        // branch. Every payload that member accepts carries that value, so dispatching on it
+        // selects exactly what the member's own schema would, and serializing it writes the value
+        // the member's field already holds. It is no implicit value the specification assigns,
+        // so a value something else claims — a `mapping` key, another member's tag, or a second
+        // untagged member pinning the same string — keeps none of them: the member stays untagged
+        // and is reached as one with no such property is.
+        let pinned: Vec<Option<String>> = variants
+            .iter()
+            .zip(&tags)
+            .zip(&categories)
+            .map(|((variant, accepted), category)| {
+                let untagged_object = category.is_none() && accepted.is_empty();
+                untagged_object
+                    .then(|| self.pinned_tag(variant, tag_field))
+                    .flatten()
+            })
+            .collect();
+        for (index, value) in pinned.iter().enumerate() {
+            let Some(value) = value else {
+                continue;
+            };
+            let claimed = discriminator.mapping.iter().any(|(tag, _)| tag == value)
+                || tags.iter().flatten().any(|tag| tag == value)
+                || pinned
+                    .iter()
+                    .enumerate()
+                    .any(|(other, pin)| other != index && pin.as_ref() == Some(value));
+            if !claimed {
+                tags[index].push(value.clone());
+            }
+        }
         Some(UnionStrategy::Discriminated {
             tag_field: tag_field.to_owned(),
             untagged: vec![None; tags.len()],
@@ -193,6 +229,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             default_variant,
             mode,
         })
+    }
+
+    /// The one string an object variant's own `tag_field` admits: the field is required, not
+    /// nullable, and its type is a closed string set of exactly one value (a `const`, or an `enum`
+    /// of one). `None` for any other variant, including one whose field admits several values,
+    /// whose tag the dispatch could not write back without overwriting the one the payload held.
+    fn pinned_tag(&self, variant: &UnionVariant, tag_field: &str) -> Option<String> {
+        let Some(TypeKind::Struct(object)) = self.graph.get(variant.ty.id).map(|def| &def.kind)
+        else {
+            return None;
+        };
+        let field = object
+            .fields
+            .iter()
+            .find(|field| field.name.wire == tag_field)?;
+        if !field.required || field.ty.nullable {
+            return None;
+        }
+        let Some(TypeKind::Enum(set)) = self.graph.get(field.ty.id).map(|def| &def.kind) else {
+            return None;
+        };
+        match set.variants.as_slice() {
+            [ScalarValue::String(value)] if !set.is_open() => Some(value.clone()),
+            _ => None,
+        }
     }
 
     /// A discriminated object member no discriminator value selects: no `mapping` key names it, and
