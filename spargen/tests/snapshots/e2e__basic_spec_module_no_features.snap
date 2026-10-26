@@ -6059,6 +6059,126 @@ pub mod types {
     pub type StringListOrNullVariant0 = String;
     pub type StringListOrNullVariant1Item = String;
     pub type StringListOrNullVariant1 = Vec<StringListOrNullVariant1Item>;
+    #[derive(Debug, Clone)]
+    pub enum Channel {
+        ChannelVariant0(Box<ChannelVariant0>),
+        ChannelVariant1(Box<ChannelVariant1>),
+    }
+    impl<'de> serde::Deserialize<'de> for Channel {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            let tag = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(std::borrow::ToOwned::to_owned);
+            let Some(tag) = tag else {
+                return Err(
+                    serde::de::Error::custom(
+                        "missing discriminator field `type` for union Channel",
+                    ),
+                );
+            };
+            match tag.as_str() {
+                "webhook" => {
+                    serde_json::from_value(value)
+                        .map(Channel::ChannelVariant0)
+                        .map_err(serde::de::Error::custom)
+                }
+                "apprise" => {
+                    serde_json::from_value(value)
+                        .map(Channel::ChannelVariant1)
+                        .map_err(serde::de::Error::custom)
+                }
+                _ => {
+                    Err(
+                        serde::de::Error::custom(
+                            "unknown discriminator value for union Channel",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+    impl serde::Serialize for Channel {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
+                Channel::ChannelVariant0(inner) => {
+                    (
+                        serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                        Some("webhook"),
+                    )
+                }
+                Channel::ChannelVariant1(inner) => {
+                    (
+                        serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                        Some("apprise"),
+                    )
+                }
+            };
+            if let Some(tag) = tag {
+                let serde_json::Value::Object(map) = &mut value else {
+                    return Err(
+                        serde::ser::Error::custom(
+                            "tagged variant of union Channel did not serialize as an object",
+                        ),
+                    );
+                };
+                map.entry("type".to_owned())
+                    .or_insert_with(|| { serde_json::Value::String(tag.to_owned()) });
+            }
+            value.serialize(serializer)
+        }
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub enum ChannelVariant0type {
+        #[serde(rename = "webhook")]
+        Webhook,
+    }
+    impl std::fmt::Display for ChannelVariant0type {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(
+                match self {
+                    ChannelVariant0type::Webhook => "webhook",
+                },
+            )
+        }
+    }
+    pub type ChannelVariant0url = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ChannelVariant0 {
+        #[serde(rename = "type")]
+        pub r#type: ChannelVariant0type,
+        #[serde(rename = "url")]
+        pub url: ChannelVariant0url,
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub enum ChannelVariant1type {
+        #[serde(rename = "apprise")]
+        Apprise,
+    }
+    impl std::fmt::Display for ChannelVariant1type {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(
+                match self {
+                    ChannelVariant1type::Apprise => "apprise",
+                },
+            )
+        }
+    }
+    pub type ChannelVariant1url = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ChannelVariant1 {
+        #[serde(rename = "type")]
+        pub r#type: ChannelVariant1type,
+        #[serde(rename = "url")]
+        pub url: ChannelVariant1url,
+    }
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MaybeAliasNode {
         #[serde(rename = "value")]
@@ -6079,7 +6199,7 @@ pub mod types {
         ///Default: `red`.
         #[serde(
             rename = "color",
-            default = "default_150_color",
+            default = "default_157_color",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6087,7 +6207,7 @@ pub mod types {
         ///Default: `true`.
         #[serde(
             rename = "enabled",
-            default = "default_150_enabled",
+            default = "default_157_enabled",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6095,7 +6215,7 @@ pub mod types {
         ///Default: `1.5`.
         #[serde(
             rename = "ratio",
-            default = "default_150_ratio",
+            default = "default_157_ratio",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6114,22 +6234,22 @@ pub mod types {
         ///Default: `auto`.
         #[serde(
             rename = "mode",
-            default = "default_150_mode",
+            default = "default_157_mode",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub mode: Option<Mode>,
     }
-    fn default_150_color() -> Option<Settingscolor> {
+    fn default_157_color() -> Option<Settingscolor> {
         Some("red".to_owned())
     }
-    fn default_150_enabled() -> Option<Settingsenabled> {
+    fn default_157_enabled() -> Option<Settingsenabled> {
         Some(true)
     }
-    fn default_150_ratio() -> Option<Settingsratio> {
+    fn default_157_ratio() -> Option<Settingsratio> {
         Some(1.5)
     }
-    fn default_150_mode() -> Option<Mode> {
+    fn default_157_mode() -> Option<Mode> {
         Some(Mode::Auto)
     }
     pub type Settingscolor = String;
