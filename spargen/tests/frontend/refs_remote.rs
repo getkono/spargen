@@ -722,6 +722,53 @@ fn a_self_recursive_vendored_remote_schema_is_boxed() {
     );
 }
 
+/// The remote spelling of #999's member-through-field cycle: vendored `a.yaml` holds a field to
+/// `b.yaml`, which is `a.yaml` and more. Entered at `a.yaml`, `b.yaml`'s member finds `a.yaml`
+/// still open and the pass refuses it, so the next pass opens `b.yaml` first at the document
+/// root, through `ensure_remote` (the `Reservation::Remote` arm of `LowerCtx::open`). Without that
+/// arm the reordered pass opens nothing first and the document is rejected with `E013`.
+#[test]
+fn a_vendored_remote_all_of_member_reached_back_through_a_field_generates() {
+    const A_URL: &str = "https://api.example.com/schemas/a.yaml";
+    const B_URL: &str = "https://api.example.com/schemas/b.yaml";
+    const A_YAML: &str = "type: object\nproperties:\n  b:\n    $ref: \"b.yaml\"\n";
+    const B_YAML: &str = "allOf:\n  - $ref: \"a.yaml\"\n  - type: object\n    properties:\n      extra:\n        type: string\n";
+    const A_SHA: &str = "cef5a9d9889e97d1371a9896ddcb65113923de74fb4b5d5a160a312db83f537a";
+    const B_SHA: &str = "d8c02f044d011cb94dc3b8593b3ab88cb59a9e639d9efb8a2b124c99ed347af0";
+
+    let lock = format!(
+        "version = 1\n\n[[remote]]\nurl = \"{A_URL}\"\nsha256 = \"{A_SHA}\"\npath = \
+             \"api.example.com/schemas/a.yaml\"\n\n[[remote]]\nurl = \"{B_URL}\"\nsha256 = \
+             \"{B_SHA}\"\npath = \"api.example.com/schemas/b.yaml\"\n"
+    );
+    let vendor = [
+        ("api.example.com/schemas/a.yaml", A_YAML),
+        ("api.example.com/schemas/b.yaml", B_YAML),
+    ];
+
+    let (generated, _temp, out) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, false);
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let (checked, _temp2, _out2) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, true);
+
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert!(
+            !has_code(report, Code::VendoredRefDrift),
+            "{entry}: {report:#?}"
+        );
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+    // `b.yaml` is the merge: `a.yaml`'s field `b`, boxed back to itself, and its own `extra`.
+    assert!(field_type(&code, "pub extra").is_some(), "{code}");
+    assert!(
+        code.contains("pub b: Option<Box<HttpsApiExampleComSchemasBYaml>>"),
+        "{code}"
+    );
+}
+
 /// The remote spelling of `Selfy = Selfy | null`: a vendored document whose **whole body** is a
 /// union over a `$ref` back to itself plus `null`.
 ///
