@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::ir::{Field, MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
-use crate::oas31::{JsonType, Schema, SchemaOr, XmlHints};
+use crate::oas31::{is_xml_name, JsonType, Schema, SchemaOr, XmlHints};
 
 use super::prune::reachable_types;
 use super::LowerCtx;
@@ -389,27 +389,6 @@ fn enclosing_emitted(
         pointer = at.parent();
     }
     Vec::new()
-}
-
-/// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
-/// holds every element name it writes to. A component key is not held to it: `[a-zA-Z0-9._-]+`
-/// admits a leading digit, `-` or `.`.
-fn is_xml_name(name: &str) -> bool {
-    fn is_start(ch: char) -> bool {
-        matches!(ch,
-            ':' | 'A'..='Z' | '_' | 'a'..='z'
-            | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
-            | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
-            | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
-            | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
-    }
-    fn is_char(ch: char) -> bool {
-        is_start(ch)
-            || matches!(ch,
-                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
-    }
-    let mut chars = name.chars();
-    chars.next().is_some_and(is_start) && chars.all(is_char)
 }
 
 /// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on
