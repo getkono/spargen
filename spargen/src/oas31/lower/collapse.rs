@@ -126,7 +126,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// generated type and each nested `anyOf` by identity, as the top-level union is, so a nested
     /// union whose branches the meet left alike is merged with `W001` rather than emitted as
     /// variants no value tells apart. A union the meet did not make (one the conjunct already
-    /// held) is left as it was lowered.
+    /// held) is left as it was lowered. A union the meet made is collapsed in its own definition
+    /// ([`Self::collapse_met_variants`], [`Self::collapse_met_union_in_place`]), so it keeps the
+    /// name it would have had uncollapsed.
     pub(super) fn collapse_nested_met_unions(
         &mut self,
         schema: &Schema,
@@ -137,46 +139,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if met.id.0 < mark {
             return met;
         }
-        let Some(def) = self.graph.get(met.id) else {
-            return met;
-        };
-        let TypeKind::Union(union) = &def.kind else {
-            return met;
-        };
-        let hint = def.name_hint.clone();
-        let mut union = union.clone();
-        let mut changed = false;
-        for variant in &mut union.variants {
-            let nested = self.collapse_nested_met_unions(schema, variant.ty, mark, spelling);
-            let collapsed = match self.graph.get(nested.id).map(|def| &def.kind) {
-                Some(TypeKind::Union(Union {
-                    strategy: UnionStrategy::Trial { mode, .. },
-                    ..
-                })) if nested.id.0 >= mark => {
-                    let one_of = matches!(mode, UnionMode::OneOf);
-                    let nested_hint = self
-                        .graph
-                        .get(nested.id)
-                        .map_or_else(|| hint.clone(), |def| def.name_hint.clone());
-                    self.collapse_met_union(schema, nested, one_of, &nested_hint, spelling)
-                        .0
-                }
-                // A reservation's body is not known yet: no union the meet made is nested in it.
-                Some(TypeKind::Reserved) => nested,
-                _ => nested,
+        self.collapse_met_variants(met, mark, |ctx, variant| {
+            let nested = ctx.collapse_nested_met_unions(schema, variant, mark, spelling);
+            let Some(TypeKind::Union(Union {
+                strategy: UnionStrategy::Trial { mode, .. },
+                ..
+            })) = ctx.graph.get(nested.id).map(|def| &def.kind)
+            else {
+                return nested;
             };
-            if !same_ty(collapsed, variant.ty) {
-                variant.ty = collapsed;
-                changed = true;
+            if nested.id.0 < mark {
+                return nested;
             }
-        }
-        if !changed {
-            return met;
-        }
-        let mut ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
-        ty.nullable = met.nullable;
-        ty.boxed = met.boxed;
-        ty
+            let one_of = matches!(mode, UnionMode::OneOf);
+            ctx.collapse_met_union_in_place(schema, nested, one_of, mark, spelling)
+        })
     }
 
     /// `met`, the meet an `allOf`'s scalar members leave ([`Self::combine_all_of`]), with every
@@ -198,40 +175,108 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if met.id.0 < mark && !self.scalar_meet_unmerged.contains(&met.id) {
             return met;
         }
-        let Some(def) = self.graph.get(met.id) else {
+        let ty = self.collapse_met_variants(met, mark, |ctx, variant| {
+            ctx.collapse_met_one_ofs(schema, variant, mark)
+        });
+        let one_of = matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Union(Union {
+                strategy: UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                    ..
+                },
+                ..
+            }))
+        );
+        if !one_of {
+            return ty;
+        }
+        self.collapse_met_union_in_place(schema, ty, true, mark, MetUnion::AllOfMember)
+    }
+
+    /// `met` with each variant's type replaced by what `collapse` makes of it, when `met` is a
+    /// union; `met` itself where it is not one or `collapse` changes no variant. A union the meet
+    /// inserted since `mark` is rewritten in its own definition, so it keeps its id and the name
+    /// its hint allocates: a rebuilt copy under the same hint would contest that name with the
+    /// definition it replaced, which nothing emits but naming still allocates, and lose it to a
+    /// hash-suffixed spelling. That is sound because the meet only reads the graph and inserts
+    /// into it, so nothing outside its own inserts refers to them
+    /// ([`Self::elide_meet_intermediates`]). Any other union is rebuilt as a new definition.
+    fn collapse_met_variants(
+        &mut self,
+        met: Ty,
+        mark: u32,
+        mut collapse: impl FnMut(&mut Self, Ty) -> Ty,
+    ) -> Ty {
+        let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) else {
             return met;
         };
-        let TypeKind::Union(union) = &def.kind else {
-            return met;
-        };
-        let hint = def.name_hint.clone();
         let mut union = union.clone();
         let mut changed = false;
         for variant in &mut union.variants {
-            let collapsed = self.collapse_met_one_ofs(schema, variant.ty, mark);
+            let collapsed = collapse(self, variant.ty);
             if !same_ty(collapsed, variant.ty) {
                 variant.ty = collapsed;
                 changed = true;
             }
         }
-        let one_of = matches!(
-            union.strategy,
-            UnionStrategy::Trial {
-                mode: UnionMode::OneOf,
-                ..
+        if !changed {
+            return met;
+        }
+        if met.id.0 >= mark {
+            if let Some(def) = self.graph.get_mut(met.id) {
+                def.kind = TypeKind::Union(union);
             }
-        );
-        let mut ty = met;
-        if changed {
-            ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
-            ty.nullable = met.nullable;
-            ty.boxed = met.boxed;
+            return met;
         }
-        if !one_of {
-            return ty;
+        let hint = self
+            .graph
+            .get(met.id)
+            .map(|def| def.name_hint.clone())
+            .unwrap_or_default();
+        let mut ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
+        ty.nullable = met.nullable;
+        ty.boxed = met.boxed;
+        ty
+    }
+
+    /// [`Self::collapse_met_union`] over `met`, a union nested in a meet's result, under its own
+    /// hint. Where `met` is a union the meet inserted since `mark` and the collapse merges only
+    /// some of its branches, the merged union is moved into `met`'s own definition, for the reason
+    /// [`Self::collapse_met_variants`] rewrites one in place. The untyped-variant check the
+    /// collapse returns is the top-level caller's, which reads the union it finally generates.
+    fn collapse_met_union_in_place(
+        &mut self,
+        schema: &Schema,
+        met: Ty,
+        one_of: bool,
+        mark: u32,
+        spelling: MetUnion,
+    ) -> Ty {
+        let hint = self
+            .graph
+            .get(met.id)
+            .map(|def| def.name_hint.clone())
+            .unwrap_or_default();
+        let inserted_from = self.graph_mark();
+        let (collapsed, _) = self.collapse_met_union(schema, met, one_of, &hint, spelling);
+        if met.id.0 < mark
+            || collapsed.id.0 < inserted_from
+            || self.graph.last_id() != Some(collapsed.id)
+        {
+            return collapsed;
         }
-        self.collapse_met_union(schema, ty, true, &hint, MetUnion::AllOfMember)
-            .0
+        let Some((_, merged)) = self.pop_last_type() else {
+            return collapsed;
+        };
+        if let Some(def) = self.graph.get_mut(met.id) {
+            def.kind = merged.kind;
+        }
+        Ty {
+            id: met.id,
+            nullable: collapsed.nullable,
+            boxed: collapsed.boxed,
+        }
     }
 
     /// Report, as the inline union reports them ([`Self::warn_untyped_one_of_variants`]), the

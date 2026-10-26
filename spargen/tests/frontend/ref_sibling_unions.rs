@@ -1266,6 +1266,11 @@ fn a_ref_to_a_multi_type_target_merges_the_branches_one_target_type_leaves_alike
                 "{union} as {spelling}: a union carries one payload type twice: \
                  {repeated:#?}\n{types}"
             );
+            let hashed = hash_suffixed_types(&types);
+            assert!(
+                hashed.is_empty(),
+                "{union} as {spelling}: a collapsed union lost its name: {hashed:?}\n{types}"
+            );
             assert!(
                 messages_for(&report, Code::ValidationKeywordIgnored)
                     .iter()
@@ -1310,4 +1315,92 @@ fn a_ref_to_a_nullable_enum_target_beside_a_union_repeats_no_payload_type() {
             }
         }
     }
+}
+
+/// A nested union the meet collapses keeps the name it has uncollapsed (#998), both where a
+/// collapse one level further in rewrites its variants and where it merges only some of its own
+/// branches. Each was emitted under a hash-suffixed name beside the definition it replaced, which
+/// nothing emits but which kept the bare name.
+///
+/// In the first, `C` is an `anyOf` of two multi-type branches, so the `oneOf` sibling is met per
+/// branch of `C` and then per `type` of that branch: two levels of nesting. In `C`'s first branch
+/// the string variant meets both `oneOf` branches as `String`, so the innermost union collapses
+/// first, to `String`, and that rewrites the union holding it, whose string and integer variants
+/// stay. In the second, `C`'s object variant meets the first two `oneOf` branches as one struct
+/// shape and the third as another, so two of its three branches merge.
+#[test]
+fn a_nested_union_the_meet_collapses_keeps_its_own_name() {
+    let holder = "    Holder:\n      type: object\n      properties:\n        pick: { $ref: \
+                  '#/components/schemas/Pick' }\n      required: [pick]\n";
+    for (target, branches, collapsed, variants) in [
+        (
+            "{ anyOf: [ { type: [string, integer] }, { type: [boolean, object] } ] }",
+            "[ { type: [string, integer, object], properties: { a: { type: string } } }, \
+             { type: [string, object], properties: { a: { type: string } } } ]",
+            "PickReferenceIntersectionVariant0",
+            2,
+        ),
+        (
+            "{ type: [string, object] }",
+            "[ { type: [string, object], properties: { a: { type: string } } }, \
+             { type: [integer, object], properties: { a: { type: string } } }, \
+             { type: [string, object], properties: { b: { type: integer } }, required: [b] } ]",
+            "PickReferenceIntersectionVariant1",
+            2,
+        ),
+    ] {
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "    C: {target}\n    Pick: {{ $ref: '#/components/schemas/C', oneOf: \
+                 {branches} }}\n{holder}"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{target}: {report:#?}"
+        );
+        let types = types_module(&code);
+        let hashed = hash_suffixed_types(&types);
+        assert!(
+            hashed.is_empty(),
+            "{target}: a collapsed union lost its name: {hashed:?}\n{types}"
+        );
+        assert_eq!(
+            enum_variants(&types, collapsed).len(),
+            variants,
+            "{target}: `{collapsed}` is the collapsed union\n{types}"
+        );
+        let repeated = unions_with_a_repeated_payload(&types);
+        assert!(
+            repeated.is_empty(),
+            "{target}: a union carries one payload type twice: {repeated:#?}\n{types}"
+        );
+        assert!(
+            messages_for(&report, Code::ValidationKeywordIgnored)
+                .iter()
+                .any(|message| message.contains("same generated type")
+                    || message.contains("differ only in keywords")),
+            "{target}: the merge must be reported: {report:#?}"
+        );
+    }
+}
+
+/// The types `types` declares whose name ends in a disambiguating hash: a run of six or more
+/// digits, which no hint in these fixtures ends in.
+fn hash_suffixed_types(types: &str) -> Vec<String> {
+    types
+        .lines()
+        .map(str::trim_start)
+        .filter_map(|line| {
+            ["pub enum ", "pub struct ", "pub type "]
+                .iter()
+                .find_map(|head| line.strip_prefix(head))
+        })
+        .filter_map(|rest| rest.split([' ', '<', '{', '(', ';', '=']).next())
+        .filter(|name| name.chars().rev().take_while(char::is_ascii_digit).count() >= 6)
+        .map(str::to_owned)
+        .collect()
 }
