@@ -2,6 +2,4 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-major|type-kind-changed|ResponseBodykindMember1|type kind `enum` -> `alias`
-minor|type-added|ResponseBodykindMember2|new public type
-bump=major
+bump=patch
