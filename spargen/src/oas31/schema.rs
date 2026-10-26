@@ -101,7 +101,8 @@ pub(crate) struct XmlHints {
 }
 
 /// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
-/// holds every element and attribute name it writes to. A component key is not held to it:
+/// holds every non-empty element and attribute name it writes to; an empty one it writes as
+/// malformed XML (`<>…</>`), and this rejects it too. A component key is not held to it:
 /// `[a-zA-Z0-9._-]+` admits a leading digit, `-` or `.`.
 pub(crate) fn is_xml_name(name: &str) -> bool {
     fn is_start(ch: char) -> bool {

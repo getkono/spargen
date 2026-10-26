@@ -310,9 +310,9 @@ fn parse_xml(
             }
         }
     }
-    // An `xml.name` becomes an element or attribute name as written, and quick-xml refuses to
-    // write one that is not an XML name, so a body carrying it would fail at run time. The name is
-    // checked here, where every `xml` object is read, so the rule does not depend on which
+    // An `xml.name` becomes an element or attribute name as written. quick-xml refuses to write a
+    // non-empty one that is not an XML name, so a body carrying it would fail at run time, and
+    // writes an empty one as malformed XML (`<>…</>`). The name is checked here, where every `xml` object is read, so the rule does not depend on which
     // position lowering reads it in or whether an XML body reaches its type.
     let name = value.get("name").and_then(SpannedValue::as_str);
     if let Some(name) = name.filter(|name| !is_xml_name(name)) {

@@ -52,9 +52,10 @@ components:
     )
 }
 
-/// An explicit `xml.name` is written as the element or attribute name, and quick-xml refuses to
-/// write one that is not an XML 1.1 `Name`, so a document carrying one used to generate and then
-/// fail on every serialization of the body (#997). It is rejected as `E011` at the `name` keyword,
+/// An explicit `xml.name` is written as the element or attribute name. quick-xml refuses to write
+/// a non-empty one that is not an XML 1.1 `Name`, so a document carrying one used to generate and
+/// then fail on every serialization of the body (#997), and writes an empty one as malformed XML
+/// (`<>…</>`), so a document carrying that used to generate a client that sent it. It is rejected as `E011` at the `name` keyword,
 /// in every position an `xml` object is read in: a schema's root, a property, an array's `items`,
 /// a property of a type no XML body reaches, and a root whose node type leaves the name ignored.
 #[test]
