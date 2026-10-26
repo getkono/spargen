@@ -110,7 +110,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Note that the composition [`Self::xml_holders`] names last merges `ty`, the type a `$ref`
-    /// member resolved to, so a member merged into `ty` is judged by that composition's type too.
+    /// member, or a `$ref` beside shape-bearing siblings, resolved to, so a member merged into `ty` is judged by that composition's type too.
     pub(super) fn record_xml_merger(&mut self, ty: TypeId) {
         let Some(holder) = self.xml_holders.last().cloned() else {
             return;
@@ -330,8 +330,9 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
 /// The definitions a merged member's `xml` object at `site` is reported against: those at its
 /// composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any, in
 /// the same document; and, for each of those a `$ref` member of another composition merged
-/// ([`LowerCtx::record_xml_merger`]), that composition's, transitively. None where no definition
-/// encloses it.
+/// ([`LowerCtx::record_xml_merger`]), or a `$ref` intersected with its shape-bearing siblings
+/// ([`LowerCtx::record_ref_sibling_merger`]), that composition's or that `$ref` schema's,
+/// transitively. None where no definition encloses it.
 ///
 /// Each site is looked up among the emitted definitions (`emitted_sites`) and among every
 /// definition, elided ones included (`defined_sites`). A definition the output withholds is still
