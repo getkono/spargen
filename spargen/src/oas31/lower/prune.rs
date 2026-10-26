@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::ir::{AdditionalProps, Ty, TypeDef, TypeGraph, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Operation, Ty, TypeDef, TypeGraph, TypeId, TypeKind};
 use crate::oas31::Schema;
 
 use super::combine::Contribution;
@@ -134,6 +134,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
         self.elide_unreached((mark..self.graph_mark()).map(TypeId), &reached);
+    }
+
+    /// [Elide](TypeGraph::elide) every type neither a root component nor an operation reaches,
+    /// once lowering has finished (#924). Run after every schema is lowered, so no memo or later
+    /// meet can still hand one out: what nothing reaches now is a public type of the output that no
+    /// field, variant, alias or operation names. The intermediates a meet consumed are this class:
+    /// a `$ref` sibling's own lowering (`<Hint>Constraint`), the per-member types an `allOf` merge
+    /// replaced (`<Hint>Member<N>`, `<Hint>Member<N><prop>`), and a referenced file's target met
+    /// only as an `allOf` member. The meets' own elisions ([`Self::elide_meet_intermediates`],
+    /// [`Self::elide_unused_union_lowering`]) still run where they are, because the passes inside
+    /// lowering read [`TypeGraph::emitted`]; this one holds the output to the rule whichever
+    /// lowering path left a type behind.
+    ///
+    /// A root component is the document's own vocabulary, so it is emitted whether or not anything
+    /// names it. A remote or bundle target is not: it is emitted where a root component or an
+    /// operation reaches it. Eliding keeps each id and name, so no type the output carries is
+    /// renamed or reordered.
+    pub(super) fn elide_unreachable(&mut self, operations: &[Operation]) {
+        let mut roots: Vec<TypeId> = self.components.values().map(|&(id, _)| id).collect();
+        for operation in operations {
+            roots.extend(operation.params.iter().map(|parameter| parameter.ty.id));
+            roots.extend(
+                operation
+                    .request_body
+                    .iter()
+                    .filter_map(|body| body.ty)
+                    .map(|ty| ty.id),
+            );
+            for (_, response) in operation.responses.entries() {
+                roots.extend(response.body.map(|ty| ty.id));
+                roots.extend(response.headers.iter().map(|header| header.ty.id));
+            }
+        }
+        let reached = reachable_types(&self.graph, &roots);
+        let unreached: Vec<TypeId> = self
+            .graph
+            .emitted()
+            .map(|(id, _)| id)
+            .filter(|id| !reached.contains(id))
+            .collect();
+        self.elide_unreached(unreached, &reached);
     }
 
     /// [Elide](TypeGraph::elide) every type in `ids` that is not in `reached`: the inserts since

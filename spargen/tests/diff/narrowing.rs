@@ -180,8 +180,9 @@ fn major_changes(report: &DiffReport) -> Vec<(ChangeKind, String)> {
 /// written in: the values every member lists, open when a member meeting a plain `string` opened
 /// it. An open set meeting a closed one keeps only their shared values (the description forbids
 /// the rest), and two open sets meet in the values both list. Reordering the members is then no
-/// more breaking with the option on than with it off: an inline member's type is named for its
-/// position either way, so moving the member the field's type comes from renames that type.
+/// more breaking with the option on than with it off, and a patch either way: an inline member's
+/// type is named for its position, but the meet consumes it and the output carries none of the
+/// member types (#924), so moving a member renames no type of the output.
 #[test]
 fn open_narrowing_meets_the_same_set_in_every_member_order() {
     let open = |spec: Spec| spec.open_narrowing(true);

@@ -2,6 +2,4 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
-major|variant-removed|ResponseBodykindMember1Member1|variant removed: `y`
-minor|variant-added|ResponseBodykindMember0Member1|variant added: `y`
-bump=major
+bump=patch
