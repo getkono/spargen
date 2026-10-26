@@ -1412,4 +1412,12 @@ paths:
     }
     assert!(flat.contains("x_req: Option<types::XReq>,"), "{code}");
     assert!(!flat.contains("x_req: Option<Option"), "{code}");
+    // The emitted docs state the three-state contract on each explicit-null field and setter, and
+    // only there: one of each per JSON parameter above, none for the text, styled or required one.
+    for sentence in [
+        "`Some(None)` sends the JSON `null`; `None` omits the parameter.",
+        "`None` sends the JSON `null`; leaving the parameter unset omits it.",
+    ] {
+        assert_eq!(flat.matches(sentence).count(), 4, "{sentence}: {code}");
+    }
 }

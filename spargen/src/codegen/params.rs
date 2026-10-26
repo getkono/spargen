@@ -285,6 +285,16 @@ pub(super) fn cookie_param_tokens(
     }
 }
 
+/// The emitted doc of an explicit-null parameter's `Option<Option<T>>` field: which of its three
+/// states sends the JSON `null` and which omits the parameter.
+const EXPLICIT_NULL_FIELD_DOC: &str =
+    "`Some(None)` sends the JSON `null`; `None` omits the parameter.";
+
+/// The emitted doc of an explicit-null parameter's `Option<T>` setter, the same contract seen from
+/// the setter's argument.
+const EXPLICIT_NULL_SETTER_DOC: &str =
+    "`None` sends the JSON `null`; leaving the parameter unset omits it.";
+
 /// Emit an operation's optional-parameters `…Params` struct (deriving `Default`, public fields)
 /// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
 /// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
@@ -319,6 +329,9 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         if let Some(default) = &param.default_display {
             notes.push(format!("Default: `{default}`."));
         }
+        if param.sends_explicit_null() {
+            notes.push(EXPLICIT_NULL_FIELD_DOC.to_owned());
+        }
         let notes = notes
             .iter()
             .map(|note| normalize_rustdoc(note))
@@ -345,8 +358,12 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
             true,
         );
         let doc = format!("Set the `{}` parameter.", param.name);
+        let null_doc = param
+            .sends_explicit_null()
+            .then(|| quote! { #[doc = ""] #[doc = #EXPLICIT_NULL_SETTER_DOC] });
         quote! {
             #[doc = #doc]
+            #null_doc
             #[must_use]
             pub fn #ident(mut self, value: #inner) -> Self {
                 self.#ident = Some(value);
