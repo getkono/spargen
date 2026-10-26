@@ -2,7 +2,9 @@
 //! standalone-discriminator warning, and the discriminated dispatch strategy.
 
 use crate::diag::{Code, Diagnostic};
-use crate::ir::{JsonCategory, ScalarValue, TypeKind, UnionMode, UnionStrategy, UnionVariant};
+use crate::ir::{
+    AdditionalProps, JsonCategory, ScalarValue, TypeKind, UnionMode, UnionStrategy, UnionVariant,
+};
 use crate::oas31::discriminator::{
     discriminator_entry, discriminator_target_identity, is_schema_component_name,
     resolve_discriminator_targets,
@@ -193,15 +195,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // branch. Every payload that member accepts carries that value, so dispatching on it
         // selects exactly what the member's own schema would, and serializing it writes the value
         // the member's field already holds. It is no implicit value the specification assigns,
-        // so a value something else claims — a `mapping` key, another member's tag, or a second
-        // untagged member pinning the same string — keeps none of them: the member stays untagged
-        // and is reached as one with no such property is.
+        // so a value something else claims — a `mapping` key, another member's tag, or another
+        // untagged member whose tag property admits the same string (a second pin of it, a plain
+        // `type: string`, or no declaration of the property at all) — keeps none of them: the
+        // member stays untagged and is reached as one with no such property is. That last claim
+        // matters because an untagged member is tried by its schema when the tag selects no
+        // tagged member, so tagging the pin would send a payload only that other member accepts
+        // to the pinned one instead.
+        let untagged_objects: Vec<bool> = tags
+            .iter()
+            .zip(&categories)
+            .map(|(accepted, category)| category.is_none() && accepted.is_empty())
+            .collect();
         let pinned: Vec<Option<String>> = variants
             .iter()
-            .zip(&tags)
-            .zip(&categories)
-            .map(|((variant, accepted), category)| {
-                let untagged_object = category.is_none() && accepted.is_empty();
+            .zip(&untagged_objects)
+            .map(|(variant, untagged_object)| {
                 untagged_object
                     .then(|| self.pinned_tag(variant, tag_field))
                     .flatten()
@@ -213,10 +222,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             let claimed = discriminator.mapping.iter().any(|(tag, _)| tag == value)
                 || tags.iter().flatten().any(|tag| tag == value)
-                || pinned
-                    .iter()
-                    .enumerate()
-                    .any(|(other, pin)| other != index && pin.as_ref() == Some(value));
+                || variants.iter().zip(&untagged_objects).enumerate().any(
+                    |(other, (variant, untagged_object))| {
+                        other != index
+                            && *untagged_object
+                            && self.admits_tag(variant, tag_field, value)
+                    },
+                );
             if !claimed {
                 tags[index].push(value.clone());
             }
@@ -253,6 +265,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         match set.variants.as_slice() {
             [ScalarValue::String(value)] if !set.is_open() => Some(value.clone()),
             _ => None,
+        }
+    }
+
+    /// Whether an object variant may accept a payload whose `tag_field` holds `value`, as far as
+    /// that one property decides it. `false` only where the property is declared with a closed
+    /// enum set that omits `value`, or is undeclared on an object that denies unknown properties;
+    /// every other declaration (a plain `string`, an open set, a `$ref` to anything else) is
+    /// taken to admit it, so a doubt keeps the pinned value claimed rather than tagged.
+    fn admits_tag(&self, variant: &UnionVariant, tag_field: &str, value: &str) -> bool {
+        let Some(TypeKind::Struct(object)) = self.graph.get(variant.ty.id).map(|def| &def.kind)
+        else {
+            return true;
+        };
+        let Some(field) = object
+            .fields
+            .iter()
+            .find(|field| field.name.wire == tag_field)
+        else {
+            return !matches!(object.additional, AdditionalProps::Deny);
+        };
+        if let Some(TypeKind::Enum(set)) = self.graph.get(field.ty.id).map(|def| &def.kind) {
+            set.is_open()
+                || set
+                    .variants
+                    .iter()
+                    .any(|listed| matches!(listed, ScalarValue::String(text) if text == value))
+        } else {
+            true
         }
     }
 

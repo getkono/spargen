@@ -901,8 +901,9 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
 
 /// The pinned value of #1001 selects a member only where it is the one value every payload the
 /// member accepts carries, and nothing else claims it. A tag property that is optional, nullable,
-/// or admits several values pins nothing; a value a `mapping` key, another member's tag, or a second
-/// member's pin claims is kept by none of the inline members. Each such member is the untagged one
+/// or admits several values pins nothing; a value a `mapping` key, another member's tag, or another
+/// untagged member whose tag property admits it (a second pin, a plain string, or no declaration of
+/// the property on an open object) claims is kept by none of the inline members. Each such member is the untagged one
 /// `W011` names, exactly as before, while the member that does pin a free value keeps its dispatch.
 #[test]
 fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
@@ -960,10 +961,36 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
             "",
             &[("Mail", "Mail")][..],
         ),
+        // An untagged member is tried by its schema when the tag selects no tagged member, so
+        // one whose tag property also admits `webhook` claims it: `{type: webhook, port: 1}`
+        // decodes as that member, not as the one pinning `webhook`.
+        (
+            "a plain string beside it",
+            "{ type: object, required: [type, port], properties: { type: { type: string }, port: { type: integer } } }",
+            "",
+            &[("Mail", "Mail")][..],
+        ),
+        (
+            "an undeclared tag property",
+            "{ type: object, required: [port], properties: { port: { type: integer } } }",
+            "",
+            &[("Mail", "Mail")][..],
+        ),
+        // A closed object that does not declare the tag property refuses every payload carrying
+        // it, so it claims nothing.
+        (
+            "an undeclared tag property on a closed object",
+            "{ type: object, required: [port], properties: { port: { type: integer } }, additionalProperties: false }",
+            "",
+            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+        ),
     ] {
         let spec = union(second, mapping);
         let (generated, code) = generate_with_code(&spec);
-        let untagged = if what == "another member's pin" {
+        let untagged = if matches!(
+            what,
+            "another member's pin" | "a plain string beside it" | "an undeclared tag property"
+        ) {
             "union members 0, 1 are no schema components"
         } else {
             "union member 1 is no schema component"
