@@ -785,6 +785,53 @@ fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
     }
 }
 
+/// `listPets` with one optional nullable integer query parameter `limit`, declared by `declaration`
+/// (its `schema:` or `content:` lines at 10-space indent).
+fn nullable_limit(declaration: &str) -> String {
+    spec(
+        &format!(
+            "      parameters:
+        - name: limit
+          in: query
+          required: false
+{declaration}"
+        ),
+        "id",
+        PET_PROPS,
+        "",
+    )
+}
+
+#[test]
+fn moving_a_nullable_parameter_onto_or_off_json_content_is_major_both_ways() {
+    // A nullable JSON `content` parameter sends `Some(None)` as `null`, so its field is
+    // `Option<Option<T>>`, where the same schema serialized by a style is `Option<T>` (#996).
+    let styled = nullable_limit("          schema: { type: [integer, 'null'] }\n");
+    let json = nullable_limit(
+        "          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+",
+    );
+    let text = nullable_limit(
+        "          content:
+            text/plain: { schema: { type: [integer, 'null'] } }
+",
+    );
+    for (old, new) in [(&styled, &json), (&json, &styled), (&text, &json)] {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::ParamTypeChanged],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+    // A `text/*` parameter has no token for `null` either, so it keeps the styled field type.
+    let report = diff(&styled, &text);
+    assert!(report.changes.is_empty(), "{:?}", report.changes);
+}
+
 /// A `GET /pets/{id}` operation carrying a path `id` of `path_type` beside a query `id` of
 /// `query_type`: the same wire name in two locations.
 fn same_named_params(path_type: &str, query_type: &str) -> String {
