@@ -42,6 +42,7 @@ mod discriminator;
 mod document;
 mod encoding;
 mod encoding_headers;
+mod encoding_style;
 mod parameters;
 mod pattern_properties;
 mod placement;

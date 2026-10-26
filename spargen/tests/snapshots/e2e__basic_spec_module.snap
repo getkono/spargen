@@ -2358,7 +2358,9 @@ mod support {
         /// Serialize one `style: spaceDelimited` or `style: pipeDelimited` query parameter.
         ///
         /// Both styles are defined only for arrays and objects with `explode: false`, and any other value
-        /// is refused with `ParameterError::ExpectedComposite`.
+        /// is refused with `ParameterError::ExpectedComposite`. Generation rejects `explode: true` and a
+        /// schema that admits a scalar, or `null` on a required parameter, so a generated call never
+        /// receives that error.
         pub fn serialize_delimited<T: Serialize>(
             name: &str,
             value: &T,
@@ -2391,6 +2393,10 @@ mod support {
         /// `explode` has no effect on this style. The `[`/`]` are emitted as the literal delimiters
         /// `%5B`/`%5D`; a bracket inside a property key encodes to the same triple, an ambiguity the
         /// specification itself acknowledges as inherent to the style.
+        ///
+        /// The style is defined only for objects, and any other value is refused with
+        /// `ParameterError::ExpectedObject`. Generation rejects a schema that admits a non-object, or
+        /// `null` on a required parameter, so a generated call never receives that error.
         pub fn serialize_deep_object<T: Serialize>(
             name: &str,
             value: &T,
