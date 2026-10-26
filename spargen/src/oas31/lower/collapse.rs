@@ -122,10 +122,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// union branch by branch per variant of its own, so the union the document wrote is nested
     /// once per conjunct variant. With `C: { type: [string, integer] }`, the schema
     /// `{ $ref: C, oneOf: [{ type: [string, integer] }, { type: string }] }` meets to a category
-    /// dispatch over a `oneOf` of two strings and an integer. Each nested `oneOf` is compared by generated type and each nested
-    /// `anyOf` by identity, as the top-level union is, so a nested union whose branches the meet
-    /// left alike is merged with `W001` rather than emitted as variants no value tells apart. A
-    /// union the meet did not make (one the conjunct already held) is left as it was lowered.
+    /// dispatch over a `oneOf` of two strings and an integer. Each nested `oneOf` is compared by
+    /// generated type and each nested `anyOf` by identity, as the top-level union is, so a nested
+    /// union whose branches the meet left alike is merged with `W001` rather than emitted as
+    /// variants no value tells apart. A union the meet did not make (one the conjunct already
+    /// held) is left as it was lowered.
     pub(super) fn collapse_nested_met_unions(
         &mut self,
         schema: &Schema,
