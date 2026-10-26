@@ -11,7 +11,8 @@
 //! codes through the JSON and the YAML parser, and `generate` over the valid-skeleton documents
 //! reaches the verdict and the sorted codes `check` reaches, and writes a module that parses as
 //! Rust whenever it reports `Generated`, whose unions' variants a value can tell apart unless a
-//! `W001` at the union says why (`oracles::unexplained_variants`, #402).
+//! `W001` at the union says why (`oracles::unexplained_variants`, #402), and whose every emitted
+//! type is a component or named by another item (`oracles::unreferenced_types`, #928).
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -554,7 +555,8 @@ fn check_never_panics_on_skeleton_documents() {
 /// over the same document, which runs the same frontend without emitting. No run may report a
 /// codegen failure ([`CODEGEN_FAILURE`]), and a `Generated` run must have written a module that
 /// parses as Rust and whose unions a value can tell apart unless a `W001` at the union says why
-/// ([`oracles::unexplained_variants`]).
+/// ([`oracles::unexplained_variants`]), and that emits no type that is no component and that
+/// nothing names ([`oracles::unreferenced_types`]).
 #[test]
 fn generate_writes_parseable_rust_for_skeleton_documents() {
     let dir = TempDir::new().unwrap();
@@ -611,6 +613,11 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                     unexplained.is_empty(),
                     "a union's variants cannot be told apart and no warning says why: \
                      {unexplained:#?}"
+                );
+                let unreferenced = oracles::unreferenced_types(&code, &text);
+                prop_assert!(
+                    unreferenced.is_empty(),
+                    "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
                 );
             }
             Ok(())

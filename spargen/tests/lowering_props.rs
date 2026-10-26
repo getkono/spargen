@@ -69,7 +69,8 @@ fn generate_module(spec: &str) -> (Report, String) {
 /// `generate` on the root document at `root`, writing the module beside it, held to
 /// [`oracles::location_violations`] and, when it generates, to [`oracles::unexplained_variants`]
 /// (a union's variants are told apart by shape, or a `W001` at the union says why) and to
-/// [`oracles::unreferenced_copies`] (no unused second lowering of a schema is emitted, #926).
+/// [`oracles::unreferenced_types`] (every emitted type is a component or something names it,
+/// #928).
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
@@ -86,10 +87,10 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
             "a union's variants cannot be told apart and no warning says why: {unexplained:#?}"
         );
         let spec = std::fs::read_to_string(root).unwrap_or_default();
-        let copies = oracles::unreferenced_copies(&source, &spec);
+        let unreferenced = oracles::unreferenced_types(&source, &spec);
         assert!(
-            copies.is_empty(),
-            "a schema lowered twice left its unused copy emitted: {copies:#?}"
+            unreferenced.is_empty(),
+            "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
         );
     }
     (report, source)

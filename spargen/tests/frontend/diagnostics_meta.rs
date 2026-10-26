@@ -683,28 +683,64 @@ fn relocation_moves_every_schema_behind_a_reference() {
     assert!(oracles::relocate(bare).is_none());
 }
 
-/// [`oracles::unreferenced_copies`] reports a hash-suffixed copy of a component that nothing names
-/// (#926), and passes the same copy once something names it, a component allocated a suffixed
-/// name because its own collides with a reserved one (`Box`). A copy of a meet's
-/// `<Hint>Constraint` intermediate is a copy like any other (#924).
+/// [`oracles::unreferenced_types`] reports a type that is no component and that nothing names
+/// (#928), and passes a component nothing names, a type a field names, and a type only the client
+/// after the `types` module names. A name that merely contains another (`PetList` beside `Pet`)
+/// names neither, and an item's own impls do not name it. A hash-suffixed copy of a component
+/// (#926) and of a meet's `<Hint>Constraint` intermediate (#924) are reported like any other type,
+/// and a component allocated a suffixed name because its own collides with a reserved one (`Box`)
+/// passes as the component.
 #[test]
-fn the_unreferenced_copy_oracle_sees_a_copy_nothing_names() {
+fn the_unreferenced_type_oracle_sees_a_type_nothing_names() {
     let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
                 schemas:\n    S0: { type: object }\n    Box: { type: object }\n";
-    let module = |items: &str| format!("pub mod types {{\n{items}\n}}\npub fn op() {{}}\n");
-    let copy =
-        module("    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub struct Box00ba9f5f {}");
+    let module = |items: &str, client: &str| format!("pub mod types {{\n{items}\n}}\n{client}\n");
+    let unused = module(
+        "    pub struct S0 {}\n    pub struct Orphan {}",
+        "pub fn op() {}",
+    );
     assert_eq!(
-        oracles::unreferenced_copies(&copy, spec),
+        oracles::unreferenced_types(&unused, spec),
+        ["`Orphan` is emitted, but nothing names it and it is no component"],
+    );
+    let field = module(
+        "    pub struct S0 {\n        pub inner: Inner,\n    }\n    pub struct Inner {}",
+        "pub fn op() {}",
+    );
+    assert!(oracles::unreferenced_types(&field, spec).is_empty());
+    let client = module(
+        "    pub struct Request {}",
+        "pub fn op(body: types::Request) {}",
+    );
+    assert!(oracles::unreferenced_types(&client, spec).is_empty());
+    let contains = module(
+        "    pub struct Pet {}\n    impl Pet {\n        pub fn new() -> Pet {\n            Pet {}\n        \
+         }\n    }\n    pub struct PetList {}\n    pub type S0 = PetList;",
+        "pub fn op() {}",
+    );
+    assert_eq!(
+        oracles::unreferenced_types(&contains, spec),
+        ["`Pet` is emitted, but nothing names it and it is no component"],
+    );
+    let copy = module(
+        "    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub struct Box00ba9f5f {}",
+        "pub fn op() {}",
+    );
+    assert_eq!(
+        oracles::unreferenced_types(&copy, spec),
         ["`S071def3c4` is emitted, but nothing names it and it is no component"],
     );
     let named = module(
         "    pub struct S0 {}\n    pub struct S071def3c4 {}\n    pub type Alias = S071def3c4;",
+        "pub fn op(alias: types::Alias) {}",
     );
-    assert!(oracles::unreferenced_copies(&named, spec).is_empty());
-    let constraint = module("    pub struct S0 {}\n    pub type S0ConstraintD3cb2251 = f64;");
+    assert!(oracles::unreferenced_types(&named, spec).is_empty());
+    let constraint = module(
+        "    pub struct S0 {}\n    pub type S0ConstraintD3cb2251 = f64;",
+        "pub fn op() {}",
+    );
     assert_eq!(
-        oracles::unreferenced_copies(&constraint, spec),
+        oracles::unreferenced_types(&constraint, spec),
         ["`S0ConstraintD3cb2251` is emitted, but nothing names it and it is no component"],
     );
 }
