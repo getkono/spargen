@@ -22,6 +22,11 @@
 //!   `anyOf` give one generated nullability, one set of `()` and `Option` arms, and one set of
 //!   excluded-member `W011`s in every spelling of that constraint set.
 //!
+//! * declaration order (#999, [`declaration_order`]): a set of components recursive through an
+//!   `allOf` reaches one verdict, one code multiset and one declaration per schema, up to where a
+//!   recursive field is boxed, in every order its `components.schemas` keys are written in, and
+//!   one verdict again moved into a referenced file.
+//!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a `W001` at the union
 //! says why (#402). Each case of the first three properties moved into a
@@ -33,6 +38,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use proptest::prelude::*;
 use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 
+#[path = "lowering_props/declaration_order.rs"]
+mod declaration_order;
 #[path = "lowering_props/null_parity.rs"]
 mod null_parity;
 mod oracles;

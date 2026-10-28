@@ -207,6 +207,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         matches!(policy, AdditionalProps::Typed(ty) if self.is_reservation(ty.id))
                     });
                     if unlowered {
+                        // The value's target can be open only because of the order lowering
+                        // reached it in, as an `allOf` member's can (`record_open_member`).
+                        for policy in [&additional, member_additional] {
+                            if let AdditionalProps::Typed(ty) = policy {
+                                self.record_open_member(ty.id);
+                            }
+                        }
                         return self.reject_all_of_cycle(
                             schema.provenance.clone(),
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
@@ -243,6 +250,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 if self.is_reservation(existing.ty.id)
                                     || self.is_reservation(field.ty.id) =>
                             {
+                                self.record_open_member(existing.ty.id);
+                                self.record_open_member(field.ty.id);
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members is typed by a \
                                      `$ref` that closes a reference cycle back to the schema \
@@ -322,6 +331,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if self.is_reservation(field.ty.id)
                             || matches!(member_additional, AdditionalProps::Typed(value) if self.is_reservation(value.id)) =>
                     {
+                        self.record_open_member(field.ty.id);
+                        if let AdditionalProps::Typed(value) = member_additional {
+                            self.record_open_member(value.id);
+                        }
                         let message = format!(
                             "required property `{}`, which no `allOf` member declares, is typed by \
                              an `additionalProperties` value schema that is a `$ref` closing a \
@@ -519,8 +532,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // recursive *fields*, which lowers fine). Refused before `ensure_component` is asked,
             // which would first report a sub-file's own declaration of the name as shadowed
             // (`W011`) beside this rejection, though `push_ref_member` reports it in the same
-            // words.
-            if self.in_progress.contains_key(name) {
+            // words. Whether the target is still being lowered here can depend on the order the
+            // document declares the two in, so the refusal is recorded for the next pass to
+            // lower this body first (`record_open_member`).
+            if let Some(&(target, _)) = self.in_progress.get(name) {
+                self.record_open_member(target);
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
             }
@@ -575,8 +591,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // this, a member that is the very schema being lowered descends into its own body again
         // and stops only at `MAX_SCHEMA_DEPTH`, reporting a chain length for what is a cycle of
         // length one. Like the component and remote arms above, this one refuses to read an
-        // in-progress member.
-        if self.reservation_at(&target.provenance).is_some() {
+        // in-progress member, and records the refusal as they do (`record_open_member`).
+        if let Some(open) = self.reservation_at(&target.provenance) {
+            self.record_open_member(open);
             return self.reject_all_of_cycle(
                 schema.provenance.clone(),
                 "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
@@ -783,10 +800,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } = member;
         // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
-        // arm is the whole guard against reading one.
+        // arm is the whole guard against reading one. Recorded first, as the root-component
+        // pre-check records it (`record_open_member`).
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Reserved) => {
-                return self.reject_all_of_cycle(provenance.clone(), recursive)
+                self.record_open_member(ty.id);
+                return self.reject_all_of_cycle(provenance.clone(), recursive);
             }
             // Read by the type it lowers to standalone, a target of untyped array applicators
             // alone would deny the merge's other categories as an array (#614), or as `Value` meet
