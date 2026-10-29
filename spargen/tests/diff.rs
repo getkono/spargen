@@ -313,7 +313,7 @@ fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
 
     let uncarved = rejection(&old, &new);
     assert!(
-        uncarved.old_spec().is_some() && uncarved.new_spec().is_some(),
+        uncarved.old_report().is_some() && uncarved.new_report().is_some(),
         "{uncarved}"
     );
 
@@ -376,8 +376,8 @@ fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
         .batch_cap(1);
 
     let rejection = spargen::diff(&old, &new).expect_err("the new side cannot be carved to lower");
-    assert!(rejection.old_spec().is_none(), "{rejection}");
-    let report = rejection.new_spec().expect("the new side is rejected");
+    assert!(rejection.old_report().is_none(), "{rejection}");
+    let report = rejection.new_report().expect("the new side is rejected");
     assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
     assert!(!report.truncated(), "{report:#?}");
     assert!(report.diagnostics().len() > 1, "{report:#?}");
@@ -452,14 +452,14 @@ fn a_rejection_names_exactly_the_sides_that_failed() {
     assert_eq!(spargen::Side::Old.as_str(), "old");
     assert_eq!(spargen::Side::New.as_str(), "new");
 
-    let old_report = old_only.old_spec().expect("the old side failed");
-    assert!(old_only.new_spec().is_none());
+    let old_report = old_only.old_report().expect("the old side failed");
+    assert!(old_only.new_report().is_none());
     assert_eq!(old_report.outcome(), spargen::Outcome::Rejected);
     assert!(old_report.errors().next().is_some(), "{old_report:#?}");
-    let new_report = new_only.new_spec().expect("the new side failed");
-    assert!(new_only.old_spec().is_none());
+    let new_report = new_only.new_report().expect("the new side failed");
+    assert!(new_only.old_report().is_none());
     assert_eq!(new_report.outcome(), spargen::Outcome::Rejected);
-    assert!(both.old_spec().is_some() && both.new_spec().is_some());
+    assert!(both.old_report().is_some() && both.new_report().is_some());
 
     // `Display` frames each failing side's report with a `<side> spec rejected:` line.
     assert_eq!(
@@ -474,8 +474,8 @@ fn a_rejection_names_exactly_the_sides_that_failed() {
         both.to_string(),
         format!(
             "old spec rejected:\n{}new spec rejected:\n{}",
-            both.old_spec().unwrap(),
-            both.new_spec().unwrap()
+            both.old_report().unwrap(),
+            both.new_report().unwrap()
         )
     );
 
