@@ -1,8 +1,10 @@
 use serde::Serialize;
 
-/// The severity of a [`Diagnostic`](super::Diagnostic).
+/// The severity of a [`Diagnostic`](super::Diagnostic). `#[non_exhaustive]`, so a severity can
+/// be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Severity {
     /// Generation fails.
     Error,
