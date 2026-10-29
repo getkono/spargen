@@ -33,7 +33,7 @@ proc-macro = true
 # The version is an exact `=` requirement: the macro calls spargen's `#[doc(hidden)]` `__private`
 # bridge, which carries no semver promise, so a macro release is only ever paired with the spargen
 # release it was built against. release-plz keeps the `=` operator when it bumps the version.
-spargen = { path = "../spargen", version = "=0.5.0", default-features = false }
+spargen = { path = "../spargen", version = "=0.6.0", default-features = false }
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
