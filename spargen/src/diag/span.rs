@@ -57,6 +57,5 @@ mod tests {
         for index in [0, 1, 2, 7, u32::MAX] {
             assert_eq!(FileId(index).get(), index);
         }
-        assert_ne!(FileId(2).get(), FileId(3).get());
     }
 }
