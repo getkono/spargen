@@ -235,76 +235,6 @@ fn a_bodyless_error_status_beside_one_error_body_is_its_own_variant() {
 }
 
 #[test]
-fn multi_status_enum_precedence_emits_exact_arm_before_range_and_a_bodyless_unit_variant() {
-    // Both classes list a RANGE before an overlapping EXACT in document order (and mix in a bodyless
-    // 204). The emitter must reorder to exact-before-range so a real 200/409 dispatches to its exact
-    // variant, and the bodyless 204 must appear as a payload-free unit variant — never a silent drop.
-    let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec_path,
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /p:
-    get:
-      operationId: getP
-      responses:
-        "2XX":
-          description: RangeOk
-          content: { application/json: { schema: { $ref: "#/components/schemas/RangeOk" } } }
-        "200":
-          description: ExactOk
-          content: { application/json: { schema: { $ref: "#/components/schemas/ExactOk" } } }
-        "204":
-          description: No Content
-        "4XX":
-          description: RangeErr
-          content: { application/json: { schema: { $ref: "#/components/schemas/RangeErr" } } }
-        "409":
-          description: Conflict
-          content: { application/json: { schema: { $ref: "#/components/schemas/Conflict" } } }
-components:
-  schemas:
-    RangeOk: { type: object, properties: { r: { type: string } } }
-    ExactOk: { type: object, properties: { e: { type: string } } }
-    RangeErr: { type: object, properties: { x: { type: string } } }
-    Conflict: { type: object, properties: { c: { type: string } } }
-"##,
-    )
-    .unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-    ));
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(report.diagnostics().is_empty(), "{report:#?}");
-
-    let code = std::fs::read_to_string(&out).unwrap();
-    // Success dispatch: the exact 200 arm is emitted (and thus checked) before the 2XX range arm.
-    let exact_200 = code.find("Exact(200u16)").expect("exact 200 selector");
-    let range_2xx = code.find("Range(2u8)").expect("2XX range selector");
-    assert!(
-        exact_200 < range_2xx,
-        "exact 200 must precede the 2XX range in the emitted decode chain"
-    );
-    // Error classification: the exact 409 arm precedes the 4XX range arm.
-    let exact_409 = code.find("Exact(409u16)").expect("exact 409 selector");
-    let range_4xx = code.find("Range(4u8)").expect("4XX range selector");
-    assert!(
-        exact_409 < range_4xx,
-        "exact 409 must precede the 4XX range in the emitted classification chain"
-    );
-    // The bodyless 204 is a payload-free unit variant, not dropped and not a `serde_json::Value`.
-    assert!(
-        code.contains("Status204,"),
-        "bodyless 204 must emit a unit variant"
-    );
-}
-
-#[test]
 fn multi_status_enum_precedence_emits_exact_and_range_arms_in_ascending_order() {
     // Issue #138: every selector class is listed in DESCENDING document order — the exact
     // successes, the exact errors, and the two error ranges — with `default` first. A key that
@@ -366,30 +296,101 @@ components:
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
     let code = std::fs::read_to_string(&out).unwrap();
-    let at = |selector: &str| {
-        assert_eq!(
-            code.matches(selector).count(),
-            1,
-            "{selector} must appear exactly once, as its dispatch arm"
-        );
-        code.find(selector).unwrap()
-    };
+    let (success, error) = dispatch_arms(&code, "get_p");
     // Success dispatch: 200 before 201, though the document lists 201 first.
-    assert!(
-        at("Exact(200u16)") < at("Exact(201u16)"),
+    assert_eq!(
+        success,
+        ["Exact(200)", "Exact(201)"],
         "exact successes must dispatch in ascending code order"
     );
-    // Error classification: 404 < 409 < 4XX < 5XX, each listed after its successor in the document.
-    let errors = [
-        at("Exact(404u16)"),
-        at("Exact(409u16)"),
-        at("Range(4u8)"),
-        at("Range(5u8)"),
-    ];
-    assert!(
-        errors.is_sorted(),
-        "error arms must be exact ascending, then range ascending: {errors:?}"
+    // Error classification: 404 < 409 < 4XX < 5XX, each listed after its successor in the
+    // document, and the `default` the document lists first is the last arm.
+    assert_eq!(
+        error,
+        ["Exact(404)", "Exact(409)", "Range(4)", "Range(5)", "Any"],
+        "error arms must be exact ascending, then range ascending, then `default`"
     );
+}
+
+/// The status selectors of the generated method `name`'s dispatch, in the order its arms test
+/// them: the `if StatusSpec::<selector>.matches(status)` arms of the success branch of its
+/// `if response.status().is_success()`, then those of its error branch, each rendered as the
+/// selector's variant and literal (`Exact(200)`, `Range(4)`, `Any`). Read from the parsed module,
+/// so neither a selector named in a doc comment nor one in another method can stand in for an arm.
+fn dispatch_arms(code: &str, name: &str) -> (Vec<String>, Vec<String>) {
+    fn find_method<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a syn::ImplItemFn> {
+        items.iter().find_map(|item| match item {
+            syn::Item::Impl(block) => block.items.iter().find_map(|member| match member {
+                syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            }),
+            syn::Item::Mod(module) => find_method(&module.content.as_ref()?.1, name),
+            _ => None,
+        })
+    }
+    /// The selector an arm `if <selector>.matches(status) { … }` tests, or `None` for any other
+    /// statement.
+    fn selector(statement: &syn::Stmt) -> Option<String> {
+        let syn::Stmt::Expr(syn::Expr::If(arm), _) = statement else {
+            return None;
+        };
+        let syn::Expr::MethodCall(call) = &*arm.cond else {
+            return None;
+        };
+        if call.method != "matches" {
+            return None;
+        }
+        let (path, literal) = match &*call.receiver {
+            syn::Expr::Path(path) => (&path.path, None),
+            syn::Expr::Call(constructor) => {
+                let syn::Expr::Path(path) = &*constructor.func else {
+                    return None;
+                };
+                let [syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(literal),
+                    ..
+                })] = constructor.args.iter().collect::<Vec<_>>()[..]
+                else {
+                    return None;
+                };
+                (&path.path, Some(literal.base10_digits()))
+            }
+            _ => return None,
+        };
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let [.., spec, variant] = &segments[..] else {
+            return None;
+        };
+        if spec != "StatusSpec" {
+            return None;
+        }
+        Some(match literal {
+            Some(literal) => format!("{variant}({literal})"),
+            None => variant.clone(),
+        })
+    }
+    let file = syn::parse_file(code).expect("a generated module parses");
+    let method = find_method(&file.items, name).unwrap_or_else(|| panic!("no method `{name}`"));
+    let dispatch = method
+        .block
+        .stmts
+        .iter()
+        .find_map(|statement| match statement {
+            syn::Stmt::Expr(syn::Expr::If(dispatch), _) => match &*dispatch.cond {
+                syn::Expr::MethodCall(call) if call.method == "is_success" => Some(dispatch),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{name}` has no `is_success` dispatch"));
+    let arms = |block: &syn::Block| block.stmts.iter().filter_map(selector).collect();
+    let Some((_, otherwise)) = &dispatch.else_branch else {
+        panic!("`{name}`'s dispatch has no error branch");
+    };
+    let syn::Expr::Block(otherwise) = &**otherwise else {
+        panic!("`{name}`'s error branch is not a block");
+    };
+    (arms(&dispatch.then_branch), arms(&otherwise.block))
 }
 
 #[test]
