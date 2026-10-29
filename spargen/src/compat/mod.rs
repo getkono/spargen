@@ -39,7 +39,11 @@ use glob::{glob_match, has_glob_meta, unescape_glob};
 pub use rule::{ComponentKind, OmitMethod, OmitRule, UnknownOmitToken};
 
 /// A compatibility omit profile.
+///
+/// Build one with [`omit!`](crate::omit), or start from `Omit::default()` and push onto
+/// [`rules`](Omit::rules).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Omit {
     /// Omit rules (exact or glob).
     pub rules: Vec<OmitRule>,

@@ -41,6 +41,14 @@ fn carving(spec: &Path, out: &Path) -> Build {
     )
 }
 
+/// An omit profile holding exactly `rules`, built from its default the way a consumer builds one
+/// (`Omit` is `#[non_exhaustive]`).
+fn omit_of(rules: Vec<spargen::OmitRule>) -> spargen::Omit {
+    let mut omit = spargen::Omit::default();
+    omit.rules = rules;
+    omit
+}
+
 /// As [`config`], but with an explicit omit profile.
 fn omitting(spec: &Path, out: &Path, omit: spargen::Omit) -> Build {
     build(
@@ -829,14 +837,12 @@ fn every_omit_spelling_reaches_the_same_rule() {
         operations { query "/items"; get "/other"; }
         components { path_items { "Unused"; } media_types { "UnusedMedia"; } }
     };
-    let built = spargen::Omit {
-        rules: vec![
-            spargen::OmitRule::operation(spargen::OmitMethod::Query, "/items"),
-            spargen::OmitRule::operation(spargen::OmitMethod::Get, "/other"),
-            spargen::OmitRule::component(spargen::ComponentKind::PathItems, "Unused"),
-            spargen::OmitRule::component(spargen::ComponentKind::MediaTypes, "UnusedMedia"),
-        ],
-    };
+    let built = omit_of(vec![
+        spargen::OmitRule::operation(spargen::OmitMethod::Query, "/items"),
+        spargen::OmitRule::operation(spargen::OmitMethod::Get, "/other"),
+        spargen::OmitRule::component(spargen::ComponentKind::PathItems, "Unused"),
+        spargen::OmitRule::component(spargen::ComponentKind::MediaTypes, "UnusedMedia"),
+    ]);
     assert_eq!(macro_rules, built);
 
     // The CLI/`spargen.toml` spellings parse to the same variants.
@@ -930,9 +936,7 @@ paths:
     let report = spargen::generate(&omitting(
         &spec,
         &exact,
-        spargen::Omit {
-            rules: vec![spargen::OmitRule::path(r"/files/\*")],
-        },
+        omit_of(vec![spargen::OmitRule::path(r"/files/\*")]),
     ));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&exact).unwrap();
@@ -943,9 +947,7 @@ paths:
     let report = spargen::generate(&omitting(
         &spec,
         &bulk,
-        spargen::Omit {
-            rules: vec![spargen::OmitRule::path("/files/*")],
-        },
+        omit_of(vec![spargen::OmitRule::path("/files/*")]),
     ));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&bulk).unwrap();
@@ -995,7 +997,7 @@ paths:
         ),
     ] {
         let out = dir.join(format!("{}.rs", label.replace(' ', "_")));
-        let report = spargen::generate(&omitting(&spec, &out, spargen::Omit { rules }));
+        let report = spargen::generate(&omitting(&spec, &out, omit_of(rules)));
         assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
         assert!(
             report

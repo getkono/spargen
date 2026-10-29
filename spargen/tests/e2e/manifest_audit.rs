@@ -917,10 +917,8 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
     // `workspace = true` (plus `optional = true` where required), each under the advice's table.
     let mut root_dependencies = String::from("[workspace.dependencies]\n");
     for dependency in &requirements.dependencies {
-        let declared = spargen::RequiredDependency {
-            optional: false,
-            ..dependency.clone()
-        };
+        let mut declared = dependency.clone();
+        declared.optional = false;
         root_dependencies.push_str(&declared.manifest_line());
         root_dependencies.push('\n');
     }
