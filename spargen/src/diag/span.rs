@@ -47,3 +47,16 @@ impl Span {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FileId;
+
+    #[test]
+    fn get_returns_the_index_the_id_was_built_from() {
+        for index in [0, 1, 2, 7, u32::MAX] {
+            assert_eq!(FileId(index).get(), index);
+        }
+        assert_ne!(FileId(2).get(), FileId(3).get());
+    }
+}
