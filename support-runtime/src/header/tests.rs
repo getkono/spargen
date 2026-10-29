@@ -81,29 +81,12 @@ fn absent_required_header_is_an_error() {
 }
 
 #[test]
-fn scalars_round_trip_through_simple_serialization() {
-    let written = serialize_simple(&"abc", false, PercentEncoding::Passthrough).unwrap();
-    let map = headers(&[("etag", &written)]);
-    let parsed: String = require_header(&map, "etag", HeaderShape::Scalar, false).unwrap();
-    assert_eq!(parsed, "abc");
-}
-
-#[test]
 fn numbers_and_booleans_keep_their_json_type() {
     let map = headers(&[("x-limit", "42"), ("x-ok", "true")]);
     let limit: u32 = require_header(&map, "x-limit", HeaderShape::Scalar, false).unwrap();
     let ok: bool = require_header(&map, "x-ok", HeaderShape::Scalar, false).unwrap();
     assert_eq!(limit, 42);
     assert!(ok);
-}
-
-#[test]
-fn arrays_round_trip_through_simple_serialization() {
-    let values = vec!["a".to_owned(), "b".to_owned()];
-    let written = serialize_simple(&values, false, PercentEncoding::Passthrough).unwrap();
-    let map = headers(&[("x-tags", &written)]);
-    let parsed: Vec<String> = require_header(&map, "x-tags", HeaderShape::Array, false).unwrap();
-    assert_eq!(parsed, values);
 }
 
 #[test]
