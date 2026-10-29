@@ -90,7 +90,9 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The stable lowercase string form, used by the `--format json` renderer.
+    /// The stable lowercase string form. [`Display`](std::fmt::Display) writes it, and the
+    /// serialized form (`#[serde(rename_all = "lowercase")]`, which `--format json` emits) spells
+    /// each variant the same way.
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Generated => "generated",
@@ -134,9 +136,12 @@ impl std::fmt::Display for Outcome {
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
-/// Fields are private and read through accessors, matching [`Spec`], [`Build`], and
-/// [`DiffRejection`], so the shape can grow without a breaking change. [`Diagnostic`] grows the
-/// other way: its fields are public and the struct is `#[non_exhaustive]`.
+/// Fields are private and read through accessors, so the shape can grow without a breaking
+/// change. [`Spec`], [`Build`], and [`DiffRejection`] keep their fields private for the same
+/// reason: [`Spec`] is set through its builder methods, with [`Spec::path`] reading back its
+/// root document, and [`Build`] and [`DiffRejection`] are read through accessors.
+/// [`Diagnostic`] grows the other way: its fields are public and the struct is
+/// `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
@@ -639,8 +644,8 @@ fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names), Report> {
     lower_frontend(spec, &mut diags).map_err(|()| report(diags, Outcome::Rejected))
 }
 
-/// Private cross-crate bridge for `spargen-macro`; `preview` is also called by this crate's
-/// integration tests.
+/// Private cross-crate bridge for `spargen-macro`; this crate's integration tests also call
+/// `preview` and `preview_for_macro`.
 #[doc(hidden)]
 pub mod __private {
     use camino::{Utf8Path, Utf8PathBuf};
@@ -1069,8 +1074,8 @@ mod tests {
         }
     }
 
-    /// `as_str` is the `--format json` spelling and `Display` renders the same string, so both
-    /// are pinned outcome by outcome.
+    /// `as_str`, `Display`, and the serialized form (what `--format json` emits) spell each
+    /// outcome alike, pinned outcome by outcome.
     #[test]
     fn each_outcome_renders_its_stable_lowercase_name() {
         for (outcome, name) in
@@ -1080,6 +1085,7 @@ mod tests {
         {
             assert_eq!(outcome.as_str(), name);
             assert_eq!(outcome.to_string(), name);
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
         }
     }
 
