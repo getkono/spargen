@@ -64,8 +64,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{Build, CargoIntegration, ConfigError, Spec};
 pub use diag::{
-    Code, Diagnostic, DiagnosticBuilder, FileId, InterpId, JsonPointer, Loc, OutcomeClaim,
-    Provenance, Severity, Span, UnknownCode,
+    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
 };
 pub use runtime_contract::{RequiredDependency, Requirements};
 #[cfg(feature = "remote-fetch")]
