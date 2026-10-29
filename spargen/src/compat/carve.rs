@@ -316,3 +316,136 @@ fn enclosing(tokens: &[String]) -> Option<Enclosing> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{carve_rules, is_path_item_position, is_prefix, operation_depth};
+    use crate::compat::tests::{bundle_of_files, error_in};
+    use crate::compat::{OmitMethod, OmitRule};
+
+    fn tokens(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|&token| token.to_owned()).collect()
+    }
+
+    /// A root document whose `paths` block is `paths`, indented as a mapping under it.
+    fn root_with_paths(paths: &str) -> String {
+        format!("openapi: 3.1.0\ninfo: {{ title: t, version: 1.0.0 }}\npaths:\n{paths}")
+    }
+
+    /// An operation whose `200` response body is the schema `$ref`.
+    fn get_returning(reference: &str) -> String {
+        format!(
+            "    get:\n      responses:\n        \"200\":\n          description: ok\n          \
+             content:\n            application/json: {{ schema: {{ $ref: '{reference}' }} }}\n"
+        )
+    }
+
+    #[test]
+    fn a_prefix_is_token_wise_and_never_longer_than_the_pointer() {
+        let pointer = tokens(&["$defs", "One", "type"]);
+        assert!(is_prefix(&[], &pointer));
+        assert!(is_prefix(&tokens(&["$defs", "One"]), &pointer));
+        assert!(is_prefix(&pointer, &pointer));
+        // Same length as a true prefix, different token.
+        assert!(!is_prefix(&tokens(&["$defs", "Two"]), &pointer));
+        // Longer than the pointer, whose own tokens it starts with.
+        assert!(!is_prefix(
+            &tokens(&["$defs", "One", "type", "x"]),
+            &pointer
+        ));
+    }
+
+    #[test]
+    fn a_path_item_position_is_a_paths_webhooks_or_path_items_entry() {
+        assert!(is_path_item_position(&tokens(&["paths", "/x"])));
+        assert!(is_path_item_position(&tokens(&["webhooks", "hook"])));
+        assert!(is_path_item_position(&tokens(&[
+            "components",
+            "pathItems",
+            "P"
+        ])));
+        assert!(!is_path_item_position(&tokens(&["paths"])));
+        assert!(!is_path_item_position(&tokens(&["paths", "/x", "get"])));
+        assert!(!is_path_item_position(&tokens(&["callbacks", "/x"])));
+        assert!(!is_path_item_position(&tokens(&[
+            "components",
+            "schemas",
+            "P"
+        ])));
+        assert!(!is_path_item_position(&tokens(&[
+            "x-paths",
+            "pathItems",
+            "P"
+        ])));
+    }
+
+    #[test]
+    fn an_operation_depth_counts_the_tokens_naming_one_operation() {
+        assert_eq!(
+            operation_depth(&tokens(&["additionalOperations", "COPY", "responses"])),
+            Some(2)
+        );
+        assert_eq!(operation_depth(&tokens(&["get", "responses"])), Some(1));
+        assert_eq!(operation_depth(&tokens(&["get"])), Some(1));
+        // `additionalOperations` with no method under it names no operation.
+        assert_eq!(operation_depth(&tokens(&["additionalOperations"])), None);
+        assert_eq!(operation_depth(&tokens(&["parameters", "0"])), None);
+        assert_eq!(operation_depth(&[]), None);
+    }
+
+    /// Only a `$ref` into the rejected file, whose target encloses the rejected pointer, is
+    /// followed back: neither the operation reaching another file's whole document nor the one
+    /// reaching a sibling definition in the same file is carved.
+    #[test]
+    fn only_referrers_whose_target_encloses_the_pointer_are_carved() {
+        let defs = "$defs:\n  One: { type: object }\n  Two: { type: object }\n";
+        let other = "type: object\n";
+        let root = root_with_paths(&format!(
+            "  /one:\n{}  /two:\n{}  /other:\n{}",
+            get_returning("./defs.yaml#/$defs/One"),
+            get_returning("./defs.yaml#/$defs/Two"),
+            get_returning("./other.yaml"),
+        ));
+        let bundle = bundle_of_files(&root, &[("defs.yaml", defs), ("other.yaml", other)]);
+        let rules = carve_rules(
+            &[error_in(&bundle, "defs.yaml", "/$defs/One/type")],
+            &bundle,
+        );
+        assert_eq!(rules, vec![OmitRule::operation(OmitMethod::Get, "/one")]);
+    }
+
+    /// A `$ref` held in an array element is a referrer like any other.
+    #[test]
+    fn a_referrer_inside_an_array_is_followed_back() {
+        let parameter = "name: q\nin: query\nschema: { type: string }\n";
+        let root = root_with_paths(
+            "  /x:\n    get:\n      parameters:\n        - $ref: './parameter.yaml'\n      \
+             responses: { \"200\": { description: ok } }\n",
+        );
+        let bundle = bundle_of_files(&root, &[("parameter.yaml", parameter)]);
+        let rules = carve_rules(&[error_in(&bundle, "parameter.yaml", "/schema")], &bundle);
+        assert_eq!(rules, vec![OmitRule::operation(OmitMethod::Get, "/x")]);
+    }
+
+    /// A path item reached below its file's root is carved at the rejected operation: the
+    /// pointer keeps the target's own tokens and then the method's.
+    #[test]
+    fn a_nested_path_item_target_carves_its_operation_below_the_target() {
+        let items =
+            "defs:\n  Item:\n    get: { responses: { \"200\": { description: ok } } }\n    \
+                     post: { responses: { \"200\": { description: ok } } }\n";
+        let root = root_with_paths("  /x: { $ref: './items.yaml#/defs/Item' }\n");
+        let bundle = bundle_of_files(&root, &[("items.yaml", items)]);
+        let rules = carve_rules(
+            &[error_in(&bundle, "items.yaml", "/defs/Item/get/responses")],
+            &bundle,
+        );
+        assert_eq!(
+            rules,
+            vec![OmitRule::pointer(
+                Some("items.yaml".into()),
+                "/defs/Item/get"
+            )]
+        );
+    }
+}

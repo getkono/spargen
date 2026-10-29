@@ -1151,7 +1151,7 @@ components:
     }
 
     /// Load a root document plus sub-files, all written beside each other.
-    fn bundle_of_files(root: &str, files: &[(&str, &str)]) -> InputBundle {
+    pub(super) fn bundle_of_files(root: &str, files: &[(&str, &str)]) -> InputBundle {
         let dir = tempfile::tempdir().unwrap();
         for (name, contents) in files {
             std::fs::write(dir.path().join(name), contents).unwrap();
@@ -1163,7 +1163,7 @@ components:
     }
 
     /// An error reported at `pointer` in the loaded file named `file`.
-    fn error_in(bundle: &InputBundle, file: &str, pointer: &str) -> Diagnostic {
+    pub(super) fn error_in(bundle: &InputBundle, file: &str, pointer: &str) -> Diagnostic {
         let id = bundle.file_id_for_path(file).unwrap();
         // Any error code carves the same way; this one is not held to an emission-site marker.
         Diagnostic::error(
