@@ -640,6 +640,20 @@ fn form_body_rejects_a_non_object() {
 }
 
 #[test]
+fn ordered_members_names_a_json_object_as_what_it_expected() {
+    // `serialize_form_body` refuses a non-object before it reads members, so only the reader
+    // itself can report what it expected.
+    let error = match serde_json::from_str::<OrderedMembers>("[]") {
+        Ok(_) => panic!("a JSON array was read as an object's members"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("expected a JSON object"),
+        "{error}"
+    );
+}
+
+#[test]
 fn serialize_multipart_values_yields_one_value_per_array_item() {
     // The part name travels in `Content-Disposition`, so the values carry no `name=` prefix,
     // and multipart values are never percent-encoded.
