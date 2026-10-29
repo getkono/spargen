@@ -1041,6 +1041,120 @@ mod tests {
         assert!(Outcome::Clean.is_success() && !Outcome::Clean.wrote_output());
     }
 
+    /// Every outcome, in declaration order.
+    const OUTCOMES: [Outcome; 4] = [
+        Outcome::Generated,
+        Outcome::Cached,
+        Outcome::Clean,
+        Outcome::Rejected,
+    ];
+
+    /// `admits` is the oracle every diagnostic's claim is checked against, so its whole truth
+    /// table is pinned: an independent claim holds on every run, a rejection claim only on a
+    /// rejected one, and a generation claim on both outcomes that leave a generated module.
+    #[test]
+    fn every_outcome_admits_exactly_the_claims_true_of_it() {
+        for outcome in OUTCOMES {
+            assert!(outcome.admits(OutcomeClaim::Independent), "{outcome}");
+            assert_eq!(
+                outcome.admits(OutcomeClaim::Rejected),
+                outcome == Outcome::Rejected,
+                "{outcome}"
+            );
+            assert_eq!(
+                outcome.admits(OutcomeClaim::Generated),
+                matches!(outcome, Outcome::Generated | Outcome::Cached),
+                "{outcome}"
+            );
+        }
+    }
+
+    /// `as_str` is the `--format json` spelling and `Display` renders the same string, so both
+    /// are pinned outcome by outcome.
+    #[test]
+    fn each_outcome_renders_its_stable_lowercase_name() {
+        for (outcome, name) in
+            OUTCOMES
+                .into_iter()
+                .zip(["generated", "cached", "clean", "rejected"])
+        {
+            assert_eq!(outcome.as_str(), name);
+            assert_eq!(outcome.to_string(), name);
+        }
+    }
+
+    /// `errors` and `warnings` split `diagnostics` by severity with nothing lost or shared, each
+    /// in emission order, and `has_errors` follows the error side alone.
+    #[test]
+    fn errors_and_warnings_partition_the_diagnostics_by_severity() {
+        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let warning = |message: &str| {
+            Diagnostic::warning(Code::ServerInitiatedFlowIgnored, provenance.clone())
+                .message(message)
+                .build()
+        };
+        let error = |message: &str| {
+            Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
+                .message(message)
+                .build()
+        };
+        let mixed = Report {
+            diagnostics: vec![
+                warning("first warning"),
+                error("first error"),
+                warning("second warning"),
+                error("second error"),
+            ],
+            outcome: Outcome::Rejected,
+            truncated: false,
+        };
+
+        let messages = |diagnostics: Vec<&Diagnostic>| {
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            messages(mixed.errors().collect()),
+            ["first error", "second error"]
+        );
+        assert_eq!(
+            messages(mixed.warnings().collect()),
+            ["first warning", "second warning"]
+        );
+        assert_eq!(
+            mixed.errors().count() + mixed.warnings().count(),
+            mixed.diagnostics().len()
+        );
+        assert!(mixed.has_errors());
+
+        // Warnings alone are not errors, whatever the outcome.
+        let warned = Report {
+            diagnostics: vec![warning("only a warning")],
+            outcome: Outcome::Generated,
+            truncated: false,
+        };
+        assert!(!warned.has_errors());
+        assert_eq!(warned.errors().count(), 0);
+        assert_eq!(warned.warnings().count(), 1);
+        assert!(!report(Outcome::Rejected).has_errors());
+    }
+
+    /// `expect_success` hands a successful report back unchanged.
+    #[test]
+    fn expect_success_returns_a_successful_report() {
+        let returned = report(Outcome::Cached).expect_success();
+        assert_eq!(returned.outcome(), Outcome::Cached);
+    }
+
+    /// `expect_success` panics with the rendered report, whose first line names the outcome.
+    #[test]
+    #[should_panic(expected = "spargen: rejected")]
+    fn expect_success_panics_on_a_rejected_report() {
+        report(Outcome::Rejected).expect_success();
+    }
+
     /// `into_result` is the `?` form of `succeeded`, so it has to split on exactly what `succeeded`
     /// splits on — including an error-severity diagnostic under a non-`Rejected` outcome, which is
     /// the case a bare `outcome` check misses.

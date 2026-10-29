@@ -394,28 +394,6 @@ fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
 }
 
 #[test]
-fn every_outcome_admits_exactly_the_claims_true_of_it() {
-    for outcome in [
-        Outcome::Generated,
-        Outcome::Cached,
-        Outcome::Clean,
-        Outcome::Rejected,
-    ] {
-        assert!(outcome.admits(OutcomeClaim::Independent), "{outcome}");
-        assert_eq!(
-            outcome.admits(OutcomeClaim::Rejected),
-            outcome == Outcome::Rejected,
-            "{outcome}"
-        );
-        assert_eq!(
-            outcome.admits(OutcomeClaim::Generated),
-            matches!(outcome, Outcome::Generated | Outcome::Cached),
-            "{outcome}"
-        );
-    }
-}
-
-#[test]
 fn the_prose_backstop_reads_only_an_unnegated_outcome_predicate() {
     for (message, stated) in [
         (W014_GENERATION_WORDING, Some(OutcomeClaim::Generated)),
