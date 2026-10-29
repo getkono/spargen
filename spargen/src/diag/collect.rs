@@ -146,7 +146,7 @@ mod tests {
 
         assert_eq!(diagnostics.items().len(), 1);
         assert!(diagnostics.has_errors());
-        assert!(!diagnostics.cap_reached);
+        assert!(!diagnostics.cap_reached());
     }
 
     #[test]
@@ -270,17 +270,21 @@ mod tests {
         );
     }
 
+    /// Read through the `cap_reached` accessor, which is what `Report::truncated` reports, so the
+    /// assertions observe the method and not only the field it returns.
     #[test]
     fn duplicate_at_capacity_does_not_report_truncation() {
         let mut diagnostics = Diagnostics::new(1);
+        assert!(!diagnostics.cap_reached());
 
         diagnostics.emit(diagnostic("invalid operation"));
         diagnostics.emit(diagnostic("invalid operation"));
 
-        assert!(!diagnostics.cap_reached);
+        assert!(!diagnostics.cap_reached());
 
         diagnostics.emit(diagnostic("another failure"));
 
-        assert!(diagnostics.cap_reached);
+        assert!(diagnostics.cap_reached());
+        assert_eq!(diagnostics.items().len(), 1);
     }
 }
