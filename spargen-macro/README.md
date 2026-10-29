@@ -10,7 +10,10 @@ mod api {
 }
 ```
 
-Keyed form, with the same controls as spargen's `build.rs` surface:
+Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
+beside the spec is always discovered and applied first; `no_uuid`, `no_time`, `carve`,
+`open_narrowing` and the two caps override it, and `omit { ... }` adds rules to its `[[omit]]`
+rules:
 
 ```rust,ignore
 spargen_macro::generate_api!(
@@ -74,8 +77,8 @@ in every mode). When the client is inlined by the macro, that gate resolves agai
 features. A crate that does not declare it compiles the blocking client out cleanly, including
 under `-D warnings`. To opt in, declare the feature as `blocking = ["dep:tokio"]` together with a
 native-only optional `tokio`: `spargen deps <spec>` prints both, commented out, at the tested
-floor. Uncommenting them is the whole opt-in, except that an entry whose `[features]` table,
-`blocking` key, or dependency table your manifest already declares merges into it rather than
-being added a second time, which TOML rejects.
+floor, and
+[`Requirements::manifest_block`](https://docs.rs/spargen/latest/spargen/struct.Requirements.html#method.manifest_block),
+which renders that block, states how they are opted into.
 
 Licensed under MIT OR Apache-2.0.
