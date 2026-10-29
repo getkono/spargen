@@ -757,6 +757,13 @@ paths:
             "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
         );
         let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
+        // A rejected preview retains no module, so the macro raises `compile_error!` instead of
+        // emitting half-generated code.
+        assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+        assert!(
+            preview.contents.is_none(),
+            "a rejected preview retains no generated module"
+        );
         // A root-level diagnostic's pointer is empty, so no `at` line is rendered. The span names
         // the spec path as the bundle loaded it, not as the macro was given it.
         assert_eq!(
