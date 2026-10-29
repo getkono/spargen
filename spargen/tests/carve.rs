@@ -142,6 +142,40 @@ fn exact_omit_path_still_removes_exactly_one() {
     assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
 
+#[test]
+fn an_operation_omit_removes_that_operation_and_keeps_the_rest() {
+    // An `operations` rule names a method and a path: `POST /upload` goes, `GET /health` stays.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: Upload, version: 1.0.0 }
+paths:
+  /health:
+    get: { responses: { "204": { description: No Content } } }
+  /upload:
+    post:
+      requestBody:
+        required: true
+        content: { multipart/form-data: { schema: { type: object } } }
+      responses: { "204": { description: No Content } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let omit = spargen::omit! { operations { post "/upload"; } };
+    let report = spargen::generate(&omitting(&spec, &out, omit));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        !generated.contains("fn post_upload"),
+        "omitted: {generated}"
+    );
+    assert!(generated.contains("fn get_health"), "kept: {generated}");
+    assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
+}
+
 // --- (b) Carve generates the rest ---------------------------------------------------------------
 
 /// `/good` is representable; `/bad` returns a dynamic reference (an `E006`).
