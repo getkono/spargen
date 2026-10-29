@@ -542,7 +542,8 @@ pub struct DiffRejection {
 }
 
 /// Which side of a diff a rejection came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Side {
     /// The old (baseline) spec.
     Old,
@@ -551,12 +552,19 @@ pub enum Side {
 }
 
 impl Side {
-    /// The stable lowercase label.
+    /// The stable lowercase label. [`Display`](std::fmt::Display) writes it, and the serialized
+    /// form (`#[serde(rename_all = "lowercase")]`) spells each variant the same way.
     pub fn as_str(self) -> &'static str {
         match self {
             Side::Old => "old",
             Side::New => "new",
         }
+    }
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -1087,6 +1095,17 @@ mod tests {
             assert_eq!(outcome.as_str(), name);
             assert_eq!(outcome.to_string(), name);
             assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+        }
+    }
+
+    /// `as_str`, `Display`, and the serialized form spell each diff side alike, matching the
+    /// lowercase keys a rejection is reported under.
+    #[test]
+    fn each_side_renders_its_stable_lowercase_name() {
+        for (side, name) in [(Side::Old, "old"), (Side::New, "new")] {
+            assert_eq!(side.as_str(), name);
+            assert_eq!(side.to_string(), name);
+            assert_eq!(serde_json::to_value(side).unwrap(), name);
         }
     }
 

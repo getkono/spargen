@@ -123,11 +123,13 @@ impl std::fmt::Display for Diagnostic {
     /// remedy when known. Shared by the CLI's human renderer and by `Report`'s own `Display`, so
     /// the two can never drift.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let severity = match self.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        write!(formatter, "{severity}[{}]: {}", self.code, self.message)?;
+        write!(
+            formatter,
+            "{}[{}]: {}",
+            self.severity.as_str(),
+            self.code,
+            self.message
+        )?;
         if let Some(span) = self.span {
             write!(formatter, "\n  --> ")?;
             if let Some(file) = &self.file {
@@ -237,7 +239,7 @@ impl DiagnosticBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_test_fn, Code, Diagnostic, JsonPointer, OutcomeClaim, Provenance};
+    use super::{is_test_fn, Code, Diagnostic, JsonPointer, OutcomeClaim, Provenance, Severity};
 
     #[test]
     fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {
@@ -310,6 +312,36 @@ mod tests {
         let mut generated = Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build();
         generated.claim = OutcomeClaim::Generated;
         assert_eq!(claim_of(generated), "generated");
+    }
+
+    /// `as_str`, `Display`, and the serialized form (what `--format json` emits) spell each
+    /// severity alike, and a diagnostic's rendering opens with the same word.
+    #[test]
+    fn each_severity_renders_its_stable_lowercase_name() {
+        let at = || Provenance::new(JsonPointer::root(), None);
+        for (severity, name, diagnostic) in [
+            (
+                Severity::Error,
+                "error",
+                Diagnostic::error(Code::UnsupportedMediaType, at()).build(),
+            ),
+            (
+                Severity::Warning,
+                "warning",
+                Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build(),
+            ),
+        ] {
+            assert_eq!(severity.as_str(), name);
+            assert_eq!(severity.to_string(), name);
+            assert_eq!(serde_json::to_value(severity).unwrap(), name);
+            assert_eq!(diagnostic.severity, severity);
+            assert!(
+                diagnostic
+                    .to_string()
+                    .starts_with(&format!("{name}[{}]", diagnostic.code)),
+                "{diagnostic}"
+            );
+        }
     }
 
     #[test]

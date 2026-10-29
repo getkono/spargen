@@ -221,6 +221,13 @@ impl Impact {
     }
 }
 
+impl std::fmt::Display for Impact {
+    /// Writes [`as_str`](Impact::as_str).
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +438,14 @@ impl serde::Serialize for ChangeKind {
     /// the single spelling table for both renderings.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.code())
+    }
+}
+
+impl std::fmt::Display for ChangeKind {
+    /// Writes the stable kebab-case [`code`](ChangeKind::code), the same spelling the serialized
+    /// form carries.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
     }
 }
 
