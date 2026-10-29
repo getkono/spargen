@@ -18,8 +18,9 @@ prints for a code byte for byte (as for `E023`), the row defers to that text rat
 it; `E023`'s row quotes a few of its clauses, and a test holds each clause there that names
 workspace inheritance to being a verbatim excerpt of it. Each cell names its constructs and their
 diagnostic codes in a sentence apiece and leaves the list of cases reaching a code to
-`spargen explain <code>`, the one copy of that list: for `E004`, `E007`, `E013`, `E016`, and
-`W011` a test ties every case the body enumerates to the emission sites that report it.
+`spargen explain <code>`, the one copy of that list: for each code `ENUMERATED_CASES` in
+[`spargen/src/diag/code/tests.rs`](https://github.com/getkono/spargen/blob/master/spargen/src/diag/code/tests.rs)
+names, a test ties every case the body enumerates to the emission sites that report it.
 
 | Area | Supported | Warned | Rejected |
 | --- | --- | --- | --- |

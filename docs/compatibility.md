@@ -142,8 +142,8 @@ method = "get"                          # method + path → OmitRule::Operation
 path = "/pets"
 
 [[omit]]
-component = "schema"                    # component + name → OmitRule::Component
-name = "LegacyPet"                      #   schema / response / parameter / requestBody / header / securityScheme / pathItem / mediaType
+component = "schemas"                   # component + name → OmitRule::Component
+name = "LegacyPet"                      #   schemas / responses / parameters / request_bodies / headers / security_schemes / path_items / media_types
 
 [[omit]]
 pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer
@@ -161,10 +161,7 @@ location, so moving the checkout already breaks such a `$ref`.
 
 `error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
 ([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
-one statement of what it bounds on each target and which paths it does not cap. On native targets
-an over-cap error body is abandoned partway, which forgoes reuse of that connection, so a cap set
-far below the error bodies an API actually returns trades connection reuse for a smaller retained
-prefix.
+one statement of what it bounds on each target and which paths it does not cap.
 
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 
@@ -172,20 +169,15 @@ Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 spargen check spec.yaml \
   --omit-path "/pets/{id}" \
   --omit-operation "get /pets" \
-  --omit-component "schema:LegacyPet" \
+  --omit-component "schemas:LegacyPet" \
   --omit-pointer "extra.yaml#/components/schemas/X"   # or "/pointer" for the root document
 ```
 
-**Precedence (low → high): built-in defaults < `spargen.toml` < CLI flags.** The caps a flag
-sets replace the file's, and omit flags add to its rules. The switches only turn their setting one
-way, so no flag undoes a file's `carve = true` (`--carve` only turns carving on), `uuid = false`
-(`--no-uuid` only turns it off), `time = false` (`--no-time` only turns it off), or
-`open_narrowing = true` (`--open-narrowing` only turns it on); edit the file or pass another
-`--config` instead. A missing auto-discovered config file is fine (defaults apply); a missing
-`--config` target, a malformed config file, or bad omit-flag syntax is a clear error with exit
-status 3 — never a panic. The
-[CLI reference](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#exit-status)
-lists every exit status.
+The CLI reference's
+[Flags and `spargen.toml`](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#flags-and-spargentoml)
+states how the flags and the file combine, and its
+[exit status](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#exit-status)
+table lists what a rejected configuration or flag value exits with.
 
 The same file is available to the generation APIs — `Spec::discover_config_file()` from `build.rs`,
 and automatically beside the spec for `generate_api!` — because it is parsed by the library, not by

@@ -31,6 +31,38 @@ fn help_lists_only_non_generation_tools() {
     );
 }
 
+/// `docs/book/src/cli.md` quotes `spargen --help` in a `text` fence; this holds that copy to what
+/// the binary prints, byte for byte, so a changed subcommand or description fails here until the
+/// book is regenerated from the real output.
+#[test]
+fn the_cli_reference_quotes_the_help_output_verbatim() {
+    let output = Command::new(spargen_bin()).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/book/src/cli.md");
+    let page = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    let quoted: Vec<&str> = page
+        .split("```text\n")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("```").map(|(body, _)| body))
+        .filter(|body| body.contains("Usage: spargen <COMMAND>"))
+        .collect();
+    assert_eq!(
+        quoted.len(),
+        1,
+        "{} must quote the top-level help in exactly one `text` fence",
+        path.display()
+    );
+    assert_eq!(
+        quoted[0],
+        stdout,
+        "{} quotes stale `spargen --help` output; paste the binary's output",
+        path.display()
+    );
+}
+
 #[test]
 fn generate_is_rejected_as_an_unknown_command() {
     let output = Command::new(spargen_bin())

@@ -10,7 +10,10 @@ mod api {
 }
 ```
 
-Keyed form, with the same controls as spargen's `build.rs` surface:
+Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
+beside the spec is always discovered and applied first; `no_uuid`, `no_time`, `carve`,
+`open_narrowing` and the two caps override it, and `omit { ... }` adds rules to its `[[omit]]`
+rules:
 
 ```rust,ignore
 spargen_macro::generate_api!(

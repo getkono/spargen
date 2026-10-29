@@ -17,34 +17,9 @@
 //!
 //! The same knobs can be read from a config file, which is available to `build.rs`, the
 //! `generate_api!` macro, and the CLI alike — the file is parsed here, in the library, so the
-//! three cannot drift:
-//!
-//! ```toml
-//! uuid = true             # map `format: uuid` to `uuid::Uuid` (default true)
-//! time = true             # map `format: date-time`/`date` to the `time` crate (default true)
-//! carve = false           # auto-carve unsupported constructs (same as `--carve`)
-//! batch_cap = 100         # max diagnostics collected before batching stops
-//! error_body_cap = 65536  # max bytes of a response body retained on error variants
-//! open_narrowing = false  # open response-body string `enum`/`const` narrowings (default false)
-//!
-//! # Zero or more omit rules. The rule KIND is discriminated by field presence, and a key that
-//! # kind does not use (`file` beside `path`, say) is an error. A path/name (or
-//! # pointer) value that contains a glob metacharacter (`*`, `**`, `?`) is matched as a glob and
-//! # removes EVERY matching construct (bulk); a value with no metacharacter is an exact rule.
-//! [[omit]]
-//! path = "/pets/{id}"                    # → OmitRule::Path (exact)
-//! [[omit]]
-//! path = "/admin/**"                     # → OmitRule::Path (glob: every path under /admin)
-//! [[omit]]
-//! method = "get"                         # `method` + `path` → OmitRule::Operation
-//! path = "/pets"
-//! [[omit]]
-//! component = "schema"                   # `component` + `name` → OmitRule::Component
-//! name = "LegacyPet"                     #   component ∈ schemas/responses/parameters/…
-//! [[omit]]
-//! pointer = "/components/schemas/X"      # `pointer` → OmitRule::Pointer
-//! file = "extra.yaml"                    #   `file` optional (file-local pointer)
-//! ```
+//! three cannot drift. Its keys, one omit rule of each kind, and how a rule's kind is told apart
+//! are shown once, in the
+//! [compatibility guide](https://github.com/getkono/spargen/blob/master/docs/compatibility.md#spargentoml-and-the-analysis-cli).
 
 use camino::{Utf8Path, Utf8PathBuf};
 

@@ -41,7 +41,9 @@ manually boxed future rather than using `async-trait`.
 
 `ReqwestBackend` is the default backend (execute directly on a `reqwest::Client`). The retry and
 middleware adapters below are themselves `HttpBackend`s that wrap an inner backend, so they
-compose by nesting.
+compose by nesting. `Client::with_backend(backend, base_url)` takes the outermost one as an
+`Arc<dyn HttpBackend>`; requests are still built on a default `reqwest::Client`, and only the
+execute step goes through the backend.
 
 ## Retry
 
