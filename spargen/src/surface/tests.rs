@@ -183,10 +183,12 @@ fn every_kind_has_a_distinct_kebab_case_code() {
 
 /// The codes are only *actually* the JSON surface if they are what `Serialize` emits. The
 /// derive would emit the Rust variant name instead, silently disagreeing with both `code` and
-/// the human rendering — so pin the two together over the whole enum.
+/// the human rendering — so pin the two together over the whole enum, with `Display` beside
+/// them.
 #[test]
-fn every_kind_serializes_as_its_code() {
+fn every_kind_serializes_and_displays_as_its_code() {
     for kind in all_kinds() {
+        assert_eq!(kind.to_string(), kind.code(), "{kind:?}");
         let json = serde_json::to_string(&kind).expect("a kind serializes");
         assert_eq!(
             json,
@@ -198,9 +200,16 @@ fn every_kind_serializes_as_its_code() {
 
 /// Same contract one level up: `impact` and `bump` are read by scripts that branch on the
 /// semver bump, and `--format human` spells it lowercase. The derive would emit `"Major"`.
+/// `Display` writes the same label.
 #[test]
-fn every_impact_serializes_as_its_lowercase_label() {
-    for impact in [Impact::Patch, Impact::Minor, Impact::Major] {
+fn every_impact_serializes_and_displays_as_its_lowercase_label() {
+    for (impact, label) in [
+        (Impact::Patch, "patch"),
+        (Impact::Minor, "minor"),
+        (Impact::Major, "major"),
+    ] {
+        assert_eq!(impact.as_str(), label);
+        assert_eq!(impact.to_string(), label);
         let json = serde_json::to_string(&impact).expect("an impact serializes");
         assert_eq!(json, format!("\"{}\"", impact.as_str()), "{impact:?}");
     }

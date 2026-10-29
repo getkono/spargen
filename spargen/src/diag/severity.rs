@@ -13,3 +13,21 @@ pub enum Severity {
     /// run that was skipped or degraded.
     Warning,
 }
+
+impl Severity {
+    /// The stable lowercase string form (`error` / `warning`). [`Display`](std::fmt::Display)
+    /// writes it, the serialized form (`#[serde(rename_all = "lowercase")]`) spells each variant
+    /// the same way, and a [`Diagnostic`](super::Diagnostic)'s rendering opens with it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}

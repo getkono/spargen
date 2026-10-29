@@ -314,7 +314,7 @@ impl Build {
 }
 
 /// A clear, user-facing config-file error. Rendered by the CLI as a usage error — never a panic.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     message: String,
 }
@@ -453,6 +453,17 @@ mod tests {
 
     fn apply(text: &str) -> Result<Spec, ConfigError> {
         Spec::new("openapi.yaml").apply_config(text, Utf8Path::new("spargen.toml"))
+    }
+
+    /// Two config errors are equal exactly when their messages are, and a clone keeps the message
+    /// its `Display` writes.
+    #[test]
+    fn config_errors_compare_and_clone_by_message() {
+        let error = ConfigError::new("bad flag");
+        assert_eq!(error.clone(), error);
+        assert_eq!(error.clone().to_string(), "bad flag");
+        assert_eq!(error, ConfigError::new("bad flag"));
+        assert_ne!(error, ConfigError::new("another flag"));
     }
 
     #[test]
