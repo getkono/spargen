@@ -136,15 +136,6 @@ fn e2e_basic_spec() -> &'static str {
     include_str!("e2e/specs/basic.yaml")
 }
 
-#[test]
-fn the_e2e_basic_spec_is_byte_identical_across_runs() {
-    let (_src, spec_path) = write_spec(e2e_basic_spec());
-    assert_eq!(
-        assert_generates_identically(&spec_path, "e2e BASIC_SPEC"),
-        Outcome::Generated
-    );
-}
-
 /// The OpenAPI 3.2 specification `e2e.rs` compile-checks: its constructs (`itemSchema` sequential
 /// media, the `query` method, `additionalOperations`) take code paths `BASIC_SPEC` does not
 /// reach.
@@ -168,11 +159,12 @@ fn the_e2e_date_spec_is_byte_identical_across_runs() {
     );
 }
 
-/// Every option set away from its default: the configuration is part of the invariant's input, so
-/// a non-default value must be as deterministic as the default one. The module must also differ
-/// from the default-option module, or the options reached nothing this test could hold.
+/// The broad spec under the default options and under every option set away from its default: the
+/// configuration is part of the invariant's input, so a non-default value must be as deterministic
+/// as the default one. Both runs generate, and the two modules must differ, or the options reached
+/// nothing this test could hold.
 #[test]
-fn the_e2e_basic_spec_with_non_default_options_is_byte_identical_across_runs() {
+fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_default_options() {
     let (_src, spec_path) = write_spec(e2e_basic_spec());
     let (outcome, module) =
         assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
@@ -184,8 +176,9 @@ fn the_e2e_basic_spec_with_non_default_options_is_byte_identical_across_runs() {
                 .carve(true)
         });
     assert_eq!(outcome, Outcome::Generated);
-    let (_, default_module) =
+    let (default_outcome, default_module) =
         assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC", |spec| spec);
+    assert_eq!(default_outcome, Outcome::Generated);
     assert_ne!(
         module, default_module,
         "the non-default options must change the emitted module"
