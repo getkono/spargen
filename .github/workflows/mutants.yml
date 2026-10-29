@@ -41,5 +41,5 @@ jobs:
       # `mise run mutants`'s commands, byte for byte
       # (`every_mise_task_runs_exactly_what_its_ci_job_runs`). The second fails on any missed
       # mutant, which exit status 3 (a timeout) does not exclude.
-      - run: cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' -- --lib || test $? -eq 3
+      - run: cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' --file 'spargen/src/compat/**' --file 'spargen/src/diag/**' -- --lib || test $? -eq 3
       - run: jq -e '.missed == 0' mutants.out/outcomes.json
