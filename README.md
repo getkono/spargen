@@ -169,7 +169,8 @@ the version it emits, and the idioms spargen handles.
   `spargen explain E013` prints its full explanation.
 - **No `serde(untagged)`.** First-match-wins deserialization can silently misparse; undiscriminated
   unions are rejected instead.
-- **`#![forbid(unsafe_code)]`-equivalent attributes on all generated items**, `Debug`-redacted
+- **`#[forbid(unsafe_code)]` on the embedded `support` module, the `types` module, `impl Client`,
+  and `impl BlockingClient`**, `Debug`-redacted
   secrets, and a 64 KiB (configurable) cap on error-body retention, whose reach the emitted
   `ClientConfig::max_error_body` doc states.
 

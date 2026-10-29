@@ -111,7 +111,8 @@ build-script process. `Build::cargo` decides what happens when there is not one:
 | `Required` | emit directives, run the audit | `E024` — generation fails |
 | `Off` | nothing, silently | nothing, silently |
 
-A build script wants `Required`; a test or code-generation script wants `Off`. `W012` covers
+A build script is served by `Auto`, the default; `Required` is the stricter opt-in for one where a
+missing rebuild trigger would ship a stale client. A test or code-generation script wants `Off`. `W012` covers
 the narrower case of a build script whose consuming manifest cannot be located, so the audit is
 skipped even though directives were emitted.
 
@@ -123,10 +124,10 @@ mod api {
 }
 ```
 
-It accepts a positional schema path or `spec = "..."`, plus the same controls as `Spec`:
-`no_uuid`, `no_time`, `carve`, `open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an
-`omit { ... }`
-profile. Cargo and rustc track the root schema, every transitive source file,
+It accepts a positional schema path or `spec = "..."`, plus `no_uuid`, `no_time`, `carve`,
+`open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }` profile. The
+`spargen.toml` beside the spec is always discovered and applied first, and those arguments
+override it. Cargo and rustc track the root schema, every transitive source file,
 `spargen.lock`, and the `spargen.toml` it applied through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
 
@@ -140,7 +141,7 @@ use secrecy::SecretString;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 // `new` validates the base URL; `with_client` injects a preconfigured reqwest::Client
-// (TLS choice, proxies, middleware, timeouts).
+// (TLS choice, proxies, timeouts); `with_backend` installs a retry or middleware adapter.
 let client = Client::new("https://api.example.com")?
     .with_credential("bearerAuth", Credential::Bearer(SecretString::from("token")));
 
@@ -176,7 +177,8 @@ Key points of the surface:
   [Generated surface](https://github.com/getkono/spargen#generated-surface) lists every variant
   and the accessors over them; [problem details](./runtime.md#problem-details) and the
   [retry adapter](./runtime.md#retry) build on it.
-- Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
+- The README's [Generated surface](https://github.com/getkono/spargen#generated-surface) states how
+  spec documentation metadata and `deprecated` reach rustdoc and `#[deprecated]`.
 
 ## Next steps
 
