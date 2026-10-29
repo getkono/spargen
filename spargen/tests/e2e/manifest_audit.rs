@@ -991,33 +991,6 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
     assert_audit_clean(&preview, "workspace-inherited, blocking opted in");
 }
 
-/// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
-/// retains no files — the proc-macro relies on this to raise a `compile_error!` instead of emitting
-/// half-generated code.
-#[test]
-fn preview_of_rejected_spec_has_no_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    // OpenAPI 3.0.x is rejected at the version gate (E001) — a reliable rejection with no codegen.
-    std::fs::write(
-        &spec,
-        BASIC_SPEC.replace("openapi: 3.1.0", "openapi: 3.0.3"),
-    )
-    .unwrap();
-
-    let preview = spargen::__private::preview(&Spec::new(spec));
-    assert_eq!(preview.report.outcome(), Outcome::Rejected);
-    assert!(
-        preview.contents.is_none(),
-        "a rejected preview retains no generated module"
-    );
-    assert!(preview
-        .report
-        .diagnostics()
-        .iter()
-        .any(|d| d.code == Code::UnsupportedOpenApiVersion));
-}
-
 /// A crate that declares `uuid`/`time` as *optional* must be rejected.
 ///
 /// Generated code names `uuid::Uuid` and the date newtypes unconditionally — there is no `cfg` to

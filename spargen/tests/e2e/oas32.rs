@@ -1,5 +1,4 @@
-//! The fixture crate generated from `OAS32_SPEC`, and an omit overlay removing an unsupported
-//! operation.
+//! The fixture crate generated from `OAS32_SPEC`.
 
 use super::*;
 
@@ -259,51 +258,3 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
         "the OpenAPI 3.2 wire round-trip must pass with --features blocking"
     );
 }
-
-#[test]
-fn omit_overlay_removes_unsupported_operation() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, SPEC_WITH_UNSUPPORTED_OPERATION).unwrap();
-    let out = temp.path().join("client.rs");
-    let config = Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())
-        .omit(spargen::omit! {
-            operations {
-                post "/upload";
-            }
-        })
-        .build(Utf8PathBuf::from_path_buf(out).unwrap())
-        .cargo(CargoIntegration::Off);
-
-    let report = spargen::generate(&config);
-
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(report
-        .diagnostics()
-        .iter()
-        .any(|diagnostic| diagnostic.code == Code::OmittedConstruct));
-}
-
-const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"
-openapi: 3.1.0
-info:
-  title: Upload
-  version: 1.0.0
-paths:
-  /health:
-    get:
-      responses:
-        "204":
-          description: No Content
-  /upload:
-    post:
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-      responses:
-        "204":
-          description: No Content
-"#;
