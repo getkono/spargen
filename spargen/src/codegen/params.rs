@@ -285,6 +285,16 @@ pub(super) fn cookie_param_tokens(
     }
 }
 
+/// The emitted doc of an explicit-null parameter's `Option<Option<T>>` field: which of its three
+/// states sends the JSON `null` and which omits the parameter.
+const EXPLICIT_NULL_FIELD_DOC: &str =
+    "`Some(None)` sends the JSON `null`; `None` omits the parameter.";
+
+/// The emitted doc of an explicit-null parameter's `Option<T>` setter, the same contract seen from
+/// the setter's argument.
+const EXPLICIT_NULL_SETTER_DOC: &str =
+    "`None` sends the JSON `null`; leaving the parameter unset omits it.";
+
 /// Emit an operation's optional-parameters `…Params` struct (deriving `Default`, public fields)
 /// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
 /// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
@@ -300,15 +310,13 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
     let fields = optional.iter().map(|param| {
         let ident = field_ident(param);
         let wire = &param.name;
-        // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
-        // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
-        // again when it did not, so absent and `null` both collapse to `None` and a `None` field
-        // is omitted. A schema-styled serialization (`style`/`explode`) has no token that tells
-        // an explicit `null` from an absent value, so `Option<Option<T>>` would ask the caller
-        // for a distinction the wire cannot carry. A `content` parameter of `application/json`
-        // does carry one, the text `null` (a required nullable one sends it for `None`), but
-        // its optional field takes the same single `Option`, so it never sends `null`.
-        let ty = if param.ty.nullable {
+        // Every struct param is optional, so the field is always an `Option`, and a `None` field
+        // is omitted. `ty_tokens` already wraps a nullable param (`"null"` in its type array) in
+        // `Option`. A nullable JSON `content` param wraps that once more, because its codec sends
+        // `Some(None)` as the text `null` (#996). Any other nullable param keeps the single
+        // `Option`, collapsing absent and `null` to `None`: its serialization has no token for
+        // `null` (see `Parameter::sends_explicit_null`).
+        let ty = if param.ty.nullable && !param.sends_explicit_null() {
             ty_tokens(param.ty, names, true)
         } else {
             let inner = ty_tokens(param.ty, names, true);
@@ -321,6 +329,9 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
         if let Some(default) = &param.default_display {
             notes.push(format!("Default: `{default}`."));
         }
+        if param.sends_explicit_null() {
+            notes.push(EXPLICIT_NULL_FIELD_DOC.to_owned());
+        }
         let notes = notes
             .iter()
             .map(|note| normalize_rustdoc(note))
@@ -331,24 +342,28 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
             pub #ident: #ty,
         }
     });
-    // Fluent consuming setters, one per optional param, in field order. Each takes the field's
-    // inner `T` by value (never the `Option` wrapper) and stores `Some(T)`: a nullable optional
-    // param's field is `Option<T>` for the same reason an ordinary optional param's is, so both
-    // accept `T`. `T`-by-value (not `impl Into<T>`) keeps inference/coherence trivial for every
-    // generated field type.
+    // Fluent consuming setters, one per optional param, in field order. Each takes the value the
+    // field's outer `Option` wraps, by value, and stores `Some` of it: the bare `T` for a param
+    // whose field is a single `Option<T>`, nullable or not, and `Option<T>` for one that sends an
+    // explicit `null`, where the setter's `None` is that `null`. By value (not `impl Into<T>`)
+    // keeps inference/coherence trivial for every generated field type.
     let setters = optional.iter().map(|param| {
         let ident = field_ident(param);
         let inner = ty_tokens(
             Ty {
-                nullable: false,
+                nullable: param.sends_explicit_null(),
                 ..param.ty
             },
             names,
             true,
         );
         let doc = format!("Set the `{}` parameter.", param.name);
+        let null_doc = param
+            .sends_explicit_null()
+            .then(|| quote! { #[doc = ""] #[doc = #EXPLICIT_NULL_SETTER_DOC] });
         quote! {
             #[doc = #doc]
+            #null_doc
             #[must_use]
             pub fn #ident(mut self, value: #inner) -> Self {
                 self.#ident = Some(value);

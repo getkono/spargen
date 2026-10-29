@@ -174,12 +174,93 @@ fn a_member_merged_through_a_component_ref_is_judged_by_the_type_merging_it() {
     );
 }
 
+/// The `$ref`-with-siblings spelling of the same merge: `Both` is `Shared` intersected with its
+/// shape-bearing siblings, so `Shared`'s `allOf` member is merged into `Both` and judged by
+/// `Both`'s body, exactly as when `Both` lists `Shared` as an `allOf` member (#1002).
+#[test]
+fn a_member_merged_through_a_ref_with_siblings_is_judged_by_the_type_merging_it() {
+    assert_member_hint_reported(
+        r##"    Both:
+      $ref: "#/components/schemas/Shared"
+      properties:
+        name: { type: string }
+    Shared:
+      allOf:
+        - type: object
+          xml: { namespace: "urn:shared" }
+          properties:
+            id: { type: integer }"##,
+        "namespace",
+    );
+    // Two hops: `Both` intersects `Middle`, which merges `Shared` as an `allOf` member.
+    assert_member_hint_reported(
+        r##"    Both:
+      $ref: "#/components/schemas/Middle"
+      properties:
+        name: { type: string }
+    Middle:
+      allOf:
+        - $ref: "#/components/schemas/Shared"
+    Shared:
+      allOf:
+        - type: object
+          xml: { prefix: s }
+          properties:
+            id: { type: integer }"##,
+        "prefix",
+    );
+    // Two hops the other way round: `Both` merges `Middle` as an `allOf` member, and `Middle`
+    // intersects `Shared` with its siblings.
+    assert_member_hint_reported(
+        r##"    Both:
+      allOf:
+        - $ref: "#/components/schemas/Middle"
+    Middle:
+      $ref: "#/components/schemas/Shared"
+      properties:
+        name: { type: string }
+    Shared:
+      allOf:
+        - type: object
+          xml: { prefix: s }
+          properties:
+            id: { type: integer }"##,
+        "prefix",
+    );
+}
+
 /// The remote counterpart: `Both` merges a pinned remote document whose own `allOf` member
 /// carries the hint, and that document reaches the body only as `Both`'s `$ref` member, so the
 /// member is judged by `Both`'s XML body rather than by the remote type's own reachability.
 #[test]
 fn a_member_merged_through_a_remote_ref_is_judged_by_the_type_merging_it() {
-    const SHARED_URL: &str = "https://api.example.com/schemas/shared.yaml";
+    assert_remote_member_hint_reported(&format!(
+        r##"    Both:
+      allOf:
+        - $ref: "{SHARED_URL}"
+        - $ref: "#/components/schemas/Pet""##
+    ));
+}
+
+/// The remote `$ref`-with-siblings spelling: `Both` is the pinned remote document intersected
+/// with its shape-bearing siblings, so the remote `allOf` member is judged by `Both`'s XML body
+/// exactly as when `Both` lists that document as an `allOf` member (#1002).
+#[test]
+fn a_member_merged_through_a_remote_ref_with_siblings_is_judged_by_the_type_merging_it() {
+    assert_remote_member_hint_reported(&format!(
+        r##"    Both:
+      $ref: "{SHARED_URL}"
+      properties:
+        name: {{ type: string }}"##
+    ));
+}
+
+const SHARED_URL: &str = "https://api.example.com/schemas/shared.yaml";
+
+/// [`assert_member_hint_reported`] for `schemas` laid out beside a pinned remote document at
+/// [`SHARED_URL`] whose own `allOf` member carries an `xml.namespace` hint, through both the
+/// generating and the check-only pipeline.
+fn assert_remote_member_hint_reported(schemas: &str) {
     const SHARED_PATH: &str = "api.example.com/schemas/shared.yaml";
     const SHARED_YAML: &str = "allOf:\n  - type: object\n    xml: { namespace: \"urn:remote\" }\n    properties:\n      id: { type: integer }\n";
     const SHARED_SHA256: &str = "84ffeec6c43b14582abbb3e46efdac70ec2cec418926d3a2b0b666cdb810b577";
@@ -188,16 +269,10 @@ fn a_member_merged_through_a_remote_ref_is_judged_by_the_type_merging_it() {
         "version = 1\n\n[[remote]]\nurl = \"{SHARED_URL}\"\nsha256 = \"{SHARED_SHA256}\"\npath = \
          \"{SHARED_PATH}\"\n"
     );
-    let schemas = format!(
-        r##"    Both:
-      allOf:
-        - $ref: "{SHARED_URL}"
-        - $ref: "#/components/schemas/Pet""##
-    );
     for check_only in [false, true] {
         assert_member_hint_reported_by(
             |media| {
-                let document = member_document(media, &schemas);
+                let document = member_document(media, schemas);
                 let vendor = [(SHARED_PATH, SHARED_YAML)];
                 let (report, _temp, _out) =
                     super::refs_remote::run_layout(&document, Some(&lock), &vendor, check_only);

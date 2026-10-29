@@ -157,6 +157,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 },
             );
         }
+        // From here the target is composed into the type this schema lowers to, as an `allOf`
+        // member's `$ref` target is into its composition's: a member that target merged is
+        // merged into this schema's type too, and is judged by its reachability (#1002).
+        self.record_ref_sibling_merger(schema, referenced.id);
         // A sibling carrying only object or only array applicators names no `type`, so
         // `lower_schema` would lower it to an object or an array that denies `null` (#613,
         // #614), and before those to `TypeKind::Any` — which intersects as identity,
@@ -286,10 +290,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // parameter or property from the generated client.
             return self.reject_ref_sibling_intersection(schema);
         };
-        // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
-        // beside a non-union sibling is an intersection this check was never meant for, and it
-        // keeps the shape it has always generated.
+        // The met union is collapsed by which union it holds. Beside a `oneOf`/`anyOf` sibling it
+        // is the sibling's, lowered with its merge held back. Beside a non-union sibling it is a
+        // union target met branch by branch (#1014): the target merged the branches alike on
+        // their own when it was lowered, so what is left alike here the sibling made so.
         let intersection = if has_union_sibling {
+            // A union target meets the sibling once per target variant, so the sibling's union is
+            // nested under each, and each nested copy collapses first (#998).
+            let intersection =
+                self.collapse_nested_met_unions(schema, intersection, mark, MetUnion::RefSibling);
             let (collapsed, untyped_check) = self.collapse_met_union(
                 schema,
                 intersection,
@@ -303,7 +312,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             collapsed
         } else {
-            intersection
+            self.collapse_met_target_union(schema, intersection, mark, hint)
         };
         let kind = self.graph.get(intersection.id)?.kind.clone();
         // The `null` the inferred category carries is there to leave the target's nullability

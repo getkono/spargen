@@ -300,11 +300,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Ok(met) = met else {
             return self.reject_ref_sibling_intersection(schema);
         };
-        let kind = self.graph.get(met.id)?.kind.clone();
-        // The meet carries the target's nullability, but for a meet that left only `null`: that
-        // is the exact null type, whose one value is `null` already, so it is not wrapped in an
-        // `Option` as the `allOf` and inline spellings of the same union are not (#450).
-        let nullable = referenced.nullable && !matches!(kind, TypeKind::Null);
+        // The applicators refine the target's branches one by one, so two branches the target
+        // keeps apart can meet to one structure. Those are merged with `W001` as a typed
+        // sibling's meet merges them (#1014), from the target's own `null` answer.
+        let met = Ty {
+            nullable: referenced.nullable,
+            ..met
+        };
+        let collapsed = self.collapse_met_target_union(schema, met, mark, hint);
+        let kind = self.graph.get(collapsed.id)?.kind.clone();
+        // The meet carries the target's nullability, or what the merge settled of it, but for a
+        // meet that left only `null`: that is the exact null type, whose one value is `null`
+        // already, so it is not wrapped in an `Option` as the `allOf` and inline spellings of the
+        // same union are not (#450).
+        let nullable = collapsed.nullable && !matches!(kind, TypeKind::Null);
+        let met = collapsed;
         // The met union is re-emitted under this schema's name, so its own def
         // (`…ReferenceIntersection`) is unused; the branches it met stay where `kind` reaches
         // them (#462).

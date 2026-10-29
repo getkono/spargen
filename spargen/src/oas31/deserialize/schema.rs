@@ -8,7 +8,9 @@ use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::source::{SpannedMap, SpannedValue};
 
 use super::super::schema::DiscriminatorTarget;
-use super::super::{Discriminator, RefOr, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints};
+use super::super::{
+    is_xml_name, Discriminator, RefOr, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
+};
 use super::keywords::{parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS};
 use super::{
     expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
@@ -308,11 +310,28 @@ fn parse_xml(
             }
         }
     }
+    // An `xml.name` becomes an element or attribute name as written. quick-xml refuses to write a
+    // non-empty one that is not an XML name, so a body carrying it would fail at run time, and
+    // writes an empty one as malformed XML (`<>…</>`). The name is checked here, where every `xml` object is read, so the rule does not depend on which
+    // position lowering reads it in or whether an XML body reaches its type.
+    let name = value.get("name").and_then(SpannedValue::as_str);
+    if let Some(name) = name.filter(|name| !is_xml_name(name)) {
+        let at = pointer.push("name");
+        let sibling = value.get("name").unwrap_or(value);
+        Diagnostic::error(Code::InvalidInput, provenance(&at, sibling))
+            .message(if name.is_empty() {
+                "xml.name is empty, which is not an XML name".to_owned()
+            } else {
+                format!("xml.name `{name}` is not an XML name")
+            })
+            .remedy(
+                "use an XML 1.1 name: a letter, `_` or `:` first, then letters, digits, `-`, `.`, \
+                 `_` or `:`",
+            )
+            .emit(diags);
+    }
     Some(XmlHints {
-        name: value
-            .get("name")
-            .and_then(SpannedValue::as_str)
-            .map(str::to_owned),
+        name: name.map(str::to_owned),
         attribute: value.get("nodeType").and_then(SpannedValue::as_str) == Some("attribute")
             || value
                 .get("attribute")

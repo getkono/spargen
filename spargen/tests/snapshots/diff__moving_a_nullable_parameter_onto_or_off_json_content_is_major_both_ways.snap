@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|param-type-changed|GET /pets param `limit` (query)|parameter type `Option<i64>` -> `Option<Option<i64>>`
+bump=major

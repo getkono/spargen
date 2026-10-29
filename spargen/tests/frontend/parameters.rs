@@ -1321,3 +1321,103 @@ paths:
         }
     }
 }
+
+#[test]
+fn an_optional_nullable_json_content_parameter_can_send_an_explicit_null() {
+    // A JSON `content` parameter's codec renders `null` as the text `null`, which a server tells
+    // apart from an absent parameter (#996), so its `…Params` field is `Option<Option<T>>` and its
+    // setter takes `Option<T>`. A nullable schema-styled or `text/*` parameter has no token for
+    // `null`, so it keeps the single `Option`; a required nullable JSON one is the `Option<T>`
+    // argument it always was, its `None` already sent as `null`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: jq
+          in: query
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+        - name: X-Jh
+          in: header
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+        - name: jc
+          in: cookie
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+        - name: X-Th
+          in: header
+          content:
+            text/plain: { schema: { type: [string, 'null'] } }
+        - name: sq
+          in: query
+          schema: { type: [integer, 'null'] }
+        - name: X-Req
+          in: header
+          required: true
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+      responses:
+        "204": { description: No Content }
+  /y:
+    get:
+      operationId: getY
+      parameters:
+        - name: whole
+          in: querystring
+          content:
+            application/json: { schema: { type: [integer, 'null'] } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(report.diagnostics().is_empty(), "no warning: {report:#?}");
+    }
+    let (_, code) = generate_with_code(spec);
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (field, ty) in [
+        ("jq", "Jq"),
+        ("x_jh", "XJh"),
+        ("jc", "Jc"),
+        ("whole", "Whole"),
+    ] {
+        assert!(
+            flat.contains(&format!("pub {field}: Option<Option<types::{ty}>>,")),
+            "{field}: {code}"
+        );
+        assert!(
+            flat.contains(&format!(
+                "pub fn {field}(mut self, value: Option<types::{ty}>) -> Self {{ self.{field} = \
+                 Some(value);"
+            )),
+            "{field}: {code}"
+        );
+    }
+    for (field, ty) in [("x_th", "XTh"), ("sq", "Sq")] {
+        assert!(
+            flat.contains(&format!("pub {field}: Option<types::{ty}>,")),
+            "{field}: {code}"
+        );
+        assert!(
+            flat.contains(&format!(
+                "pub fn {field}(mut self, value: types::{ty}) -> Self"
+            )),
+            "{field}: {code}"
+        );
+    }
+    assert!(flat.contains("x_req: Option<types::XReq>,"), "{code}");
+    assert!(!flat.contains("x_req: Option<Option"), "{code}");
+    // The emitted docs state the three-state contract on each explicit-null field and setter, and
+    // only there: one of each per JSON parameter above, none for the text, styled or required one.
+    for sentence in [
+        "`Some(None)` sends the JSON `null`; `None` omits the parameter.",
+        "`None` sends the JSON `null`; leaving the parameter unset omits it.",
+    ] {
+        assert_eq!(flat.matches(sentence).count(), 4, "{sentence}: {code}");
+    }
+}

@@ -22,6 +22,11 @@
 //!   `anyOf` give one generated nullability, one set of `()` and `Option` arms, and one set of
 //!   excluded-member `W011`s in every spelling of that constraint set.
 //!
+//! * declaration order (#999, [`declaration_order`]): a set of components recursive through an
+//!   `allOf` reaches one verdict, one code multiset and one declaration per schema, up to where a
+//!   recursive field is boxed, in every order its `components.schemas` keys are written in, and
+//!   one verdict again moved into a referenced file.
+//!
 //! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
 //! and each generated union's variants are distinguishable by shape unless a `W001` at the union
 //! says why (#402). Each case of the first three properties moved into a
@@ -33,6 +38,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use proptest::prelude::*;
 use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 
+#[path = "lowering_props/declaration_order.rs"]
+mod declaration_order;
 #[path = "lowering_props/null_parity.rs"]
 mod null_parity;
 mod oracles;
@@ -69,7 +76,8 @@ fn generate_module(spec: &str) -> (Report, String) {
 /// `generate` on the root document at `root`, writing the module beside it, held to
 /// [`oracles::location_violations`] and, when it generates, to [`oracles::unexplained_variants`]
 /// (a union's variants are told apart by shape, or a `W001` at the union says why) and to
-/// [`oracles::unreferenced_copies`] (no unused second lowering of a schema is emitted, #926).
+/// [`oracles::unreferenced_types`] (every emitted type is a component or something names it,
+/// #928).
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
@@ -86,10 +94,10 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
             "a union's variants cannot be told apart and no warning says why: {unexplained:#?}"
         );
         let spec = std::fs::read_to_string(root).unwrap_or_default();
-        let copies = oracles::unreferenced_copies(&source, &spec);
+        let unreferenced = oracles::unreferenced_types(&source, &spec);
         assert!(
-            copies.is_empty(),
-            "a schema lowered twice left its unused copy emitted: {copies:#?}"
+            unreferenced.is_empty(),
+            "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
         );
     }
     (report, source)

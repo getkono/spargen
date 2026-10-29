@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::ir::{Field, MediaType, Operation, TypeGraph, TypeId, TypeKind, XmlField};
-use crate::oas31::{JsonType, Schema, SchemaOr, XmlHints};
+use crate::oas31::{is_xml_name, JsonType, Schema, SchemaOr, XmlHints};
 
 use super::prune::reachable_types;
 use super::LowerCtx;
@@ -110,7 +110,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Note that the composition [`Self::xml_holders`] names last merges `ty`, the type a `$ref`
-    /// member resolved to, so a member merged into `ty` is judged by that composition's type too.
+    /// member, or a `$ref` beside shape-bearing siblings, resolved to, so a member merged into `ty` is judged by that composition's type too.
     pub(super) fn record_xml_merger(&mut self, ty: TypeId) {
         let Some(holder) = self.xml_holders.last().cloned() else {
             return;
@@ -119,6 +119,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !mergers.contains(&holder) {
             mergers.push(holder);
         }
+    }
+
+    /// Note that `schema`, a `$ref` whose shape-bearing siblings are intersected with its target
+    /// `ty`, merges `ty` the way an `allOf` composition merges a `$ref` member's target
+    /// ([`Self::record_xml_merger`]), with `schema` itself as the composition.
+    pub(super) fn record_ref_sibling_merger(&mut self, schema: &Schema, ty: TypeId) {
+        self.with_xml_holder(schema, |ctx| ctx.record_xml_merger(ty));
     }
 
     /// Read the `xml` object of `schema`, a `$ref` whose siblings bear no shape and so resolved to
@@ -323,8 +330,9 @@ fn component_name(pointer: &JsonPointer) -> Option<String> {
 /// The definitions a merged member's `xml` object at `site` is reported against: those at its
 /// composition's site ([`RootXml::holder`]), else at the nearest pointer above it that has any, in
 /// the same document; and, for each of those a `$ref` member of another composition merged
-/// ([`LowerCtx::record_xml_merger`]), that composition's, transitively. None where no definition
-/// encloses it.
+/// ([`LowerCtx::record_xml_merger`]), or a `$ref` intersected with its shape-bearing siblings
+/// ([`LowerCtx::record_ref_sibling_merger`]), that composition's or that `$ref` schema's,
+/// transitively. None where no definition encloses it.
 ///
 /// Each site is looked up among the emitted definitions (`emitted_sites`) and among every
 /// definition, elided ones included (`defined_sites`). A definition the output withholds is still
@@ -381,27 +389,6 @@ fn enclosing_emitted(
         pointer = at.parent();
     }
     Vec::new()
-}
-
-/// Whether `name` is an XML 1.1 `Name` (<https://www.w3.org/TR/xml11/#NT-Name>), the rule quick-xml
-/// holds every element name it writes to. A component key is not held to it: `[a-zA-Z0-9._-]+`
-/// admits a leading digit, `-` or `.`.
-fn is_xml_name(name: &str) -> bool {
-    fn is_start(ch: char) -> bool {
-        matches!(ch,
-            ':' | 'A'..='Z' | '_' | 'a'..='z'
-            | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
-            | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
-            | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
-            | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
-    }
-    fn is_char(ch: char) -> bool {
-        is_start(ch)
-            || matches!(ch,
-                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
-    }
-    let mut chars = name.chars();
-    chars.next().is_some_and(is_start) && chars.all(is_char)
 }
 
 /// Settle every XML hint once the graph is final: suppress `xml.name`/`xml.attribute` renames on

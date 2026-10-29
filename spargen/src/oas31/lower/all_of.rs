@@ -1206,7 +1206,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower `union`, with its own merge held back, meet it with an `allOf`'s `composed` members,
     /// collapse what that meet leaves sharing one generated type, and then meet the result with
-    /// each of its `refiners`; the result is inserted as `schema`'s type under `hint`. The meet
+    /// each of its `refiners` and collapse what they leave alike in turn (#1023); the result is
+    /// inserted as `schema`'s type under `hint`. The meet
     /// shared by [`Self::lower_all_of_beside_union`], [`Self::lower_all_of_with_union_member`] and
     /// [`Self::meet_ref_union_sibling`], whose `composed` is the `$ref` target met with the
     /// keywords beside the union. A union uninhabited on its own (a lone `false` branch) makes the
@@ -1234,7 +1235,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "the union beside the `allOf`",
                 "this `allOf` member's",
             ),
-            MetUnion::RefSibling => (
+            MetUnion::RefSibling | MetUnion::RefTarget => (
                 "the union beside this `$ref`",
                 "the union beside the `$ref`",
                 "this `$ref`'s sibling",
@@ -1273,10 +1274,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Collapsed before the refiners, which meet each branch apart and so would give branches
         // the composition left as one type distinct definitions of the same shape: the refiners
         // constrain every branch of their category alike, so refining the collapsed type admits
-        // the same values.
-        let (collapsed, untyped_check) =
-            self.collapse_met_union(schema, meet, !union.one_of.is_empty(), &meet_hint, spelling);
+        // the same values. A union the meet nested once per variant of a union conjunct collapses
+        // first, so the comparison below reads the variants as they end up (#998).
+        meet = self.collapse_nested_met_unions(schema, meet, mark, spelling);
+        let one_of = !union.one_of.is_empty();
+        let (collapsed, mut untyped_check) =
+            self.collapse_met_union(schema, meet, one_of, &meet_hint, spelling);
         meet = collapsed;
+        let refined = !refiners.is_empty();
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
             let refined_hint = format!("{hint}Refined{index}");
             let met = self.meet_scoped_and_report(
@@ -1305,10 +1310,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             meet = met;
         }
+        // The refiners narrow each branch of their category apart, so two branches the collapse
+        // above kept apart can be refined to one generated type: `a: [string, integer]` and
+        // `a: string` are both `a: String` once an untyped `properties: { a: { type: string } }`
+        // refines them, and a `oneOf` of the two rejects every value. What they leave is
+        // collapsed as the meet itself was (#1023), as the `$ref` spelling of the same
+        // conjunction, `{ $ref: T, properties: … }`, collapses it
+        // ([`Self::collapse_met_target_union`]).
+        if refined {
+            meet = self.collapse_nested_met_unions(schema, meet, mark, spelling);
+            let (collapsed, refined_check) =
+                self.collapse_met_union(schema, meet, one_of, &meet_hint, spelling);
+            meet = collapsed;
+            untyped_check &= refined_check;
+        }
         // A branch the composition excludes is reported as the sibling spelling reports it (#671).
         let conjunct = match spelling {
             MetUnion::AllOfMember => self.null_admission_without(schema, &union.provenance),
-            MetUnion::BesideAllOf | MetUnion::RefSibling => {
+            MetUnion::BesideAllOf | MetUnion::RefSibling | MetUnion::RefTarget => {
                 self.union_sibling_null_admission(schema)
             }
         };

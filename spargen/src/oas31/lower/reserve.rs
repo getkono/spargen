@@ -8,6 +8,7 @@ use crate::ir::{Ty, TypeId, TypeKind};
 use crate::oas31::{RefOr, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
+use super::cycle::{Opening, Via};
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
 use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
@@ -217,7 +218,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(schema) {
             return Some(alias);
         }
-        self.lower_into_reservation(Reservation::Component(name.to_owned()), schema, name)
+        self.lower_into_reservation(Reservation::Component(name.to_owned()), None, schema, name)
     }
 
     /// The two memos `reservation`'s frame keeps, each keyed by [`Reservation::key`]: the types it
@@ -281,10 +282,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower `schema`, the body `reservation` names, once: reserve its root id, lower the body
     /// against that reservation, lift the root def into the reserved slot, and record the finished
     /// type in the frame's memo. The one lifecycle a root component, a remote target and a bundle
-    /// target share; `hint` names the root def.
+    /// target share; `hint` names the root def, and `via` is how a bundle target was opened
+    /// ([`Opening`]).
     fn lower_into_reservation(
         &mut self,
         reservation: Reservation,
+        via: Option<Via>,
         schema: &Schema,
         hint: &str,
     ) -> Option<Ty> {
@@ -306,7 +309,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             reservation.key().to_owned(),
             (root_id, provisional_nullable),
         );
+        self.open_reservations.push(Opening {
+            reservation: reservation.clone(),
+            via,
+        });
         let lowered = self.lower_reserved_body(schema, hint);
+        self.open_reservations.pop();
         self.reservation_memos(&reservation)
             .1
             .remove(reservation.key());
@@ -648,6 +656,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.lower_into_reservation(
             Reservation::Remote(reference.to_owned()),
+            None,
             &schema,
             reference,
         )
@@ -683,7 +692,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nothing repeated can accumulate against it.
     ///
     /// [`MAX_SCHEMA_DEPTH`]: super::MAX_SCHEMA_DEPTH
-    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
+    pub(super) fn ensure_resolved(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+        hint: &str,
+    ) -> Option<Ty> {
         self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
     }
 
@@ -720,6 +734,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // once one type serves every site, a per-site hint would make the generated name depend on
         // lowering order. A whole-file reference has no final pointer token, so the caller's hint
         // stands there.
+        let site_hint = hint;
         let hint = resolved_hint(&schema.provenance, hint);
 
         // A target that is itself a bare `$ref` is an alias with no body to reserve a root for.
@@ -739,7 +754,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(&schema) {
             return Some(alias);
         }
-        self.lower_into_reservation(Reservation::Resolved(key), &schema, &hint)
+        let via = Via {
+            reference: reference.to_owned(),
+            at: at.clone(),
+            hint: site_hint.to_owned(),
+        };
+        self.lower_into_reservation(Reservation::Resolved(key), Some(via), &schema, &hint)
     }
 
     /// Whether this definition is a named component root — reachable by name from anywhere else in
