@@ -7,7 +7,7 @@ use super::{JsonPointer, Span};
 /// location. It is also where [`super::Diagnostic::error`] and [`super::Diagnostic::warning`] place
 /// the diagnostic they begin.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Provenance {
+pub(crate) struct Provenance {
     /// RFC 6901 pointer to the construct.
     pub(crate) pointer: JsonPointer,
     /// Source span, when available.
@@ -16,7 +16,7 @@ pub struct Provenance {
 
 impl Provenance {
     /// Construct provenance from a pointer and optional span.
-    pub fn new(pointer: JsonPointer, span: Option<Span>) -> Self {
+    pub(crate) fn new(pointer: JsonPointer, span: Option<Span>) -> Self {
         Self { pointer, span }
     }
 }

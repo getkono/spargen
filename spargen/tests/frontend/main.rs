@@ -350,7 +350,11 @@ fn assert_no_untyped_value(code: &str) {
     );
 }
 
-/// A diagnostic for the location oracle's own fixtures, at `pointer` with `span` in file `file`.
+/// A warning for the location oracle's own fixtures, at `pointer` with `span` in file `file`.
+///
+/// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, since
+/// a `Diagnostic` reaches a caller from a run, and overwrites every field: what a fixture asserts
+/// on is the values set here, never the run's own.
 fn located(
     code: Code,
     pointer: &str,
@@ -372,9 +376,20 @@ fn located(
             offset: end,
         },
     };
-    let at = spargen::Provenance::new(spargen::JsonPointer::from(pointer), Some(span));
-    let mut diagnostic = Diagnostic::warning(code, at).message(message).build();
+    let mut diagnostic = check("openapi: 3.0.0\n")
+        .diagnostics()
+        .first()
+        .cloned()
+        .expect("an unsupported version is reported");
+    diagnostic.code = code;
+    diagnostic.severity = Severity::Warning;
+    diagnostic.pointer = spargen::JsonPointer::from(pointer);
+    diagnostic.span = Some(span);
+    diagnostic.file = None;
+    diagnostic.message = message.to_owned();
+    diagnostic.remedy = None;
     diagnostic.interpretation = None;
+    diagnostic.claim = OutcomeClaim::Independent;
     diagnostic
 }
 

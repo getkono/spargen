@@ -31,7 +31,7 @@ pub struct Span {
 
 impl Span {
     /// A zero-width span at a single position in `file`.
-    pub fn point(file: FileId, at: Loc) -> Self {
+    pub(crate) fn point(file: FileId, at: Loc) -> Self {
         Self {
             file,
             start: at,
