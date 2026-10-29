@@ -533,8 +533,9 @@ where
 /// comparable and no [`DiffReport`] is produced.
 ///
 /// Each side that failed to lower carries its rejection [`Report`], read through
-/// [`old_spec`](Self::old_spec), [`new_spec`](Self::new_spec), or [`rejections`](Self::rejections)
-/// for every failed side in turn. `diff` never panics on a bad spec.
+/// [`old_report`](Self::old_report), [`new_report`](Self::new_report), or
+/// [`rejections`](Self::rejections) for every failed side in turn. `diff` never panics on a bad
+/// spec.
 #[derive(Debug, Clone)]
 pub struct DiffRejection {
     old: Option<Report>,
@@ -570,12 +571,12 @@ impl std::fmt::Display for Side {
 
 impl DiffRejection {
     /// The old spec's rejection report, if it failed to lower.
-    pub fn old_spec(&self) -> Option<&Report> {
+    pub fn old_report(&self) -> Option<&Report> {
         self.old.as_ref()
     }
 
     /// The new spec's rejection report, if it failed to lower.
-    pub fn new_spec(&self) -> Option<&Report> {
+    pub fn new_report(&self) -> Option<&Report> {
         self.new.as_ref()
     }
 
