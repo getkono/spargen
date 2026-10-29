@@ -296,30 +296,101 @@ components:
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
     let code = std::fs::read_to_string(&out).unwrap();
-    let at = |selector: &str| {
-        assert_eq!(
-            code.matches(selector).count(),
-            1,
-            "{selector} must appear exactly once, as its dispatch arm"
-        );
-        code.find(selector).unwrap()
-    };
+    let (success, error) = dispatch_arms(&code, "get_p");
     // Success dispatch: 200 before 201, though the document lists 201 first.
-    assert!(
-        at("Exact(200u16)") < at("Exact(201u16)"),
+    assert_eq!(
+        success,
+        ["Exact(200)", "Exact(201)"],
         "exact successes must dispatch in ascending code order"
     );
-    // Error classification: 404 < 409 < 4XX < 5XX, each listed after its successor in the document.
-    let errors = [
-        at("Exact(404u16)"),
-        at("Exact(409u16)"),
-        at("Range(4u8)"),
-        at("Range(5u8)"),
-    ];
-    assert!(
-        errors.is_sorted(),
-        "error arms must be exact ascending, then range ascending: {errors:?}"
+    // Error classification: 404 < 409 < 4XX < 5XX, each listed after its successor in the
+    // document, and the `default` the document lists first is the last arm.
+    assert_eq!(
+        error,
+        ["Exact(404)", "Exact(409)", "Range(4)", "Range(5)", "Any"],
+        "error arms must be exact ascending, then range ascending, then `default`"
     );
+}
+
+/// The status selectors of the generated method `name`'s dispatch, in the order its arms test
+/// them: the `if StatusSpec::<selector>.matches(status)` arms of the success branch of its
+/// `if response.status().is_success()`, then those of its error branch, each rendered as the
+/// selector's variant and literal (`Exact(200)`, `Range(4)`, `Any`). Read from the parsed module,
+/// so neither a selector named in a doc comment nor one in another method can stand in for an arm.
+fn dispatch_arms(code: &str, name: &str) -> (Vec<String>, Vec<String>) {
+    fn find_method<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a syn::ImplItemFn> {
+        items.iter().find_map(|item| match item {
+            syn::Item::Impl(block) => block.items.iter().find_map(|member| match member {
+                syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            }),
+            syn::Item::Mod(module) => find_method(&module.content.as_ref()?.1, name),
+            _ => None,
+        })
+    }
+    /// The selector an arm `if <selector>.matches(status) { … }` tests, or `None` for any other
+    /// statement.
+    fn selector(statement: &syn::Stmt) -> Option<String> {
+        let syn::Stmt::Expr(syn::Expr::If(arm), _) = statement else {
+            return None;
+        };
+        let syn::Expr::MethodCall(call) = &*arm.cond else {
+            return None;
+        };
+        if call.method != "matches" {
+            return None;
+        }
+        let (path, literal) = match &*call.receiver {
+            syn::Expr::Path(path) => (&path.path, None),
+            syn::Expr::Call(constructor) => {
+                let syn::Expr::Path(path) = &*constructor.func else {
+                    return None;
+                };
+                let [syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(literal),
+                    ..
+                })] = constructor.args.iter().collect::<Vec<_>>()[..]
+                else {
+                    return None;
+                };
+                (&path.path, Some(literal.base10_digits()))
+            }
+            _ => return None,
+        };
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let [.., spec, variant] = &segments[..] else {
+            return None;
+        };
+        if spec != "StatusSpec" {
+            return None;
+        }
+        Some(match literal {
+            Some(literal) => format!("{variant}({literal})"),
+            None => variant.clone(),
+        })
+    }
+    let file = syn::parse_file(code).expect("a generated module parses");
+    let method = find_method(&file.items, name).unwrap_or_else(|| panic!("no method `{name}`"));
+    let dispatch = method
+        .block
+        .stmts
+        .iter()
+        .find_map(|statement| match statement {
+            syn::Stmt::Expr(syn::Expr::If(dispatch), _) => match &*dispatch.cond {
+                syn::Expr::MethodCall(call) if call.method == "is_success" => Some(dispatch),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{name}` has no `is_success` dispatch"));
+    let arms = |block: &syn::Block| block.stmts.iter().filter_map(selector).collect();
+    let Some((_, otherwise)) = &dispatch.else_branch else {
+        panic!("`{name}`'s dispatch has no error branch");
+    };
+    let syn::Expr::Block(otherwise) = &**otherwise else {
+        panic!("`{name}`'s error branch is not a block");
+    };
+    (arms(&dispatch.then_branch), arms(&otherwise.block))
 }
 
 #[test]
