@@ -289,6 +289,7 @@ impl std::error::Error for Report {}
 /// let build = spargen::Spec::new("api/openapi.yaml").build("src/api.rs");
 /// spargen::generate(&build).expect_success();
 /// ```
+#[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
 pub fn generate(build: &Build) -> Report {
     let cache_dir = cache::cache_dir();
     generate_with_cache_dir(build, cache_dir.as_deref())
@@ -439,6 +440,7 @@ fn prepend(diagnostics: &mut Vec<Diagnostic>, leading: &[Diagnostic]) {
 /// `E023` is catchable before a single line of code is generated. Elsewhere there is no consuming
 /// package to audit — `spargen deps` prints the dependency tables generated output
 /// requires instead.
+#[must_use = "the report carries the outcome and every diagnostic; a rejection is lost unless it is read, e.g. with `.expect_success()`"]
 pub fn check(spec: &Spec) -> Report {
     let result = run_mode(spec, PipelineMode::Requirements);
     let mut report = result.report;
