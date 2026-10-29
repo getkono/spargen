@@ -22,18 +22,27 @@ freestanding either way.
 spargen = { version = "0.5", features = ["remote-fetch"] }
 ```
 
-With neither feature on (the default), the crate links no HTTP client at all, and `generate` and
-`check` cannot reach the network even in principle.
+`reqwest` is an optional dependency of the crate, and `remote-fetch` is the only feature that
+enables it (`cli` reaches it through `remote-fetch`).
+
+`spargen --help` prints the subcommands (a test holds this copy to the binary's output):
 
 ```text
+A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x.
+
 Usage: spargen <COMMAND>
 
 Commands:
   check    Audit a spec's feature support without generating code
-  deps     Print the [dependencies] block generated output from this spec requires
-  lock     Fetch, vendor, and hash-pin remote $refs into spargen.lock (the only networked step)
+  deps     Print the `[dependencies]` block generated output from this spec requires
+  lock     Fetch, vendor, and hash-pin remote `$ref`s into `spargen.lock` (the only networked step)
   explain  Show extended documentation for a diagnostic code
   diff     Report the semver impact of regenerating the client from a newer spec
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
@@ -99,10 +108,10 @@ spargen deps <SPEC> [OPTIONS]
 The block it prints is the block the audit accepts — both read one table, and a test pins that they
 agree. Opt-in dependencies (the blocking client's `tokio`) are printed commented out under the
 Cargo feature that would require them, together with that feature's `[features]` entry
-(`blocking = ["dep:tokio"]`), so uncommenting them is the whole opt-in — except that an entry whose
-`[features]` table, `blocking` key, or dependency table the manifest already declares is merged
-into it, since TOML rejects a table or key defined twice. `--format json` emits the
-same set structurally.
+(`blocking = ["dep:tokio"]`);
+[`Requirements::manifest_block`](https://docs.rs/spargen/latest/spargen/struct.Requirements.html#method.manifest_block),
+which renders the block, states how they are opted into. `--format json` emits the same set
+structurally.
 
 The block is written for the package's own tables, but a workspace member may inherit it instead:
 move each entry, `default-features = false` included, into the root's `[workspace.dependencies]`,
