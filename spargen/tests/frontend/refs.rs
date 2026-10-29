@@ -804,7 +804,7 @@ fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
             );
             let span = diag.span.expect("located at a span");
             assert_eq!(
-                (diag.pointer.as_str(), span.file.0, span.start.line),
+                (diag.pointer.as_str(), span.file.get(), span.start.line),
                 (pointer, file, line),
                 "{target}, check only: {check_only}: {diag:?}"
             );

@@ -351,6 +351,40 @@ fn assert_no_untyped_value(code: &str) {
     );
 }
 
+/// The [`spargen::FileId`]s of a two-file bundle's root document and of the file it references,
+/// in that order, read off the spans of a real run's diagnostics: a `FileId` reaches a caller from
+/// a run, like the `Diagnostic` [`located`] starts from.
+fn bundle_file_ids() -> (spargen::FileId, spargen::FileId) {
+    let (_, checked, _) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Name: { type: string, pattern: '^a' }\n    Pet: { $ref: 'lib.yaml#/Pet' }\n",
+        ),
+        ("lib.yaml", "Pet: { type: string, pattern: '^b' }\n"),
+    ]);
+    let file_of = |name: &str| {
+        checked
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .file
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with(name))
+            })
+            .and_then(|diagnostic| diagnostic.span)
+            .map(|span| span.file)
+            .unwrap_or_else(|| panic!("no diagnostic is located in {name}: {checked:#?}"))
+    };
+    let ids = (file_of("openapi.yaml"), file_of("lib.yaml"));
+    assert_eq!(
+        (ids.0.get(), ids.1.get()),
+        (0, 1),
+        "the root is the first file a bundle loads"
+    );
+    ids
+}
+
 /// A warning for the location oracle's own fixtures, at `pointer` with `span` in file `file`.
 ///
 /// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, since
@@ -359,13 +393,13 @@ fn assert_no_untyped_value(code: &str) {
 fn located(
     code: Code,
     pointer: &str,
-    file: u32,
+    file: spargen::FileId,
     span: (u32, usize, usize),
     message: &str,
 ) -> Diagnostic {
     let (line, start, end) = span;
     let span = spargen::Span {
-        file: spargen::FileId(file),
+        file,
         start: spargen::Loc {
             line,
             col: 1,

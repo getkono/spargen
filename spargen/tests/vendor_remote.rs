@@ -598,7 +598,7 @@ fn a_failed_fetch_is_located_at_the_root_ref_that_names_it() {
 }
 
 /// A failed fetch of a reference inside a fetched document keeps that reference's pointer in
-/// the fetched document's terms, and no span: every scanned document parses as `FileId(0)`, so
+/// the fetched document's terms, and no span: every scanned document parses as file `0`, so
 /// only the root's spans name the file they lie in.
 #[test]
 fn a_failed_fetch_of_a_fetched_documents_ref_is_located_at_its_pointer_without_a_span() {

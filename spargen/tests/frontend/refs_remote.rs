@@ -92,7 +92,7 @@ fn located_at(report: &Report, root: &[u8], code: Code) -> (String, u32) {
     assert!(violations.is_empty(), "{violations:#?}");
     let diag = &report.diagnostics()[0];
     let span = diag.span.expect("located at a span");
-    assert_eq!(span.file.0, 0, "{diag:?}");
+    assert_eq!(span.file.get(), 0, "{diag:?}");
     (diag.pointer.as_str().to_owned(), span.start.line)
 }
 

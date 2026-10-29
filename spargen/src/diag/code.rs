@@ -408,7 +408,14 @@ impl std::str::FromStr for Code {
 
 /// Error returned when a string does not name a known [`Code`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownCode(pub String);
+pub struct UnknownCode(String);
+
+impl UnknownCode {
+    /// The string that named no known [`Code`], as it was given.
+    pub fn code(&self) -> &str {
+        &self.0
+    }
+}
 
 impl std::fmt::Display for UnknownCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

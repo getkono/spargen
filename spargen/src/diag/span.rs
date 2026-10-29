@@ -2,7 +2,15 @@ use serde::Serialize;
 
 /// Identifies a source file within an input bundle (owned by the `source` subsystem).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct FileId(pub u32);
+pub struct FileId(pub(crate) u32);
+
+impl FileId {
+    /// The file's index in its bundle, in load order: the root document, which a bundle loads
+    /// first, is `0`.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
 
 /// A position within a source file: 1-based `line` and `col`, plus the 0-based byte `offset`
 /// (span-preserving parse).
