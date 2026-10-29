@@ -379,3 +379,41 @@ macro_rules! omit {
         omit
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ComponentKind, OmitMethod};
+
+    #[test]
+    fn component_kind_displays_as_its_camel_case_oas_key() {
+        for (kind, text) in [
+            (ComponentKind::Schemas, "schemas"),
+            (ComponentKind::Responses, "responses"),
+            (ComponentKind::Parameters, "parameters"),
+            (ComponentKind::RequestBodies, "requestBodies"),
+            (ComponentKind::Headers, "headers"),
+            (ComponentKind::SecuritySchemes, "securitySchemes"),
+            (ComponentKind::PathItems, "pathItems"),
+            (ComponentKind::MediaTypes, "mediaTypes"),
+        ] {
+            assert_eq!(kind.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn omit_method_displays_as_its_lowercase_path_item_field() {
+        for (method, text) in [
+            (OmitMethod::Get, "get"),
+            (OmitMethod::Put, "put"),
+            (OmitMethod::Post, "post"),
+            (OmitMethod::Delete, "delete"),
+            (OmitMethod::Options, "options"),
+            (OmitMethod::Head, "head"),
+            (OmitMethod::Patch, "patch"),
+            (OmitMethod::Trace, "trace"),
+            (OmitMethod::Query, "query"),
+        ] {
+            assert_eq!(method.to_string(), text);
+        }
+    }
+}
