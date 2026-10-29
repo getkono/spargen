@@ -436,6 +436,7 @@ impl serde::Serialize for ChangeKind {
 
 /// A single classified difference between two surfaces.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct Change {
     /// What kind of change this is.
     pub kind: ChangeKind,
@@ -461,6 +462,7 @@ impl Change {
 /// The result of diffing two surfaces: every classified change (deterministically ordered) and the
 /// overall recommended semver bump (the max impact, or `Patch` when there are no changes).
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct DiffReport {
     /// Every change, sorted most-severe-first then by location and code (deterministic).
     pub changes: Vec<Change>,

@@ -203,6 +203,7 @@ pub(super) fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requi
 
 /// One dependency the consuming package must declare for generated output to compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct RequiredDependency {
     /// The crate name.
     pub name: &'static str,
@@ -255,6 +256,7 @@ impl RequiredDependency {
 /// feature's commented lines uncommented (merged into any table or key the manifest already
 /// declares) for one that does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Requirements {
     /// The dependencies, in manifest order.
     pub dependencies: Vec<RequiredDependency>,
