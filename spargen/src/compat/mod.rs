@@ -69,10 +69,11 @@ impl Omit {
     }
 
     /// Stable fingerprint used in generated provenance headers: FNV-1a 64 over
-    /// the profile's canonical rule encoding (the crate-private `Omit::canonical_encoding`), not over derived [`Hash`](std::hash::Hash), whose byte
-    /// stream std documents as unstable across platforms and compiler releases. The value is
-    /// therefore the same on every host and toolchain for the same rules.
-    pub fn fingerprint(&self) -> String {
+    /// the profile's canonical rule encoding ([`Omit::canonical_encoding`]), not over derived
+    /// [`Hash`](std::hash::Hash), whose byte stream std documents as unstable across platforms
+    /// and compiler releases. The value is therefore the same on every host and toolchain for the
+    /// same rules.
+    pub(crate) fn fingerprint(&self) -> String {
         let mut hasher = Fnv64::new();
         hasher.write(&self.canonical_encoding());
         format!("{:016x}", hasher.finish())
