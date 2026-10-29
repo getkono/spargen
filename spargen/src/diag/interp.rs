@@ -16,7 +16,15 @@ use serde::Serialize;
 ///   disjoint category, or typed trial matching, and a union that none of these can represent is
 ///   rejected rather than degraded to `serde_json::Value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct InterpId(pub u16);
+pub struct InterpId(pub(crate) u16);
+
+impl InterpId {
+    /// The bare number this id renders as `INT-###`: `1` for `INT-001`, the number JSON output
+    /// and the build cache carry.
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
 
 impl std::fmt::Display for InterpId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

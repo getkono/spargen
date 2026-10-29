@@ -29,11 +29,12 @@ fn the_location_oracle_sees_each_lost_location() {
         oracles::location_violations(&[diagnostic], root)
     };
     let at = "/components/schemas/Pet";
+    let (root_file, lib_file) = bundle_file_ids();
     // The three #454 shapes: an empty pointer, an empty name, a span over the whole root.
     let empty_pointer = reasons(located(
         Code::SchemaDefaultNotApplied,
         "",
-        0,
+        root_file,
         (2, 15, 28),
         "m",
     ));
@@ -44,7 +45,7 @@ fn the_location_oracle_sees_each_lost_location() {
     let empty_name = reasons(located(
         Code::SchemaDefaultNotApplied,
         at,
-        0,
+        root_file,
         (2, 15, 28),
         "in ``",
     ));
@@ -55,7 +56,7 @@ fn the_location_oracle_sees_each_lost_location() {
     let whole = reasons(located(
         Code::SchemaDefaultNotApplied,
         at,
-        0,
+        root_file,
         (1, 0, 29),
         "m",
     ));
@@ -64,7 +65,7 @@ fn the_location_oracle_sees_each_lost_location() {
     assert!(reasons(located(
         Code::SchemaDefaultNotApplied,
         at,
-        0,
+        root_file,
         (2, 15, 28),
         "`Pet`"
     ))
@@ -72,7 +73,7 @@ fn the_location_oracle_sees_each_lost_location() {
     assert!(reasons(located(
         Code::SchemaDefaultNotApplied,
         "",
-        1,
+        lib_file,
         (1, 0, 29),
         "m"
     ))
@@ -81,22 +82,22 @@ fn the_location_oracle_sees_each_lost_location() {
     assert!(reasons(located(
         Code::UnsupportedOpenApiVersion,
         "",
-        0,
+        root_file,
         (1, 0, 29),
         "m"
     ))
     .is_empty());
-    assert!(reasons(located(Code::InvalidInput, "", 0, (1, 0, 29), "m")).is_empty());
+    assert!(reasons(located(Code::InvalidInput, "", root_file, (1, 0, 29), "m")).is_empty());
     // So is an `E011` the root document could not be read for (no span), and a syntax error the
     // parser places only at a point of the root.
-    let mut unread = located(Code::InvalidInput, "", 0, (1, 0, 0), "m");
+    let mut unread = located(Code::InvalidInput, "", root_file, (1, 0, 0), "m");
     unread.span = None;
     assert!(reasons(unread).is_empty());
-    assert!(reasons(located(Code::InvalidInput, "", 0, (2, 15, 15), "m")).is_empty());
+    assert!(reasons(located(Code::InvalidInput, "", root_file, (2, 15, 15), "m")).is_empty());
     // An `E011` with an empty pointer whose span covers one construct below the root, such as a
     // mapping key that is not a string, is not about the document as a whole: that construct has
     // a pointer of its own.
-    let key = reasons(located(Code::InvalidInput, "", 0, (2, 15, 16), "m"));
+    let key = reasons(located(Code::InvalidInput, "", root_file, (2, 15, 16), "m"));
     assert_eq!(key.len(), 1, "{key:?}");
     assert!(key[0].contains("the pointer is empty"), "{key:?}");
     // A non-string key is addressed by the mapping that holds it (#923): the empty pointer is its
@@ -104,7 +105,7 @@ fn the_location_oracle_sees_each_lost_location() {
     let non_string = located(
         Code::InvalidInput,
         "",
-        0,
+        root_file,
         (2, 15, 16),
         "YAML object keys must be strings",
     );
@@ -126,7 +127,14 @@ fn the_location_oracle_sees_each_lost_location() {
         "YAML input must contain exactly one document",
     ] {
         assert!(
-            reasons(located(Code::InvalidInput, "", 0, (1, 0, 1), message)).is_empty(),
+            reasons(located(
+                Code::InvalidInput,
+                "",
+                root_file,
+                (1, 0, 1),
+                message
+            ))
+            .is_empty(),
             "{message}"
         );
     }
@@ -134,7 +142,7 @@ fn the_location_oracle_sees_each_lost_location() {
     let quoting = located(
         Code::SchemaDefaultNotApplied,
         at,
-        0,
+        root_file,
         (2, 15, 28),
         "`` is no type",
     );
@@ -147,19 +155,28 @@ fn the_location_oracle_sees_each_lost_location() {
     // Each rule an `E003` or `E021` breaks is a violation of its own (#534), the empty pointer and
     // the whole-root span as much as an empty name.
     for code in [Code::AbsoluteRefUnsupported, Code::VendoredRefDrift] {
-        let all = oracles::location_violations(&[located(code, "", 0, (1, 0, 29), "in ``")], root);
+        let all = oracles::location_violations(
+            &[located(code, "", root_file, (1, 0, 29), "in ``")],
+            root,
+        );
         assert_eq!(all.len(), 3, "{code:?}: {all:?}");
     }
     // An `E022`'s empty pointer is a violation of its own (#533).
     let duplicate = oracles::location_violations(
-        &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
+        &[located(
+            Code::DuplicateObjectKey,
+            "",
+            root_file,
+            (2, 15, 28),
+            "m",
+        )],
         root,
     );
     assert_eq!(duplicate.len(), 1, "{duplicate:?}");
     let unlocated = reasons(located(
         Code::SchemaDefaultNotApplied,
         "",
-        0,
+        root_file,
         (1, 0, 29),
         "m",
     ));

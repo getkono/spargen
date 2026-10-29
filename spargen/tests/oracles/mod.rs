@@ -103,7 +103,7 @@ fn is_document_level(diagnostic: &Diagnostic, root: &[u8], content_end: usize) -
     let Some(span) = diagnostic.span else {
         return true;
     };
-    span.file.0 == 0
+    span.file.get() == 0
         && (span.start.offset == span.end.offset
             || (span.start.line == 1 && span.end.offset >= content_end)
             || diagnostic
@@ -138,7 +138,7 @@ fn root_mapping_holds_a_non_string_key(root: &[u8]) -> bool {
 /// covering the whole root document `root`, and a non-empty pointer unless it lies in a referenced
 /// file. A pointer addresses the file its span lies in, and the root of a referenced file is a
 /// construct of its own (a whole-file `$ref` target); the root of the root document is not. The
-/// root is the first file a bundle loads, `FileId(0)`.
+/// root is the first file a bundle loads, the one whose [`spargen::FileId::get`] is `0`.
 ///
 /// A span covers the whole root when it starts on the first line and runs to the last
 /// non-whitespace byte: the root value's span, which the YAML parser starts at the first value
@@ -154,9 +154,9 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Strin
         .iter()
         .filter(|diagnostic| !is_document_level(diagnostic, root, content_end))
     {
-        let in_root = diagnostic.span.is_none_or(|span| span.file.0 == 0);
+        let in_root = diagnostic.span.is_none_or(|span| span.file.get() == 0);
         let whole_root = diagnostic.span.is_some_and(|span| {
-            span.file.0 == 0
+            span.file.get() == 0
                 && span.start.line == 1
                 && content_end > 0
                 && span.end.offset >= content_end

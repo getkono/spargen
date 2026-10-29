@@ -252,6 +252,26 @@ fn all_codes_round_trip_from_stable_strings() {
     }
 }
 
+/// A string that names no code comes back from [`super::UnknownCode::code`] as it was given, and
+/// is what the error's message names.
+#[test]
+fn an_unknown_code_hands_back_the_string_it_was_given() {
+    let unknown = Code::from_str("e001").unwrap_err();
+    assert_eq!(unknown.code(), "e001");
+    assert_eq!(unknown.to_string(), "unknown diagnostic code: e001");
+}
+
+/// [`crate::diag::InterpId::get`] is the bare number its `INT-###` rendering pads, for each id
+/// [`crate::diag::InterpId`]'s documentation assigns.
+#[test]
+fn an_interpretation_id_gets_the_number_it_renders() {
+    for (code, number) in [("E001", 1), ("W001", 2), ("E007", 3)] {
+        let id = Code::from_str(code).unwrap().interpretation().unwrap();
+        assert_eq!(id.get(), number, "{code}");
+        assert_eq!(id.to_string(), format!("INT-{number:03}"), "{code}");
+    }
+}
+
 /// The Rust identifier of each variant. The match is exhaustive, so a variant added to `Code`
 /// does not compile until it is named here — which is what makes the two tests below closed
 /// over the whole enum rather than over whatever `all()` happens to list.

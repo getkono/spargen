@@ -141,7 +141,7 @@ fn e011_a_yaml_mapping_key_that_is_not_a_string_is_addressed_by_its_mapping() {
             assert_eq!(diag.code, Code::InvalidInput, "{diag:#?}");
             assert_eq!(diag.pointer.as_str(), pointer, "{files:?}: {diag:#?}");
             let span = diag.span.expect("key span");
-            assert_eq!(span.file.0 == 0, in_root, "{files:?}: {diag:#?}");
+            assert_eq!(span.file.get() == 0, in_root, "{files:?}: {diag:#?}");
             assert_eq!(
                 (span.start.line, span.start.col),
                 (line, col),
