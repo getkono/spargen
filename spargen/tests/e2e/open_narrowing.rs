@@ -1,5 +1,6 @@
-//! `open_narrowing`: the generated code for a narrowed problem type, decoding listed and unlisted
-//! values.
+//! `open_narrowing`: the generated code for a narrowed problem type, compiled and linted, decoding
+//! listed and unlisted values. Which positions the option opens, and that it reports nothing of
+//! its own, are lowering decisions pinned in `frontend/open_narrowing.rs` over the same spec.
 
 use super::*;
 
@@ -8,190 +9,7 @@ use super::*;
 /// positions `open_narrowing` leaves closed sit beside them: a union of narrowed problems (`400`),
 /// a narrowing inside a component (`410`), a set narrowed against a `uuid` string in either member
 /// order (`428`, `429`), and a request body.
-const OPEN_NARROWING_SPEC: &str = r##"
-openapi: 3.1.0
-info: { title: Problems, version: 1.0.0 }
-paths:
-  /problems:
-    post:
-      operationId: postProblems
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              allOf:
-                - $ref: "#/components/schemas/Problem"
-                - properties: { type: { const: "https://example.com/probs/request" } }
-      responses:
-        "200":
-          description: a narrowed success body opens too
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties: { type: { const: "https://example.com/probs/none" } }
-        "400":
-          description: a union of narrowed problems stays closed
-          content:
-            application/problem+json:
-              schema:
-                oneOf:
-                  - allOf:
-                      - $ref: "#/components/schemas/Problem"
-                      - properties: { type: { const: "https://example.com/probs/a" } }
-                  - allOf:
-                      - $ref: "#/components/schemas/Problem"
-                      - properties: { type: { const: "https://example.com/probs/b" } }
-        "403":
-          description: the narrowing value is itself a component, which stays closed
-          content:
-            application/problem+json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties: { type: { $ref: "#/components/schemas/ForbiddenType" } }
-        "404":
-          description: not found
-          content:
-            application/problem+json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/Problem"
-                  - properties: { type: { const: "https://example.com/probs/not-found" } }
-        "409":
-          description: conflict, narrowed beside the `$ref`, with a value spelled `other`
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/Problem"
-                properties: { type: { enum: ["https://example.com/probs/conflict", "other"] } }
-        "410":
-          description: a component's narrowing stays closed
-          content:
-            application/problem+json:
-              schema: { $ref: "#/components/schemas/GoneProblem" }
-        "422":
-          description: a response's own set met by a union, the union last, keeps its variants closed
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - { type: string }
-                      - { enum: [a, b, c] }
-                      - oneOf: [{ const: a }, { const: b }]
-        "423":
-          description: the same set with the union first
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - oneOf: [{ const: a }, { const: b }]
-                      - { enum: [a, b, c] }
-                      - { type: string }
-        "424":
-          description: a union that narrows to its one string branch, the union last
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - { type: string }
-                      - { enum: [a, b, c] }
-                      - oneOf: [{ type: string }, { type: integer }]
-        "425":
-          description: the same union with the union first
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - oneOf: [{ type: string }, { type: integer }]
-                      - { enum: [a, b, c] }
-                      - { type: string }
-        "426":
-          description: a union keeping a plain string branch beside another, the union last
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - { type: string }
-                      - { enum: [a, b, c] }
-                      - oneOf: [{ const: a }, { type: string }]
-        "427":
-          description: the same union with the union first
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - oneOf: [{ const: a }, { type: string }]
-                      - { enum: [a, b, c] }
-                      - { type: string }
-        "428":
-          description: a set narrowed against a uuid string after a plain string opened it
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - { type: string }
-                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
-                      - { type: string, format: uuid }
-        "429":
-          description: the same set with the uuid string first and the plain string last
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [kind]
-                properties:
-                  kind:
-                    allOf:
-                      - { type: string, format: uuid }
-                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
-                      - { type: string }
-components:
-  schemas:
-    Problem:
-      type: object
-      required: [type, title]
-      properties:
-        type: { type: string }
-        title: { type: string }
-        detail: { type: string }
-    GoneProblem:
-      allOf:
-        - $ref: "#/components/schemas/Problem"
-        - properties: { type: { const: "https://example.com/probs/gone" } }
-    ForbiddenType:
-      const: "https://example.com/probs/forbidden"
-"##;
+const OPEN_NARROWING_SPEC: &str = include_str!("specs/open_narrowing.yaml");
 
 #[test]
 fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
@@ -199,59 +17,11 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     let spec = temp.path().join("problems.yaml");
     std::fs::write(&spec, OPEN_NARROWING_SPEC).unwrap();
 
-    // The option off: the narrowing is exact, as before.
-    let closed = temp.path().join("closed");
-    let report = generate_fixture_crate(&spec, &closed, "closed_problems");
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    let generated = std::fs::read_to_string(closed.join("src/lib.rs")).unwrap();
-    assert!(
-        !generated.contains("Other(String)"),
-        "without the option no set is open:\n{generated}"
-    );
-
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "open_problems", "2021", |spec| {
         spec.open_narrowing(true)
     });
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    // The option reports nothing of its own. The `424`/`425` unions' `integer` branch, which the
-    // `type: string` member excludes, is reported (`W011`) as the sibling spelling reports it
-    // (#671), with the option on or off.
-    let reported: Vec<(&str, &str)> = report
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.pointer.as_str()))
-        .collect();
-    assert_eq!(
-        reported,
-        [
-            (
-                "W011",
-                "/paths/~1problems/post/responses/424/content/application~1json/schema/properties/\
-                 kind"
-            ),
-            (
-                "W011",
-                "/paths/~1problems/post/responses/425/content/application~1json/schema/properties/\
-                 kind"
-            ),
-        ],
-        "the option reports nothing of its own: {report:#?}"
-    );
-    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
-    // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
-    // `424` and `425` open in place too, as intermediates no field uses, which the output does not
-    // carry (#924). The union members of `422`, `423`, `426`, and `427`, which keep two branches,
-    // are met first in either order (#678), so those members meet them into closed branch sets as
-    // they are written, opening nothing (`tests/open.rs` decodes both). The `428`/`429` `kind`,
-    // narrowed against a `uuid` string, stays closed in either order. Only an open enum emits
-    // `as_str`.
-    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
-    assert_eq!(
-        generated.matches("pub fn as_str(&self) -> &str").count(),
-        6,
-        "{generated}"
-    );
 
     let status = fixture_cargo(&out)
         .args(["clippy", "--all-targets", "--", "-D", "warnings"])

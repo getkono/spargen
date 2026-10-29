@@ -1,0 +1,182 @@
+openapi: 3.1.0
+info: { title: Problems, version: 1.0.0 }
+paths:
+  /problems:
+    post:
+      operationId: postProblems
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Problem"
+                - properties: { type: { const: "https://example.com/probs/request" } }
+      responses:
+        "200":
+          description: a narrowed success body opens too
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/none" } }
+        "400":
+          description: a union of narrowed problems stays closed
+          content:
+            application/problem+json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/a" } }
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/b" } }
+        "403":
+          description: the narrowing value is itself a component, which stays closed
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { $ref: "#/components/schemas/ForbiddenType" } }
+        "404":
+          description: not found
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/not-found" } }
+        "409":
+          description: conflict, narrowed beside the `$ref`, with a value spelled `other`
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+                properties: { type: { enum: ["https://example.com/probs/conflict", "other"] } }
+        "410":
+          description: a component's narrowing stays closed
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/GoneProblem" }
+        "422":
+          description: a response's own set met by a union, the union last, keeps its variants closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { const: b }]
+        "423":
+          description: the same set with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { const: b }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "424":
+          description: a union that narrows to its one string branch, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ type: string }, { type: integer }]
+        "425":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ type: string }, { type: integer }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "426":
+          description: a union keeping a plain string branch beside another, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { type: string }]
+        "427":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { type: string }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "428":
+          description: a set narrowed against a uuid string after a plain string opened it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string, format: uuid }
+        "429":
+          description: the same set with the uuid string first and the plain string last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string, format: uuid }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string }
+components:
+  schemas:
+    Problem:
+      type: object
+      required: [type, title]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        detail: { type: string }
+    GoneProblem:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - properties: { type: { const: "https://example.com/probs/gone" } }
+    ForbiddenType:
+      const: "https://example.com/probs/forbidden"
