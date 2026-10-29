@@ -32,15 +32,12 @@ fn every_runtime_type_in_a_signature_is_nameable() {
             None
         }
     }
-    fn shape(shape: basic_client::HeaderShape) -> basic_client::HeaderShape {
-        shape
-    }
     // `ApiErrorBody` is the bound a caller writes to be generic over operations' error bodies.
     fn body_of<E: basic_client::ApiErrorBody>(error: &E) -> Option<&E::Body> {
         error.body()
     }
     // Naming each type above is the assertion; binding the items keeps them from reading as dead.
-    let _ = (header_result, core, timeout_kind, config, shape);
+    let _ = (header_result, core, timeout_kind, config);
     let _ = body_of::<basic_client::GetTextErrorError>;
     let _: &dyn basic_client::RetryPolicy = &NeverRetry;
 }
