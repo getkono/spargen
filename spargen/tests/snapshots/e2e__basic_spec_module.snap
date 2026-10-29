@@ -11,11 +11,11 @@ expression: basic_spec_module(|spec| spec)
 #[allow(unused_imports)]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
-    Error, ExecuteFuture, ExposeSecret, HeaderError, HeaderShape, HttpBackend,
-    LinkPaginator, Middleware, MiddlewareBackend, Next, ProblemDetails, ProtocolError,
-    RedirectError, RequestCause, RequestError, ReqwestBackend, ResponseValue,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-    TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
+    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, LinkPaginator,
+    Middleware, MiddlewareBackend, Next, ProblemDetails, ProtocolError, RedirectError,
+    RequestCause, RequestError, ReqwestBackend, ResponseValue, RetryBackend,
+    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
+    TokenProvider, TransportError, exponential_backoff, next_link,
 };
 #[allow(unused_imports)]
 pub use support::{

@@ -145,7 +145,10 @@ pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
 /// types gets none). `ApiErrorProblem` is the bound `Error::problem` needs, implemented by every
-/// error shape, and `ProblemDetails` is what that reader returns.
+/// error shape, and `ProblemDetails` is what that reader returns. The list follows signatures, not
+/// bodies: a runtime item the output names only inside a function body, such as the `HeaderShape`
+/// each `…Headers::from_headers` passes to the header readers, is spelled `support::…` there and
+/// stays on the private side.
 ///
 /// `codegen` emits the root `pub use` from these lists and the root scope [`allocate`] draws the
 /// operation types from reserves them, so the two read one source.
@@ -162,7 +165,6 @@ pub(crate) const ROOT_REEXPORTS: &[&str] = &[
     "ExecuteFuture",
     "ExposeSecret",
     "HeaderError",
-    "HeaderShape",
     "HttpBackend",
     "LinkPaginator",
     "Middleware",
