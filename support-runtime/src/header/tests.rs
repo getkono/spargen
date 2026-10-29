@@ -319,3 +319,67 @@ proptest::proptest! {
         }
     }
 }
+
+/// Header text a `simple` token can hold verbatim: visible ASCII, which `HeaderValue` accepts,
+/// without `,`, which `simple` gives no escape for. `excluded` names further bytes to keep out.
+fn token(excluded: &'static [u8]) -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::strategy::Strategy;
+    proptest::collection::vec(0x21u8..=0x7e, 0..6).prop_map(move |bytes| {
+        bytes
+            .into_iter()
+            .filter(|byte| *byte != b',' && !excluded.contains(byte))
+            .map(char::from)
+            .collect()
+    })
+}
+
+/// Write `value` with `serialize_simple` under `explode`, then read it back with
+/// `require_header` under `shape` and the same `explode`.
+fn round_trip<T: serde::Serialize + DeserializeOwned>(
+    value: &T,
+    shape: HeaderShape,
+    explode: bool,
+) -> Result<T, HeaderError> {
+    let written = serialize_simple(value, explode, PercentEncoding::Passthrough).unwrap();
+    require_header(
+        &headers(&[("x-value", &written)]),
+        "x-value",
+        shape,
+        explode,
+    )
+}
+
+proptest::proptest! {
+    /// The module's stated law: parsing is the inverse of `serialize_simple`, for every value
+    /// `simple` can carry losslessly — a scalar of each JSON type, a non-empty array whose
+    /// strings hold no `,`, and an object whose keys and values hold neither `,` nor `=` —
+    /// under both `explode` settings. A string spelling a number or a boolean stays a string.
+    #[test]
+    fn require_header_inverts_serialize_simple(
+        text in token(b""),
+        unsigned in proptest::num::u64::ANY,
+        signed in proptest::num::i64::ANY,
+        flag in proptest::bool::ANY,
+        texts in proptest::collection::vec(token(b""), 1..5),
+        numbers in proptest::collection::vec(proptest::num::i64::ANY, 1..5),
+        members in proptest::collection::btree_map(token(b"="), token(b"="), 0..5),
+        explode in proptest::bool::ANY,
+    ) {
+        proptest::prop_assert_eq!(round_trip(&text, HeaderShape::Scalar, explode).unwrap(), text);
+        proptest::prop_assert_eq!(
+            round_trip(&unsigned, HeaderShape::Scalar, explode).unwrap(),
+            unsigned
+        );
+        proptest::prop_assert_eq!(round_trip(&signed, HeaderShape::Scalar, explode).unwrap(), signed);
+        proptest::prop_assert_eq!(round_trip(&flag, HeaderShape::Scalar, explode).unwrap(), flag);
+        proptest::prop_assert_eq!(round_trip(&texts, HeaderShape::Array, explode).unwrap(), texts);
+        proptest::prop_assert_eq!(
+            round_trip(&numbers, HeaderShape::Array, explode).unwrap(),
+            numbers
+        );
+        proptest::prop_assert_eq!(
+            round_trip(&members, HeaderShape::Object, explode).unwrap(),
+            members
+        );
+    }
+}
