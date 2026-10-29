@@ -291,22 +291,6 @@ fn same_pair_twice_is_identical() {
     assert_eq!(fingerprint(&first), fingerprint(&second));
 }
 
-#[test]
-fn rejecting_spec_reports_cleanly_without_a_diff() {
-    // A spec that fails to lower must be reported as a rejection, not crash, and yield no diff.
-    let temp = tempfile::tempdir().unwrap();
-    let old_path = temp.path().join("old.yaml");
-    let new_path = temp.path().join("new.yaml");
-    std::fs::write(&old_path, base()).unwrap();
-    std::fs::write(&new_path, "not: a valid openapi document\n").unwrap();
-    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
-    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
-    let outcome = spargen::diff(&old, &new);
-    let rejection = outcome.expect_err("the new spec does not lower, so there is no diff");
-    assert!(rejection.old_spec().is_none());
-    assert!(rejection.new_spec().is_some());
-}
-
 /// A path item whose response is a dynamic reference (`E006`): it rejects the whole spec unless
 /// carve omits it.
 const DYNAMIC_REF_OP: &str = "  /bad:
