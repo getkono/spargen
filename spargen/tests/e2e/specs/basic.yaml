@@ -1413,6 +1413,22 @@ components:
             fins: { type: integer }
       discriminator:
         propertyName: petType
+    # An internally tagged Rust enum's OpenAPI output (#1001): every member inline, each pinning the
+    # required tag property to one value, which selects it and is the tag it writes.
+    Channel:
+      oneOf:
+        - type: object
+          required: [type, url]
+          properties:
+            type: { type: string, const: webhook }
+            url: { type: string }
+        - type: object
+          required: [type, url]
+          properties:
+            type: { type: string, enum: [apprise] }
+            url: { type: string }
+      discriminator:
+        propertyName: type
     # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
     # or wrapper — the active variant's inner value is emitted directly.
     StringOrList:

@@ -1029,7 +1029,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 // A member that is no component — inline, or a pointer into another schema — has
-                // no implicit value, and with no mapping entry naming it no tag selects it;
+                // no implicit value, and with no mapping entry naming it and no tag property
+                // pinning a free value of its own, no tag selects it;
                 // inventing a tag for it would be one no server sends. Where no variant carries a
                 // tag at all, the discriminator dispatches nothing, and the members' own schemas
                 // decode the union, as for one with no discriminator. Otherwise the tagged

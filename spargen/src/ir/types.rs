@@ -506,7 +506,9 @@ pub(crate) enum UnionStrategy {
         tag_field: String,
         /// Every tag value that selects each variant, parallel to [`Union::variants`], in dispatch
         /// order: each `mapping` key naming the variant's member in document order, then its
-        /// implicit component name unless a `mapping` key claims that value. Deserialization
+        /// implicit component name unless a `mapping` key claims that value, or, for a member with
+        /// neither, the one string its required tag property pins, unless something else claims
+        /// it. Deserialization
         /// accepts every entry; serialization writes the first. Empty for a variant routed by
         /// `categories`, for an object variant reached only as the `default_variant` fallback, and
         /// for an `untagged` variant.
