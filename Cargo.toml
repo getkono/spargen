@@ -60,11 +60,23 @@ sha2 = "0.10"
 # `cargo bench`.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
+# Full debug info is what makes `target/` grow during fast iteration, so dev (and `test`, which
+# inherits both tables below) keeps only what a backtrace reads: workspace libraries, binaries and
+# tests keep line tables, so their backtrace frames still name file:line; dependencies keep no
+# debug info, so their frames still name the function where it was not inlined (from the symbol
+# table) but generally lose file:line. Build scripts and `spargen-macro` follow Cargo's
+# `build-override` default, as before. Release is untouched. For full debug info, override one
+# build rather than editing this: `CARGO_PROFILE_DEV_DEBUG=2` covers the workspace crates, and
+# `cargo --config 'profile.dev.package."*".debug=2' …` the dependencies; pass both for everything.
+[profile.dev]
+debug = "line-tables-only"
+
 # The test suites run the generator in-process thousands of times, mostly inside dependency code
 # (jsonschema, syn/prettyplease, serde_json); at opt-level 0 that made them ~2.5x slower. `"*"`
 # matches only non-workspace packages, so spargen itself keeps fast rebuilds and debug assertions.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 strip = true
