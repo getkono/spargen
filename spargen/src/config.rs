@@ -254,8 +254,9 @@ impl Spec {
 /// Both need a real build-script process (`OUT_DIR` and friends in the environment). Outside
 /// one — a test, a CLI wrapper, an ad-hoc binary — spargen cannot emit directives Cargo would
 /// read, nor find the manifest to audit. This enum makes that a decision rather than a silent
-/// degradation.
+/// degradation. `#[non_exhaustive]`, so a policy can be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CargoIntegration {
     /// Integrate when running under a build script, degrading with `W012` (audit skipped) when
     /// that build script locates no consumer manifest; outside a build script, degrade with
