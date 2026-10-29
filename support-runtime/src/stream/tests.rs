@@ -1036,3 +1036,119 @@ fn max_stream_frame_defaults_to_sixteen_mebibytes() {
     let stream: EventStream<serde_json::Value> = EventStream::new(response(""), Framing::Ndjson);
     assert_eq!(stream.max_frame, 16 * 1024 * 1024);
 }
+
+/// A body that is ready with each of its chunks in turn, then ends.
+struct Chunks(VecDeque<bytes::Bytes>);
+
+impl futures_core::Stream for Chunks {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.get_mut().0.pop_front().map(Ok))
+    }
+}
+
+/// What a caller observes from a stream: each item, as its decoded value or the frame a
+/// `Decode` error carries, then the SSE metadata the stream ends holding.
+type Observed = (
+    Vec<Result<serde_json::Value, Vec<u8>>>,
+    Option<String>,
+    Option<std::time::Duration>,
+);
+
+/// Drive an `EventStream` poll-once over `body` delivered as the given chunks.
+fn observe(chunks: Vec<Vec<u8>>, framing: Framing) -> Observed {
+    let body =
+        reqwest::Body::wrap_stream(Chunks(chunks.into_iter().map(bytes::Bytes::from).collect()));
+    let response = reqwest::Response::from(
+        http::Response::builder()
+            .status(200)
+            .body(body)
+            .expect("valid synthetic response"),
+    );
+    let mut stream: EventStream<serde_json::Value> = EventStream::new(response, framing);
+    let mut items = Vec::new();
+    while let Some(item) = poll_ready(stream.next()) {
+        items.push(item.map_err(|error| match error {
+            Error::Decode { body, .. } => body.to_vec(),
+            other => panic!("only a decode error is expected: {other:?}"),
+        }));
+    }
+    (
+        items,
+        stream.last_event_id().map(str::to_owned),
+        stream.reconnect_delay(),
+    )
+}
+
+/// Body bytes assembled from the fragments every framing's grammar turns on — line endings,
+/// the record separator, SSE fields and comments, the `[DONE]` sentinel, JSON values valid and
+/// not — plus arbitrary bytes, so a split can fall inside or between any of them.
+fn framed_body() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::strategy::Strategy;
+    let fragment = proptest::prop_oneof![
+        proptest::sample::select(vec![
+            &b"\n"[..],
+            b"\r\n",
+            b"\r",
+            b"\x1e",
+            b"data: ",
+            b"data:",
+            b"id: 7",
+            b"id:",
+            b"retry: 25",
+            b"event: tick",
+            b": comment",
+            b"[DONE]",
+            b"{\"a\":1}",
+            b"[1,2]",
+            b"{\"a\":",
+            b"}",
+            b"null",
+            b" ",
+        ])
+        .prop_map(<[u8]>::to_vec),
+        proptest::collection::vec(proptest::num::u8::ANY, 1..3),
+    ];
+    proptest::collection::vec(fragment, 0..24).prop_map(|fragments| fragments.concat())
+}
+
+const FRAMINGS: [Framing; 5] = [
+    Framing::Ndjson,
+    Framing::Sse,
+    Framing::SseEvent,
+    Framing::SseJsonData,
+    Framing::JsonSequence,
+];
+
+proptest::proptest! {
+    /// Partial frames are carried across chunks: under every framing, a body split at
+    /// arbitrary points — empty chunks included — yields the same items, decode errors, and
+    /// SSE metadata as the same bytes delivered in one chunk, and never panics.
+    #[test]
+    fn a_body_frames_the_same_however_it_is_split_into_chunks(
+        body in framed_body(),
+        cuts in proptest::collection::vec(proptest::num::usize::ANY, 0..8),
+        framing in proptest::sample::select(FRAMINGS.to_vec()),
+    ) {
+        let mut cuts: Vec<usize> = cuts.into_iter().map(|cut| cut % (body.len() + 1)).collect();
+        cuts.sort_unstable();
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        for cut in cuts {
+            chunks.push(body[start..cut].to_vec());
+            start = cut;
+        }
+        chunks.push(body[start..].to_vec());
+        proptest::prop_assert_eq!(
+            observe(chunks, framing),
+            observe(vec![body.clone()], framing),
+            "{:?} {:?}",
+            framing,
+            body
+        );
+    }
+}
