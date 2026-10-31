@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.5.0...spargen-macro-v0.6.0) - 2026-10-31
+
+### Added
+
+- open const-narrowed response strings, and read problem details across operations ([#396](https://github.com/getkono/spargen/pull/396))
+
+### Fixed
+
+- *(macro)* render generate_api! failures with the shared diagnostic display ([#894](https://github.com/getkono/spargen/pull/894))
+- rerun build.rs and re-expand generate_api! when an applied spargen.toml changes ([#836](https://github.com/getkono/spargen/pull/836))
+- *(compat)* name every accepted value in an unknown omit token's error ([#819](https://github.com/getkono/spargen/pull/819))
+- *(macro)* fail loudly instead of auditing ./Cargo.toml when Cargo names no crate ([#338](https://github.com/getkono/spargen/pull/338))
+
+### Other
+
+- move misplaced tests into the suites CLAUDE.md assigns them to ([#1060](https://github.com/getkono/spargen/pull/1060))
+- *(spargen-macro)* pin the spargen dependency exactly ([#1053](https://github.com/getkono/spargen/pull/1053))
+- bring the README, book and macro README into line with the code ([#1046](https://github.com/getkono/spargen/pull/1046))
+- *(macro)* expect the file-qualified span in rendered failures ([#911](https://github.com/getkono/spargen/pull/911))
+- *(macro)* parse the generated module and its tracking items once ([#890](https://github.com/getkono/spargen/pull/890))
+- state the feature and gate setup the manifests, gate comments and examples describe as it is ([#880](https://github.com/getkono/spargen/pull/880))
+- *(macro)* pin generate_api!'s failure text, config discovery, rebuild tracking and argument errors ([#803](https://github.com/getkono/spargen/pull/803))
+- cut duplicated and narrative prose from AGENTS.md, README and the book ([#548](https://github.com/getkono/spargen/pull/548))
+- pin the exact diff, carve, macro and e2e outcomes their fixtures name ([#530](https://github.com/getkono/spargen/pull/530))
+- make the docs' claims true: link gate, samples, install pins, stale counts ([#506](https://github.com/getkono/spargen/pull/506))
+
 ## [0.5.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.4.0...spargen-macro-v0.5.0) - 2026-09-24
 
 ### Other
