@@ -78,6 +78,55 @@ impl Spec {
         &self.path
     }
 
+    // A setter holds each knob's plain name, so the getter that reads it back adds the setter's
+    // parameter name (`uuid(enabled)` ⇒ `uuid_enabled`, `batch_cap(count)` ⇒ `batch_cap_count`).
+    // `omit(omit)` would double the word, so its getter is `omissions`.
+
+    /// Whether `format: uuid` maps to `uuid::Uuid`, as [`uuid`](Self::uuid) set it.
+    pub fn uuid_enabled(&self) -> bool {
+        self.uuid
+    }
+
+    /// Whether `format: date-time`/`date` map to the RFC 3339 newtypes, as [`time`](Self::time)
+    /// set it.
+    pub fn time_enabled(&self) -> bool {
+        self.time
+    }
+
+    /// The compatibility omissions, in chained order: [`omit`](Self::omit) replaces the set, and
+    /// [`omit_rule`](Self::omit_rule) and each applied config file append to it.
+    pub fn omissions(&self) -> &Omit {
+        &self.omit
+    }
+
+    /// The cap on retained error-body bytes, as [`error_body_cap`](Self::error_body_cap) set it.
+    pub fn error_body_cap_bytes(&self) -> usize {
+        self.error_body_cap
+    }
+
+    /// The cap on diagnostics collected before batching stops, as
+    /// [`batch_cap`](Self::batch_cap) set it.
+    pub fn batch_cap_count(&self) -> usize {
+        self.batch_cap
+    }
+
+    /// Whether auto-carve is on, as [`carve`](Self::carve) set it.
+    pub fn carve_enabled(&self) -> bool {
+        self.carve
+    }
+
+    /// Whether a narrowing string `enum`/`const` lowers as an open set, as
+    /// [`open_narrowing`](Self::open_narrowing) set it.
+    pub fn open_narrowing_enabled(&self) -> bool {
+        self.open_narrowing
+    }
+
+    /// Every config file applied through [`config_file`](Self::config_file) or
+    /// [`discover_config_file`](Self::discover_config_file), in the order applied.
+    pub fn config_files(&self) -> &[Utf8PathBuf] {
+        &self.config_files
+    }
+
     /// Map `format: uuid` to `uuid::Uuid` (default `true`). Turning this off falls back to
     /// `String` — a deliberate, documented loss of typing that also drops `uuid` from the
     /// dependencies generated output requires.
@@ -310,6 +359,11 @@ impl Build {
     /// Where the generated module is written.
     pub fn output(&self) -> &Utf8Path {
         &self.output
+    }
+
+    /// How this build interacts with Cargo, as [`cargo`](Self::cargo) set it.
+    pub fn cargo_integration(&self) -> CargoIntegration {
+        self.cargo
     }
 }
 
