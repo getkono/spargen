@@ -19,6 +19,42 @@ fn renaming_an_operation_id_renames_the_method_and_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+#[test]
+fn an_added_operation_taking_an_accessor_name_renames_the_accessor_and_is_major() {
+    // `listPetsUrl`'s method spells `list_pets`'s `{method}_url` accessor. Operation methods keep
+    // their names, so the existing accessor yields to a suffixed spelling: an addition that breaks
+    // every caller of `list_pets_url`.
+    let added = "  /pets/url:
+    get:
+      operationId: listPetsUrl
+      responses:
+        '204':
+          description: none
+";
+    let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let new = full(
+        &format!("{}{added}", pets_get("listPets", "", PET_REF)),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::MethodRenamed, ChangeKind::OperationAdded],
+        "{:?}",
+        report.changes
+    );
+    let renamed = &report.changes[0];
+    assert_eq!(renamed.location, "GET /pets");
+    assert!(
+        renamed
+            .detail
+            .starts_with("URL accessor renamed `list_pets_url` -> `list_pets_url_"),
+        "{}",
+        renamed.detail
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 const REQUEST_BODY_PET: &str = "      requestBody:
         required: true
         content:

@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /pets|URL accessor renamed `list_pets_url` -> `list_pets_url_cd0eec77`
+minor|operation-added|GET /pets/url|new operation
+bump=major
