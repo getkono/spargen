@@ -376,6 +376,19 @@ paths:
       responses: { "204": { description: OK } }
 "##;
 
+/// [`ONE_OPERATION`] with a validation-only `minLength`, which lowers with one `W001`.
+const WARNED: &str = r##"
+openapi: 3.1.0
+info: { title: Pets, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - { name: q, in: query, schema: { type: string, minLength: 1 } }
+      responses: { "204": { description: OK } }
+"##;
+
 /// A 3.0 document, which every subcommand that lowers a spec rejects with `E001`.
 const REJECTED: &str = "openapi: 3.0.3\ninfo: { title: Old, version: 1.0.0 }\npaths: {}\n";
 
@@ -642,6 +655,45 @@ fn deps_json_carries_the_dependencies_or_the_rejection_on_stdout() {
         ("rejected", vec!["E001"]),
         "{stdout}"
     );
+}
+
+/// `deps` and `diff` over a spec that lowers with a warning still succeed, print their result on
+/// stdout exactly as for a clean spec, and print the warning on stderr in the requested format
+/// (#1043).
+#[test]
+fn deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let warned = write_spec(temp.path(), "warned.yaml", WARNED);
+    let clean = write_spec(temp.path(), "clean.yaml", ONE_OPERATION);
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("reqwest"), "{stdout}");
+    assert!(
+        stderr.contains("spargen: clean") && stderr.contains("warning[W001]"),
+        "{stderr}"
+    );
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned, "--format", "json"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(json(&stdout)["dependencies"].is_array(), "{stdout}");
+    assert_eq!(outcome_and_codes(&json(&stderr)), ("clean", vec!["W001"]));
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["diff", &clean, &warned]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("recommended bump:"), "{stdout}");
+    assert!(
+        stderr.starts_with("new spec:\nspargen: clean\n") && stderr.contains("warning[W001]"),
+        "only the side that warned is reported: {stderr}"
+    );
+
+    let (status, stdout, stderr) =
+        spargen(temp.path(), &["diff", &clean, &warned, "--format", "json"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(json(&stdout)["bump"].is_string(), "{stdout}");
+    let sides = json(&stderr);
+    assert_eq!(outcome_and_codes(&sides["old"]), ("clean", vec![]));
+    assert_eq!(outcome_and_codes(&sides["new"]), ("clean", vec!["W001"]));
 }
 
 #[test]

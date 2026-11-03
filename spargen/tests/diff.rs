@@ -489,6 +489,46 @@ fn a_rejection_names_exactly_the_sides_that_failed() {
     assert_eq!(value["old"], serde_json::to_value(old_report).unwrap());
 }
 
+/// A diff whose sides both lower returns each side's lowering report beside the diff: a warning
+/// one side emits reaches the caller under that side's label (#1043), in the accessors, `reports`,
+/// `Display` and the JSON keys alike, and a side that emitted nothing renders nothing.
+#[test]
+fn a_successful_diff_keeps_each_sides_warnings() {
+    let validated = "        id: { type: integer, minimum: 1 }\n        name: { type: string }\n";
+    let temp = tempfile::tempdir().unwrap();
+    let old_path = temp.path().join("old.yaml");
+    let new_path = temp.path().join("new.yaml");
+    std::fs::write(&old_path, base()).unwrap();
+    std::fs::write(&new_path, spec("", "id", validated, "")).unwrap();
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+
+    let (report, sides) = spargen::diff(&old, &new).expect("both specs should lower");
+    assert_eq!(report.bump, Impact::Patch, "{report}");
+
+    let old_report = sides.old_report();
+    let new_report = sides.new_report();
+    assert_eq!(old_report.outcome(), spargen::Outcome::Clean);
+    assert_eq!(new_report.outcome(), spargen::Outcome::Clean);
+    assert!(old_report.diagnostics().is_empty(), "{old_report:#?}");
+    let warnings: Vec<_> = new_report
+        .warnings()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(warnings, ["W001"], "{new_report:#?}");
+    assert!(!new_report.has_errors(), "{new_report:#?}");
+
+    let labels: Vec<_> = sides.reports().map(|(side, _)| side.as_str()).collect();
+    assert_eq!(labels, ["old", "new"]);
+    assert_eq!(sides.to_string(), format!("new spec:\n{new_report}"));
+
+    let value = serde_json::to_value(&sides).unwrap();
+    let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys.len(), 2, "{value}");
+    assert_eq!(value["old"], serde_json::to_value(old_report).unwrap());
+    assert_eq!(value["new"], serde_json::to_value(new_report).unwrap());
+}
+
 /// A report carrying breaking and additive changes: `summary` counts each impact, and `Display`
 /// lists every change, then the summary, then the bump. The display snapshot records today's bytes.
 #[test]

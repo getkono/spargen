@@ -14,6 +14,44 @@ fn manifest_block(spec: &str) -> String {
         .manifest_block()
 }
 
+/// A spec that lowers returns its requirements beside the run's own report, so a warning the
+/// lowering emits reaches the caller rather than being dropped with the run (#1043). The report
+/// is the one `check` produces for the same spec.
+#[test]
+fn requirements_keep_the_warnings_of_the_run() {
+    let spec = r#"
+openapi: 3.1.0
+info: { title: t, version: '1' }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - { name: q, in: query, schema: { type: string, minLength: 1 } }
+      responses: { "204": { description: ok } }
+"#;
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(&spec_path, spec).unwrap();
+
+    let (requirements, report) =
+        spargen::requirements(&Spec::new(spec_path.clone())).expect("spec lowers");
+    assert!(!requirements.dependencies.is_empty());
+    assert_eq!(report.outcome(), Outcome::Clean, "{report:#?}");
+    let warnings: Vec<_> = report
+        .warnings()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(warnings, ["W001"], "{report:#?}");
+    assert!(!report.has_errors(), "{report:#?}");
+
+    let checked = spargen::check(&Spec::new(spec_path));
+    assert_eq!(
+        format!("{:?}", checked.diagnostics()),
+        format!("{:?}", report.diagnostics())
+    );
+}
+
 /// A union met with an `allOf`'s other members is lowered on its own first, and the branch the
 /// meet drops is withheld from the output (#561). A `format: date`, `format: uuid` or
 /// `contentEncoding` bytes branch that only that withheld lowering holds is no type of the client,
