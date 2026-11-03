@@ -45,27 +45,23 @@ Options:
   -V, --version  Print version
 ```
 
-`check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
-`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, `--open-narrowing`, and the
-repeatable `--omit-path`,
-`--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the setter list on
-`spargen::Spec`, and the `spargen.toml` it reads is parsed by the library, the same file
-`build.rs` and `generate_api!` read.
+`check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
+`--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
+`--open-narrowing`/`--no-open-narrowing`, `--error-body-cap`, `--batch-cap`, and the repeatable
+`--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the
+setter list on `spargen::Spec`, and the `spargen.toml` it reads is parsed by the library, the same
+file `build.rs` and `generate_api!` read. `lock` fetches every remote `$ref` the spec reaches
+whatever the omit rules and switches say, so of the group it reads only `--config` and
+`--batch-cap` (and the file's `batch_cap`); the rest are accepted there and have no effect.
 
 ### Flags and `spargen.toml`
 
 Each spec is resolved as built-in defaults, then its `spargen.toml` (the `--config` path, or the
 file beside the spec when there is one), then the flags. `--error-body-cap` and `--batch-cap`
 replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules rather
-than replacing them. The four switches only turn their setting one way, so a file's setting in the
-other direction stands whatever the command line says:
-
-- `carve = true` in the file cannot be turned off by a flag; `--carve` only turns carving on.
-- `uuid = false` in the file cannot be turned back on; `--no-uuid` only turns it off.
-- `time = false` in the file cannot be turned back on; `--no-time` only turns it off.
-- `open_narrowing = true` in the file cannot be turned off; `--open-narrowing` only turns it on.
-
-To undo one of those, edit the file or point `--config` at another. `diff` resolves each of its two
+than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
+overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
+pair given, the file's value stands, and giving both is a usage error (exit status `2`). `diff` resolves each of its two
 specs this way on its own: absent `--config`, each side discovers the `spargen.toml` beside it,
 while `--config` applies its one file to both sides.
 

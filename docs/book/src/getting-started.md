@@ -124,10 +124,11 @@ mod api {
 }
 ```
 
-It accepts a positional schema path or `spec = "..."`, plus `no_uuid`, `no_time`, `carve`,
-`open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }` profile. The
+It accepts a positional schema path or `spec = "..."`, plus the switches `uuid`, `time`,
+`carve` and `open_narrowing` (each `= true` or `= false`, alone meaning `true`, with `no_uuid` /
+`no_time` for `false`), `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }` profile. The
 `spargen.toml` beside the spec is always discovered and applied first; the switches and caps
-override it, and `omit { ... }` adds rules to its `[[omit]]` rules. Cargo and rustc track the root schema, every transitive source file,
+override it in either direction, and `omit { ... }` adds rules to its `[[omit]]` rules. Cargo and rustc track the root schema, every transitive source file,
 `spargen.lock`, and the `spargen.toml` it applied through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
 

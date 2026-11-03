@@ -18,20 +18,20 @@ use super::args::SpecArgs;
 ///
 /// The config file is either the explicit `--config` path or, when that is absent, `spargen.toml`
 /// beside the spec (a missing auto-discovered file is fine). Flags are applied last so they win,
-/// and omit flags are unioned with the file's `[[omit]]` rules rather than replacing them.
+/// each switch pair in either direction and only when one of its flags was given, and omit flags are unioned with the file's `[[omit]]` rules rather than replacing them.
 pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
     let mut spec = match &args.config {
         Some(config) => Spec::new(path).config_file(config)?,
         None => Spec::new(path).discover_config_file()?,
     };
-    if args.carve {
-        spec = spec.carve(true);
+    if let Some(carve) = switch(args.carve, args.no_carve) {
+        spec = spec.carve(carve);
     }
-    if args.no_uuid {
-        spec = spec.uuid(false);
+    if let Some(uuid) = switch(args.uuid, args.no_uuid) {
+        spec = spec.uuid(uuid);
     }
-    if args.no_time {
-        spec = spec.time(false);
+    if let Some(time) = switch(args.time, args.no_time) {
+        spec = spec.time(time);
     }
     if let Some(cap) = args.error_body_cap {
         spec = spec.error_body_cap(cap);
@@ -39,8 +39,8 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     if let Some(cap) = args.batch_cap {
         spec = spec.batch_cap(cap);
     }
-    if args.open_narrowing {
-        spec = spec.open_narrowing(true);
+    if let Some(open) = switch(args.open_narrowing, args.no_open_narrowing) {
+        spec = spec.open_narrowing(open);
     }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
@@ -55,6 +55,16 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
         spec = spec.omit_rule(parse_pointer_flag(value));
     }
     Ok(spec)
+}
+
+/// The value a `--X` / `--no-X` flag pair sets, or `None` when neither was given, so the config
+/// file's value stands. Clap rejects the two together, so `on` and `off` are never both set.
+fn switch(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    }
 }
 
 /// Parse a `--omit-operation "METHOD /path"` value into an [`OmitRule::Operation`].
@@ -132,6 +142,98 @@ fn error(message: String) -> ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use clap::Parser;
+
+    use super::super::args::{Cli, Command};
+
+    /// The [`Spec`] `spargen check` resolves for `openapi.yaml` in `dir` under `flags`.
+    fn resolved(dir: &camino::Utf8Path, flags: &[&str]) -> Spec {
+        let spec = dir.join("openapi.yaml");
+        let cli = Cli::try_parse_from(
+            ["spargen", "check", spec.as_str()]
+                .into_iter()
+                .chain(flags.iter().copied()),
+        )
+        .unwrap_or_else(|error| panic!("{flags:?} did not parse: {error}"));
+        let Command::Check(args) = cli.command else {
+            unreachable!("parsed as `check`")
+        };
+        resolve(spec, &args.options).unwrap()
+    }
+
+    /// A temporary directory holding `spargen.toml` with `config`, as a UTF-8 path.
+    fn with_config(config: &str) -> (tempfile::TempDir, Utf8PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("spargen.toml"), config).unwrap();
+        (temp, dir)
+    }
+
+    /// Each switch pair overrides the file in both directions, and leaves the file's value alone
+    /// when neither of its flags is given.
+    #[test]
+    fn each_switch_pair_overrides_the_config_file_either_way() {
+        let (_on, on) =
+            with_config("carve = true\nuuid = true\ntime = true\nopen_narrowing = true\n");
+        let (_off, off) =
+            with_config("carve = false\nuuid = false\ntime = false\nopen_narrowing = false\n");
+        let file_on = Spec::new(on.join("openapi.yaml"))
+            .config_file(on.join("spargen.toml"))
+            .unwrap();
+        let file_off = Spec::new(off.join("openapi.yaml"))
+            .config_file(off.join("spargen.toml"))
+            .unwrap();
+
+        assert_eq!(resolved(&on, &[]), file_on);
+        assert_eq!(resolved(&off, &[]), file_off);
+        assert_eq!(
+            resolved(
+                &on,
+                &[
+                    "--no-carve",
+                    "--no-uuid",
+                    "--no-time",
+                    "--no-open-narrowing"
+                ]
+            ),
+            file_on
+                .clone()
+                .carve(false)
+                .uuid(false)
+                .time(false)
+                .open_narrowing(false)
+        );
+        assert_eq!(
+            resolved(&off, &["--carve", "--uuid", "--time", "--open-narrowing"]),
+            file_off
+                .clone()
+                .carve(true)
+                .uuid(true)
+                .time(true)
+                .open_narrowing(true)
+        );
+        // One flag of a pair moves only its own setting.
+        assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
+    }
+
+    #[test]
+    fn both_flags_of_a_switch_pair_are_a_usage_error() {
+        for (on, off) in [
+            ("--carve", "--no-carve"),
+            ("--uuid", "--no-uuid"),
+            ("--time", "--no-time"),
+            ("--open-narrowing", "--no-open-narrowing"),
+        ] {
+            let error = Cli::try_parse_from(["spargen", "check", "openapi.yaml", on, off])
+                .expect_err(&format!("`{on} {off}` must not parse"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{on} {off}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn parses_each_omit_flag_kind() {

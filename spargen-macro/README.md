@@ -11,17 +11,20 @@ mod api {
 ```
 
 Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
-beside the spec is always discovered and applied first; `no_uuid`, `no_time`, `carve`,
-`open_narrowing` and the two caps override it, and `omit { ... }` adds rules to its `[[omit]]`
-rules:
+beside the spec is always discovered and applied first; the four switches and the two caps
+override it, and `omit { ... }` adds rules to its `[[omit]]` rules. Each switch — `uuid`, `time`,
+`carve`, `open_narrowing` — takes `= true` or `= false`, so it overrides the file in either
+direction; written alone it means `= true`, and `no_uuid` / `no_time` are shorthand for
+`uuid = false` / `time = false`. A switch the macro is not given leaves the file's value, and one
+given twice is a compile error:
 
 ```rust,ignore
 spargen_macro::generate_api!(
     spec = "openapi.yaml",
-    no_uuid,
-    no_time,
-    carve,
-    open_narrowing,
+    uuid = false,
+    time = false,
+    carve = true,
+    open_narrowing = true,
     error_body_cap = 65536,
     batch_cap = 100,
     omit {

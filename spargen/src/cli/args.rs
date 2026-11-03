@@ -41,11 +41,21 @@ pub(crate) struct SpecArgs {
     pub(crate) config: Option<Utf8PathBuf>,
     /// Auto-carve: omit the minimal set of unsupported constructs (each reported via W009) so the
     /// rest audits clean. Un-carvable rejections are still reported.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_carve")]
     pub(crate) carve: bool,
+    /// Turn auto-carve off, overriding `carve = true` in `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_carve: bool,
+    /// Map `format: uuid` to `uuid::Uuid`, overriding `uuid = false` in `spargen.toml`.
+    #[arg(long, conflicts_with = "no_uuid")]
+    pub(crate) uuid: bool,
     /// Map `format: uuid` to `String` instead of `uuid::Uuid`.
     #[arg(long)]
     pub(crate) no_uuid: bool,
+    /// Map `format: date-time`/`date` to the `time` crate, overriding `time = false` in
+    /// `spargen.toml`.
+    #[arg(long, conflicts_with = "no_time")]
+    pub(crate) time: bool,
     /// Map `format: date-time`/`date` to `String` instead of the `time` crate.
     #[arg(long)]
     pub(crate) no_time: bool,
@@ -57,8 +67,12 @@ pub(crate) struct SpecArgs {
     pub(crate) batch_cap: Option<usize>,
     /// Lower a response body's own string `enum`/`const` narrowings of a plain `string` as open
     /// enums, so a value the description does not list still decodes.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_open_narrowing")]
     pub(crate) open_narrowing: bool,
+    /// Keep response-body string narrowings closed, overriding `open_narrowing = true` in
+    /// `spargen.toml`.
+    #[arg(long)]
+    pub(crate) no_open_narrowing: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub(crate) omit_path: Vec<String>,
