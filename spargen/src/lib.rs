@@ -137,8 +137,8 @@ impl std::fmt::Display for Outcome {
 ///
 /// Fields are private and read through accessors, so the shape can grow without a breaking
 /// change. [`Spec`], [`Build`], and [`DiffRejection`] keep their fields private for the same
-/// reason: [`Spec`] is set through its builder methods, with [`Spec::path`] reading back its
-/// root document, and [`Build`] and [`DiffRejection`] are read through accessors.
+/// reason: [`Spec`] is set through its builder methods and its settings are read back through
+/// its accessors, and [`Build`] and [`DiffRejection`] are read through accessors.
 /// [`Diagnostic`] grows the other way: its fields are public and the struct is
 /// `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
