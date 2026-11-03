@@ -886,3 +886,88 @@ fn cargo_integration_off_reports_neither_degradation_nor_failure() {
         "{report:#?}"
     );
 }
+
+/// Each getter reads back the default `Spec::new` documents and `Build::new` picks.
+#[test]
+fn the_getters_read_back_the_defaults() {
+    let spec = spargen::Spec::new("openapi.yaml");
+    assert!(spec.uuid_enabled());
+    assert!(spec.time_enabled());
+    assert!(spec.omissions().is_empty());
+    assert_eq!(spec.error_body_cap_bytes(), 64 * 1024);
+    assert_eq!(spec.batch_cap_count(), 100);
+    assert!(!spec.carve_enabled());
+    assert!(!spec.open_narrowing_enabled());
+    assert!(spec.config_files().is_empty());
+    assert_eq!(
+        spec.build("out.rs").cargo_integration(),
+        spargen::CargoIntegration::Auto
+    );
+}
+
+/// Each getter reads back what its setter wrote, every default flipped so a getter that returned
+/// the default instead fails.
+#[test]
+fn the_getters_read_back_what_the_setters_wrote() {
+    let rule = spargen::OmitRule::Path {
+        path: "/pets".into(),
+    };
+    let appended = spargen::OmitRule::Path {
+        path: "/pets/{id}".into(),
+    };
+    let mut omit = spargen::Omit::default();
+    omit.rules.push(rule.clone());
+    let spec = spargen::Spec::new("openapi.yaml")
+        .uuid(false)
+        .time(false)
+        // `omit` replaces the rule set `omit_rule` started, and a later `omit_rule` appends to it.
+        .omit_rule(appended.clone())
+        .omit(omit)
+        .omit_rule(appended.clone())
+        .error_body_cap(11)
+        .batch_cap(7)
+        .carve(true)
+        .open_narrowing(true);
+    assert!(!spec.uuid_enabled());
+    assert!(!spec.time_enabled());
+    assert_eq!(spec.omissions().rules, [rule, appended]);
+    assert_eq!(spec.error_body_cap_bytes(), 11);
+    assert_eq!(spec.batch_cap_count(), 7);
+    assert!(spec.carve_enabled());
+    assert!(spec.open_narrowing_enabled());
+    for integration in [
+        spargen::CargoIntegration::Required,
+        spargen::CargoIntegration::Off,
+    ] {
+        let build = spec.clone().build("out.rs").cargo(integration);
+        assert_eq!(build.cargo_integration(), integration);
+    }
+}
+
+/// `config_files` lists every applied file in the order applied, and the knobs a file sets read
+/// back through the same getters as a setter's.
+#[test]
+fn config_files_lists_each_applied_file_in_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let discovered = dir.join("spargen.toml");
+    let explicit = dir.join("explicit.toml");
+    std::fs::write(&discovered, "carve = true\n").unwrap();
+    std::fs::write(&explicit, "batch_cap = 7\n[[omit]]\npath = \"/pets\"\n").unwrap();
+
+    let spec = spargen::Spec::new(dir.join("openapi.yaml"))
+        .discover_config_file()
+        .unwrap()
+        .config_file(&explicit)
+        .unwrap();
+
+    assert_eq!(spec.config_files(), [discovered, explicit]);
+    assert!(spec.carve_enabled());
+    assert_eq!(spec.batch_cap_count(), 7);
+    assert_eq!(
+        spec.omissions().rules,
+        [spargen::OmitRule::Path {
+            path: "/pets".into()
+        }]
+    );
+}
