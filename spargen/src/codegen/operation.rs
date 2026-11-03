@@ -150,7 +150,7 @@ fn shapes_url(location: ParamLoc) -> bool {
 
 /// Whether an operation's optional-parameters bundle holds a parameter that shapes its URL, so the
 /// URL accessor takes the bundle as well.
-pub(super) fn url_takes_params(operation: &Operation) -> bool {
+fn url_takes_params(operation: &Operation) -> bool {
     operation
         .params
         .iter()
