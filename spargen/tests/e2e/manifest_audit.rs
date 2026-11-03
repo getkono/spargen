@@ -445,7 +445,7 @@ paths:
 "##,
     )
     .unwrap();
-    let requirements = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
+    let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
     let required = requirements
         .dependencies
         .iter()
@@ -829,7 +829,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
     let temp = tempfile::tempdir().unwrap();
     let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
-    let requirements = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
+    let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
 
     // The set is non-trivial: every conditional crate and feature is in it, so neither layout can
     // pass by the table having shrunk to the five core crates.

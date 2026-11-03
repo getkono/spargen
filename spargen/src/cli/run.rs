@@ -30,7 +30,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             }
         }),
         Command::Deps(args) => with_spec(args.spec, &args.options, |spec| {
-            report_or(spargen::requirements(&spec), args.format)
+            let requirements = spargen::requirements(&spec).map(|(requirements, report)| {
+                if !report.diagnostics().is_empty() {
+                    emit_to_stderr(&report, args.format);
+                }
+                requirements
+            });
+            report_or(requirements, args.format)
         }),
         Command::Lock(args) => with_spec(args.spec, &args.options, |spec| {
             report_or(spargen::vendor(&spec), args.format)
@@ -47,7 +53,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                     emit(&rejection, args.format, Stream::Stderr);
                     ExitStatus::Diagnostics.into()
                 }
-                Ok(report) => {
+                Ok((report, sides)) => {
+                    if sides
+                        .reports()
+                        .any(|(_, side)| !side.diagnostics().is_empty())
+                    {
+                        emit_to_stderr(&sides, args.format);
+                    }
                     let breaking = report.bump == spargen::Impact::Major;
                     emit(&report, args.format, Stream::Stdout);
                     if args.exit_code && breaking {
@@ -119,6 +131,20 @@ fn spec_pair(
         config::resolve(old, options)?,
         config::resolve(new, options)?,
     ))
+}
+
+/// Render the warnings of a run that succeeded to stderr, in the requested [`Format`], so stdout
+/// keeps exactly the one result document a script parses.
+fn emit_to_stderr<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format) {
+    match format {
+        Format::Json => {
+            let rendered = serde_json::to_string(value).unwrap_or_else(|error| {
+                format!("{{\"error\":\"failed to render JSON: {error}\"}}")
+            });
+            eprintln!("{rendered}");
+        }
+        Format::Human => eprintln!("{value}"),
+    }
 }
 
 /// Render a config/flag error to stderr and exit with a usage status — never a panic.

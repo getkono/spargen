@@ -10,6 +10,7 @@ fn manifest_block(spec: &str) -> String {
     std::fs::write(&spec_path, spec).unwrap();
     spargen::requirements(&Spec::new(spec_path))
         .expect("spec lowers")
+        .0
         .manifest_block()
 }
 

@@ -355,6 +355,7 @@ fn runtime_floors() -> &'static std::collections::BTreeMap<&'static str, &'stati
         std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
         spargen::requirements(&Spec::new(spec))
             .expect("spec lowers")
+            .0
             .dependencies
             .into_iter()
             .map(|dependency| (dependency.name, dependency.version))

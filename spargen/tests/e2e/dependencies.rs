@@ -33,7 +33,7 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     std::fs::write(&spec_path, BYTES_ERROR_SPEC).unwrap();
     let spec = Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap());
 
-    let requirements = spargen::requirements(&spec).expect("spec lowers");
+    let (requirements, _) = spargen::requirements(&spec).expect("spec lowers");
     let out = temp.path().join("client");
     std::fs::create_dir_all(out.join("src")).unwrap();
     std::fs::write(

@@ -136,9 +136,10 @@ impl std::fmt::Display for Outcome {
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
 /// Fields are private and read through accessors, so the shape can grow without a breaking
-/// change. [`Spec`], [`Build`], and [`DiffRejection`] keep their fields private for the same
-/// reason: [`Spec`] is set through its builder methods, with [`Spec::path`] reading back its
-/// root document, and [`Build`] and [`DiffRejection`] are read through accessors.
+/// change. [`Spec`], [`Build`], [`DiffRejection`], and [`DiffSides`] keep their fields private for
+/// the same reason: [`Spec`] is set through its builder methods, with [`Spec::path`] reading back
+/// its root document, and [`Build`], [`DiffRejection`], and [`DiffSides`] are read through
+/// accessors.
 /// [`Diagnostic`] grows the other way: its fields are public and the struct is
 /// `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -601,6 +602,59 @@ impl std::fmt::Display for DiffRejection {
 
 impl std::error::Error for DiffRejection {}
 
+/// The `Ok` companion of a [`diff`] run: both specs lowered, and this is the [`Report`] of each
+/// side's lowering, with [`Outcome::Clean`] and every warning that lowering emitted.
+///
+/// Read through [`old_report`](Self::old_report), [`new_report`](Self::new_report), or
+/// [`reports`](Self::reports) for both sides in turn.
+#[derive(Debug, Clone)]
+pub struct DiffSides {
+    old: Report,
+    new: Report,
+}
+
+impl DiffSides {
+    /// The old spec's lowering report.
+    pub fn old_report(&self) -> &Report {
+        &self.old
+    }
+
+    /// The new spec's lowering report.
+    pub fn new_report(&self) -> &Report {
+        &self.new
+    }
+
+    /// Both sides with their reports, old first.
+    pub fn reports(&self) -> impl Iterator<Item = (Side, &Report)> + '_ {
+        [(Side::Old, &self.old), (Side::New, &self.new)].into_iter()
+    }
+}
+
+/// Each side whose report carries a diagnostic, headed by the side it came from. Both sides clean
+/// render nothing.
+impl std::fmt::Display for DiffSides {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (side, report) in self.reports() {
+            if !report.diagnostics().is_empty() {
+                writeln!(formatter, "{} spec:", side.as_str())?;
+                write!(formatter, "{report}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl serde::Serialize for DiffSides {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        for (side, report) in self.reports() {
+            map.serialize_entry(side.as_str(), report)?;
+        }
+        map.end()
+    }
+}
+
 impl serde::Serialize for DiffRejection {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -620,16 +674,25 @@ impl serde::Serialize for DiffRejection {
 /// generated client sees (operations, their params/body/return types, and the public model types),
 /// and reports every difference with its impact. A pure analysis step — it never writes output nor
 /// touches the runtime. Deterministic: the same pair of specs yields a byte-identical report.
-pub fn diff(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
+///
+/// When both specs lower, the diff comes back beside [`DiffSides`], the report of each side's
+/// lowering, which carries every warning that lowering emitted.
+pub fn diff(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejection> {
     run_on_frontend_stack(|| diff_inner(old, new))
 }
 
-fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
+fn diff_inner(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejection> {
     match (lower_side(old), lower_side(new)) {
-        (Ok((old_api, old_names)), Ok((new_api, new_names))) => {
+        (Ok((old_api, old_names, old_report)), Ok((new_api, new_names, new_report))) => {
             let old_surface = surface::build(&old_api, &old_names);
             let new_surface = surface::build(&new_api, &new_names);
-            Ok(surface::diff(&old_surface, &new_surface))
+            Ok((
+                surface::diff(&old_surface, &new_surface),
+                DiffSides {
+                    old: old_report,
+                    new: new_report,
+                },
+            ))
         }
         // A spec that failed to lower has no surface, so the two are simply not comparable.
         (old_lowered, new_lowered) => Err(DiffRejection {
@@ -641,8 +704,9 @@ fn diff_inner(old: &Spec, new: &Spec) -> Result<DiffReport, DiffRejection> {
 
 /// Lower one side of a [`diff`]: through the carve driver when `spec.carve` asks for it, as
 /// [`run_mode`] does for every other entry point, and the plain frontend otherwise. A side that
-/// does not lower returns its rejection [`Report`].
-fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names), Report> {
+/// does not lower returns its rejection [`Report`]; one that lowers returns its [`Outcome::Clean`]
+/// report beside the lowered API, so its warnings reach the caller.
+fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names, Report), Report> {
     let carved;
     let spec = if spec.carve {
         carved = carve_spec(spec)?;
@@ -651,7 +715,10 @@ fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names), Report> {
         spec
     };
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
-    lower_frontend(spec, &mut diags).map_err(|()| report(diags, Outcome::Rejected))
+    match lower_frontend(spec, &mut diags) {
+        Ok((api, names)) => Ok((api, names, report(diags, Outcome::Clean))),
+        Err(()) => Err(report(diags, Outcome::Rejected)),
+    }
 }
 
 /// Private cross-crate bridge for `spargen-macro`; this crate's integration tests also call
@@ -725,11 +792,13 @@ pub mod __private {
 /// whole set before a build, rather than leaving `E023` to report what the consuming package
 /// lacks.
 ///
-/// The spec must lower — a rejection is returned as the [`Report`] that explains why.
-pub fn requirements(spec: &Spec) -> Result<Requirements, Report> {
+/// The spec must lower — a rejection is returned as the [`Report`] that explains why. A spec that
+/// lowers returns its requirements beside the run's own [`Report`], whose outcome is
+/// [`Outcome::Clean`] and which carries every warning the lowering emitted.
+pub fn requirements(spec: &Spec) -> Result<(Requirements, Report), Report> {
     let result = run_mode(spec, PipelineMode::Requirements);
     match result.requirements {
-        Some(requirements) => Ok(Requirements::new(&requirements)),
+        Some(requirements) => Ok((Requirements::new(&requirements), result.report)),
         None => Err(result.report),
     }
 }

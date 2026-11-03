@@ -110,7 +110,9 @@ fn unsnapshotted_diff(
     std::fs::write(&new_path, new_spec).unwrap();
     let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
     let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
-    spargen::diff(&old, &new).expect("both specs should lower")
+    spargen::diff(&old, &new)
+        .expect("both specs should lower")
+        .0
 }
 
 std::thread_local! {
