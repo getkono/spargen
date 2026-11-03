@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parenthesized, Ident, LitInt, LitStr, Token};
+use syn::{braced, parenthesized, Ident, LitBool, LitInt, LitStr, Token};
 
 /// Generate a typed OpenAPI 3.1.x/3.2.x client in place. See the [crate docs](crate) for forms and
 /// caveats.
@@ -51,24 +51,60 @@ impl Drop for FallbackGuard {
 }
 
 /// Parsed macro arguments: a spec path (positional string or `spec = "..."`) plus optional flags.
+///
+/// Each switch is `None` when the macro was not given it, so the config file's value stands.
 struct Args {
     spec: LitStr,
-    no_uuid: bool,
-    no_time: bool,
-    carve: bool,
-    open_narrowing: bool,
+    uuid: Option<bool>,
+    time: Option<bool>,
+    carve: Option<bool>,
+    open_narrowing: Option<bool>,
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
 }
 
+/// Parse the switch `name` into `slot`. Its own key takes `= true` or `= false`, and alone means
+/// `true`; a `negated` key (`no_uuid`, `no_time`) takes no value and means `false`. A switch set
+/// twice, in either spelling, is an error rather than a silent last-wins.
+fn parse_switch(
+    input: ParseStream,
+    key: &Ident,
+    name: &str,
+    slot: &mut Option<bool>,
+    negated: bool,
+) -> syn::Result<()> {
+    let value = if negated {
+        if input.peek(Token![=]) {
+            return Err(syn::Error::new(
+                key.span(),
+                format!("`{key}` takes no value; write `{name} = true` or `{name} = false`"),
+            ));
+        }
+        false
+    } else if input.peek(Token![=]) {
+        input.parse::<Token![=]>()?;
+        input.parse::<LitBool>()?.value
+    } else {
+        true
+    };
+    if slot.is_some() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!("`{name}` given more than once"),
+        ));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
 impl Parse for Args {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut spec: Option<LitStr> = None;
-        let mut no_uuid = false;
-        let mut no_time = false;
-        let mut carve = false;
-        let mut open_narrowing = false;
+        let mut uuid = None;
+        let mut time = None;
+        let mut carve = None;
+        let mut open_narrowing = None;
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
@@ -97,10 +133,14 @@ impl Parse for Args {
                         }
                         spec = Some(lit);
                     }
-                    "no_uuid" => no_uuid = true,
-                    "no_time" => no_time = true,
-                    "carve" => carve = true,
-                    "open_narrowing" => open_narrowing = true,
+                    "uuid" => parse_switch(input, &key, "uuid", &mut uuid, false)?,
+                    "no_uuid" => parse_switch(input, &key, "uuid", &mut uuid, true)?,
+                    "time" => parse_switch(input, &key, "time", &mut time, false)?,
+                    "no_time" => parse_switch(input, &key, "time", &mut time, true)?,
+                    "carve" => parse_switch(input, &key, "carve", &mut carve, false)?,
+                    "open_narrowing" => {
+                        parse_switch(input, &key, "open_narrowing", &mut open_narrowing, false)?
+                    }
                     "error_body_cap" => {
                         input.parse::<Token![=]>()?;
                         error_body_cap = Some(parse_usize(input)?);
@@ -115,8 +155,8 @@ impl Parse for Args {
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
-                                 no_uuid, no_time, carve, open_narrowing, error_body_cap, batch_cap, \
-                                 omit"
+                                 uuid, no_uuid, time, no_time, carve, open_narrowing, \
+                                 error_body_cap, batch_cap, omit"
                             ),
                         ));
                     }
@@ -134,8 +174,8 @@ impl Parse for Args {
         })?;
         Ok(Args {
             spec,
-            no_uuid,
-            no_time,
+            uuid,
+            time,
             carve,
             open_narrowing,
             error_body_cap,
@@ -223,21 +263,21 @@ fn tracking(preview: &spargen::__private::MacroPreview) -> proc_macro2::TokenStr
 }
 
 /// Apply the macro arguments over `discovered`, the `Spec` the config file beside the spec yields.
-/// A flag only ever overrides: an argument the macro was not given leaves the config file's value
-/// in place, and omit rules are appended to the file's own.
+/// A switch overrides the file in whichever direction it was given; an argument the macro was not
+/// given leaves the config file's value in place, and omit rules are appended to the file's own.
 fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     let mut config = discovered;
-    if args.no_uuid {
-        config = config.uuid(false);
+    if let Some(uuid) = args.uuid {
+        config = config.uuid(uuid);
     }
-    if args.no_time {
-        config = config.time(false);
+    if let Some(time) = args.time {
+        config = config.time(time);
     }
-    if args.carve {
-        config = config.carve(true);
+    if let Some(carve) = args.carve {
+        config = config.carve(carve);
     }
-    if args.open_narrowing {
-        config = config.open_narrowing(true);
+    if let Some(open) = args.open_narrowing {
+        config = config.open_narrowing(open);
     }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());
@@ -554,10 +594,10 @@ mod tests {
         let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
 
         assert_eq!(args.spec.value(), "openapi.yaml");
-        assert!(args.no_uuid);
-        assert!(args.no_time);
-        assert!(args.carve);
-        assert!(args.open_narrowing);
+        assert_eq!(args.uuid, Some(false));
+        assert_eq!(args.time, Some(false));
+        assert_eq!(args.carve, Some(true));
+        assert_eq!(args.open_narrowing, Some(true));
         assert_eq!(args.error_body_cap, Some(4096));
         assert_eq!(args.batch_cap, Some(7));
         assert_eq!(args.omit.rules, every_omit_rule());
@@ -568,10 +608,10 @@ mod tests {
         let args: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
 
         assert_eq!(args.spec.value(), "openapi.yaml");
-        assert!(!args.no_uuid);
-        assert!(!args.no_time);
-        assert!(!args.carve);
-        assert!(!args.open_narrowing);
+        assert_eq!(args.uuid, None);
+        assert_eq!(args.time, None);
+        assert_eq!(args.carve, None);
+        assert_eq!(args.open_narrowing, None);
         assert_eq!(args.error_body_cap, None);
         assert_eq!(args.batch_cap, None);
         assert_eq!(args.omit.rules, Vec::new());
@@ -619,6 +659,35 @@ mod tests {
                 .batch_cap(9)
                 .omit_rule(OmitRule::path("/from-macro"))
         );
+    }
+
+    /// Each switch overrides the config file in both directions: its `= bool` form sets either
+    /// value, its bare key sets `true`, and `no_uuid` / `no_time` set `false`.
+    #[test]
+    fn each_switch_overrides_the_config_file_either_way() {
+        let on = Spec::new("openapi.yaml")
+            .uuid(true)
+            .time(true)
+            .carve(true)
+            .open_narrowing(true);
+        let off = Spec::new("openapi.yaml")
+            .uuid(false)
+            .time(false)
+            .carve(false)
+            .open_narrowing(false);
+
+        let turn_off = args(
+            r#""openapi.yaml", uuid = false, time = false, carve = false, open_narrowing = false"#,
+        );
+        assert_eq!(config(&turn_off, on.clone()), off);
+        let turn_on = args(
+            r#""openapi.yaml", uuid = true, time = true, carve = true, open_narrowing = true"#,
+        );
+        assert_eq!(config(&turn_on, off.clone()), on);
+        let bare = args(r#""openapi.yaml", uuid, time, carve, open_narrowing"#);
+        assert_eq!(config(&bare, off.clone()), on);
+        let negated = args(r#""openapi.yaml", no_uuid, no_time"#);
+        assert_eq!(config(&negated, on.clone()), on.uuid(false).time(false));
     }
 
     /// A directory under the system temporary directory, removed on drop.
@@ -879,9 +948,28 @@ paths:
             (r#"spec = 1"#, "expected string literal"),
             (r#"42"#, "expected identifier"),
             (
-                r#""a.yaml", uuid"#,
-                "unknown argument `uuid`; expected a spec path or one of: no_uuid, no_time, \
-                 carve, open_narrowing, error_body_cap, batch_cap, omit",
+                r#""a.yaml", uuids"#,
+                "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, time, \
+                 no_time, carve, open_narrowing, error_body_cap, batch_cap, omit",
+            ),
+            (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
+            (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
+            (
+                r#""a.yaml", no_uuid = true"#,
+                "`no_uuid` takes no value; write `uuid = true` or `uuid = false`",
+            ),
+            (
+                r#""a.yaml", no_uuid, uuid = true"#,
+                "`uuid` given more than once",
+            ),
+            (r#""a.yaml", time, no_time"#, "`time` given more than once"),
+            (
+                r#""a.yaml", carve, carve = false"#,
+                "`carve` given more than once",
+            ),
+            (
+                r#""a.yaml", open_narrowing = true, open_narrowing"#,
+                "`open_narrowing` given more than once",
             ),
             (r#""a.yaml" no_uuid"#, "expected `,`"),
             (
