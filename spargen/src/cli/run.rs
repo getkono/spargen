@@ -30,7 +30,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             }
         }),
         Command::Deps(args) => with_spec(args.spec, &args.options, |spec| {
-            report_or(spargen::requirements(&spec), args.format)
+            let requirements = spargen::requirements(&spec).map(|(requirements, report)| {
+                if !report.diagnostics().is_empty() {
+                    emit(&report, args.format, Stream::Aside);
+                }
+                requirements
+            });
+            report_or(requirements, args.format)
         }),
         Command::Lock(args) => with_spec(args.spec, &args.options, |spec| {
             report_or(spargen::vendor(&spec), args.format)
@@ -47,7 +53,13 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                     emit(&rejection, args.format, Stream::Stderr);
                     ExitStatus::Diagnostics.into()
                 }
-                Ok(report) => {
+                Ok((report, sides)) => {
+                    if sides
+                        .reports()
+                        .any(|(_, side)| !side.diagnostics().is_empty())
+                    {
+                        emit(&sides, args.format, Stream::Aside);
+                    }
                     let breaking = report.bump == spargen::Impact::Major;
                     emit(&report, args.format, Stream::Stdout);
                     if args.exit_code && breaking {
@@ -127,12 +139,16 @@ fn config_error(error: ConfigError) -> ExitCode {
     ExitStatus::Usage.into()
 }
 
-/// Where the human rendering of a value goes: diagnostics on stderr, results on stdout. JSON
-/// output ignores it.
+/// Where a value goes. `Stdout` and `Stderr` choose the stream of the *human* rendering of a
+/// run's one document (its result on stdout, its rejection on stderr); the JSON rendering of that
+/// document ignores them and goes to stdout. `Aside` is a report beside that document, the
+/// warnings of a run that succeeded, and goes to stderr in both formats, so stdout keeps exactly
+/// the one document a script parses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stream {
     Stdout,
     Stderr,
+    Aside,
 }
 
 /// Render one value in the requested format.
@@ -141,19 +157,23 @@ enum Stream {
 /// form), so every command but `explain` renders through the library's own forms. `explain`
 /// prints its text, or builds its `{ "code", "explain" }` JSON object, inline in [`run`].
 ///
-/// `stream` chooses where the *human* rendering goes. JSON always goes to stdout, whatever
-/// `stream` says.
+/// `stream` chooses where the *human* rendering goes. JSON goes to stdout whatever `stream` says,
+/// except under [`Stream::Aside`]: a report beside the run's one document goes to stderr in both
+/// formats.
 fn emit<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format, stream: Stream) {
     match format {
         Format::Json => {
             let rendered = serde_json::to_string(value).unwrap_or_else(|error| {
                 format!("{{\"error\":\"failed to render JSON: {error}\"}}")
             });
-            println!("{rendered}");
+            match stream {
+                Stream::Stdout | Stream::Stderr => println!("{rendered}"),
+                Stream::Aside => eprintln!("{rendered}"),
+            }
         }
         Format::Human => match stream {
             Stream::Stdout => println!("{value}"),
-            Stream::Stderr => eprintln!("{value}"),
+            Stream::Stderr | Stream::Aside => eprintln!("{value}"),
         },
     }
 }

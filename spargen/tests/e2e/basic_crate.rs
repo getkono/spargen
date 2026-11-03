@@ -300,7 +300,7 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // fixture manifest: `tokio` is the one opt-in dependency — optional, native-only, needed only
     // by the `blocking` feature — and every other dependency is unconditional. `uuid`/`time` are
     // not consumer features at all: generated code names them unconditionally.
-    let requirements = spargen::requirements(&Spec::new(
+    let (requirements, _) = spargen::requirements(&Spec::new(
         Utf8PathBuf::from_path_buf(spec.clone()).unwrap(),
     ))
     .expect("the basic spec lowers");

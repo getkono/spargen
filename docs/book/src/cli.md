@@ -111,7 +111,8 @@ Cargo feature that would require them, together with that feature's `[features]`
 (`blocking = ["dep:tokio"]`), so uncommenting them is the whole opt-in — except that an entry whose
 `[features]` table, `blocking` key, or dependency table the manifest already declares is merged
 into it, since TOML rejects a table or key defined twice. `--format json` emits the
-same set structurally.
+same set structurally. A spec that lowers with warnings still prints the block on stdout, and
+prints its report (outcome `clean`, with those warnings) on stderr, in the same format.
 
 The block is written for the package's own tables, but a workspace member may inherit it instead:
 move each entry, `default-features = false` included, into the root's `[workspace.dependencies]`,
@@ -170,7 +171,10 @@ spargen diff <OLD> <NEW> [--exit-code] [OPTIONS]
 
 It accepts `--format <human|json>` plus the shared spec options, applied to both specs.
 `--exit-code` exits `1` for a breaking (`major`) change; without it a successful comparison exits
-`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`.
+`0` whatever its bump. A spec that cannot lower is always a hard error and exits `1`. When either
+spec lowers with warnings, the comparison is printed on stdout as usual and those warnings go to
+stderr in the same format: each warning side's report under an `old spec:` / `new spec:` heading,
+or, under `--format json`, one object keyed `old` and `new`.
 
 `--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
 sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code

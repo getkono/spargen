@@ -343,10 +343,13 @@ fn check_reports_the_same_for_every_spelling_of_the_spec_path() {
 // --- Exit codes and output routing ---------------------------------------------------------------
 //
 // `cli/exit.rs` declares the contract: 0 for success, 1 when error-severity diagnostics were
-// reported, 3 for a usage error spargen detects (clap's own argument errors exit 2). Every report a
-// subcommand renders as JSON goes to stdout, so it stays pipeable. A human-rendered report goes to
-// stderr when it is a rejection, and to stdout when it is the subcommand's result, except for
-// `check`: its result is a diagnostic report, so it goes to stderr on success too.
+// reported, 3 for a usage error spargen detects (clap's own argument errors exit 2). The one
+// document a subcommand renders as JSON, its result or its rejection, goes to stdout, so it stays
+// pipeable. A human-rendered report goes to stderr when it is a rejection, and to stdout when it
+// is the subcommand's result, except for `check`: its result is a diagnostic report, so it goes
+// to stderr on success too. The warnings of a successful `deps` or `diff` are a second report
+// beside that document, so they go to stderr in both formats and stdout keeps the one document
+// (`deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr`).
 
 /// Two operations; [`ONE_OPERATION`] removes `getPet`, a breaking (`major`) change.
 const TWO_OPERATIONS: &str = r##"
@@ -373,6 +376,19 @@ paths:
   /pets:
     get:
       operationId: listPets
+      responses: { "204": { description: OK } }
+"##;
+
+/// [`ONE_OPERATION`] with a validation-only `minLength`, which lowers with one `W001`.
+const WARNED: &str = r##"
+openapi: 3.1.0
+info: { title: Pets, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - { name: q, in: query, schema: { type: string, minLength: 1 } }
       responses: { "204": { description: OK } }
 "##;
 
@@ -642,6 +658,45 @@ fn deps_json_carries_the_dependencies_or_the_rejection_on_stdout() {
         ("rejected", vec!["E001"]),
         "{stdout}"
     );
+}
+
+/// `deps` and `diff` over a spec that lowers with a warning still succeed, print their result on
+/// stdout exactly as for a clean spec, and print the warning on stderr in the requested format
+/// (#1043).
+#[test]
+fn deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let warned = write_spec(temp.path(), "warned.yaml", WARNED);
+    let clean = write_spec(temp.path(), "clean.yaml", ONE_OPERATION);
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("reqwest"), "{stdout}");
+    assert!(
+        stderr.contains("spargen: clean") && stderr.contains("warning[W001]"),
+        "{stderr}"
+    );
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned, "--format", "json"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(json(&stdout)["dependencies"].is_array(), "{stdout}");
+    assert_eq!(outcome_and_codes(&json(&stderr)), ("clean", vec!["W001"]));
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["diff", &clean, &warned]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stdout.contains("recommended bump:"), "{stdout}");
+    assert!(
+        stderr.starts_with("new spec:\nspargen: clean\n") && stderr.contains("warning[W001]"),
+        "only the side that warned is reported: {stderr}"
+    );
+
+    let (status, stdout, stderr) =
+        spargen(temp.path(), &["diff", &clean, &warned, "--format", "json"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(json(&stdout)["bump"].is_string(), "{stdout}");
+    let sides = json(&stderr);
+    assert_eq!(outcome_and_codes(&sides["old"]), ("clean", vec![]));
+    assert_eq!(outcome_and_codes(&sides["new"]), ("clean", vec!["W001"]));
 }
 
 #[test]
