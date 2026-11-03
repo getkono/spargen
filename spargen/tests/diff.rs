@@ -103,6 +103,16 @@ fn unsnapshotted_diff(
     configure_old: impl FnOnce(Spec) -> Spec,
     configure_new: impl FnOnce(Spec) -> Spec,
 ) -> DiffReport {
+    diff_with_sides(old_spec, new_spec, configure_old, configure_new).0
+}
+
+/// [`unsnapshotted_diff`] that also returns each side's lowering report.
+fn diff_with_sides(
+    old_spec: &str,
+    new_spec: &str,
+    configure_old: impl FnOnce(Spec) -> Spec,
+    configure_new: impl FnOnce(Spec) -> Spec,
+) -> (DiffReport, spargen::DiffSides) {
     let temp = tempfile::tempdir().unwrap();
     let old_path = temp.path().join("old.yaml");
     let new_path = temp.path().join("new.yaml");
@@ -110,9 +120,7 @@ fn unsnapshotted_diff(
     std::fs::write(&new_path, new_spec).unwrap();
     let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
     let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
-    spargen::diff(&old, &new)
-        .expect("both specs should lower")
-        .0
+    spargen::diff(&old, &new).expect("both specs should lower")
 }
 
 std::thread_local! {
@@ -323,6 +331,19 @@ fn carve_diffs_the_carved_surfaces_of_a_pair_that_lowers_only_under_carve() {
     assert_eq!(kinds(&report), [ChangeKind::OperationAdded], "{report:?}");
     assert_eq!(report.bump, Impact::Minor);
 
+    // Each carved side's report succeeds as `Clean` and keeps the `W009` naming what it carved.
+    let (_, sides) = diff_with_sides(&old, &new, |spec| spec.carve(true), |spec| spec.carve(true));
+    for (side, side_report) in sides.reports() {
+        assert_eq!(side_report.outcome(), spargen::Outcome::Clean, "{side:?}");
+        let carved: Vec<_> = side_report
+            .warnings()
+            .filter(|diagnostic| diagnostic.code.as_str() == "W009")
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(carved.len(), 1, "{side:?}: {side_report:#?}");
+        assert!(carved[0].contains("get /bad"), "{side:?}: {carved:?}");
+    }
+
     // The carved operation is on neither surface: each carved side diffs clean against the same
     // spec written without `/bad` and not carved, where a surviving `GET /bad` would be a removal
     // or an addition.
@@ -527,6 +548,35 @@ fn a_successful_diff_keeps_each_sides_warnings() {
     assert_eq!(keys.len(), 2, "{value}");
     assert_eq!(value["old"], serde_json::to_value(old_report).unwrap());
     assert_eq!(value["new"], serde_json::to_value(new_report).unwrap());
+
+    // The same warning on the old side lands under the `old` label instead.
+    let warned = spec("", "id", validated, "");
+    let (_, sides) = diff_with_sides(&warned, &base(), |spec| spec, |spec| spec);
+    let old_report = sides.old_report();
+    assert!(sides.new_report().diagnostics().is_empty(), "{sides:#?}");
+    let warnings: Vec<_> = old_report
+        .warnings()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert_eq!(warnings, ["W001"], "{old_report:#?}");
+    assert_eq!(sides.to_string(), format!("old spec:\n{old_report}"));
+    let value = serde_json::to_value(&sides).unwrap();
+    assert_eq!(value["old"], serde_json::to_value(old_report).unwrap());
+    assert_eq!(
+        value["new"],
+        serde_json::to_value(sides.new_report()).unwrap()
+    );
+
+    // Both sides warning render as two headed blocks, old first.
+    let (_, sides) = diff_with_sides(&warned, &warned, |spec| spec, |spec| spec);
+    assert_eq!(
+        sides.to_string(),
+        format!(
+            "old spec:\n{}new spec:\n{}",
+            sides.old_report(),
+            sides.new_report()
+        )
+    );
 }
 
 /// A report carrying breaking and additive changes: `summary` counts each impact, and `Display`
