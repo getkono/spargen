@@ -7801,6 +7801,27 @@ impl Client {
             Err(support::unexpected_status::<ReadFileError>(&self.core, response).await)
         }
     }
+    ///The URL `read_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn read_file_url(
+        &self,
+        path: impl Into<types::Path>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let path: types::Path = path.into();
+        let mut path_3c31c5d6 = "/files".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        query
+            .extend(
+                support::serialize_form(
+                        "path",
+                        &path,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        support::build_url_on(&self.core, None, &path_3c31c5d6, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn binding_collisions(
@@ -7906,6 +7927,54 @@ impl Client {
             )
         }
     }
+    ///The URL `binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn binding_collisions_url(
+        &self,
+        query: impl Into<types::Query>,
+        url: impl Into<types::Url>,
+        params: impl Into<Option<BindingCollisionsParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let query: types::Query = query.into();
+        let url: types::Url = url.into();
+        let params: Option<BindingCollisionsParams> = params.into();
+        let mut path = "/binding-collisions".to_owned();
+        let mut query_fe9665f8: Vec<String> = Vec::new();
+        query_fe9665f8
+            .extend(
+                support::serialize_form(
+                        "query",
+                        &query,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        query_fe9665f8
+            .extend(
+                support::serialize_form(
+                        "url",
+                        &url,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        if let Some(value) = params.as_ref().and_then(|params| params.optional.as_ref())
+        {
+            query_fe9665f8
+                .extend(
+                    support::serialize_form(
+                            "optional",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query_fe9665f8)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn signature_binding_collisions(
@@ -7983,6 +8052,57 @@ impl Client {
                     .await,
             )
         }
+    }
+    ///The URL `signature_binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn signature_binding_collisions_url(
+        &self,
+        body: impl Into<types::Body>,
+        params: impl Into<types::Params>,
+        params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let body: types::Body = body.into();
+        let params: types::Params = params.into();
+        let params_07e95c71: Option<SignatureBindingCollisionsParams> = params_07e95c71
+            .into();
+        let mut path = "/signature-binding-collisions".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        query
+            .extend(
+                support::serialize_form(
+                        "body",
+                        &body,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        query
+            .extend(
+                support::serialize_form(
+                        "params",
+                        &params,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        if let Some(value) = params_07e95c71
+            .as_ref()
+            .and_then(|params| params.optional.as_ref())
+        {
+            query
+                .extend(
+                    support::serialize_form(
+                            "optional",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: No Content
     #[inline]
@@ -8084,6 +8204,63 @@ impl Client {
             )
         }
     }
+    ///The URL `serialize_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn serialize_params_url(
+        &self,
+        ids: types::Ids,
+        workflow_id: types::WorkflowId,
+        params: impl Into<Option<SerializeParamsParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let params: Option<SerializeParamsParams> = params.into();
+        let mut path = "/params/{ids}".to_owned();
+        path = path
+            .replace(
+                "{ids}",
+                &support::serialize_simple(
+                        &ids,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        query
+            .extend(
+                support::serialize_form(
+                        "workflow_id",
+                        &workflow_id,
+                        true,
+                        support::PercentEncoding::Form,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        if let Some(value) = params.as_ref().and_then(|params| params.labels.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "labels",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.compact.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "compact",
+                            value,
+                            false,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn get_conjunction(
@@ -8142,6 +8319,15 @@ impl Client {
                     .await,
             )
         }
+    }
+    ///The URL `get_conjunction` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_conjunction_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/conjunction".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: OK
     #[inline]
@@ -8234,6 +8420,65 @@ impl Client {
         } else {
             Err(support::unexpected_status::<GetUserError>(&self.core, response).await)
         }
+    }
+    ///The URL `get_user` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_user_url(
+        &self,
+        id: impl Into<types::IdF3e1128f>,
+        params: impl Into<Option<GetUserParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let id: types::IdF3e1128f = id.into();
+        let params: Option<GetUserParams> = params.into();
+        let mut path = "/users/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        if let Some(value) = params.as_ref().and_then(|params| params.page.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "page",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.filter.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "filter",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.r#type.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "type",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -8366,6 +8611,15 @@ Response `409`: Conflict*/
             })
         }
     }
+    ///The URL `get_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_multi_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/multi".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `401`: Unauthorized
@@ -8468,6 +8722,15 @@ Response `409`: Conflict*/
                 body,
             })
         }
+    }
+    ///The URL `get_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_shared_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/shared".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -8593,6 +8856,15 @@ Response `default`: Anything else*/
             })
         }
     }
+    ///The URL `get_maybe` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_maybe_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/maybe".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `201`: Created
@@ -8655,6 +8927,15 @@ Response `default`: Anything else*/
             )
         }
     }
+    ///The URL `get_multi_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_multi_default_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/multi-default".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `default`: Anything else*/
@@ -8687,6 +8968,15 @@ Response `default`: Anything else*/
             )
         }
     }
+    ///The URL `get_plain_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_plain_default_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/plain-default".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `204`: No Content
 
 Response `default`: Anything else*/
@@ -8715,6 +9005,15 @@ Response `default`: Anything else*/
                     .await,
             )
         }
+    }
+    ///The URL `get_unit_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_unit_default_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/unit-default".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -8790,6 +9089,15 @@ Response `default`: Anything else*/
                 body,
             })
         }
+    }
+    ///The URL `get_bodyless_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_bodyless_default_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/bodyless-default".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -8897,6 +9205,15 @@ Response `default`: Anything else*/
             })
         }
     }
+    ///The URL `get_bodyless_default_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_bodyless_default_multi_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/bodyless-default-multi".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `403`: Forbidden
@@ -8972,6 +9289,15 @@ Response `404`: Not Found*/
             })
         }
     }
+    ///The URL `get_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_bodyless_sibling_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/bodyless-sibling".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `403`: Forbidden
@@ -9044,6 +9370,15 @@ Response `404`: Not Found*/
                 body,
             })
         }
+    }
+    ///The URL `get_xml_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_xml_bodyless_sibling_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/xml-bodyless-sibling".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `304`: Not Modified
 
@@ -9121,6 +9456,15 @@ Response `default`: Anything else*/
             })
         }
     }
+    ///The URL `get_conditional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_conditional_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/conditional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `204`: No Content
 
 Response `400`: Bad Request*/
@@ -9149,6 +9493,15 @@ Response `400`: Bad Request*/
                     .await,
             )
         }
+    }
+    ///The URL `get_maybe_single` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_maybe_single_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/maybe-single".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -9240,6 +9593,15 @@ Response `409`: Conflict*/
             })
         }
     }
+    ///The URL `get_alias_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_alias_shared_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/alias-shared".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn upload_file(
@@ -9303,6 +9665,15 @@ Response `409`: Conflict*/
             )
         }
     }
+    ///The URL `upload_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn upload_file_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/upload".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn get_blob(
@@ -9351,6 +9722,41 @@ Response `409`: Conflict*/
             Err(support::unexpected_status::<GetBlobError>(&self.core, response).await)
         }
     }
+    ///The URL `get_blob` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_blob_url(
+        &self,
+        token: impl Into<types::Token84222325>,
+        params: impl Into<Option<GetBlobParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let token: types::Token84222325 = token.into();
+        let params: Option<GetBlobParams> = params.into();
+        let mut path = "/blob/{token}".to_owned();
+        path = path
+            .replace(
+                "{token}",
+                &support::serialize_simple(
+                        &token,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        if let Some(value) = params.as_ref().and_then(|params| params.cursor.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "cursor",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn post_raw(
@@ -9376,6 +9782,15 @@ Response `409`: Conflict*/
         } else {
             Err(support::unexpected_status::<PostRawError>(&self.core, response).await)
         }
+    }
+    ///The URL `post_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn post_raw_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/raw".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: OK
     #[inline]
@@ -9427,6 +9842,29 @@ Response `409`: Conflict*/
             )
         }
     }
+    ///The URL `post_nullable_bytes` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn post_nullable_bytes_url(
+        &self,
+        params: impl Into<Option<PostNullableBytesParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let params: Option<PostNullableBytesParams> = params.into();
+        let mut path = "/nullable-bytes".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        if let Some(value) = params.as_ref().and_then(|params| params.cursor.as_ref()) {
+            query
+                .extend(
+                    support::serialize_form(
+                            "cursor",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn post_nullable_parts(
@@ -9471,6 +9909,15 @@ Response `409`: Conflict*/
             )
         }
     }
+    ///The URL `post_nullable_parts` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn post_nullable_parts_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/nullable-parts".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `200`: rendered HTML
     #[inline]
     pub async fn render_html(
@@ -9499,6 +9946,15 @@ Response `409`: Conflict*/
                 support::unexpected_status::<RenderHtmlError>(&self.core, response).await,
             )
         }
+    }
+    ///The URL `render_html` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn render_html_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/render".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: octocat art
     #[inline]
@@ -9529,6 +9985,15 @@ Response `409`: Conflict*/
             )
         }
     }
+    ///The URL `get_octocat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_octocat_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/octocat".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `200`: raw bytes
     #[inline]
     pub async fn download_raw(
@@ -9556,6 +10021,15 @@ Response `409`: Conflict*/
                     .await,
             )
         }
+    }
+    ///The URL `download_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn download_raw_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/download".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `206`: partial content
     #[inline]
@@ -9585,6 +10059,15 @@ Response `409`: Conflict*/
         } else {
             Err(support::unexpected_status::<PutRangedError>(&self.core, response).await)
         }
+    }
+    ///The URL `put_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn put_ranged_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/ranged".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: the image
     #[inline]
@@ -9624,6 +10107,27 @@ Response `409`: Conflict*/
                 support::unexpected_status::<GetArtworkError>(&self.core, response).await,
             )
         }
+    }
+    ///The URL `get_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_artwork_url(
+        &self,
+        id: impl Into<types::Id>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let id: types::Id = id.into();
+        let mut path = "/artwork/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: stored
     #[inline]
@@ -9665,6 +10169,27 @@ Response `409`: Conflict*/
             )
         }
     }
+    ///The URL `put_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn put_artwork_url(
+        &self,
+        id: impl Into<types::Id4f0a4fba>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let id: types::Id4f0a4fba = id.into();
+        let mut path = "/artwork/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `204`: success
 
 Response `400`: textual failure*/
@@ -9694,6 +10219,16 @@ Response `400`: textual failure*/
                     .await,
             )
         }
+    }
+    ///The URL `get_text_error` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[deprecated]
+    #[inline]
+    pub fn get_text_error_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/text-error".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: text success
 
@@ -9821,6 +10356,15 @@ Response `409`: binary error*/
             })
         }
     }
+    ///The URL `get_raw_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_raw_multi_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/raw-multi".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `200`: OK
     #[inline]
     pub async fn submit_order(
@@ -9853,6 +10397,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `submit_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn submit_order_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/xml/order".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: patched
     #[inline]
@@ -9899,6 +10452,27 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `patch_merge_document` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn patch_merge_document_url(
+        &self,
+        id: impl Into<types::Id3e6bacfe>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let id: types::Id3e6bacfe = id.into();
+        let mut path = "/merge-patch/{id}".to_owned();
+        path = path
+            .replace(
+                "{id}",
+                &support::serialize_simple(
+                        &id,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: accepted
     #[inline]
     pub async fn submit_legacy_order(
@@ -9928,6 +10502,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `submit_legacy_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn submit_legacy_order_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/xml/legacy-order".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: OK
     #[inline]
@@ -9963,6 +10546,15 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `post_json_meta` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn post_json_meta_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/json/meta".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `200`: OK
     #[inline]
     pub async fn stream_chat(
@@ -9995,6 +10587,15 @@ Response `409`: binary error*/
                 support::unexpected_status::<StreamChatError>(&self.core, response).await,
             )
         }
+    }
+    ///The URL `stream_chat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn stream_chat_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/chat/stream".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: OK
     #[inline]
@@ -10029,6 +10630,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `stream_chat_lines` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn stream_chat_lines_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/chat/lines".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `200`: OK
     #[inline]
@@ -10065,6 +10675,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `stream_chat_sequence` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn stream_chat_sequence_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/chat/sequence".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: No Content
     #[inline]
@@ -10116,6 +10735,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `get_alternate_auth` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_alternate_auth_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/alternate-auth".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: No Content
     #[inline]
@@ -10227,6 +10855,100 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `serialize_styles` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn serialize_styles_url(
+        &self,
+        matrix: types::Matrix,
+        label: types::Label,
+        raw: impl Into<types::Raw>,
+        params: impl Into<Option<SerializeStylesParams>>,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let raw: types::Raw = raw.into();
+        let params: Option<SerializeStylesParams> = params.into();
+        let mut path = "/styles/{matrix}/{label}/{raw}".to_owned();
+        path = path
+            .replace(
+                "{matrix}",
+                &support::serialize_matrix(
+                        "matrix",
+                        &matrix,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        path = path
+            .replace(
+                "{label}",
+                &support::serialize_label(
+                        &label,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        path = path
+            .replace(
+                "{raw}",
+                &support::serialize_simple(
+                        &raw,
+                        false,
+                        support::PercentEncoding::Unreserved,
+                    )
+                    .map_err(support::Error::request_construction)?,
+            );
+        let mut query: Vec<String> = Vec::new();
+        if let Some(value) = params.as_ref().and_then(|params| params.space.as_ref()) {
+            query
+                .extend(
+                    support::serialize_delimited(
+                            "space",
+                            value,
+                            support::Delimiter::Space,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.pipe.as_ref()) {
+            query
+                .extend(
+                    support::serialize_delimited(
+                            "pipe",
+                            value,
+                            support::Delimiter::Pipe,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.deep.as_ref()) {
+            query
+                .extend(
+                    support::serialize_deep_object(
+                            "deep",
+                            value,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if let Some(value) = params.as_ref().and_then(|params| params.reserved.as_ref())
+        {
+            query
+                .extend(
+                    support::serialize_form(
+                            "reserved",
+                            value,
+                            true,
+                            support::PercentEncoding::Reserved,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn serialize_content_params(
@@ -10301,6 +11023,40 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `serialize_content_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn serialize_content_params_url(
+        &self,
+        text: impl Into<types::Text>,
+        json: types::DeepFilter,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let text: types::Text = text.into();
+        let mut path = "/content-params/{text}/{json}".to_owned();
+        path = path
+            .replace(
+                "{text}",
+                &support::encode(
+                    &support::serialize_simple(
+                            &text,
+                            false,
+                            support::PercentEncoding::Passthrough,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                    support::PercentEncoding::Unreserved,
+                ),
+            );
+        path = path
+            .replace(
+                "{json}",
+                &support::encode(
+                    &serde_json::to_string(&json)
+                        .map_err(support::Error::request_construction)?,
+                    support::PercentEncoding::Unreserved,
+                ),
+            );
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn submit_form(
@@ -10349,6 +11105,15 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `submit_form` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn submit_form_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/forms".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn submit_form_additional(
@@ -10391,6 +11156,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `submit_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn submit_form_additional_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/forms/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     ///Response `204`: No Content
     #[inline]
@@ -10441,6 +11215,15 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `submit_nullable_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn submit_nullable_form_additional_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/form/additional/nullable".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn upload_additional(
@@ -10487,6 +11270,15 @@ Response `409`: binary error*/
             )
         }
     }
+    ///The URL `upload_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn upload_additional_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/upload/additional".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     ///Response `204`: No Content
     #[inline]
     pub async fn documented_headers(
@@ -10513,6 +11305,15 @@ Response `409`: binary error*/
                     .await,
             )
         }
+    }
+    ///The URL `documented_headers` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn documented_headers_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/documented-headers".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `404`: Not Found
 
@@ -10605,6 +11406,15 @@ Response `default`: Anything else*/
             })
         }
     }
+    ///The URL `get_no_success` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_no_success_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/no-success".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `204`: No Content*/
@@ -10659,6 +11469,15 @@ Response `204`: No Content*/
             )
         }
     }
+    ///The URL `get_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_maybe_empty_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/maybe-empty".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `200`: OK
 
 Response `204`: No Content*/
@@ -10712,6 +11531,15 @@ Response `204`: No Content*/
             )
         }
     }
+    ///The URL `get_xml_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_xml_maybe_empty_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/xml/maybe-empty".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
     /**Response `2XX`: Any other success
 
 Response `200`: OK*/
@@ -10763,6 +11591,15 @@ Response `200`: OK*/
         } else {
             Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         }
+    }
+    ///The URL `get_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_ranged_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/exact-or-range".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
     }
     /**Response `200`: OK
 
@@ -10857,6 +11694,15 @@ Response `409`: Conflict*/
             })
         }
     }
+    ///The URL `get_error_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_error_ranged_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/error-exact-or-range".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
 }
 #[allow(unexpected_cfgs, unused_imports)]
 mod __spargen_blocking {
@@ -10949,6 +11795,14 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
             self.runtime.block_on(self.inner.read_file(path))
         }
+        ///The URL `read_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn read_file_url(
+            &self,
+            path: impl Into<types::Path>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.read_file_url(path)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn binding_collisions(
@@ -10963,6 +11817,16 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                 .block_on(
                     self.inner.binding_collisions(query, url, request, cookies, params),
                 )
+        }
+        ///The URL `binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn binding_collisions_url(
+            &self,
+            query: impl Into<types::Query>,
+            url: impl Into<types::Url>,
+            params: impl Into<Option<BindingCollisionsParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.binding_collisions_url(query, url, params)
         }
         ///Response `204`: No Content
         #[inline]
@@ -10988,6 +11852,16 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                         ),
                 )
         }
+        ///The URL `signature_binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn signature_binding_collisions_url(
+            &self,
+            body: impl Into<types::Body>,
+            params: impl Into<types::Params>,
+            params_07e95c71: impl Into<Option<SignatureBindingCollisionsParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.signature_binding_collisions_url(body, params, params_07e95c71)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn serialize_params(
@@ -11000,12 +11874,29 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime
                 .block_on(self.inner.serialize_params(ids, workflow_id, x_flags, params))
         }
+        ///The URL `serialize_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn serialize_params_url(
+            &self,
+            ids: types::Ids,
+            workflow_id: types::WorkflowId,
+            params: impl Into<Option<SerializeParamsParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.serialize_params_url(ids, workflow_id, params)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn get_conjunction(
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetConjunctionError>> {
             self.runtime.block_on(self.inner.get_conjunction())
+        }
+        ///The URL `get_conjunction` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_conjunction_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_conjunction_url()
         }
         ///Response `200`: OK
         #[inline]
@@ -11015,6 +11906,15 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             params: impl Into<Option<GetUserParams>>,
         ) -> Result<support::ResponseValue<types::User>, support::Error<GetUserError>> {
             self.runtime.block_on(self.inner.get_user(id, params))
+        }
+        ///The URL `get_user` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_user_url(
+            &self,
+            id: impl Into<types::IdF3e1128f>,
+            params: impl Into<Option<GetUserParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_user_url(id, params)
         }
         /**Response `200`: OK
 
@@ -11034,6 +11934,13 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_multi())
         }
+        ///The URL `get_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_multi_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_multi_url()
+        }
         /**Response `200`: OK
 
 Response `401`: Unauthorized
@@ -11047,6 +11954,13 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetSharedError>> {
             self.runtime.block_on(self.inner.get_shared())
         }
+        ///The URL `get_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_shared_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_shared_url()
+        }
         /**Response `200`: OK
 
 Response `404`: Not Found
@@ -11059,6 +11973,13 @@ Response `default`: Anything else*/
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeError>> {
             self.runtime.block_on(self.inner.get_maybe())
+        }
+        ///The URL `get_maybe` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_maybe_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_maybe_url()
         }
         /**Response `200`: OK
 
@@ -11074,6 +11995,13 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_multi_default())
         }
+        ///The URL `get_multi_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_multi_default_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_multi_default_url()
+        }
         /**Response `200`: OK
 
 Response `default`: Anything else*/
@@ -11086,6 +12014,13 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_plain_default())
         }
+        ///The URL `get_plain_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_plain_default_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_plain_default_url()
+        }
         /**Response `204`: No Content
 
 Response `default`: Anything else*/
@@ -11094,6 +12029,13 @@ Response `default`: Anything else*/
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetUnitDefaultError>> {
             self.runtime.block_on(self.inner.get_unit_default())
+        }
+        ///The URL `get_unit_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_unit_default_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_unit_default_url()
         }
         /**Response `200`: OK
 
@@ -11108,6 +12050,13 @@ Response `default`: Anything else*/
             support::Error<GetBodylessDefaultError>,
         > {
             self.runtime.block_on(self.inner.get_bodyless_default())
+        }
+        ///The URL `get_bodyless_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_bodyless_default_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_bodyless_default_url()
         }
         /**Response `200`: OK
 
@@ -11125,6 +12074,13 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_bodyless_default_multi())
         }
+        ///The URL `get_bodyless_default_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_bodyless_default_multi_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_bodyless_default_multi_url()
+        }
         /**Response `200`: OK
 
 Response `403`: Forbidden
@@ -11138,6 +12094,13 @@ Response `404`: Not Found*/
             support::Error<GetBodylessSiblingError>,
         > {
             self.runtime.block_on(self.inner.get_bodyless_sibling())
+        }
+        ///The URL `get_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_bodyless_sibling_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_bodyless_sibling_url()
         }
         /**Response `200`: OK
 
@@ -11153,6 +12116,13 @@ Response `404`: Not Found*/
         > {
             self.runtime.block_on(self.inner.get_xml_bodyless_sibling())
         }
+        ///The URL `get_xml_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_xml_bodyless_sibling_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_xml_bodyless_sibling_url()
+        }
         /**Response `304`: Not Modified
 
 Response `default`: Anything else*/
@@ -11165,6 +12135,13 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_conditional())
         }
+        ///The URL `get_conditional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_conditional_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_conditional_url()
+        }
         /**Response `204`: No Content
 
 Response `400`: Bad Request*/
@@ -11173,6 +12150,13 @@ Response `400`: Bad Request*/
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeSingleError>> {
             self.runtime.block_on(self.inner.get_maybe_single())
+        }
+        ///The URL `get_maybe_single` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_maybe_single_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_maybe_single_url()
         }
         /**Response `200`: OK
 
@@ -11185,6 +12169,13 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetAliasSharedError>> {
             self.runtime.block_on(self.inner.get_alias_shared())
         }
+        ///The URL `get_alias_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_alias_shared_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_alias_shared_url()
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn upload_file(
@@ -11192,6 +12183,13 @@ Response `409`: Conflict*/
             body: &types::RequestBodyE12d70b5,
         ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
             self.runtime.block_on(self.inner.upload_file(body))
+        }
+        ///The URL `upload_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn upload_file_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.upload_file_url()
         }
         ///Response `204`: No Content
         #[inline]
@@ -11202,6 +12200,15 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetBlobError>> {
             self.runtime.block_on(self.inner.get_blob(token, params))
         }
+        ///The URL `get_blob` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_blob_url(
+            &self,
+            token: impl Into<types::Token84222325>,
+            params: impl Into<Option<GetBlobParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_blob_url(token, params)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn post_raw(
@@ -11209,6 +12216,13 @@ Response `409`: Conflict*/
             body: &types::RequestBody43755b84,
         ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
             self.runtime.block_on(self.inner.post_raw(body))
+        }
+        ///The URL `post_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn post_raw_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.post_raw_url()
         }
         ///Response `200`: OK
         #[inline]
@@ -11222,6 +12236,14 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.post_nullable_bytes(params, body))
         }
+        ///The URL `post_nullable_bytes` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn post_nullable_bytes_url(
+            &self,
+            params: impl Into<Option<PostNullableBytesParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.post_nullable_bytes_url(params)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn post_nullable_parts(
@@ -11229,6 +12251,13 @@ Response `409`: Conflict*/
             body: &types::RequestBody20d50470,
         ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
             self.runtime.block_on(self.inner.post_nullable_parts(body))
+        }
+        ///The URL `post_nullable_parts` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn post_nullable_parts_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.post_nullable_parts_url()
         }
         ///Response `200`: rendered HTML
         #[inline]
@@ -11240,6 +12269,13 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.render_html())
         }
+        ///The URL `render_html` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn render_html_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.render_html_url()
+        }
         ///Response `200`: octocat art
         #[inline]
         pub fn get_octocat(
@@ -11250,6 +12286,13 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_octocat())
         }
+        ///The URL `get_octocat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_octocat_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_octocat_url()
+        }
         ///Response `200`: raw bytes
         #[inline]
         pub fn download_raw(
@@ -11259,6 +12302,13 @@ Response `409`: Conflict*/
             support::Error<DownloadRawError>,
         > {
             self.runtime.block_on(self.inner.download_raw())
+        }
+        ///The URL `download_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn download_raw_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.download_raw_url()
         }
         ///Response `206`: partial content
         #[inline]
@@ -11271,6 +12321,13 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.put_ranged(body))
         }
+        ///The URL `put_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn put_ranged_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.put_ranged_url()
+        }
         ///Response `200`: the image
         #[inline]
         pub fn get_artwork(
@@ -11282,6 +12339,14 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_artwork(id))
         }
+        ///The URL `get_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_artwork_url(
+            &self,
+            id: impl Into<types::Id>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_artwork_url(id)
+        }
         ///Response `204`: stored
         #[inline]
         pub fn put_artwork(
@@ -11290,6 +12355,14 @@ Response `409`: Conflict*/
             body: &types::RequestBody,
         ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
             self.runtime.block_on(self.inner.put_artwork(id, body))
+        }
+        ///The URL `put_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn put_artwork_url(
+            &self,
+            id: impl Into<types::Id4f0a4fba>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.put_artwork_url(id)
         }
         /**Response `204`: success
 
@@ -11300,6 +12373,14 @@ Response `400`: textual failure*/
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetTextErrorError>> {
             self.runtime.block_on(self.inner.get_text_error())
+        }
+        ///The URL `get_text_error` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[deprecated]
+        #[inline]
+        pub fn get_text_error_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_text_error_url()
         }
         /**Response `200`: text success
 
@@ -11317,6 +12398,13 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.get_raw_multi())
         }
+        ///The URL `get_raw_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_raw_multi_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_raw_multi_url()
+        }
         ///Response `200`: OK
         #[inline]
         pub fn submit_order(
@@ -11327,6 +12415,13 @@ Response `409`: binary error*/
             support::Error<SubmitOrderError>,
         > {
             self.runtime.block_on(self.inner.submit_order(body))
+        }
+        ///The URL `submit_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn submit_order_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.submit_order_url()
         }
         ///Response `204`: patched
         #[inline]
@@ -11340,6 +12435,14 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.patch_merge_document(id, body))
         }
+        ///The URL `patch_merge_document` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn patch_merge_document_url(
+            &self,
+            id: impl Into<types::Id3e6bacfe>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.patch_merge_document_url(id)
+        }
         ///Response `204`: accepted
         #[inline]
         pub fn submit_legacy_order(
@@ -11347,6 +12450,13 @@ Response `409`: binary error*/
             body: &types::XmlOrder,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
             self.runtime.block_on(self.inner.submit_legacy_order(body))
+        }
+        ///The URL `submit_legacy_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn submit_legacy_order_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.submit_legacy_order_url()
         }
         ///Response `200`: OK
         #[inline]
@@ -11359,6 +12469,13 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.post_json_meta(body))
         }
+        ///The URL `post_json_meta` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn post_json_meta_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.post_json_meta_url()
+        }
         ///Response `200`: OK
         #[inline]
         pub fn stream_chat(
@@ -11368,6 +12485,13 @@ Response `409`: binary error*/
             support::Error<StreamChatError>,
         > {
             self.runtime.block_on(self.inner.stream_chat())
+        }
+        ///The URL `stream_chat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn stream_chat_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.stream_chat_url()
         }
         ///Response `200`: OK
         #[inline]
@@ -11379,6 +12503,13 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.stream_chat_lines())
         }
+        ///The URL `stream_chat_lines` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn stream_chat_lines_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.stream_chat_lines_url()
+        }
         ///Response `200`: OK
         #[inline]
         pub fn stream_chat_sequence(
@@ -11389,12 +12520,26 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.stream_chat_sequence())
         }
+        ///The URL `stream_chat_sequence` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn stream_chat_sequence_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.stream_chat_sequence_url()
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn get_alternate_auth(
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<GetAlternateAuthError>> {
             self.runtime.block_on(self.inner.get_alternate_auth())
+        }
+        ///The URL `get_alternate_auth` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_alternate_auth_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_alternate_auth_url()
         }
         ///Response `204`: No Content
         #[inline]
@@ -11407,6 +12552,17 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<SerializeStylesError>> {
             self.runtime
                 .block_on(self.inner.serialize_styles(matrix, label, raw, params))
+        }
+        ///The URL `serialize_styles` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn serialize_styles_url(
+            &self,
+            matrix: types::Matrix,
+            label: types::Label,
+            raw: impl Into<types::Raw>,
+            params: impl Into<Option<SerializeStylesParams>>,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.serialize_styles_url(matrix, label, raw, params)
         }
         ///Response `204`: No Content
         #[inline]
@@ -11425,6 +12581,15 @@ Response `409`: binary error*/
                     self.inner.serialize_content_params(text, json, x_text, x_json),
                 )
         }
+        ///The URL `serialize_content_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn serialize_content_params_url(
+            &self,
+            text: impl Into<types::Text>,
+            json: types::DeepFilter,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.serialize_content_params_url(text, json)
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn submit_form(
@@ -11432,6 +12597,13 @@ Response `409`: binary error*/
             body: &types::RequestBody75618f63,
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
             self.runtime.block_on(self.inner.submit_form(body))
+        }
+        ///The URL `submit_form` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn submit_form_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.submit_form_url()
         }
         ///Response `204`: No Content
         #[inline]
@@ -11444,6 +12616,13 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_form_additional(body))
         }
+        ///The URL `submit_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn submit_form_additional_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.submit_form_additional_url()
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn submit_nullable_form_additional(
@@ -11455,6 +12634,13 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
         }
+        ///The URL `submit_nullable_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn submit_nullable_form_additional_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.submit_nullable_form_additional_url()
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn upload_additional(
@@ -11463,12 +12649,26 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
             self.runtime.block_on(self.inner.upload_additional(body))
         }
+        ///The URL `upload_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn upload_additional_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.upload_additional_url()
+        }
         ///Response `204`: No Content
         #[inline]
         pub fn documented_headers(
             &self,
         ) -> Result<support::ResponseValue<()>, support::Error<DocumentedHeadersError>> {
             self.runtime.block_on(self.inner.documented_headers())
+        }
+        ///The URL `documented_headers` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn documented_headers_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.documented_headers_url()
         }
         /**Response `404`: Not Found
 
@@ -11482,6 +12682,13 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_no_success())
         }
+        ///The URL `get_no_success` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_no_success_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_no_success_url()
+        }
         /**Response `200`: OK
 
 Response `204`: No Content*/
@@ -11493,6 +12700,13 @@ Response `204`: No Content*/
             support::Error<GetMaybeEmptyError>,
         > {
             self.runtime.block_on(self.inner.get_maybe_empty())
+        }
+        ///The URL `get_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_maybe_empty_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_maybe_empty_url()
         }
         /**Response `200`: OK
 
@@ -11506,6 +12720,13 @@ Response `204`: No Content*/
         > {
             self.runtime.block_on(self.inner.get_xml_maybe_empty())
         }
+        ///The URL `get_xml_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_xml_maybe_empty_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_xml_maybe_empty_url()
+        }
         /**Response `2XX`: Any other success
 
 Response `200`: OK*/
@@ -11517,6 +12738,13 @@ Response `200`: OK*/
             support::Error<GetRangedError>,
         > {
             self.runtime.block_on(self.inner.get_ranged())
+        }
+        ///The URL `get_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_ranged_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_ranged_url()
         }
         /**Response `200`: OK
 
@@ -11531,6 +12759,13 @@ Response `409`: Conflict*/
             support::Error<GetErrorRangedError>,
         > {
             self.runtime.block_on(self.inner.get_error_ranged())
+        }
+        ///The URL `get_error_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_error_ranged_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_error_ranged_url()
         }
     }
 }

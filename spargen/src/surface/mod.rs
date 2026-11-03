@@ -95,6 +95,9 @@ impl ServerVariableSurface {
 struct OpSurface {
     /// The generated Rust method identifier.
     method_name: String,
+    /// The generated `{method}_url` accessor's identifier. It shares the method scope and yields
+    /// to every operation method, so an added operation can rename it while `method_name` holds.
+    url_accessor_name: String,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, ParamSurface>,
@@ -237,7 +240,8 @@ pub enum ChangeKind {
     OperationAdded,
     /// An operation was removed. **Major** — a method the consumer calls disappears.
     OperationRemoved,
-    /// The generated method name for an endpoint changed. **Major** — the callable renames.
+    /// The generated method name for an endpoint changed, or its `{method}_url` accessor's alone
+    /// did. **Major** — the callable renames.
     MethodRenamed,
     /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
     RequestBodyAdded,

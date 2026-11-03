@@ -25,6 +25,12 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             .expect("operation name allocated")
             .as_str()
             .to_owned();
+        let url_accessor_name = names
+            .operation_urls
+            .get(&operation.id)
+            .expect("operation URL accessor name allocated")
+            .as_str()
+            .to_owned();
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
@@ -56,6 +62,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             key,
             OpSurface {
                 method_name,
+                url_accessor_name,
                 params,
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names),

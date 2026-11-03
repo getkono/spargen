@@ -21,6 +21,18 @@ pub(super) fn operation_method_ident<'a>(
         .expect("operation name allocated")
 }
 
+/// The URL-accessor method identifier of an operation on `Client` and `BlockingClient`, as
+/// [`Names::operation_urls`] allocates it.
+pub(super) fn operation_url_ident<'a>(
+    operation: &Operation,
+    names: &'a Names,
+) -> &'a crate::name::Ident {
+    names
+        .operation_urls
+        .get(&operation.id)
+        .expect("operation URL accessor name allocated")
+}
+
 /// The type name of an operation's optional-parameters `…Params` struct, as
 /// [`Names::params_structs`] allocates it.
 pub(super) fn params_struct_ident<'a>(

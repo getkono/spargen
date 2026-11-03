@@ -7,8 +7,11 @@ use crate::ir::{Api, Operation};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
-use super::idents::operation_method_ident;
-use super::operation::{operation_args, operation_return_ty, param_default_docs_tokens};
+use super::idents::{operation_method_ident, operation_url_ident};
+use super::operation::{
+    operation_args, operation_return_ty, operation_url_args, param_default_docs_tokens,
+    url_accessor_doc,
+};
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
 /// `BlockingRuntime` beside it: the consumer crate's `blocking` feature, on a non-`wasm32` target.
@@ -137,7 +140,8 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 
 /// Emit one blocking operation method: the async method's signature minus `async`, whose body drives
 /// the async method to completion on the owned runtime. Same docs, deprecation, argument list, and
-/// return types as the async method (all built from the shared signature helpers).
+/// return types as the async method (all built from the shared signature helpers). Its URL
+/// accessor follows it, forwarding to the async client's, which sends nothing and needs no runtime.
 fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let method_ident = operation_method_ident(operation, names);
     let docs = doc_tokens(&operation.docs);
@@ -145,6 +149,9 @@ fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> T
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
     let (args, forwards) = operation_args(operation, api, names);
     let (return_ok_ty, error_ty) = operation_return_ty(operation, names);
+    let url_ident = operation_url_ident(operation, names);
+    let url_doc = url_accessor_doc(method_ident);
+    let (url_args, url_forwards) = operation_url_args(operation, api, names);
     quote! {
         #docs
         #(#param_default_docs)*
@@ -155,6 +162,16 @@ fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> T
             #(#args),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             self.runtime.block_on(self.inner.#method_ident(#(#forwards),*))
+        }
+
+        #[doc = #url_doc]
+        #deprecated
+        #[inline]
+        pub fn #url_ident(
+            &self,
+            #(#url_args),*
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.#url_ident(#(#url_forwards),*)
         }
     }
 }

@@ -1,4 +1,5 @@
-//! One async operation method on `Client`, and the signature pieces its blocking twin shares.
+//! One async operation method on `Client` with its URL accessor, and the signature pieces its
+//! blocking twin shares.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -12,7 +13,8 @@ use super::dispatch::{
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
 use super::idents::{
-    error_type_ident, operation_bindings, operation_method_ident, param_ident, params_struct_ident,
+    error_type_ident, operation_bindings, operation_method_ident, operation_url_ident, param_ident,
+    params_struct_ident,
 };
 use super::params::{
     cookie_param_tokens, json_querystring_tokens, location_statements, param_value_tokens,
@@ -26,11 +28,11 @@ use super::ty::{reqwest_method, ty_tokens};
 /// the request through `support`, then dispatches the response by status into the operation's
 /// typed success value or typed error. The wire work itself — encoding, sending, and decoding —
 /// is done by `support` routines, most of them generic over the body or error type.
+///
+/// The operation's URL accessor (`emit_operation_url`) is emitted after it, from the same
+/// URL-building statements.
 pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let bindings = operation_bindings(operation, names);
-    let path_binding = &bindings.path;
-    let query_binding = &bindings.query;
-    let raw_query_binding = &bindings.raw_query;
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
     let cookies_binding = &bindings.cookies;
@@ -48,7 +50,203 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
     // The typed argument list (required params, the optional-params struct, the body) is shared
     // verbatim with the blocking shim so the two signatures can never drift.
     let (args, _arg_names) = operation_args(operation, api, names);
+    let UrlBuilding {
+        statements: url_statements,
+        build_url,
+    } = url_building(operation, names);
 
+    let headers = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::Header,
+        |param, value| {
+            let name = &param.name;
+            let value = param_value_tokens(param, value);
+            quote! { #request_binding = #request_binding.header(#name, #value); }
+        },
+    );
+    let has_cookies = operation
+        .params
+        .iter()
+        .any(|param| param.location == ParamLoc::Cookie);
+    let cookie_init =
+        has_cookies.then(|| quote! { let mut #cookies_binding: Vec<String> = Vec::new(); });
+    let cookies = location_statements(
+        operation,
+        names,
+        bindings,
+        ParamLoc::Cookie,
+        |param, value| cookie_param_tokens(param, &param.name, value, cookies_binding),
+    );
+    let cookie_attach = has_cookies.then(|| {
+        quote! {
+            if !#cookies_binding.is_empty() {
+                #request_binding = #request_binding.header(
+                    reqwest::header::COOKIE,
+                    #cookies_binding.join("; "),
+                );
+            }
+        }
+    });
+    let accept = accept_tokens(operation, bindings);
+    let body_send = body_send_tokens(operation, api, names, bindings);
+    let attach_auth = attach_auth_tokens(operation, api, request_binding);
+    let error_branch = error_branch_tokens(operation, api, names, error_ident);
+    let (success_decode, reconnect_request_init) =
+        success_decode_tokens(operation, api, names, bindings, &success_ty, error_ident);
+    // The return type is shared with the blocking shim so both surfaces stay identical.
+    let (return_ok_ty, _) = operation_return_ty(operation, names);
+
+    let arg_normalizations = operation_arg_normalizations(operation, api, names, |_| true, true);
+    let url_accessor = emit_operation_url(operation, api, names);
+
+    quote! {
+        #docs
+        #(#param_default_docs)*
+        #deprecated
+        #[inline]
+        pub async fn #method_ident(
+            &self,
+            #(#args),*
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            #(#arg_normalizations)*
+            #url_statements
+            let #url_binding = #build_url
+                .map_err(support::Error::widen)?;
+            let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
+            #(#headers)*
+            #cookie_init
+            #(#cookies)*
+            #cookie_attach
+            #accept
+            #body_send
+            #attach_auth
+            let #request_binding = #request_binding
+                .build()
+                .map_err(support::Error::request_construction)?;
+            #reconnect_request_init
+            let response = support::send(&self.core, #request_binding)
+                .await
+                .map_err(support::Error::widen)?;
+            if response.status().is_success() {
+                #success_decode
+            } else {
+                #error_branch
+            }
+        }
+
+        #url_accessor
+    }
+}
+
+/// Whether `location` shapes the request URL: the path, the query, or the whole query string.
+fn shapes_url(location: ParamLoc) -> bool {
+    matches!(
+        location,
+        ParamLoc::Path | ParamLoc::Query | ParamLoc::QueryString
+    )
+}
+
+/// Whether an operation's optional-parameters bundle holds a parameter that shapes its URL, so the
+/// URL accessor takes the bundle as well.
+fn url_takes_params(operation: &Operation) -> bool {
+    operation
+        .params
+        .iter()
+        .any(|param| !param.required && shapes_url(param.location))
+}
+
+/// The arguments of an operation's URL accessor, and their bare forwarding names: the operation's
+/// own [`operation_args`] narrowed to the required parameters that [`shapes_url`] admits, and the
+/// optional-parameters bundle where [`url_takes_params`] holds. A header, a cookie or the request
+/// body changes nothing in the URL, so the accessor does not ask for one.
+pub(super) fn operation_url_args(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let (args, forwards) = operation_args(operation, api, names);
+    let required = operation.params.iter().filter(|param| param.required);
+    let mut keep: Vec<bool> = required.map(|param| shapes_url(param.location)).collect();
+    if operation_bindings(operation, names).params.is_some() {
+        keep.push(url_takes_params(operation));
+    }
+    // The body argument, last when present, is never kept.
+    keep.resize(args.len(), false);
+    let kept = |items: Vec<TokenStream>| -> Vec<TokenStream> {
+        items
+            .into_iter()
+            .zip(&keep)
+            .filter_map(|(item, keep)| keep.then_some(item))
+            .collect()
+    };
+    (kept(args), kept(forwards))
+}
+
+/// Emit one operation's URL accessor on `Client`: a `pub fn {method}_url` taking the parameters
+/// that shape the URL and returning the URL the operation method sends its request to, built by
+/// the same [`url_building`] statements, against the client's base URL or the operation's server
+/// override. Nothing is sent, and no credential is attached. It serves a caller that hands the URL
+/// to something that fetches it itself, a media player or a browser.
+fn emit_operation_url(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
+    let url_ident = operation_url_ident(operation, names);
+    let method_ident = operation_method_ident(operation, names);
+    let (args, _) = operation_url_args(operation, api, names);
+    let normalizations = operation_arg_normalizations(
+        operation,
+        api,
+        names,
+        shapes_url,
+        url_takes_params(operation),
+    );
+    let UrlBuilding {
+        statements,
+        build_url,
+    } = url_building(operation, names);
+    let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
+    let doc = url_accessor_doc(method_ident);
+    quote! {
+        #[doc = #doc]
+        #deprecated
+        #[inline]
+        pub fn #url_ident(
+            &self,
+            #(#args),*
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            #(#normalizations)*
+            #statements
+            #build_url
+        }
+    }
+}
+
+/// The rustdoc of an operation's URL accessor, on `Client` and `BlockingClient` alike.
+pub(super) fn url_accessor_doc(method_ident: &crate::name::Ident) -> String {
+    let method = method_ident.as_str().trim_start_matches("r#");
+    normalize_rustdoc(&format!(
+        "The URL `{method}` sends its request to, with the same path and query encoding, \
+         resolved against the client's base URL or the operation's server override. Nothing is \
+         sent and no credential is attached: this is for a URL handed to something that fetches \
+         it itself."
+    ))
+}
+
+/// The statements that assemble an operation's path and query into its bindings, and the
+/// `support::build_url_on` (or `build_url_with_query_string_on`) call that resolves them into a
+/// `Result<Url, Error<Infallible>>`. Shared by the operation method and its URL accessor, so the
+/// URL a caller is handed is the URL the request goes to.
+struct UrlBuilding {
+    statements: TokenStream,
+    build_url: TokenStream,
+}
+
+/// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it.
+fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
+    let bindings = operation_bindings(operation, names);
+    let path_binding = &bindings.path;
+    let query_binding = &bindings.query;
+    let raw_query_binding = &bindings.raw_query;
     let path_init = operation.path.raw.clone();
     let path_replacements = operation
         .params
@@ -111,48 +309,6 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             querystring_param_tokens(parameter, value, query_binding, raw_query_binding)
         },
     );
-    let headers = location_statements(
-        operation,
-        names,
-        bindings,
-        ParamLoc::Header,
-        |param, value| {
-            let name = &param.name;
-            let value = param_value_tokens(param, value);
-            quote! { #request_binding = #request_binding.header(#name, #value); }
-        },
-    );
-    let has_cookies = operation
-        .params
-        .iter()
-        .any(|param| param.location == ParamLoc::Cookie);
-    let cookie_init =
-        has_cookies.then(|| quote! { let mut #cookies_binding: Vec<String> = Vec::new(); });
-    let cookies = location_statements(
-        operation,
-        names,
-        bindings,
-        ParamLoc::Cookie,
-        |param, value| cookie_param_tokens(param, &param.name, value, cookies_binding),
-    );
-    let cookie_attach = has_cookies.then(|| {
-        quote! {
-            if !#cookies_binding.is_empty() {
-                #request_binding = #request_binding.header(
-                    reqwest::header::COOKIE,
-                    #cookies_binding.join("; "),
-                );
-            }
-        }
-    });
-    let accept = accept_tokens(operation, bindings);
-    let body_send = body_send_tokens(operation, api, names, bindings);
-    let attach_auth = attach_auth_tokens(operation, api, request_binding);
-    let error_branch = error_branch_tokens(operation, api, names, error_ident);
-    let (success_decode, reconnect_request_init) =
-        success_decode_tokens(operation, api, names, bindings, &success_ty, error_ident);
-    // The return type is shared with the blocking shim so both surfaces stay identical.
-    let (return_ok_ty, _) = operation_return_ty(operation, names);
 
     // An Operation or Path Item Object may override the document's `servers`. The runtime's
     // `*_on` entry points take that override: absolute, it replaces the client's base URL;
@@ -177,47 +333,16 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         }
     };
 
-    let arg_normalizations = operation_arg_normalizations(operation, api, names);
-
-    quote! {
-        #docs
-        #(#param_default_docs)*
-        #deprecated
-        #[inline]
-        pub async fn #method_ident(
-            &self,
-            #(#args),*
-        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
-            #(#arg_normalizations)*
+    UrlBuilding {
+        statements: quote! {
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
             let mut #query_binding: Vec<String> = Vec::new();
             #raw_query_init
             #(#query)*
             #(#querystring)*
-            let #url_binding = #build_url
-                .map_err(support::Error::widen)?;
-            let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
-            #(#headers)*
-            #cookie_init
-            #(#cookies)*
-            #cookie_attach
-            #accept
-            #body_send
-            #attach_auth
-            let #request_binding = #request_binding
-                .build()
-                .map_err(support::Error::request_construction)?;
-            #reconnect_request_init
-            let response = support::send(&self.core, #request_binding)
-                .await
-                .map_err(support::Error::widen)?;
-            if response.status().is_success() {
-                #success_decode
-            } else {
-                #error_branch
-            }
-        }
+        },
+        build_url,
     }
 }
 
@@ -240,22 +365,31 @@ fn takes_into_string(api: &Api, ty: Ty) -> bool {
 /// each required parameter [`takes_into_string`] admits, and the optional-parameters bundle from
 /// `impl Into<Option<…Params>>` to `Option<…Params>`. The rest of the emitted body is written
 /// against concrete types.
+///
+/// Only the arguments the method takes are converted: a required parameter whose location
+/// `takes_required` admits, and the bundle where `takes_bundle` holds.
 fn operation_arg_normalizations(
     operation: &Operation,
     api: &Api,
     names: &Names,
+    takes_required: impl Fn(ParamLoc) -> bool,
+    takes_bundle: bool,
 ) -> Vec<TokenStream> {
     let bindings = operation_bindings(operation, names);
     let params_ident = params_struct_ident(operation, names);
     let mut statements = Vec::new();
-    for param in operation.params.iter().filter(|param| param.required) {
+    let required = operation
+        .params
+        .iter()
+        .filter(|param| param.required && takes_required(param.location));
+    for param in required {
         if takes_into_string(api, param.ty) {
             let ident = param_ident(names, operation, param);
             let ty = ty_tokens(param.ty, names, true);
             statements.push(quote! { let #ident: #ty = #ident.into(); });
         }
     }
-    if let Some(params_binding) = &bindings.params {
+    if let Some(params_binding) = bindings.params.as_ref().filter(|_| takes_bundle) {
         statements.push(quote! {
             let #params_binding: Option<#params_ident> = #params_binding.into();
         });
