@@ -1,5 +1,6 @@
-//! Values on the wire: dates, a per-operation server override, RFC 6570 multipart parts, CBOR
-//! bodies, and an explicit `null` content parameter.
+//! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
+//! the request it describes, RFC 6570 multipart parts, CBOR bodies, and an explicit `null` content
+//! parameter.
 
 use super::*;
 
@@ -247,6 +248,140 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
         "the request must carry the override host, not the document server: {seen}"
     );
 }
+
+/// An operation's `{method}_url` accessor must hand back exactly the URL its method sends the
+/// request to: the same path-parameter and query encoding, against the client's base URL with its
+/// path prefix, and through a path item's server override. Each URL is compared with the request
+/// line a local server then receives, so the accessor cannot drift from the request it describes.
+/// A required header parameter shapes no URL, so the accessor does not ask for it.
+#[test]
+fn an_operation_url_is_the_url_its_request_is_sent_to() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Urls, version: "1" }
+paths:
+  /v1/files/{file_id}/stream:
+    get:
+      operationId: stream_file
+      parameters:
+        - { name: file_id, in: path, required: true, schema: { type: string } }
+        - { name: X-Trace, in: header, required: true, schema: { type: string } }
+      responses:
+        "204": { description: streamed elsewhere }
+  /v1/auth/login:
+    get:
+      operationId: login
+      parameters:
+        - { name: redirect, in: query, required: false, schema: { type: string } }
+      responses:
+        "302": { description: to the identity provider }
+  /blobs/{name}:
+    servers:
+      - url: /edge/
+    get:
+      operationId: read_blob
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: read elsewhere }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "urls_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(out.join("tests/urls.rs"), URL_ACCESSOR_TEST).unwrap();
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "urls"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "each URL accessor must name the URL sent");
+}
+
+const URL_ACCESSOR_TEST: &str = r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+/// Serve `count` requests on a fresh port, answering each with `204`, and return the base URL,
+/// with a path prefix, and the request lines in the order they arrived.
+fn serve(count: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/api", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        (0..count)
+            .map(|_| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                stream.flush().unwrap();
+                request.lines().next().unwrap().to_owned()
+            })
+            .collect()
+    });
+    (base, server)
+}
+
+/// The request line a request to `url` carries.
+fn request_line(url: &reqwest::Url) -> String {
+    match url.query() {
+        Some(query) => format!("GET {}?{query} HTTP/1.1", url.path()),
+        None => format!("GET {} HTTP/1.1", url.path()),
+    }
+}
+
+#[test]
+fn each_url_accessor_names_the_url_its_operation_sends_to() {
+    let (base, server) = serve(4);
+    let client = urls_client::BlockingClient::new(&base).unwrap();
+
+    let stream = client.stream_file_url("a b/c").unwrap();
+    assert_eq!(stream.as_str(), format!("{base}/v1/files/a%20b%2Fc/stream"));
+    let login = client
+        .login_url(urls_client::LoginParams::default().redirect("/".to_owned()))
+        .unwrap();
+    assert_eq!(login.as_str(), format!("{base}/v1/auth/login?redirect=%2F"));
+    let bare_login = client.login_url(None).unwrap();
+    assert_eq!(bare_login.as_str(), format!("{base}/v1/auth/login"));
+    let blob = client.read_blob_url("x y").unwrap();
+    assert!(
+        !blob.path().starts_with("/api/"),
+        "the path item's server override must replace the base path: {blob}"
+    );
+
+    // The async client's accessor is the one the blocking client forwards to.
+    assert_eq!(client.inner().stream_file_url("a b/c").unwrap(), stream);
+
+    client.stream_file("a b/c", "trace").unwrap();
+    // `login` documents only `302`, so the server's `204` is an undocumented status: the request
+    // line is what is compared, not the outcome.
+    let _ = client.login(urls_client::LoginParams::default().redirect("/".to_owned()));
+    let _ = client.login(None);
+    client.read_blob("x y").unwrap();
+    let seen = server.join().unwrap();
+    assert_eq!(
+        seen,
+        vec![
+            request_line(&stream),
+            request_line(&login),
+            request_line(&bare_login),
+            request_line(&blob),
+        ]
+    );
+}
+"##;
 
 /// RFC 6570-mode `multipart/form-data` parts must carry literal delimiters, not percent-encoded
 /// ones.
