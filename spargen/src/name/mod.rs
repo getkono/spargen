@@ -30,6 +30,10 @@ pub(crate) use synth::synth_operation_id;
 pub(crate) struct Names {
     /// Method name per operation.
     pub(crate) operations: HashMap<OperationId, Ident>,
+    /// URL-accessor method name per operation, `{method}_url`. Allocated in the method scope after
+    /// every operation's own method, so an operation whose method already spells `{method}_url`
+    /// keeps that name and the accessor takes a pointer-seeded suffix instead.
+    pub(crate) operation_urls: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Error type name per operation: `{Method}Error`, or `{Method}OperationError` where the first
@@ -414,6 +418,23 @@ pub(crate) fn allocate(api: &Api) -> Names {
                 ),
                 cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
             },
+        );
+    }
+    // The URL accessors share the method scope, and are allocated only once every operation holds
+    // its method: an operation's own method name is the older surface, so where `{method}_url` is
+    // another operation's method, that operation keeps it and the accessor yields.
+    for operation in &api.operations {
+        let method = names
+            .operations
+            .get(&operation.id)
+            .expect("operation name allocated");
+        names.operation_urls.insert(
+            operation.id.clone(),
+            operation_scope.alloc(
+                &format!("{}_url", method.as_str().trim_start_matches("r#")),
+                IdentRole::Method,
+                &operation.provenance.pointer,
+            ),
         );
     }
     allocate_operation_types(api, &mut names, &mut root_scope);
@@ -922,6 +943,41 @@ mod tests {
         );
     }
 
+    /// An operation whose method already spells another operation's `{method}_url` keeps it, in
+    /// either listing order, and the accessor it would have taken is suffixed instead.
+    #[test]
+    fn an_operation_method_keeps_a_spelling_a_url_accessor_wants() {
+        for accessor_first in [false, true] {
+            let mut api = api(Vec::new(), false);
+            let mut spelled = api.operations[0].clone();
+            spelled.id = OperationId("getItemUrl".to_owned());
+            spelled.provenance = Provenance::new(
+                JsonPointer::root()
+                    .push("paths")
+                    .push("/items/{id}/url")
+                    .push("get"),
+                None,
+            );
+            if accessor_first {
+                api.operations.insert(0, spelled);
+            } else {
+                api.operations.push(spelled);
+            }
+            let names = allocate(&api);
+            let method = |id: &str| names.operations[&OperationId(id.to_owned())].as_str();
+            let accessor = |id: &str| names.operation_urls[&OperationId(id.to_owned())].as_str();
+            assert_eq!(method("getItem"), "get_item");
+            assert_eq!(method("getItemUrl"), "get_item_url");
+            assert_eq!(accessor("getItemUrl"), "get_item_url_url");
+            assert_ne!(accessor("getItem"), "get_item_url");
+            assert!(
+                accessor("getItem").starts_with("get_item_url_"),
+                "the accessor keeps its stem: {}",
+                accessor("getItem")
+            );
+        }
+    }
+
     #[test]
     fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
         // A definition is anonymous only when it has neither a document nor a pointer. A schema
@@ -1263,8 +1319,8 @@ mod tests {
         /// biased to collide, is a legal identifier and distinct within the scope it is emitted
         /// in: the `types` module (definitions and response-header structs, beside the names
         /// that module imports), the module root (the `…Params` structs, the error types, and the
-        /// success enums, beside the runtime re-exports), the client methods (beside the fixed
-        /// ones), each struct's fields with its overflow map, each enum's and union's variants
+        /// success enums, beside the runtime re-exports), the client methods and their URL
+        /// accessors (beside the fixed ones), each struct's fields with its overflow map, each enum's and union's variants
         /// with an open enum's catch-all, each operation's method arguments with its generator
         /// bindings and its `…Params` fields, each header struct's fields, the `servers` module
         /// (the server builders and the server-variable enums `emit_servers` declares side by
@@ -1293,7 +1349,12 @@ mod tests {
             )?;
 
             prop_assert_eq!(names.operations.len(), operations.len());
-            assert_scope("client methods", names.operations.values(), super::CLIENT_METHODS)?;
+            prop_assert_eq!(names.operation_urls.len(), operations.len());
+            assert_scope(
+                "client methods",
+                names.operations.values().chain(names.operation_urls.values()),
+                super::CLIENT_METHODS,
+            )?;
             prop_assert_eq!(names.params_structs.len(), operations.len());
             prop_assert_eq!(names.operation_errors.len(), operations.len());
             let enum_successes = api
