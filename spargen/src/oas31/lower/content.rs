@@ -108,46 +108,20 @@ pub(super) fn choose_media<'a, T>(
         // generated. That narrows the documented surface — a server that also accepts XML will only
         // ever be sent JSON — so it is reported rather than dropped in silence.
         //
-        // An alternative that decodes to the very same thing narrows nothing, though. An
-        // opaque-octets body that constrains nothing is `bytes::Bytes`, so a ranged media response
-        // offering `video/*`, `image/png` and `application/octet-stream` gives up nothing by
-        // generating one of them, and saying otherwise is noise on a common shape.
+        // A response's octet-stream alternatives that constrain nothing are not reported: each
+        // decodes to `bytes::Bytes`, the one type the octet gate (`opaque_octets`) admits, so
+        // generating one of them gives up nothing. The rule stays confined to that case:
         //
-        // The rule is deliberately confined to octet-stream, and the confinement is load-bearing
-        // rather than conservatism waiting to be relaxed. Octet-stream is the one codec whose gate
-        // collapses every body it admits onto a single type: `opaque_octets` maps an absent or
-        // empty schema to `Bytes`, `format: binary` and `contentEncoding: base64` are `Bytes`, and
-        // anything else is rejected outright. No other codec has that property, and two things
-        // go wrong the moment the rule is widened on the strength of "both sides constrain
-        // nothing":
-        //
-        // - *Constrains nothing* has two spellings that do not agree outside this gate. A media
-        //   type with no `schema` at all lowers to `()`; one with `schema: {}` lowers to `Any`,
-        //   i.e. `serde_json::Value`. Suppressing between them makes the *order* of two content
-        //   keys decide the response type, silently.
-        // - `itemSchema` lives outside the body schema entirely. Two sequential entries can both
-        //   constrain nothing and still stream different item types.
-        //
-        // A *request* narrows at the wire whatever the types do, so nothing is suppressed there at
-        // all. The chosen media key becomes the `Content-Type` verbatim, and a server documented as
-        // accepting `application/octet-stream` and `video/*` is only ever sent the first — a real
-        // narrowing even though both decode to `Bytes`. It is tempting to think ranges cannot reach
-        // a request anyway, since one is rejected as a request `Content-Type` by
-        // `lower_chosen_request_body`; that rejection
-        // fires on the media actually *selected*, and a suppressed alternative is never selected.
-        //
-        // "Constrains nothing" also has to be proved, not assumed from the media type: an
-        // octet-classified alternative carrying an object schema would be *rejected* by the octet
-        // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
-        // nothing is allowed.
-        //
-        // A selected CBOR key is the exception among octet-classified responses, and its
-        // alternatives are always reported. Where the request announces it in `Accept` (every
-        // bodied success response is CBOR, `Responses::accept`), the alternatives a server could
-        // otherwise have sent are asked against at the wire. Where it does not — an error
-        // response, or a success beside a non-CBOR success body — nothing narrows at the wire, and
-        // the alternatives are reported all the same: this choice is made one response at a time,
-        // before the operation's `Accept` is known.
+        // - Elsewhere, *constrains nothing* has two spellings (no `schema` lowers to `()`,
+        //   `schema: {}` to `Any`), so suppressing would let content-key order pick the type.
+        // - `itemSchema` sits outside the body schema, so two sequential entries that constrain
+        //   nothing can still stream different item types.
+        // - A request's chosen media key is its `Content-Type`, so it narrows at the wire whatever
+        //   the types do, and nothing is suppressed there.
+        // - An octet alternative carrying an object schema is rejected by the octet gate, not
+        //   decoded as bytes, so suppressing it would hide a rejection.
+        // - A selected CBOR key's alternatives are always reported: the choice is made one
+        //   response at a time, before the operation's `Accept` (`Responses::accept`) is known.
         let suppressible = position == BodyPosition::Response
             && classified == MediaType::OctetStream
             && !is_cbor(media_essence(media));

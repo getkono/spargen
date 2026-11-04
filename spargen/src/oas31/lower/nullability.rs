@@ -252,7 +252,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if self.has_exact_null_variant(ty) {
                     // A `()` arm carries the `null`, so neither the union nor another variant is
                     // an `Option` as well, as an `allOf` spelling of the same constraints settles
-                    // it (Decision 3).
+                    // it: one `null` carrier per type, whatever the spelling.
                     ty.nullable = false;
                     self.clear_variant_nulls(ty.id, mark, false);
                 } else if ty.nullable || self.any_of_variant_carries_null(ty, mark) {
@@ -461,8 +461,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A `type` naming only `null` beside an `allOf` that refuses it (`{allOf: [{$ref: User}],
         // type: ['null']}`, GitHub's spelling of a nullable `$ref`) is satisfied by no value under
         // 2020-12, yet a non-null type would refuse the `null` such an API sends, and `E013` would
-        // refuse the whole description: it is read as the `allOf`'s type or `null`, as before the
-        // one decision, wherever it is reached — the schema itself, and every `$ref`, `allOf`
+        // refuse the whole description: it is read as the `allOf`'s type or `null`, wherever it
+        // is reached — the schema itself, and every `$ref`, `allOf`
         // member and union branch that composes it.
         if answer == NullAdmission::Denies && type_beside_all_of_is_null_only(schema) {
             return NullAdmission::Admits;
@@ -692,8 +692,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .is_none_or(|target| self.null_admission(&target) != NullAdmission::Undecided)
     }
 
-    /// The body of the schema the `$ref` written at `at` names, as
-    /// [`Self::ref_target_decides_null`] finds it: a root component first, then a remote document
+    /// The body of the schema the `$ref` written at `at` names, shared by the lowering steps that
+    /// read a reference's target: a root component first, then a remote document
     /// from the root, and otherwise the referring file's target, with a bare alias (a `$ref` with
     /// no shape-bearing sibling) followed to the schema it names. `None` where the chain cannot be
     /// read, which reports nothing a second time.

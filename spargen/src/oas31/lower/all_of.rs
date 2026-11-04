@@ -56,9 +56,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// Each `E013` returns `None`, as does a member that fails to lower for its own reason.
     ///
-    /// Every path inserts its result type as the *final* graph insert (all member/property/component
-    /// types insert first), so an `allOf` used as a component body still satisfies the
-    /// [`Self::ensure_component`] last-insert invariant.
+    /// Every path inserts its result type as the *final* graph insert (last-insert invariant:
+    /// `lower_into_reservation`).
     ///
     /// [`Struct`]: crate::ir::Struct
     pub(super) fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
@@ -770,9 +769,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::elide_unused_union_lowering`] of `composed`, the ids [`Self::combine_all_of`]
     /// inserted for the composition a union was met with, once the meet re-emitted its result
     /// under the schema's own name. The composition is an input to that meet, as a `$ref` sibling's
-    /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct was emitted
-    /// as a public type nothing referred to (#852). [`Self::meet_union_with_all_of`] inserts its
-    /// result after `composed` ends, so the result is never one of the ids elided. A met
+    /// keywords are to theirs (#571): left in the graph, its `<hint>Composition` struct would be
+    /// emitted as a public type nothing refers to (#852). [`Self::meet_union_with_all_of`] inserts
+    /// its result after `composed` ends, so the result is never one of the ids elided. A met
     /// reservation's body is not known yet, so nothing is elided against it.
     fn elide_unused_composition(&mut self, met: Option<Ty>, composed: Range<u32>) {
         if met.is_some_and(|met| !self.is_reservation(met.id)) {
@@ -844,8 +843,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         // A bare `$ref` member to a union component is that component's union, met with the other
         // members as the same union written inline is, and as `{$ref: U, <keywords>}` meets
-        // `U` with its keywords (#841): read as the scalar `U` lowers to, it made every object
-        // composition an object/scalar mix.
+        // `U` with its keywords (#841), rather than as the scalar `U` lowers to, which would make
+        // every object composition an object/scalar mix.
         let target = member
             .reference
             .as_deref()
@@ -1009,7 +1008,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A further union member of one real branch beside `null` lowers to that branch. Where
         // the branch is an object, it is met with the object composition as the object it is, as
         // the same member is met alone beside the composition and inside a `$ref`'s `allOf`
-        // sibling (#841): combined as a scalar, it made the composition an object/scalar mix.
+        // sibling (#841), rather than combined as a scalar into an object/scalar mix.
         let mut met_as_objects = Vec::new();
         if has_object {
             let mut slots: Vec<usize> = union_members
@@ -1139,9 +1138,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// or one the keywords' `allOf` reaches — is `E013`, as the `allOf` spelling of the same
     /// conjunction is ([`Self::reject_all_of_several_unions`]).
     ///
-    /// Lowered as one schema, the sibling met `keywords` with each branch before the target, and
-    /// the union hoisted every branch's `null` to itself, so the collapse could no longer count
-    /// how many branches accept `null`: a `oneOf` that `null` matches twice kept it.
+    /// The keywords and the union are lowered apart rather than as one sibling schema, which would
+    /// meet `keywords` with each branch before the target and hoist every branch's `null` to the
+    /// union, so the collapse could not count how many branches accept `null`.
     ///
     /// [`split_union_sibling`]: super::refiner::split_union_sibling
     pub(super) fn meet_ref_union_sibling(
@@ -1162,8 +1161,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let keywords = self.lower_ref_sibling(referenced, keywords, &keywords_hint)?;
             // An object target or object keywords met with the union beside them and a second
             // union — the target's own, or one the keywords' `allOf` reaches — is the conjunction
-            // the `allOf` spelling rejects (#841): each union was lowered apart from the meet,
-            // so the second nested one union's branches under the other's.
+            // the `allOf` spelling rejects (#841): each union is lowered apart from the meet, so
+            // composing the second would nest one union's branches under the other's.
             let is_struct = |ctx: &Self, ty: Ty| {
                 matches!(
                     ctx.graph.get(ty.id).map(|def| &def.kind),
@@ -1198,8 +1197,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             MetUnion::RefSibling,
         )?;
         // The keywords' own type is an input to the meet, lowered before any mark it takes, so it
-        // was emitted as a public type nothing referred to (#571). The same rule as the union's
-        // lowering withholds it: whatever the met type, a memo, or another schema names stays.
+        // is withheld from the emitted types unless something refers to it (#571), by the same
+        // rule as the union's lowering: whatever the met type, a memo, or another schema names
+        // stays.
         self.elide_unused_union_lowering(keywords_lowered);
         Some(ty)
     }

@@ -251,8 +251,8 @@ mod tests {
 
     /// The gate reads nothing the table does not name. A schema carrying every other keyword the
     /// parser keeps — validation, annotations, content, `$defs` — does not clear it, so a
-    /// clause added to `schema_has_shape_constraint` beside the table (the `maxLength` mutation
-    /// #155 measured surviving) fails here rather than widening the published rule unseen.
+    /// clause added to `schema_has_shape_constraint` beside the table fails here rather than
+    /// widening the published rule unseen.
     #[test]
     fn the_gate_reads_only_the_keywords_its_table_names() {
         let everything_else = schema(

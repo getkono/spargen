@@ -377,7 +377,7 @@ fn parse_validation_children(
 
 /// A keyword whose value maps names to schemas (`properties`, `patternProperties`, `$defs`,
 /// `dependentSchemas`): each entry parsed at its own pointer, or `E011` at the keyword when the
-/// value is not an object, which used to read as no entries at all.
+/// value is not an object.
 fn parse_schema_map(
     map: &SpannedMap,
     keyword: &str,
@@ -401,7 +401,7 @@ fn parse_schema_map(
 }
 
 /// A string-valued keyword (`$ref`, `format`, `title`, ...): absent, or the string, or `E011` at
-/// the keyword, which used to read as absent.
+/// the keyword.
 fn string_keyword(
     map: &SpannedMap,
     keyword: &str,
@@ -414,7 +414,7 @@ fn string_keyword(
 }
 
 /// A boolean keyword (`deprecated`, `readOnly`, `writeOnly`): `false` when absent, or `E011` at
-/// the keyword when it is not a boolean, which used to read as `false`.
+/// the keyword when it is not a boolean.
 fn bool_keyword(
     map: &SpannedMap,
     keyword: &str,

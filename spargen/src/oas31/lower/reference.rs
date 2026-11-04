@@ -189,10 +189,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// in the root document, or with no span to say otherwise.
     ///
     /// A JSON Pointer fragment addresses the document it appears in, so the same spelling written
-    /// inside a referenced file names that file's components (#397). Reading the root's map for it
-    /// rejected the reference when the root declared no such name and silently substituted the
-    /// root's declaration when it did; `None` sends it to the bundle, which resolves it from the
-    /// file it is written in.
+    /// inside a referenced file names that file's components (#397), not the root's; `None` sends
+    /// it to the bundle, which resolves it from the file it is written in.
     fn root_component_name<'r>(
         &self,
         reference: &'r crate::oas31::Reference,

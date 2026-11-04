@@ -54,8 +54,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
     /// a member target flattened by an enclosing expansion and met again inside this body is a
     /// recursive *field* of the new type, which the reservation boxes, not a loop of the enclosing
-    /// expansion. Re-entering the reserved type itself is refused by its `*_in_progress` entry, so
-    /// every loop that crosses this boundary is still caught, as the root document catches it.
+    /// expansion. Re-entering the reserved type itself meets its `*_in_progress` entry, which
+    /// `reserved_type` answers with a boxed back-edge, so every loop that crosses this
+    /// boundary is still closed, as the root document closes it.
     pub(super) fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let enclosing = std::mem::take(&mut self.resolved_member_stack);
         let enclosing_unions = std::mem::take(&mut self.union_member_stack);
@@ -109,41 +110,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // depends on the very result being computed, so `intersect_non_null`'s `(Any, _)` arm
         // would return the sibling and silently discard the target.
         //
-        // It is asked of the DOCUMENT, for every spelling alike. A lowering-order test — "is the
-        // target mid-flight" — gives two byte-identical documents opposite verdicts when only
-        // the order of two map entries differs (decision 23), and so does a document test that
-        // only one spelling can reach: the sub-file spelling used to fall back to
-        // `is_in_progress_root`, so with siblings on one edge of a two-schema cycle the verdict
-        // followed which end lowering happened to enter first. `ref_closes_a_cycle` walks
-        // resolved identities across every file instead.
-        //
-        // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
-        // still being lowered is one whose lowering reached this site, which is a cycle the walk
-        // finds. Kept so that a walk which ever missed one reports the recursion, rather than
-        // leaving `intersect_types`' fail-closed arm to report it as a failed intersection.
+        // It is asked of the DOCUMENT, for every spelling alike: `ref_closes_a_cycle` walks
+        // resolved identities across every file, so the verdict never depends on map order or on
+        // which end of a cycle lowering enters first. `is_in_progress_root` is a backstop that
+        // adds no rejection of its own: a walk that missed a cycle still reports the recursion,
+        // rather than `intersect_types`' fail-closed arm reporting a failed intersection.
         let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
             || self.is_in_progress_root(referenced.id);
         if back_edge {
             // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
-            // conjunction has always rejected this rather than composing against a placeholder,
-            // and the alternative here is not "compose anyway" but "discard the target", which
-            // produces a type accepting documents the description forbids — a recursive `Node`
-            // flattened to a one-off struct, or to the sibling's own scalar.
-            // The wording is chosen by what the reference RESOLVES TO, not by how it was
-            // spelled. It used to branch on whether the string began `#/components/schemas/`,
-            // which is a fact about the author's typing: the explicit `./lib.yaml#/…` spelling
-            // of a sub-file component was therefore described to the reader as *remote*, which
-            // it is not, while the bare spelling of the same target in the same file was
-            // described correctly. One reference, two spellings, two different accounts of one
-            // fact — the mistake decision 23 removed from the verdict, left standing in the
-            // explanation.
+            // conjunction rejects this rather than composing against a placeholder, and the
+            // alternative here is not "compose anyway" but "discard the target", which produces a
+            // type accepting documents the description forbids — a recursive `Node` flattened to
+            // a one-off struct, or to the sibling's own scalar.
             //
-            // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
-            // so the message and the code path now agree by construction. A genuinely remote
-            // target still says so; every local target, however addressed, says the same thing.
-            // The local noun is "schema", not "component": a local target need not be a
-            // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
-            // a two-way predicate cannot tell that case apart, so the wording must hold for it.
+            // The wording follows what the reference RESOLVES TO, not how it is spelled:
+            // `is_remote_ref` is the predicate that routes the lowering above. The local noun is
+            // "schema", not "component", because a local target need not be a component at all
+            // (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file).
             return self.reject_ref_sibling_cycle(
                 schema,
                 if is_remote_ref(reference) {
@@ -163,9 +147,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.record_ref_sibling_merger(schema, referenced.id);
         // A sibling carrying only object or only array applicators names no `type`, so
         // `lower_schema` would lower it to an object or an array that denies `null` (#613,
-        // #614), and before those to `TypeKind::Any` — which intersects as identity,
-        // discarding the keywords with no diagnostic (#140). The applicators establish the category they apply to, as an untyped
-        // `properties` already does, and say nothing about `null` (the same reading
+        // #614). The applicators establish the category they apply to, as an untyped
+        // `properties` does, and say nothing about `null` (the same reading
         // `lower_union_sibling` takes), so the target's nullability survives the intersection.
         //
         // Against a union target that reading would drop every branch of another category in
@@ -419,8 +402,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let nullable = schema.types.types.contains(&JsonType::Null);
         // Untyped `items` or `prefixItems` alone are array applicators, and establish the array
         // category as the same keywords do beside a `$ref` or as an `allOf` member, and as untyped
-        // object applicators do below. Reading no `type` as no category fell to `Any`, dropping
-        // the item types with no diagnostic (#614).
+        // object applicators do below, so the item types are kept rather than read as `Any`
+        // (#614).
         let primary = schema
             .types
             .types
@@ -495,7 +478,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // Untyped `required` or `additionalProperties` alone are object applicators too, and
             // establish the object category as untyped `properties` does above and as the same
-            // keywords do beside a `$ref`. Falling to `Any` dropped them with no diagnostic (#613).
+            // keywords do beside a `$ref`, rather than being read as `Any` (#613).
             None if matches!(
                 implied_applicator_category(schema),
                 Some(ImpliedCategory::Only(JsonType::Object))
@@ -645,8 +628,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(scalar);
         }
-        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
-        // preserves the component-root last-insert invariant asserted in `ensure_component`.
+        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate
+        // (last-insert invariant: `lower_into_reservation`).
         let repr = repr.unwrap_or(ScalarRepr::String);
         // A string set whose own schema names a `uuid` or date format is narrowed against that
         // format exactly as an `allOf` member declaring it would narrow it (`narrowed_string`).

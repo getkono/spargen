@@ -119,15 +119,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The name missed the ROOT document's component map — but a `$ref` written inside a
             // referenced sub-file spells that file's own components exactly the same way, and a
             // JSON Pointer fragment addresses the document it appears in. `Resolver::resolve`
-            // already implements that: it keys on the provenance's file and shortcuts to the parsed
-            // component map only for the root. `ensure_component` is reached by callers that strip
-            // the `#/components/schemas/` prefix before any file is considered, so a sub-file's
-            // sibling reference never got there. Hand it back to the resolver.
+            // implements that: it keys on the provenance's file and shortcuts to the parsed
+            // component map only for the root. Callers reach `ensure_component` with the
+            // `#/components/schemas/` prefix already stripped, before any file is considered, so
+            // a sub-file's sibling reference is handed back to the resolver here.
             //
-            // Root first, file second: the root map was already consulted above, so a document that
-            // resolves today keeps selecting the same component and only a name the root does not
-            // declare reaches the sub-file reading. Which namespace *should* win when both declare
-            // the name is a separate question; this deliberately does not change the answer.
+            // Root first, file second: the root map is consulted above, so a name both declare
+            // selects the root's component and only a name the root does not declare reaches the
+            // sub-file reading.
             if self.resolver.written_in(at) != self.resolver.root_id() {
                 // The resolver reports its own failure, so a miss here is already diagnosed. Going
                 // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
@@ -762,8 +761,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.lower_into_reservation(Reservation::Resolved(key), Some(via), &schema, &hint)
     }
 
-    /// Whether this definition is a named component root — reachable by name from anywhere else in
-    /// the document, rather than owned by the single use site that produced it.
+    /// Whether `id` is the type of a component, a remote or a resolved target, finished or still
+    /// being lowered: a type other uses share, which one use's lowering does not change.
     pub(super) fn is_component_root(&self, id: TypeId) -> bool {
         self.reservation_roots().any(|root| root == id)
     }
@@ -842,26 +841,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `file#pointer`, so a string comparison against this provenance can never match one.
             // Canonicalise its keys to the same identity instead of reconstructing a URL from a
             // file id: a URL is only one of the spellings that reaches a vendored document, and
-            // the map holds at most one entry per open recursion frame. Omitting this frame is what
-            // let a remote body whose union collapses onto an open remote reservation past the
-            // guard below, to be aborted by `TypeDefs::fill`'s `fill of an unreserved id` instead
-            // of reported.
-            //
-            // That abort is a `debug_assert!`, so it is an enforcement point that degrades: it
-            // holds under `cargo test` and not in a consumer's release `build.rs`. Both halves are
-            // measured with this loop deleted. Debug assertions on: the process aborts at
-            // `TypeDefs::fill`. Debug assertions off: it neither aborts nor emits — `fill` writes
-            // the unreserved id, the reservation survives, and `check_invariants` rejects with
-            // `E011`, "type `` is still a reservation, so its body was never lowered", naming no
-            // type and carrying no pointer. So the release outcome is a poor diagnostic rather
-            // than silent wrong output, and the second net is `check_invariants`, not `fill`.
-            //
-            // Only one shape reaches here: a vendored document whose **whole body** is the union,
-            // because only then does the provenance canonicalise to a frame's own `file#pointer`.
-            // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
-            // document and the only thing in the suite that executes this loop; deleting the loop
-            // turns it red. Every other remote recursion sits at a property or an `allOf` member,
-            // whose pointer is not the frame's, so it reaches here and matches nothing.
+            // the map holds at most one entry per open recursion frame. Without it, a remote body
+            // whose union collapses onto an open remote reservation passes the guard below and
+            // reaches `TypeGraph::fill` with an id it never reserved, instead of being reported
+            // here. Only a vendored document whose whole body is
+            // the union matches here, which
+            // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` pins.
             for (reference, &(id, _)) in &self.remote_in_progress {
                 let matches = self
                     .resolver

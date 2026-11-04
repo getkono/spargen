@@ -118,7 +118,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // the sibling spelling gives the same constraints (#674). A `null` only the
                     // decision's departure admits (a null-only `type` beside the `allOf`) is not
                     // such a `null`: it makes the members' type optional, and members sharing no
-                    // value make none, so the schema is `E013`, as before the one decision.
+                    // value make none, so the schema is `E013`.
                     Err(NoMeet::Empty)
                         if self.null_admission(schema) == NullAdmission::Admits
                             && !self.null_admitted_only_by_departure(schema) =>
@@ -149,10 +149,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // as the meet of a union member does (#643); an `anyOf` member met with a `oneOf`
             // member left such `oneOf`s nested in its branches.
             intersection = self.collapse_met_one_ofs(schema, intersection, mark);
-            // Re-emit the intersection as the final graph insert so the invariant holds even when
-            // the allOf is a component body (the per-member scalar inserts above are left dead —
-            // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
-            // The meets' own inserts are discarded unless the re-emitted kind reaches them.
+            // Re-emit the intersection as the final graph insert (last-insert invariant:
+            // `lower_into_reservation`) rather than threading a reserved id. The meets' own
+            // inserts are discarded unless the re-emitted kind reaches them, and a per-member
+            // scalar insert above that nothing reaches is elided by `elide_unreachable`.
             let kind = self
                 .graph
                 .get(intersection.id)
@@ -652,7 +652,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.resolved_member_stack.pop();
         expanded?;
         // A target's member whose `type` names `object` beside another category is met as its
-        // object alone, as before #827: the union of its categories is read only for a member
+        // object alone (#827): the union of its categories is read only for a member
         // written inline in the composition ([`objects_met_as_their_unions`]). Recorded here, it
         // would stay reachable from the memo at every later use, and be emitted unused.
         let mut unread = Vec::new();
@@ -1050,8 +1050,7 @@ impl LowerCtx<'_, '_> {
     ///
     /// Where every member is a union, inline or as a `$ref`, and the schema's own keywords bear
     /// no shape, no object member is met with them: only the one inline union is the member,
-    /// as before #841, so `allOf: [{$ref: U}, {$ref: NullableOther}]` keeps the scalar meet it
-    /// generated through.
+    /// so `allOf: [{$ref: U}, {$ref: NullableOther}]` is a scalar meet.
     pub(super) fn sole_union_member(&self, schema: &Schema) -> Option<usize> {
         if self.every_member_is_a_union(schema) {
             let mut inline = schema.all_of.iter().enumerate().filter(|(_, member)| {

@@ -17,16 +17,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// This is a property of the DOCUMENT, not of the lowering: it asks whether the target reaches,
     /// through `$ref`s, a schema that contains `at` along the keywords lowering descends into. That
     /// is the same answer however any map is ordered and whichever end of a cycle lowering entered
-    /// first. The predicate it replaced — membership of an in-progress map — was a property of
-    /// *when* lowering happened, so mutual recursion rejected or generated according to which entry
-    /// the document happened to declare, or which operation happened to reach it, first. Re-ordering
-    /// a YAML map is a no-op in OpenAPI.
+    /// first, as it must be: re-ordering a YAML map is a no-op in OpenAPI. Membership of an
+    /// in-progress map is a property of *when* lowering happens, and would make mutual recursion
+    /// reject or generate according to which entry is declared or reached first.
     ///
     /// Every schema is named by its resolved `(file, pointer)`, for every spelling alike, which is
-    /// what makes the answer spelling-independent. An earlier form walked the root document's
-    /// `components.schemas` by name, so it could not see a sub-file or remote target at all, and it
-    /// matched a sub-file component's name against the root's map — a sub-file `Item` sharing its
-    /// name with a root `Item` in a cycle was reported as closing that cycle.
+    /// what makes the answer spelling-independent and lets the walk see sub-file and remote
+    /// targets: a sub-file `Item` sharing its name with a root `Item` is a different schema.
     pub(super) fn ref_closes_a_cycle(&self, reference: &str, at: &Provenance) -> bool {
         let site_file = self.resolver.written_in(at);
         let Some(start) = self
