@@ -224,10 +224,13 @@ fn deep_object_rejects_non_objects() {
     ));
 }
 
-/// The composites the specification's table leaves out: an empty array, an empty object, and
-/// composites holding `null`. An empty composite renders as an empty value, kept under the
-/// parameter name where the unexploded style carries one and dropped where the exploded style
-/// names each member instead. A `null` member renders as an empty scalar in its place.
+/// Empty composites and composites holding `null`. An empty composite renders as an empty value,
+/// kept under the parameter name where the unexploded style carries one and dropped where the
+/// exploded style names each member instead. A `null` member renders as an empty scalar in its
+/// place. This pins the serializers' present behaviour, not the specification's: RFC 6570
+/// §2.3 counts an empty list or map as undefined, and the 3.2 table's `undefined` column gives
+/// `;color` for both `matrix` rows and `color=` for exploded `form`, where these render `;c=`,
+/// nothing, and nothing (#1143).
 #[test]
 fn empty_and_null_bearing_composites_render_per_style_and_explode() {
     let empty_array = serde_json::json!([]);
