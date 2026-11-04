@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use camino::Utf8PathBuf;
 use spargen::{CargoIntegration, Outcome, Spec};
 
-use crate::{read, workspace_root};
+use crate::{enum_variants, read, workspace_root};
 
 /// The runtime sources are embedded by splitting on the literal `#[cfg(test)]` and keeping
 /// everything before it (`codegen/runtime.rs`). That is only sound while each file contains the marker
@@ -419,46 +419,6 @@ fn the_embed_list_names_every_runtime_source() {
         "the `src/support/runtime/` symlinks are what `cargo publish` follows, so a missing link \
          ships a crate that cannot build"
     );
-}
-
-/// The names of the top-level variants of `header`'s enum body in `source`: every identifier that
-/// opens a comma-separated item at the body's own depth. Line comments are dropped first, so doc
-/// text cannot contribute a name, and a variant's attributes, fields and payload all sit one
-/// bracket deeper than its name, so none of them does either.
-fn enum_variants(source: &str, header: &str) -> Vec<String> {
-    let start = source
-        .find(header)
-        .unwrap_or_else(|| panic!("`{header}` is declared in support-runtime/src/error.rs"))
-        + header.len();
-    let body: String = source[start..]
-        .lines()
-        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut variants = Vec::new();
-    let mut depth = 0usize;
-    let mut current = String::new();
-    // Whether the item being read has produced its name yet.
-    let mut named = false;
-    for ch in body.chars() {
-        if depth == 0 && !named && (ch.is_alphanumeric() || ch == '_') {
-            current.push(ch);
-            continue;
-        }
-        if !current.is_empty() {
-            variants.push(std::mem::take(&mut current));
-            named = true;
-        }
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' if depth == 0 => break,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => named = false,
-            _ => {}
-        }
-    }
-    variants
 }
 
 /// The value of `const NAME: usize = N;` in `source`.
