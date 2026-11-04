@@ -690,6 +690,30 @@ mod tests {
         assert_eq!(config(&negated, on.clone()), on.uuid(false).time(false));
     }
 
+    /// Each switch sets its own `Spec` field: `uuid` and `time`, and `carve` and
+    /// `open_narrowing`, are given opposite values over a base holding the inverse of each, so a
+    /// switch wired to another's setting changes the result.
+    #[test]
+    fn each_switch_reaches_its_own_field_when_the_values_differ() {
+        let base = Spec::new("openapi.yaml")
+            .uuid(true)
+            .time(false)
+            .carve(false)
+            .open_narrowing(true);
+        let expected = Spec::new("openapi.yaml")
+            .uuid(false)
+            .time(true)
+            .carve(true)
+            .open_narrowing(false);
+
+        let valued = args(
+            r#""openapi.yaml", uuid = false, time = true, carve = true, open_narrowing = false"#,
+        );
+        assert_eq!(config(&valued, base.clone()), expected);
+        let spelled = args(r#""openapi.yaml", no_uuid, time, carve, open_narrowing = false"#);
+        assert_eq!(config(&spelled, base), expected);
+    }
+
     /// A directory under the system temporary directory, removed on drop.
     struct Scratch(std::path::PathBuf);
 
@@ -899,6 +923,40 @@ paths:
                  --> {spec}:23:23\n  \
                  at /paths/~1b/get/responses/200/content/application~1json/schema"
             )
+        );
+    }
+
+    /// A preview that produced no client and retained no error says so in place of a diagnostic
+    /// list: a rejection whose errors `batch_cap = 0` dropped, and a generated outcome holding no
+    /// module.
+    #[test]
+    fn a_failure_with_no_retained_error_says_generation_did_not_succeed() {
+        let scratch = Scratch::new("no-retained-error");
+        let rejected = scratch.write(
+            "openapi.yaml",
+            "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
+        );
+        let preview = spargen::__private::preview(&Spec::new(rejected.as_str()).batch_cap(0));
+        assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+        assert!(
+            preview.report.diagnostics().is_empty(),
+            "a zero cap retains no diagnostic"
+        );
+        let expected = "spargen could not generate a client from `openapi.yaml`: generation did \
+                        not succeed";
+        assert_eq!(
+            failure_message("openapi.yaml", &preview).as_deref(),
+            Some(expected)
+        );
+
+        let generated = scratch.write("split/openapi.yaml", SPLIT_SPEC);
+        scratch.write("split/schemas.yaml", SPLIT_SCHEMAS);
+        let mut preview = spargen::__private::preview(&Spec::new(generated));
+        assert_eq!(preview.report.outcome(), spargen::Outcome::Generated);
+        preview.contents = None;
+        assert_eq!(
+            failure_message("openapi.yaml", &preview).as_deref(),
+            Some(expected)
         );
     }
 
