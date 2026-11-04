@@ -405,9 +405,9 @@ impl Responses {
     /// specification does: `default` documents every undeclared status, of either class. (A bodied
     /// *streaming* `default` cannot be typed on both sides — the success side would stream and this
     /// side decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].)
-    /// With no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
-    /// non-success status is then `UnexpectedStatus`, retaining at most `max_error_body` bytes of
-    /// the body (see [`ErrorShape::None`]).
+    /// With no bodied entry at all the shape is `None`, whatever bodyless entries are declared:
+    /// every non-success status is then `UnexpectedStatus`, retaining at most `max_error_body`
+    /// bytes of the body (see [`ErrorShape::None`]).
     pub(crate) fn error(&self) -> ErrorShape {
         let entries: Vec<(StatusSpec, Option<Ty>)> = self
             .entries()

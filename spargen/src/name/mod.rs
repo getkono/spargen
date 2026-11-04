@@ -1325,8 +1325,9 @@ mod tests {
         /// enum's and union's variants with an open enum's catch-all, each operation's method
         /// arguments with its generator bindings and its `…Params` fields, each header struct's
         /// fields, the `servers` module (the server builders and the server-variable enums
-        /// `emit_servers` declares side by side), and each server's setters and each server variable's values. Every member is
-        /// allocated, so the property cannot pass by allocating nothing.
+        /// `emit_servers` declares side by side), and each server's setters and each server
+        /// variable's values. Every member is allocated, so the property cannot pass by allocating
+        /// nothing.
         #[test]
         fn every_allocation_is_legal_and_distinct_within_its_scope(
             definitions in proptest::collection::vec(definition(), 0..10),

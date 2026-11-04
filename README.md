@@ -101,10 +101,10 @@ the version it emits, and the idioms spargen handles.
 - Beside each operation method, a `{method}_url` accessor on both clients returns, as
   `Result<reqwest::Url, Error<Infallible>>`, the URL that method sends its request to, less any
   `apiKey` query credential, without sending it: the same path-parameter and query encoding,
-  resolved against the base URL or the operation's server override. It takes the required path, query and `querystring` parameters and,
-  where it holds one of those, the `…Params` bundle; it attaches no credential. This is for a URL
-  handed to a fetcher of its own, such as a media player or a browser
-  (`client.stream_file_url(id)`). Where another operation's method already spells
+  resolved against the base URL or the operation's server override. It takes the required path,
+  query and `querystring` parameters and, where it holds one of those, the `…Params` bundle; it
+  attaches no credential. This is for a URL handed to a fetcher of its own, such as a media player
+  or a browser (`client.stream_file_url(id)`). Where another operation's method already spells
   `{method}_url`, that method keeps it and the accessor takes a disambiguated name.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
