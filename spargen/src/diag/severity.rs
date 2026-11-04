@@ -1,10 +1,24 @@
 use serde::Serialize;
 
-/// The severity of a [`Diagnostic`](super::Diagnostic). `#[non_exhaustive]`, so a severity can
-/// be added without a breaking change.
+/// The severity of a [`Diagnostic`](super::Diagnostic): an error or a warning, the split
+/// [`Report::errors`](crate::Report::errors) and [`Report::warnings`](crate::Report::warnings)
+/// partition a report on. The enum is exhaustive, so a caller's `match` names both variants and
+/// needs no wildcard arm:
+///
+/// ```
+/// use spargen::Severity;
+///
+/// fn cargo_directive(severity: Severity) -> &'static str {
+///     match severity {
+///         Severity::Error => "cargo::error=",
+///         Severity::Warning => "cargo::warning=",
+///     }
+/// }
+///
+/// assert_eq!(cargo_directive(Severity::Warning), "cargo::warning=");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
 pub enum Severity {
     /// Generation fails.
     Error,
