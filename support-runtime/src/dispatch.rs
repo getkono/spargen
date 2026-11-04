@@ -157,9 +157,9 @@ pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error
 }
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
-/// per body type. Decode failures become [`Error::Decode`] with the serde path and a body capped
-/// at `max_error_body`. A zero-length body is not a JSON value, so it is always [`Error::Decode`],
-/// whatever `T` is.
+/// per body type. Decode failures become [`Error::Decode`] with serde's error message and a body
+/// capped at `max_error_body`. A zero-length body is not a JSON value, so it is always
+/// [`Error::Decode`], whatever `T` is.
 pub async fn decode_success<T>(
     core: &ClientCore,
     response: Response,
@@ -266,8 +266,9 @@ pub async fn read_error_body<E>(
     Ok((status, headers, body, truncated))
 }
 
-/// A status selector an operation documents as an error response. Generated code passes these as
-/// static tables so classification distinguishes documented from undocumented statuses.
+/// A status selector an operation documents a response under. Generated code passes these as
+/// static tables so classification distinguishes documented from undocumented statuses, and
+/// matches them to pick a multi-status response's variant on either side.
 #[derive(Debug, Clone, Copy)]
 pub enum StatusSpec {
     /// An exact status code, e.g. `404`.
@@ -364,16 +365,13 @@ pub(crate) async fn classify_with<E>(
 
 /// Classify a documented raw-byte error body without passing it through a structured decoder.
 ///
-/// Retains at most `max_error_body` bytes either way, and drops the truncation flag: neither
-/// [`Error::Api`] nor [`Error::UnexpectedStatus`] has a field for it, so a body cut at the cap is
-/// indistinguishable from one that was exactly that long.
+/// Retains at most `max_error_body` bytes either way, as `ClientConfig::max_error_body` documents.
 pub async fn classify_error_bytes<E: From<Bytes>>(
     core: &ClientCore,
     response: Response,
     documented: &[StatusSpec],
 ) -> Error<E> {
-    // The decoder cannot fail, so `Error::Decode`, the one variant that would carry the flag, is
-    // unreachable.
+    // The decoder cannot fail, so `Error::Decode` is unreachable.
     classify_with(core, response, documented, |body| Ok(E::from(body.clone()))).await
 }
 
@@ -400,25 +398,14 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 
 /// Read a response body, retaining at most `max_error_body` bytes.
 ///
-/// The body is pulled incrementally and abandoned at the first chunk that carries it past the cap
-/// (the loop extends before it re-tests), so peak memory is a
-/// function of the cap rather than of whatever the server chose to send — `reqwest` imposes no
-/// response size limit of its own, so without this a hostile or malfunctioning peer could force an
-/// arbitrarily large allocation on an error path whose contents are mostly discarded. What matters
-/// is that peak stops depending on the body's size; it is not `cap` exactly. The loop extends
-/// before it re-tests, so one transport chunk rides on top — hyper buffers up to a few hundred KiB
-/// — and `BytesMut` grows by doubling while `cap_body` allocates the retained copy alongside it. A
-/// small cap is therefore dominated by the chunk, not by the cap.
+/// The body is pulled incrementally and abandoned at the first chunk that carries it past the cap,
+/// so peak memory depends on the cap (plus one transport chunk, and the retained copy `cap_body`
+/// makes) rather than on whatever the server chose to send; `reqwest` imposes no response size
+/// limit of its own. Abandoning the body forgoes reuse of that connection; a deployment that would
+/// rather keep it raises the cap.
 ///
-/// Abandoning the body early forgoes reuse of that connection, which is the right trade for a
-/// response already too large to retain. The threshold is the cap itself, with no drain allowance
-/// on top: an allowance would be a second bound that nothing declares and no caller can set, and
-/// the cap is already the one number a consumer chose. A deployment that would rather keep the
-/// connection can raise the cap, which says so directly.
-///
-/// Uses `Response::chunk`, which — unlike `bytes_stream` — is not behind reqwest's `stream`
-/// feature. Generated clients enable `stream` only for APIs with sequential responses, so reading
-/// incrementally here must not depend on it.
+/// Uses `Response::chunk`, which, unlike `bytes_stream`, is not behind reqwest's `stream` feature,
+/// which generated clients enable only for APIs with sequential responses.
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_capped<E>(
     core: &ClientCore,

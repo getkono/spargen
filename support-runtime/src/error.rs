@@ -9,14 +9,8 @@ use crate::{AuthError, ResponseValue};
 ///
 /// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
 /// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
-/// standard HTTP semantics. Every variant implements [`std::error::Error`]
-/// with full source chains, and `Debug` never leaks secrets.
-///
-/// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new
-/// variant in `every_variant`, both in this file's test module
-/// `support-runtime/src/error/tests.rs`, for the reasons `request_variant_index` there sets out.
-/// That test module is stripped when this file is embedded into a generated client, so none of
-/// those three names exist in the copy a consumer reads.
+/// standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
+/// each retained cause, and `Debug` never leaks secrets.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
@@ -25,33 +19,9 @@ pub enum Error<E> {
     /// neither proof that nothing reached the server, nor proof that no response was already
     /// produced and delivered to the caller.
     ///
-    /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
-    /// no registered credential satisfies the operation's security requirement, a registered
-    /// credential is of a kind its scheme cannot carry, a registered token provider failed, the
-    /// base URL is invalid, or a parameter or body did not serialize. Also
-    /// pre-send: reqwest refusing the request when asked to send it (a builder-kind error), as it
-    /// does for a URL scheme other than `http`/`https` or plain `http` on an `https_only` client.
-    ///
-    /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
-    /// from inside the send itself, so the request may already have been transmitted and the
-    /// server may already have acted on it. Retrying it is not safe for a non-idempotent call.
-    /// A connection that was never established is not in this class: reqwest reports it as a
-    /// request error too, but it arrives as [`Error::Transport`] (off `wasm32`).
-    ///
-    /// After a response was accepted: when the API has streaming (sequential) responses, the
-    /// generated client also embeds `EventStream`, which raises this class when the stored request
-    /// cannot be cloned for an automatic reconnect — from `with_reconnect`, and from `poll_next`
-    /// once the reconnect wait has elapsed, which is mid-stream, after frames have already been
-    /// yielded to the caller. `StreamError`, that module's alias for this same enum, documents
-    /// itself as the failure yielded by a streaming response *after its initial HTTP response was
-    /// accepted*; the two sentences describe one case. Re-driving such an operation from the start
-    /// is not a safe recovery — it re-delivers events the caller has already consumed and acted
-    /// on.
-    ///
-    /// [`RequestError`] types the three credential causes; every other cause — reqwest's own
-    /// request-error and builder-error classes and both reconnect-clone failures included —
-    /// arrives as
-    /// [`RequestError::Other`].
+    /// [`RequestError`] types the three credential causes, each raised before anything is sent;
+    /// every other cause arrives as [`RequestError::Other`], whose documentation says which of
+    /// them are raised before anything is sent and which are not. Read it before retrying.
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -69,17 +39,15 @@ pub enum Error<E> {
         status: StatusCode,
         /// The response headers.
         headers: HeaderMap,
-        /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
-        /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
-        /// cap.
+        /// The raw response body, capped as `ClientConfig::max_error_body` documents.
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the status and headers the response
-    /// carried, the serde error path, and the raw body, capped on every path but the one named on
-    /// `body` below. A documented error status whose body does not match its schema (a problem
-    /// `type` the description does not list, or an HTML page from a proxy in front of the server)
-    /// arrives here with its status and headers intact, so the caller can still act on them —
-    /// honour a `Retry-After` on a `429`, say.
+    /// carried, the decoder's error message, and the raw body, capped on every path but the one
+    /// named on `body` below. A documented error status whose body does not match its schema (a
+    /// problem `type` the description does not list, or an HTML page from a proxy in front of the
+    /// server) arrives here with its status and headers intact, so the caller can still act on
+    /// them — honour a `Retry-After` on a `429`, say.
     Decode {
         /// The status of the response whose body failed to decode: a success status when a
         /// success body did not match its schema, the documented error status when a documented
@@ -89,22 +57,13 @@ pub enum Error<E> {
         /// The headers of the response whose body failed to decode — for `EventStream`'s
         /// per-frame decode, of the response the frame was read from, as for `status`.
         headers: HeaderMap,
-        /// The serde deserialization error path, held as serde wrote it; `Display` escapes its
+        /// The decoder's error message, held as the decoder wrote it; `Display` escapes its
         /// control characters, since the message may quote server-supplied input.
         path: String,
-        /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
-        ///
-        /// One path does not reach the cap and can retain more than it: `EventStream`'s
-        /// per-frame decode retains one whole frame, already detached by the framer. The bound
-        /// there is the frame, not the response: `ClientConfig::max_stream_frame` limits the
-        /// bytes buffered for an item before its terminator arrives. An item that passes that
-        /// limit is itself reported here, retaining at most `max_error_body` bytes of it.
+        /// The retained raw body, capped at `max_error_body`, except on `EventStream`'s per-frame
+        /// decode, which `ClientConfig::max_stream_frame` bounds instead.
         body: Bytes,
-        /// Whether bytes were dropped from `body` to meet the cap.
-        ///
-        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the
-        /// per-frame decode path above nothing is dropped because nothing is capped. An item past
-        /// `max_stream_frame` always sets it.
+        /// Whether bytes were dropped from `body` to meet a cap: `false` means nothing was dropped.
         truncated: bool,
     },
     /// #9 — the connection dropped mid-stream on a streamed response.
@@ -149,8 +108,7 @@ impl<E> Error<E> {
         Self::from_class(ReqwestClass::of(&error), error)
     }
 
-    /// Build the variant `class` names around `error`. Split from [`Self::from_reqwest`] so a test
-    /// can pair every class with the variant it produces.
+    /// Build the variant `class` names around `error`.
     fn from_class(class: ReqwestClass, error: reqwest::Error) -> Self {
         match class {
             ReqwestClass::Timeout(kind) => Error::Timeout(kind),
@@ -166,8 +124,7 @@ impl<E> Error<E> {
     /// Whether the failure is worth retrying: transport failures, timeouts, and a `429` or `5xx`
     /// response — whichever class carries it, including [`Error::Decode`], since a server that
     /// answered `503` is unavailable whether or not its body matched the schema. This is the
-    /// rule `RetryOutcome::is_transient` applies to the undecoded response. Lets callers wrap any
-    /// retry policy around the client without spargen shipping one.
+    /// rule `RetryOutcome::is_transient` applies to the undecoded response.
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
@@ -426,9 +383,9 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 write!(f, "unexpected response status {status}")
             }
             Error::Decode { status, path, .. } => {
-                // `path` is serde's message, which quotes the server-supplied input (an unknown
-                // enum variant, say) verbatim; its control characters are escaped so a value
-                // holding a LF, CR or tab cannot break or forge the message's line.
+                // `path` is the decoder's message, which quotes the server-supplied input (an
+                // unknown enum variant, say) verbatim; its control characters are escaped so a
+                // value holding a LF, CR or tab cannot break or forge the message's line.
                 write!(f, "response decode failed ({status}) at ")?;
                 write_escaped(f, path)
             }
@@ -489,14 +446,6 @@ impl std::error::Error for MessageError {}
 /// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
 /// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
 /// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
-///
-/// Adding a variant, in spargen's own sources: raise `REQUEST_VARIANTS` and list a value of the new
-/// variant in `every_request_variant`, both in this file's test module
-/// `support-runtime/src/error/tests.rs`.
-/// The compiler will demand the classification arms on its own, but it cannot demand the value —
-/// `request_variant_index` there documents precisely why, and which ways of getting this wrong are
-/// caught. That test module is stripped when this file is embedded into a generated client, so
-/// none of those three names exist in the copy a consumer reads.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RequestError {
@@ -521,8 +470,8 @@ pub enum RequestError {
     /// and before a registered token provider is asked for a token. The payload is the whole cause,
     /// so `source()` is `None`.
     ///
-    /// Registration selected the alternative, so there is no fall-through to a later one: the
-    /// registration is what needs correcting.
+    /// The registration is what needs correcting: [`crate::attach_auth`] never falls through to a
+    /// later alternative.
     CredentialMismatch {
         /// The `securitySchemes` key the credential is registered under.
         scheme: &'static str,
@@ -544,20 +493,25 @@ pub enum RequestError {
     },
     /// Any other request-construction failure, with the cause reachable through `source()`.
     ///
-    /// Pre-send: an unparseable base URL, or a parameter, body, or credential value that did not
-    /// serialize.
+    /// Pre-send, raised before anything is transmitted: an unparseable base URL; a parameter,
+    /// body, or credential value that did not serialize; or reqwest refusing the request when
+    /// asked to send it (a builder-kind error), as it does for a URL scheme other than
+    /// `http`/`https` or plain `http` on an `https_only` client.
     ///
     /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
-    /// from inside the send, so the request may already have been transmitted. This variant is
-    /// therefore the one place in taxonomy #1 where "the request was never sent" does not hold,
-    /// and a caller that retries on it must treat the call as possibly-already-applied.
+    /// from inside the send, so the request may already have been transmitted and the server may
+    /// already have acted on it. This variant is therefore the one place in taxonomy #1 where "the
+    /// request was never sent" does not hold, and a caller that retries on it must treat the call
+    /// as possibly-already-applied. A connection that was never established is classified apart,
+    /// as [`Error::from_reqwest`] describes.
     ///
-    /// After a response was accepted: when the API has streaming responses, the embedded
-    /// `EventStream`'s two reconnect-clone failures land here as well. Nothing was transmitted for
-    /// the reconnect itself, but the stream's initial response was accepted and frames may already
-    /// have been yielded, so the possibly-already-applied reading above is not the one that
-    /// describes them — re-driving the operation from the start re-delivers consumed events
-    /// instead. See [`Error::RequestConstruction`] for the class.
+    /// After a response was accepted: when the API has streaming (sequential) responses, the
+    /// embedded `EventStream` raises this when the stored request cannot be cloned for an
+    /// automatic reconnect — from `with_reconnect`, and from `poll_next` once the reconnect wait
+    /// has elapsed, mid-stream, after frames may already have been yielded. Nothing was
+    /// transmitted for the reconnect itself, so the possibly-already-applied reading above does
+    /// not describe it; re-driving the operation from the start re-delivers events the caller has
+    /// already consumed instead.
     Other(RequestCause),
 }
 
@@ -659,12 +613,12 @@ impl ReqwestClass {
 pub enum TimeoutKind {
     /// The connect timeout: no connection was established in time — the client's
     /// `connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
-    /// the operating system gave up on the handshake. Never reported on `wasm32`, where the fetch
-    /// backend does not say which phase timed out.
+    /// the operating system gave up on the handshake. Never reported on `wasm32`; see
+    /// [`Error::from_reqwest`].
     Connect,
     /// Every other timeout: the client's total-request `timeout` elapsed, whichever phase the
     /// request was in (connecting included), or a `read_timeout` elapsed on an established
-    /// connection. On `wasm32` this is every timeout.
+    /// connection.
     Total,
 }
 
@@ -688,8 +642,8 @@ impl std::fmt::Display for RequestError {
                     "no registered credential satisfies the operation's security requirement",
                 )?;
                 // `alternatives` is public inside the consumer's crate, so a hand-built value can
-                // name nothing. The runtime never builds one, so every value it does build renders
-                // exactly as it did before: a non-empty clause, in declaration order.
+                // name nothing; it renders without the clause. Every value the runtime builds
+                // renders a non-empty clause, in declaration order.
                 let mut named = alternatives
                     .iter()
                     .filter(|alternative| !alternative.is_empty())
@@ -731,8 +685,8 @@ impl std::error::Error for RequestError {
                 None
             }
             RequestError::CredentialProvider { source, .. } => Some(source),
-            // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
-            // as they were when the box was a private field.
+            // The boxed cause itself, not its wrapper, so `downcast_ref` reaches the cause's own
+            // type.
             RequestError::Other(cause) => {
                 Some(cause.0.as_ref() as &(dyn std::error::Error + 'static))
             }

@@ -48,7 +48,7 @@ const UNAUTHORIZED_BODY: &str = r#"{"message":"unauthorized"}"#;
 
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
-/// ships no timer and never depends on tokio; timing is supplied here.
+/// ships no timer and its retry path never depends on tokio; timing is supplied here.
 ///
 /// `RetryWait` is re-exported by the generated client, so the policy names the runtime's own alias
 /// rather than spelling out `Pin<Box<dyn Future<Output = ()> + Send + 'a>>` by hand.

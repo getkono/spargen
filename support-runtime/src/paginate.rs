@@ -148,10 +148,8 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     }
 
     /// The post-`send` half of [`Self::next_page`]: gate on status, follow the `Link` header, decode.
-    /// Split out so it can be driven directly over an in-memory [`Response`] in the unit tests (the
-    /// `send` above needs a live socket, which the runtime's poll-once harness cannot provide). On
-    /// entry `self.next` has already been taken (is `None`), so every non-success path here leaves the
-    /// paginator disarmed; only a successful decode re-arms it.
+    /// On entry `self.next` has already been taken (is `None`), so every non-success path here
+    /// leaves the paginator disarmed; only a successful decode re-arms it.
     async fn handle_response(
         &mut self,
         url: Url,
@@ -188,8 +186,8 @@ impl ClientCore {
 }
 
 /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or
-/// `None` when there is no usable next link. Pure and side-effect-free — the building block generated
-/// clients and callers can reuse directly. A relative target is not resolved here (there is no base);
+/// `None` when there is no usable next link. Pure and side-effect-free — the building block callers
+/// can reuse directly. A relative target is not resolved here (there is no base);
 /// [`LinkPaginator::next_page`] resolves relatives against the fetched page URL.
 pub fn next_link(headers: &HeaderMap) -> Option<Url> {
     next_link_target(headers).and_then(|target| Url::parse(&target).ok())

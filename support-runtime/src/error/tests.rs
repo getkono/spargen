@@ -120,34 +120,21 @@ const REQUEST_VARIANTS: usize = 4;
 /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
 /// what `every_request_variant_lists_each_variant_exactly_once` checks.
 ///
-/// **What this actually enforces, and what it does not.** The match being exhaustive means a
-/// variant added to `RequestError` cannot compile without being *classified* here and in every
-/// other match over the enum. Whether it is *listed* in `every_request_variant` — and so
-/// whether anything it claims is ever compared against anything — this module enforces only in
-/// part, and a test outside it closes the rest. Each of these was run:
+/// Adding a variant to `RequestError`: classify it here, raise `REQUEST_VARIANTS`, and list a
+/// value of it in `every_request_variant`. Adding one to `Error` is the same, through
+/// `error_variant_index`, `ERROR_VARIANTS` and `every_variant`. What holds each step:
 ///
-/// - Adding a variant, classifying it everywhere, giving it the next free index, and raising
-///   `REQUEST_VARIANTS` to match: **caught**, at compile time — the array is then one element
-///   short of its own declared length.
-/// - Padding that array with a duplicate of some other variant to make it compile: **caught**,
-///   by the bijection test — two entries take one index, and another index is unoccupied.
-/// - Adding a variant, classifying it, giving it the next free index, and leaving
-///   `REQUEST_VARIANTS` alone: **not caught here**. Nothing in this module ever evaluates this
-///   function on a value of the new variant, because no such value is ever constructed. It is
-///   **caught** by `every_error_variant_is_counted_by_its_enumeration` in
-///   `spargen/tests/layering/runtime_embed.rs`, which counts the top-level variants of `RequestError` and
-///   `Error` in the text of `error.rs` and requires `REQUEST_VARIANTS` and `ERROR_VARIANTS`, read
-///   from this file's text, to equal them. With the count held to the enum, the first case then forces the value to be listed.
+/// - The exhaustive match demands the classification at compile time.
+/// - `every_error_variant_is_counted_by_its_enumeration` in
+///   `spargen/tests/layering/runtime_embed.rs` holds `REQUEST_VARIANTS` and `ERROR_VARIANTS`, read
+///   from this file's text, to the variant counts in `error.rs`'s text.
+/// - The array length then demands a listed value at compile time, and the bijection test
+///   rejects a duplicate of another variant padding the array.
 ///
-/// The count is read from the text because no *language* construct yields it on stable:
-/// `std::mem::variant_count` is nightly, and a `const` assertion over an exhaustive match
-/// cannot help, because constructing one value of each variant *is* the list the guard is
-/// trying to force. Reading it in `spargen/tests/` adds nothing to the embedded runtime or to
-/// generated output. Rejected: declaring the enum through a macro that emits the count
-/// alongside it, which ships a `macro_rules!` definition of a public type into every generated
-/// client; `strum::EnumCount`, whose attribute would sit above the test-module marker the embed
-/// splits on, so it would ship; and `#[cfg_attr(test, derive(..))]`, which ships too and
-/// activates when the *consumer* runs `cargo test`.
+/// The count is read from the text because `std::mem::variant_count` is nightly, and each
+/// in-source alternative (a macro emitting the count beside the enum, `strum::EnumCount`, or a
+/// `#[cfg_attr(test, derive(..))]`) would sit above the marker the embed splits on and ship in
+/// every generated client.
 fn request_variant_index(error: &RequestError) -> usize {
     match error {
         RequestError::MissingCredential { .. } => 0,

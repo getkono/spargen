@@ -1,9 +1,9 @@
-//! XML request/response body codec (feature `xml`).
+//! XML request/response body codec.
 //!
 //! Serializes typed request bodies to XML and decodes XML response bodies through `quick-xml`'s
-//! serde integration, mirroring the JSON paths in [`crate::dispatch`]. Compiled only under the
-//! `xml` feature — enabled by a spec with an `application/xml` / `text/xml` body — so the default
-//! runtime and every non-XML generated client never reference `quick-xml`.
+//! serde integration, mirroring the JSON paths in [`crate::dispatch`]. Embedded only when the spec
+//! uses an `application/xml` / `text/xml` body, so a non-XML generated client never references
+//! `quick-xml`.
 
 use std::convert::Infallible;
 
@@ -25,8 +25,8 @@ where
 
 /// Decode an XML success response body into `T`, wrapping it with status and headers. The XML
 /// analogue of [`crate::decode_success`]; a parse failure (invalid UTF-8 or malformed XML) becomes
-/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`. An empty
-/// body is not an XML document and is a parse failure too (see [`decode_xml_body`]).
+/// [`Error::Decode`] with the decoder's error message and a body capped at `max_error_body`. An
+/// empty body is not an XML document and is a parse failure too (see [`decode_xml_body`]).
 pub async fn decode_success_xml<T>(
     core: &ClientCore,
     response: Response,

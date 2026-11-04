@@ -22,8 +22,8 @@ pub struct ClientConfig {
     /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
     ///   [`Error::UnexpectedStatus`] have no such field, so where they are capped they are capped
     ///   silently.
-    /// - One path is **not** capped by it: `EventStream`'s per-frame decode, which retains the
-    ///   whole frame. That frame is bounded instead by [`Self::max_stream_frame`].
+    /// - One path is **not** capped by it: `EventStream`'s per-frame decode, which
+    ///   [`Self::max_stream_frame`] bounds instead.
     pub max_error_body: usize,
     /// Maximum bytes `EventStream` buffers for one item whose terminator has not arrived yet
     /// (default 16 MiB): an SSE event before its blank line, an ndjson line before its newline, a
@@ -36,6 +36,10 @@ pub struct ClientConfig {
     /// buffer may hold up to one chunk more than this limit before the check runs, and an item
     /// whose terminator arrives in the same chunk that takes it past the limit is framed
     /// normally.
+    ///
+    /// It also bounds what a per-frame decode failure retains: an item within the limit that
+    /// fails to decode is reported as [`Error::Decode`] retaining the whole frame, uncapped by
+    /// `max_error_body`, with `truncated` unset.
     pub max_stream_frame: usize,
 }
 
@@ -53,8 +57,8 @@ impl Default for ClientConfig {
 /// [`HttpBackend`] that EXECUTES them, the base URL, configuration, and per-scheme credentials.
 ///
 /// Request building stays on a concrete `reqwest::Client`; only the execute step is routed through
-/// the backend (see [`crate::send`]). `new`/`with_client` install the default [`ReqwestBackend`],
-/// so their behavior is unchanged; `with_backend` plugs a caller-supplied transport.
+/// the backend (see [`crate::send`]). `new`/`with_client` install the default [`ReqwestBackend`];
+/// `with_backend` plugs a caller-supplied transport.
 ///
 /// The generated `Client` wraps one of these and documents its own constructors; each of its
 /// operation methods delegates to the shared dispatch routines.
@@ -140,10 +144,8 @@ impl ClientCore {
 
     /// Unregister the credential for a named security scheme, returning it if one was registered.
     ///
-    /// This is how a caller reaches a later security alternative: selection picks the first
-    /// alternative whose schemes are all registered and never falls through past it (see
-    /// [`crate::attach_auth`]), so an alternative stops being chosen only once one of its schemes
-    /// is unregistered. Removing a scheme that was never registered is a no-op returning `None`.
+    /// This is how a caller reaches a later security alternative, as [`crate::attach_auth`]
+    /// describes. Removing a scheme that was never registered is a no-op returning `None`.
     pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
         self.credentials.remove(scheme)
     }

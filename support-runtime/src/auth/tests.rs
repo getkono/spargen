@@ -630,8 +630,8 @@ fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_ba
 
 #[test]
 fn attaches_http_basic_credential() {
-    // `Basic` was previously present only as the *wrong* credential for a bearer scheme, so
-    // nothing asserted the header it is supposed to produce. RFC 7617: base64("u:p").
+    // The header a `Basic` credential produces under an `http basic` scheme. RFC 7617:
+    // base64("u:p").
     let mut core = core();
     core.set_credential(
         "login",
