@@ -73,14 +73,8 @@ mod api {
 
 See [`examples/petstore`](examples/petstore) (build.rs) and
 [`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops against
-a local mock server. `petstore` drives path, query, header and `deepObject` parameters, JSON and
-multipart request bodies, a multi-status response enum, typed servers and response headers, bearer
-auth with a static token and an async token provider, typed and undocumented error statuses,
-RFC 9457 problems with `open_narrowing`, and the retry adapter; `petstore-macro` drives a compact
-subset of that through the macro path. Streams, XML, pagination, the blocking client, and apiKey
-and basic auth are compile-checked and exercised by spargen's own test suite, not by the examples.
-Point the `build.rs` output at `src/api.rs`
-instead when the generated client should be reviewed and committed.
+a local mock server; each README lists what its example exercises. To review and commit the
+generated client, see [Getting Started](docs/book/src/getting-started.md#buildrs-mode).
 
 Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
 The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
@@ -136,20 +130,23 @@ the version it emits, and the idioms spargen handles.
   members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
   carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
   of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`
-  lowers a response's per-status problem `type` narrowing as an open enum (each listed value, plus
-  `Other(String)`), so a problem type the description does not list still decodes into
-  `Error::Api`. See [problem details](docs/book/src/runtime.md#problem-details).
+  decodes a problem type the description does not list into `Error::Api`; see
+  [problem details](docs/book/src/runtime.md#problem-details).
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
-  support. Each is opt-in; streams add `futures-core` and the blocking client a native-only
-  `tokio`, and the [runtime reference](docs/book/src/runtime.md) lists what each capability adds.
-  Spargen ships no retry *policy* and no async timer — the caller supplies both.
+  support. Streams and XML are emitted only when the spec uses them; the blocking client is
+  opt-in. The [runtime reference](docs/book/src/runtime.md) lists what each capability adds to the
+  runtime dependency set. Spargen ships no retry *policy* and no async timer — the caller supplies
+  both.
 - Each schema becomes a model in the generated `types` module. A model whose name would spell one
   of the ten names that module itself uses (`Date`, `DateTime`, `Serialize`, `Deserialize`,
   `BTreeMap`, `String`, `Option`, `Vec`, `Box`, `Result`) takes a disambiguated name instead.
   All ten are reserved whether or not the module writes them, so starting to use a date type never
-  renames a model.
+  renames a model. Likewise, a server builder or server-variable enum in the generated `servers`
+  module whose name would spell one of the three names that module uses (`Default`, `Into`,
+  `String`) takes a disambiguated name; all three are reserved whether or not the module writes
+  them, so adding a free-form server variable never renames a server.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees
@@ -184,18 +181,9 @@ the version it emits, and the idioms spargen handles.
 
 ## Status
 
-Implemented and verified today: the full pipeline for substantial 3.1 and 3.2 surfaces — boolean
-schemas, objects, arrays, tuples, maps, scalar primitives and `format` mappings, homogeneous scalar enums,
-`$ref`s (including self- and mutually-recursive schemas, whose cycle-closing references are
-boxed), `allOf` merging, `oneOf`/`anyOf` unions, path/query/header/cookie parameters, JSON /
-form-urlencoded / octet-stream / text bodies, per-status responses (including multi-status
-success/error bodies lowered to typed per-operation response enums), auth attachment, and the
-complete diagnostics surface (`check` / `explain`, `--format json`, stable codes,
-batch reporting). OpenAPI 3.2 adds canonical `$self` reference identity, `QUERY` and custom HTTP
-methods, whole-query-string and cookie-style parameters, reusable media types, typed SSE/JSON
-sequence streams (including JSON typed by SSE `data.contentSchema`), and expanded documentation
-metadata. See the concise
-[OpenAPI 3.2 scope](docs/openapi-3.2.md) for the exact delta from 3.1.
+The full pipeline, from a vendored 3.1 or 3.2 description to a compiled client, is implemented
+for the constructs the [support matrix](docs/support-matrix.md) lists as supported. The
+[OpenAPI 3.2 scope](docs/openapi-3.2.md) gives the exact delta from 3.1.
 
 Anything outside the documented surface is rejected or warned loudly, never silent; see the
 [support matrix](docs/support-matrix.md) for the exact boundary. Every diagnostic carries the
@@ -220,7 +208,7 @@ mise run docs               # mdbook build docs/book, then the link check
 ```
 
 The rendered HTML lands in the git-ignored `docs/book/book/`; open `index.html` from there. CI
-builds the book on every push so doc-site breakage is caught.
+builds the book and checks its internal links on every pull request and every push to `master`.
 
 ## Prerequisites
 

@@ -11,12 +11,12 @@ mod api {
 ```
 
 Keyed form, with every argument the macro accepts besides the spec path. The `spargen.toml`
-beside the spec is always discovered and applied first; the four switches and the two caps
-override it, and `omit { ... }` adds rules to its `[[omit]]` rules. Each switch — `uuid`, `time`,
-`carve`, `open_narrowing` — takes `= true` or `= false`, so it overrides the file in either
-direction; written alone it means `= true`, and `no_uuid` / `no_time` are shorthand for
-`uuid = false` / `time = false`. A switch the macro is not given leaves the file's value, and one
-given twice is a compile error:
+beside the spec is always discovered and applied first; the four switches override it in either
+direction, the two caps replace its values, and `omit { ... }` adds rules to its `[[omit]]` rules.
+Each switch — `uuid`, `time`, `carve`, `open_narrowing` — takes `= true` or `= false`; written
+alone it means `= true`, and `no_uuid` / `no_time` are shorthand for `uuid = false` /
+`time = false`. A switch the macro is not given leaves the file's value, and one given twice is a
+compile error:
 
 ```rust,ignore
 spargen_macro::generate_api!(
@@ -66,8 +66,10 @@ want to see:
 | `generate_api!` (this crate) | No (use `cargo expand`) | No build.rs |
 | `build.rs` (`spargen::generate`) | Yes — in `OUT_DIR`, via `include!` | A few lines of build.rs |
 
-Inline generation recompiles the whole generator (host-side) as part of your build. To vendor the
-generated module, point the `build.rs` output directly at `src/api.rs` and commit it.
+Inline generation recompiles the whole generator (host-side) as part of your build. To commit the
+generated module instead, use the `build.rs` path as
+[Getting Started](https://github.com/getkono/spargen/blob/master/docs/book/src/getting-started.md#buildrs-mode)
+describes.
 
 A generation failure is a `compile_error!` carrying spargen's diagnostics — no silent degradation.
 Warnings are not surfaced through the macro (stable proc-macro APIs can't emit them); run
@@ -78,10 +80,8 @@ Warnings are not surfaced through the macro (stable proc-macro APIs can't emit t
 The generated code gates the synchronous `BlockingClient` behind a `blocking` feature (as it does
 in every mode). When the client is inlined by the macro, that gate resolves against *your* crate's
 features. A crate that does not declare it compiles the blocking client out cleanly, including
-under `-D warnings`. To opt in, declare the feature as `blocking = ["dep:tokio"]` together with a
-native-only optional `tokio`: `spargen deps <spec>` prints both, commented out, at the tested
-floor. Uncommenting them is the whole opt-in, except that an entry whose `[features]` table,
-`blocking` key, or dependency table your manifest already declares merges into it rather than
-being added a second time, which TOML rejects.
+under `-D warnings`. The CLI reference's
+[`spargen deps`](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#spargen-deps)
+states how to opt in.
 
 Licensed under MIT OR Apache-2.0.
