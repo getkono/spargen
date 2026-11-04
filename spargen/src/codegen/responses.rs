@@ -296,7 +296,7 @@ pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -
             // `From<Bytes>` — so deriving `Deserialize` there would demand `bytes/serde` of the
             // consumer for an impl nothing calls, and the runtime dependency contract deliberately
             // does not require that feature for a top-level bytes body. This predicate is the same
-            // one the error branch in `emit_operation` dispatches on, so the two cannot drift.
+            // one `dispatch::error_branch_tokens` dispatches on, so the two cannot drift.
             let deserialize = (!is_bytes_ty(api, body_ty))
                 .then(|| quote! { #[derive(serde::Deserialize)] #[serde(transparent)] });
             // As on the enum shape: a raw-bytes body has no JSON members to read.
@@ -453,11 +453,9 @@ mod tests {
         emit_error_enum(&api.operations[0], &api, &names).to_string()
     }
 
-    /// Lowering never hands `ErrorShape::Single` a boxed body today (components are lowered before
-    /// operations, so a response body is never a cycle back-edge), and the single-body arm relies
-    /// on that only through its `boxed: false` normalisation. Pin the normalisation itself, so a
-    /// lowering change that does box a response body still emits the finite, compiling newtype and
-    /// its accessor rather than an arm nobody has compiled.
+    /// The single-body arm's `boxed: false` normalisation (see its comment on why lowering hands it
+    /// an unboxed body) is pinned here directly, so a lowering change that does box a response body
+    /// still emits the finite, compiling newtype and its accessor.
     #[test]
     fn a_boxed_single_error_body_emits_the_unboxed_newtype() {
         for nullable in [false, true] {

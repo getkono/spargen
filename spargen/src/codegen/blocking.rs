@@ -140,8 +140,8 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 }
 
 /// Emit one blocking operation method: the async method's signature minus `async`, whose body drives
-/// the async method to completion on the owned runtime. Same docs, deprecation, argument list, and
-/// return types as the async method (all built from the shared signature helpers). Its URL
+/// the async method to completion on the owned runtime, with the async method's docs, deprecation,
+/// arguments and return types (see [`operation_args`]). Its URL
 /// accessor follows it, forwarding to the async client's, which sends nothing and needs no runtime.
 fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let method_ident = operation_method_ident(operation, names);

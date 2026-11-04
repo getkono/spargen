@@ -29,7 +29,10 @@ pub(crate) use synth::synth_operation_id;
 /// deterministic.
 #[derive(Debug, Default)]
 pub(crate) struct Names {
-    /// Method name per operation.
+    /// Method name per operation, allocated first-come with [`Scope::alloc`] in operation order, as
+    /// are [`Names::operation_urls`], [`Names::params_structs`] and
+    /// [`Names::response_header_structs`]; the type, error, success-enum and parameter names are
+    /// allocated with [`Scope::alloc_ranked`].
     pub(crate) operations: HashMap<OperationId, Ident>,
     /// URL-accessor method name per operation, `{method}_url`. Allocated in the method scope after
     /// every operation's own method, so an operation whose method already spells `{method}_url`
@@ -38,10 +41,10 @@ pub(crate) struct Names {
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Error type name per operation: `{Method}Error`, or `{Method}OperationError` where the first
-    /// form would shadow a root re-export. Allocated in the root scope with the `…Params` structs
-    /// and the success enums, so two operations whose methods PascalCase alike (`get_v2` and
-    /// `get_v_2`), or whose plain and widened forms meet (`request` and `requestOperation`), get
-    /// distinct types.
+    /// form would shadow a root re-export. Allocated as one ranked batch in the root scope, which
+    /// the `…Params` structs and the success enums share, so two operations whose methods
+    /// PascalCase alike (`get_v2` and `get_v_2`), or whose plain and widened forms meet (`request`
+    /// and `requestOperation`), get distinct types.
     pub(crate) operation_errors: HashMap<OperationId, Ident>,
     /// `{Method}Response` success-enum name per operation whose
     /// [`Responses::success`](crate::ir::Responses::success) is an enum, allocated in the root
@@ -240,8 +243,8 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // Servers live in their own module, so they get their own scope and can never collide with a
     // generated model or operation name. The builders and the variable enums are declared side by
     // side in that module and share Rust's type namespace, so they are drawn from one scope: two
-    // scopes could hand a builder and an enum the same spelling. A spelling moves only where the
-    // two would have collided, so no description that compiled before is renamed. The prelude
+    // scopes could hand a builder and an enum the same spelling. A spelling is suffixed only where
+    // a builder and an enum would collide. The prelude
     // names the module itself writes are taken first, unconditionally, so a server's name does not
     // change when it gains or loses a free-form variable.
     let mut server_scope = Scope::default();
@@ -421,9 +424,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             },
         );
     }
-    // The URL accessors share the method scope, and are allocated only once every operation holds
-    // its method: an operation's own method name is the older surface, so where `{method}_url` is
-    // another operation's method, that operation keeps it and the accessor yields.
+    // After every method, so the accessor yields (see `Names::operation_urls`).
     for operation in &api.operations {
         let method = names
             .operations
@@ -1320,9 +1321,9 @@ mod tests {
         /// in: the `types` module (definitions and response-header structs, beside the names
         /// that module imports), the module root (the `…Params` structs, the error types, and the
         /// success enums, beside the runtime re-exports), the client methods and their URL
-        /// accessors (beside the fixed ones), each struct's fields with its overflow map, each enum's and union's variants
-        /// with an open enum's catch-all, each operation's method arguments with its generator
-        /// bindings and its `…Params` fields, each header struct's fields, the `servers` module
+        /// accessors (beside the fixed ones), each struct's fields with its overflow map, each
+        /// enum's and union's variants with an open enum's catch-all, each operation's method
+        /// arguments with its generator bindings and its `…Params` fields, each header struct's fields, the `servers` module
         /// (the server builders and the server-variable enums `emit_servers` declares side by
         /// side), and each server's setters and each server variable's values. Every member is
         /// allocated, so the property cannot pass by allocating nothing.

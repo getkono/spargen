@@ -41,9 +41,10 @@ impl Scope {
     /// Allocate a unique identifier for `hint` in `role`. If the cased/escaped name is already
     /// taken in this scope, `provenance` seeds a stable disambiguator.
     ///
-    /// The first call for a spelling wins it, so a scope whose call order can follow document
-    /// order — where a reordered mapping would rename a public item — uses
-    /// [`Scope::alloc_ranked`] instead.
+    /// The first call for a spelling wins it. Model types, operation error types, success enums
+    /// and parameters are allocated through [`Scope::alloc_ranked`] instead, so reordering their
+    /// requests renames none of them; operation methods, `…Params` structs, URL accessors and
+    /// response-header structs are allocated here, in operation order.
     pub(crate) fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
         let base = super::escape(hint, role);
         if self.used.insert(base.as_str().to_owned()) {

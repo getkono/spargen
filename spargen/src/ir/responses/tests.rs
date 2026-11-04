@@ -226,7 +226,7 @@ fn error_enum_sorts_exact_before_range_before_default() {
     // Document order: range 4XX, then exact 409, then a default — all must reorder to
     // exact < range < default. A `Range(0)`, which the frontend never admits, is included to
     // pin that a range prefix of `0` is an ordinary range here, sorted among the ranges and
-    // distinct from the `default` entry (issue #233: it once *was* the `default` entry).
+    // distinct from the `default` entry (issue #233).
     let responses = Responses {
         by_status: vec![
             (StatusSpec::Range(4), resp(Some(1))),
@@ -623,8 +623,8 @@ fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
 
     // Only a `304` and a `default` documented: no success status is declared, so `default`
     // is the success source, and the `304` does not claim it. On the error side the bodyless
-    // `304` is its own unit variant ahead of `default` (issue #204): as a `Single(default)` it
-    // was dropped, and a real `304` matched `default` and had its empty body decoded.
+    // `304` is its own unit variant ahead of `default` (issue #204), so a real `304` never
+    // matches `default` and has its empty body decoded as that model.
     let conditional = Responses {
         by_status: vec![(StatusSpec::Exact(304), resp(None))],
         default: Some(resp(Some(1))),

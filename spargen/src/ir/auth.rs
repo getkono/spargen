@@ -5,9 +5,9 @@ pub(crate) struct SchemeId(pub(crate) String);
 /// A declared security scheme: how a credential attaches, plus the documentation the specification
 /// lets the scheme carry.
 ///
-/// The documentation is rendered onto `Client::with_credential`, which is where a caller decides
-/// what to register and needs to know the token format, the flows that mint one, and whether the
-/// scheme is deprecated.
+/// The documentation is rendered onto `Client::with_credential`, where a caller decides what to
+/// register and needs to know the token format, the flows that mint one, the OpenID Connect
+/// discovery URL, and whether the scheme is deprecated.
 #[derive(Debug, Clone)]
 pub(crate) struct SecuritySchemeDef {
     /// How a credential for this scheme attaches to a request.
@@ -30,8 +30,8 @@ pub(crate) enum SecurityScheme {
         /// The header/query/cookie name.
         name: String,
     },
-    /// `oauth2` — flows are not implemented; the caller-supplied token attaches as a bearer
-    /// credential.
+    /// `oauth2` — the caller-supplied token attaches as a bearer credential; the caller obtains it
+    /// through whichever flow the scheme documents.
     OAuth2,
     /// `openIdConnect` — the caller-supplied token attaches as a bearer credential.
     OpenIdConnect,

@@ -249,9 +249,8 @@ fn only_the_additive_kinds_are_minor() {
     }
 }
 
-/// CLAUDE.md asks the `diff` suite for "semver classification per change kind". Nine of the 24
-/// had a fixture; the rest were classified by policy alone, with nothing proving the
-/// classifier ever produces them. This makes "per change kind" mean what it says.
+/// AGENTS.md asks the `diff` suite for "semver classification per change kind": every
+/// [`ChangeKind`] has a fixture proving the classifier produces it, not only a policy row.
 ///
 /// A bare mention is not a fixture: `kinds(&report).contains(&ChangeKind::X)` passes beside
 /// spurious extra changes, and a filter on `X` asserts nothing about whether `X` was produced.

@@ -369,10 +369,12 @@ fn emit_field(id: crate::ir::TypeId, field: &Field, names: &Names) -> TokenStrea
         notes.push("Deprecated per the spec.".to_owned());
     }
     if field.read_only {
-        notes.push("Read-only: set by the server; ignored in requests.".to_owned());
+        notes.push("Read-only: the server sets it and ignores it in requests.".to_owned());
     }
     if field.write_only {
-        notes.push("Write-only: sent in requests; absent from responses.".to_owned());
+        notes.push(
+            "Write-only: the server accepts it in requests and omits it from responses.".to_owned(),
+        );
     }
     if let Some(default) = &field.default {
         notes.push(default.doc_note.clone());
@@ -646,8 +648,9 @@ mod tests {
     }
 
     /// Issue #356: a model is emitted into the `types` module beside that module's own imports and
-    /// the prelude types it writes bare, so a schema hinted `Date` redefined the runtime `Date` the
-    /// module imports (`E0255`). `name::TYPES_MODULE_NAMES` must hold every name the module brings
+    /// the prelude types it writes bare, so a schema hinted `Date` would redefine the runtime
+    /// `Date` the module imports (`E0255`) were it not reserved. `name::TYPES_MODULE_NAMES` must
+    /// hold every name the module brings
     /// in by `use` and every capitalised type-namespace name it writes bare. The first module's
     /// definitions spell none of those names, so every such use is one the list must reserve; both
     /// date types are used, so the date import is emitted.

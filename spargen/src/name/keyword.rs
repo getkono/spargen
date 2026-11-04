@@ -299,7 +299,7 @@ mod tests {
     }
 
     /// A `matches!` chain warns on a repeated arm; a flat slice does not, so the duplicate check
-    /// that the old table got from the compiler has to be written down.
+    /// is written down here.
     #[test]
     fn the_keyword_table_has_no_duplicates() {
         let unique: std::collections::BTreeSet<&str> = KEYWORDS.iter().copied().collect();

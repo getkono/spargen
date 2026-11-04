@@ -11,11 +11,9 @@
 //!   [`OmitRule::Component`] path/name — and an [`OmitRule::Pointer`] string — that contains a glob
 //!   metacharacter (`*`, `**`, or `?`) is matched as a glob over the construct's path/name (or the
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
-//!   metacharacter is an exact rule and removes exactly the one construct it names. A
-//!   metacharacter is escapable with a backslash (`\*`, `\?`), because a URI path may
-//!   legitimately contain one; rules that auto-carve builds from literal document text are escaped
-//!   for exactly that reason. A backslash escapes whatever character follows it, in exact and glob
-//!   rules alike (`\b` is `b`, `\\` is one literal backslash). See [`glob_match`] for the
+//!   metacharacter is an exact rule and removes exactly the one construct it names. A backslash
+//!   escapes a metacharacter, in exact and glob rules alike, as `glob` states; rules that
+//!   auto-carve builds from literal document text are escaped. See [`glob_match`] for the
 //!   semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
@@ -405,8 +403,7 @@ fn emit_invalid_rule(
 ///
 /// This mirrors the official schemas, which `require` only `openapi` and `info` and then place
 /// `paths`, `components`, and `webhooks` in an `anyOf` — a document carrying any one of the three
-/// is valid. Demanding `paths` outright reported a document the specification accepts as
-/// `E020` "omit profile created an invalid document".
+/// is valid, so a profile that leaves only `components` or `webhooks` is not `E020`.
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
     let reject = |message: String, diags: &mut Diagnostics| {
