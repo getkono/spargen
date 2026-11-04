@@ -191,7 +191,8 @@ impl Diagnostic {
 }
 
 /// Fluent builder for a [`Diagnostic`], begun by [`Diagnostic::error`], [`Diagnostic::warning`]
-/// or [`Diagnostic::at_root`]: attaches the message and remedy, then [`Self::build`] finishes the diagnostic.
+/// or [`Diagnostic::at_root`]: attaches the message and remedy, then [`Self::build`] finishes the
+/// diagnostic.
 #[derive(Debug)]
 #[must_use = "a builder does nothing until it is built"]
 pub(crate) struct DiagnosticBuilder {

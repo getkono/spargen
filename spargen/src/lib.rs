@@ -1442,8 +1442,8 @@ paths:
     }
 
     /// The round cap is exact: a chain whose carve clears within [`compat::MAX_CARVE_ROUNDS`]
-    /// rounds lowers, and one link longer ends `Rejected` with the last round's report — the link it carved last
-    /// as `W009`s, and the one its final rule dangled as the residual `E004`.
+    /// rounds lowers, and one link longer ends `Rejected` with the last round's report — the link
+    /// it carved last as `W009`s, and the one its final rule dangled as the residual `E004`.
     #[test]
     fn a_carve_that_exhausts_the_round_cap_reports_its_last_rejection() {
         let cap = compat::MAX_CARVE_ROUNDS;

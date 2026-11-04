@@ -459,9 +459,9 @@ fn a_relative_manifest_path_with_no_root_names_the_absolute_path_searched_from()
 #[test]
 fn the_walk_climbs_a_symlinked_member_path_as_written() {
     // Absolutization is lexical: `std::path::absolute`, not `canonicalize` (#202). The two
-    // disagree exactly here — a member reached through a symlinked directory. Cargo climbs the path it was given, which is the path it
-    // hands the build as `CARGO_MANIFEST_DIR`, so the root is the one above the link, not the
-    // one above where the link points.
+    // disagree exactly here — a member reached through a symlinked directory. Cargo climbs the
+    // path it was given, which is the path it hands the build as `CARGO_MANIFEST_DIR`, so the
+    // root is the one above the link, not the one above where the link points.
     let directory = Sandbox::new();
     let lexical = directory.path().join("lexical");
     let physical = directory.path().join("physical");
@@ -1376,8 +1376,9 @@ fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
     // different file with every assertion above still green. So take the path the inheritance
     // message names and require the read failure to name that same one. They are compared to
     // each other *and* to the path this fixture itself builds, never by `contains`, a substring
-    // relation an empty path, a bare `Cargo.toml`, or the root *directory* satisfies. Agreement alone is no better: two renderers degrading the same
-    // way still agree, and so does one naming a manifest nothing ever opened. The expected
+    // relation an empty path, a bare `Cargo.toml`, or the root *directory* satisfies. Agreement
+    // alone is no better: two renderers degrading the same way still agree, and so does one
+    // naming a manifest nothing ever opened. The expected
     // spelling is not `root`: `package.workspace` is joined, not normalised, so both messages
     // spell the root `<tmp>/outside/../root/Cargo.toml`, and camino joins lexically, so
     // building it the same way here is portable and needs no canonicalisation.
