@@ -35,10 +35,18 @@
 //! preprocesses the bundle before `oas31` sees it; `surface` reads the lowered API for `diff` and
 //! never feeds generation.
 //!
-//! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
-//! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
-//! `test_support`, compiled only into the test build, holds helpers the subsystems' in-crate tests
-//! share; the lint admits it by name as neither.
+//! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they
+//! carry no `layer-deps:` header, the lint admits them by name in its `FACADE_PLUMBING` list, and
+//! no subsystem may depend on them. `test_support`, compiled only into the test build, holds
+//! helpers the subsystems' in-crate tests share; the lint admits it by name in `TEST_SUPPORT`.
+//!
+//! ## How the public types grow
+//!
+//! A public type grows without a breaking change in one of two ways. [`Report`], [`Spec`],
+//! [`Build`], [`DiffRejection`] and [`DiffSides`] keep their fields private and are read through
+//! accessors, and `Spec` and `Build` are set through chained setters, so a new field or knob is
+//! additive. A type with public fields or variants that may grow — [`Diagnostic`], [`Outcome`],
+//! [`Code`] and [`CargoIntegration`] among them — is `#[non_exhaustive]` instead.
 
 mod diag;
 
@@ -81,7 +89,8 @@ pub enum Outcome {
     Generated,
     /// The generated module was already up to date and was verified from the build cache.
     Cached,
-    /// The support audit completed without a rejection.
+    /// An analysis completed without a rejection: [`check`]'s support audit, or the lowering
+    /// whose report [`requirements`] or [`diff`] returns.
     Clean,
     /// An error-severity diagnostic was emitted, so the run did not get as far as it was asked
     /// to.
@@ -134,14 +143,6 @@ impl std::fmt::Display for Outcome {
 }
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
-///
-/// Fields are private and read through accessors, so the shape can grow without a breaking
-/// change. [`Spec`], [`Build`], [`DiffRejection`], and [`DiffSides`] keep their fields private for
-/// the same reason: [`Spec`] is set through its builder methods and its settings are read back
-/// through its accessors, and [`Build`], [`DiffRejection`], and [`DiffSides`] are read through
-/// accessors.
-/// [`Diagnostic`] grows the other way: its fields are public and the struct is
-/// `#[non_exhaustive]`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
@@ -496,21 +497,19 @@ fn preview_inner(spec: &Spec) -> PipelinePreview {
     }
 }
 
-/// The stack size for the dedicated frontend worker thread. Parsing, deserialization, meta-schema
-/// validation, and lowering are all recursive over the (possibly deeply nested) document. Lowering
-/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`), and the JSON and YAML
-/// parsers both refuse a document nested past a fixed depth before recursing past it, an alias's
-/// copy counted at the depth it reaches, so the peak stack is bounded — but only *this* thread
-/// guarantees it has room for that bound, no matter how small the caller's own stack is. A
-/// build.rs, a CLI, a proptest worker, or a libFuzzer target all inherit the same guarantee: no
-/// spec — however deep or adversarial — can overflow the stack, because the recursive work always
-/// runs here.
+/// The stack size for the dedicated frontend worker thread, room for the bounded peak recursion
+/// [`run_on_frontend_stack`] relies on.
 const FRONTEND_STACK: usize = 64 * 1024 * 1024;
 
 /// Run `f` (the whole recursive frontend/pipeline) on a dedicated thread with a large, fixed stack,
-/// decoupling spargen's recursion budget from the caller's stack size. This is the mechanism behind
-/// the no-overflow invariant: combined with the parsers' and lowering's depth caps, it makes stack
-/// exhaustion on any input impossible for every entry point. A panic inside the worker is
+/// decoupling spargen's recursion budget from the caller's stack size. Parsing, deserialization,
+/// meta-schema validation, and lowering all recurse over the document. Lowering caps its own
+/// recursion at a fixed depth (`oas31::lower::MAX_SCHEMA_DEPTH`), and the JSON and YAML parsers
+/// both refuse a document nested past a fixed depth before recursing past it, an alias's copy
+/// counted at the depth it reaches, so the peak stack is bounded; this thread guarantees room for
+/// that bound however small the caller's own stack is. Together they make stack exhaustion on any
+/// input impossible for the work that runs here, whether the caller is a `build.rs`, the CLI, a
+/// proptest worker, or a libFuzzer target. A panic inside the worker is
 /// propagated to the caller unchanged (so genuine bugs still surface). Thread creation is not
 /// input-driven; the only way it fails is OS resource exhaustion, which is outside the "no input
 /// crashes the generator" contract.
@@ -543,7 +542,7 @@ pub struct DiffRejection {
     new: Option<Report>,
 }
 
-/// Which side of a diff a rejection came from.
+/// Which side of a diff a rejection or a lowering report belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -603,7 +602,8 @@ impl std::fmt::Display for DiffRejection {
 impl std::error::Error for DiffRejection {}
 
 /// The `Ok` companion of a [`diff`] run: both specs lowered, and this is the [`Report`] of each
-/// side's lowering, with [`Outcome::Clean`] and every warning that lowering emitted.
+/// side's lowering, with [`Outcome::Clean`] and the warnings that lowering emitted, up to the
+/// spec's `batch_cap`.
 ///
 /// Read through [`old_report`](Self::old_report), [`new_report`](Self::new_report), or
 /// [`reports`](Self::reports) for both sides in turn.
@@ -676,7 +676,7 @@ impl serde::Serialize for DiffRejection {
 /// touches the runtime. Deterministic: the same pair of specs yields a byte-identical report.
 ///
 /// When both specs lower, the diff comes back beside [`DiffSides`], the report of each side's
-/// lowering, which carries every warning that lowering emitted.
+/// lowering, which carries the warnings that lowering emitted, up to the spec's `batch_cap`.
 pub fn diff(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejection> {
     run_on_frontend_stack(|| diff_inner(old, new))
 }
@@ -721,8 +721,8 @@ fn lower_side(spec: &Spec) -> Result<(ir::Api, name::Names, Report), Report> {
     }
 }
 
-/// Private cross-crate bridge for `spargen-macro`; this crate's integration tests also call
-/// `preview` and `preview_for_macro`.
+/// Private cross-crate bridge to the in-memory renderer, for `spargen-macro` and for tests that
+/// render without writing.
 #[doc(hidden)]
 pub mod __private {
     use camino::{Utf8Path, Utf8PathBuf};
@@ -794,7 +794,8 @@ pub mod __private {
 ///
 /// The spec must lower — a rejection is returned as the [`Report`] that explains why. A spec that
 /// lowers returns its requirements beside the run's own [`Report`], whose outcome is
-/// [`Outcome::Clean`] and which carries every warning the lowering emitted.
+/// [`Outcome::Clean`] and which carries the warnings the lowering emitted, up to the spec's
+/// `batch_cap`.
 pub fn requirements(spec: &Spec) -> Result<(Requirements, Report), Report> {
     let result = run_mode(spec, PipelineMode::Requirements);
     match result.requirements {
@@ -901,7 +902,7 @@ fn lower_bundle(
     }
 
     // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
-    // exactly the diagnostics `generate` would, just without emitting code.
+    // exactly the frontend diagnostics `generate` would, just without emitting code.
     let options = oas31::LowerOptions {
         open_narrowing: spec.open_narrowing,
     };
@@ -916,9 +917,9 @@ fn lower_bundle(
     Ok((api, names))
 }
 
-/// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// the internal preview. Returns the fully rendered module plan or `Err(())` with the codegen
-/// error already pushed onto `diags` as `E011`, so nothing is written or cached.
+/// Codegen + emit-planning for an already-lowered API, the step [`PipelineMode::Preview`] adds to
+/// the frontend. Returns the fully rendered module plan or `Err(())` with the codegen error already
+/// pushed onto `diags` as `E011`, so nothing is written or cached.
 fn build_emit_plan(
     spec: &Spec,
     api: &ir::Api,
@@ -992,20 +993,8 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     }
 }
 
-/// Auto-carve driver: iterate the frontend to a fixpoint, omitting the smallest enclosing
-/// omittable construct for each rejection, then run `mode` for real with the carved omit set.
-///
-/// Each round runs the frontend alone (no codegen, and no output is written while carving) with the
-/// current omit set. If it is not rejected, the carve converged and we run `mode` once with that
-/// omit set (which re-applies every omit rule, emitting a `W009` for each carved construct — carving
-/// is never silent). If it is rejected, we map the error pointers to omittable constructs
-/// ([`compat::carve_rules`]) and add any *new* rules; when a round adds no new rule (an un-carvable
-/// residual — a root/unmodelled rejection, or a rule that did not clear its error), we return that
-/// round's report as-is: it already carries the `W009`s for what *was* carved plus the residual
-/// error diagnostics, with `Outcome::Rejected`. Omitting a construct can dangle a `$ref` and surface
-/// a fresh `E004`/`E020`; that new error is itself carved on the next round (its enclosing operation
-/// is omitted) or, if un-carvable, reported honestly — the document is never emitted broken. The
-/// round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
+/// Auto-carve driver: resolve the carved omit set with [`carve_spec`], then run `mode` once with
+/// it, which re-applies every omit rule and so emits a `W009` for each carved construct.
 fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     match carve_spec(spec) {
         Ok(resolved) => run_pipeline(&resolved, mode),
@@ -1013,9 +1002,19 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
     }
 }
 
-/// The carve fixpoint [`run_carve`] describes, without the final run: `spec` with `carve` off and
-/// the carved omit set in place of its own once the frontend lowers under it, or the rejection
-/// [`Report`] of the round that could make no progress (or of the last round, at the cap).
+/// The carve fixpoint: `spec` with `carve` off and the carved omit set in place of its own once the
+/// frontend lowers under it, or the rejection [`Report`] of the round that could make no progress
+/// (or of the last round, at the cap).
+///
+/// Each round runs the frontend alone (no codegen, no output written) with the current omit set.
+/// If it is not rejected, the carve converged. If it is rejected, the error pointers are mapped to
+/// the smallest enclosing omittable constructs ([`compat::carve_rules`]) and any *new* rules are
+/// added; when a round adds none (an un-carvable residual — a root/unmodelled rejection, or a rule
+/// that did not clear its error), that round's report is returned as-is: it carries the `W009`s
+/// for what *was* carved plus the residual errors, with `Outcome::Rejected`. Omitting a construct
+/// can dangle a `$ref` and surface a fresh `E004`/`E020`; that error is carved on the next round
+/// (its enclosing operation is omitted) or, if un-carvable, reported — the document is never
+/// emitted broken. The round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
 fn carve_spec(spec: &Spec) -> Result<Spec, Report> {
     let mut omit = spec.omit.clone();
     let mut last_rejection: Option<Report> = None;
@@ -1105,9 +1104,9 @@ mod tests {
         }
     }
 
-    /// `wrote_output` distinguishes a run that rewrote the file from one that did not. `Cached` is
-    /// the case that matters: it is a success, but nothing was written, and a build script keying
-    /// off it would otherwise re-run work on every warm build.
+    /// `wrote_output` holds only for a run that rendered the output, which rewrites the file only
+    /// when its bytes change. `Cached` is the case that matters: it is a success that rendered
+    /// nothing, and a build script keying off it would otherwise re-run work on every warm build.
     #[test]
     fn only_a_generated_outcome_reports_that_output_was_written() {
         assert!(Outcome::Generated.wrote_output());
@@ -1442,9 +1441,9 @@ paths:
         );
     }
 
-    /// The round cap is exact: a chain carve clears in [`compat::MAX_CARVE_ROUNDS`] rounds lowers,
-    /// and one link longer ends `Rejected` with the last round's report — the link it carved last
-    /// as `W009`s, and the one its final rule dangled as the residual `E004`.
+    /// The round cap is exact: a chain whose carve clears within [`compat::MAX_CARVE_ROUNDS`]
+    /// rounds lowers, and one link longer ends `Rejected` with the last round's report — the link
+    /// it carved last as `W009`s, and the one its final rule dangled as the residual `E004`.
     #[test]
     fn a_carve_that_exhausts_the_round_cap_reports_its_last_rejection() {
         let cap = compat::MAX_CARVE_ROUNDS;

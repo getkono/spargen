@@ -213,9 +213,9 @@ fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
 #[test]
 fn a_root_package_inherits_its_own_workspace_dependencies() {
     // `[package]` and `[workspace]` in one file is the single-crate repository, and `workspace
-    // = true` there resolves against the table directly below it. Resolution used to give up
-    // the moment the consumer manifest declared `[workspace]` at all, so this layout reported
-    // every inherited dependency as unresolvable — about a table spargen had already parsed.
+    // = true` there resolves against the table directly below it, so a consumer manifest that
+    // declares `[workspace]` itself resolves its inherited dependencies rather than reporting
+    // them unresolvable.
     let directory = Sandbox::new();
     let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
     std::fs::write(
@@ -419,8 +419,8 @@ fn a_relative_manifest_path_still_resolves_the_workspace_root() {
 #[test]
 fn a_relative_manifest_path_with_no_root_names_the_absolute_path_searched_from() {
     // "No workspace manifest was found above `Cargo.toml`" names no directory at all. The
-    // search runs from the absolutized path, and the message must name that one; reporting
-    // the caller's spelling instead left every test green (#202).
+    // search runs from the absolutized path, and the message must name that one rather than
+    // the caller's spelling (#202).
     let directory = Sandbox::new();
     let member_dir = directory.path().join("client");
     std::fs::create_dir(&member_dir).unwrap();
@@ -458,11 +458,10 @@ fn a_relative_manifest_path_with_no_root_names_the_absolute_path_searched_from()
 #[cfg(unix)]
 #[test]
 fn the_walk_climbs_a_symlinked_member_path_as_written() {
-    // Absolutization is lexical: `std::path::absolute`, not `canonicalize`. Swapping one for
-    // the other left every test green (#202), and they disagree exactly here — a member reached
-    // through a symlinked directory. Cargo climbs the path it was given, which is the path it
-    // hands the build as `CARGO_MANIFEST_DIR`, so the root is the one above the link, not the
-    // one above where the link points.
+    // Absolutization is lexical: `std::path::absolute`, not `canonicalize` (#202). The two
+    // disagree exactly here — a member reached through a symlinked directory. Cargo climbs the
+    // path it was given, which is the path it hands the build as `CARGO_MANIFEST_DIR`, so the
+    // root is the one above the link, not the one above where the link points.
     let directory = Sandbox::new();
     let lexical = directory.path().join("lexical");
     let physical = directory.path().join("physical");
@@ -725,24 +724,16 @@ fn a_broken_manifest_below_the_real_root_does_not_stop_the_walk() {
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
 }
 
-/// One choice in `workspace_root` is left unguarded, and the reason has a precondition that an
-/// earlier version of this comment stated as though it were unconditional. The walk starts at
+/// One choice in `workspace_root` is left unguarded. The walk starts at
 /// `absolute.parent().and_then(Utf8Path::parent)`, skipping the consumer's own directory.
-/// Starting at `.parent()` instead re-reads the consumer's *directory*, whose `Cargo.toml` is
-/// already known to parse and already known to declare no `[workspace]` — `workspace_root`
-/// returns early when it does — so it falls through the `Ok(_) => {}` arm and climbs on.
-///
-/// That holds **only when the audited manifest is itself named `Cargo.toml`**. Point the audit
-/// at `dir/Other.toml` with a real workspace root beside it at `dir/Cargo.toml` and the two
-/// differ sharply: the original skips the sibling and reports every inherited dependency
-/// unresolvable, the mutant adopts it and reports nothing. So the mutant is equivalent **under
-/// that precondition** and distinguishable without it.
-///
-/// The precondition is not enforced anywhere: `manifest_from_env` and `generate_api!` both pass
-/// `CARGO_MANIFEST_PATH` on verbatim with no filename check, and otherwise join `Cargo.toml`
-/// onto `CARGO_MANIFEST_DIR`. It holds because Cargo sets that variable to a `Cargo.toml`,
-/// which is why this is a comment rather than a fixture — there is no reachable input that
-/// distinguishes the two.
+/// Starting at `.parent()` instead re-reads that directory's `Cargo.toml`, which is the audited
+/// manifest, already known to parse and to declare no `[workspace]`, so the walk climbs on and
+/// the two starts agree. That holds **only when the audited manifest is named `Cargo.toml`**:
+/// audit `dir/Other.toml` beside a workspace root at `dir/Cargo.toml` and the original skips the
+/// root where the other start adopts it. Cargo sets `CARGO_MANIFEST_PATH` to a `Cargo.toml`, and
+/// `manifest_from_env` and `generate_api!` otherwise join `Cargo.toml` onto
+/// `CARGO_MANIFEST_DIR`, so no reachable input tells the two apart and no fixture pins the
+/// choice.
 #[test]
 fn the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace() {
     // "A manifest that parses but declares no `[workspace]` is an ordinary member or an
@@ -806,8 +797,8 @@ fn walked(root: WorkspaceRoot) -> String {
 fn the_walk_reads_nothing_above_its_ceiling() {
     // #214: the ceiling is what keeps a fixture's outcome to the files it wrote. Above it sit
     // a workspace root that would resolve and, further up, a manifest that does not parse —
-    // the two host files that used to turn these fixtures red — and a walk bounded below both
-    // must neither adopt the first nor name the second.
+    // host files a fixture must never read — and a walk bounded below both must neither adopt
+    // the first nor name the second.
     let directory = Sandbox::new();
     let sandbox = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
     let outer = sandbox.join("outer");
@@ -1122,9 +1113,9 @@ fn a_root_declaring_optional_does_not_make_an_inherited_crate_optional() {
 #[test]
 fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() {
     // The other half of the fixture above. `optional` is read from the member in both
-    // directions, and that fixture holds only the forbidden one: reading the root as well on
-    // the required side — so a root `optional = true` excuses a member that leaves it out —
-    // left every test green (#202). Cargo rejects `optional` in `[workspace.dependencies]`,
+    // directions, and that fixture holds only the forbidden one; this one holds the required
+    // side, where a root `optional = true` must not excuse a member that leaves it out (#202).
+    // Cargo rejects `optional` in `[workspace.dependencies]`,
     // so this, too, pins a rule rather than a layout Cargo loads.
     let directory = Sandbox::new();
     let member_dir = directory.path().join("client");
@@ -1196,9 +1187,9 @@ fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
 
 #[test]
 fn an_unresolvable_inheritance_says_where_the_lookup_went() {
-    // One message used to cover two opposite situations: the workspace has no such entry (fix
-    // the root), and no workspace was found at all (fix the layout, or spell the version out).
-    // The report behind #71 landed in exactly that ambiguity.
+    // Two opposite situations get distinct messages: the workspace has no such entry (fix the
+    // root), and no workspace was found at all (fix the layout, or spell the version out). One
+    // message for both is the ambiguity behind #71.
     let directory = Sandbox::new();
     let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
     let member_dir = directory.path().join("client");
@@ -1384,11 +1375,10 @@ fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
     // the *consumer* manifest's path on the read-failure line would point the reader at a
     // different file with every assertion above still green. So take the path the inheritance
     // message names and require the read failure to name that same one. They are compared to
-    // each other *and* to the path this fixture itself builds. Requiring the read failure to
-    // merely `contain` the inheritance message's path left the claim open: `contains` is a
-    // substring relation, so an arm rendering an empty path, a bare `Cargo.toml`, or the root
-    // *directory* satisfied it. Agreement alone is no better: two renderers degrading the same
-    // way still agree, and so does one naming a manifest nothing ever opened. The expected
+    // each other *and* to the path this fixture itself builds, never by `contains`, a substring
+    // relation an empty path, a bare `Cargo.toml`, or the root *directory* satisfies. Agreement
+    // alone is no better: two renderers degrading the same way still agree, and so does one
+    // naming a manifest nothing ever opened. The expected
     // spelling is not `root`: `package.workspace` is joined, not normalised, so both messages
     // spell the root `<tmp>/outside/../root/Cargo.toml`, and camino joins lexically, so
     // building it the same way here is portable and needs no canonicalisation.
@@ -1442,9 +1432,9 @@ fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
     );
     // And the reason must not ride inline in *any* shape, not merely without a colon. The
     // explain text says this limb's inheritance message carries no reason of its own, so a
-    // separator of any kind appended here falsifies it; `!contains("could not be read:")` forbade one
-    // spelling and left the rest — an em dash among them — free. Pinning the end of the
-    // message forbids all of them. `location` is empty here: one counting table.
+    // separator of any kind appended here falsifies it. Pinning the end of the message forbids
+    // every separator, an em dash among them, where `!contains("could not be read:")` would
+    // forbid one spelling. `location` is empty here: one counting table.
     assert!(
         result.diagnostics[inherits]
             .message

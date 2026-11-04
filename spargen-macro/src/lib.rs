@@ -501,9 +501,9 @@ mod tests {
 
     #[test]
     fn an_unnamed_consumer_is_an_error_not_the_working_directory() {
-        // #195: with neither variable set, the macro used to audit `./Cargo.toml` — under a
-        // workspace build, the (usually virtual) workspace root — and report every runtime
-        // dependency missing at spargen's floor version. Not knowing the crate must be an error.
+        // #195: with neither variable set, auditing `./Cargo.toml` would read the (usually
+        // virtual) workspace root under a workspace build and report every runtime dependency
+        // missing at spargen's floor version. Not knowing the crate is an error.
         let error = Consumer::locate(None, None).unwrap_err();
         assert!(
             error.contains("CARGO_MANIFEST_PATH") && error.contains("CARGO_MANIFEST_DIR"),
@@ -826,12 +826,12 @@ paths:
             "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
         );
         let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
-        // A rejected preview retains no module, so the macro raises `compile_error!` instead of
-        // emitting half-generated code.
+        // A frontend rejection retains no module; the macro raises `compile_error!` on any
+        // rejected outcome rather than emitting the code it may hold.
         assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
         assert!(
             preview.contents.is_none(),
-            "a rejected preview retains no generated module"
+            "a frontend rejection retains no generated module"
         );
         // A root-level diagnostic's pointer is empty, so no `at` line is rendered. The span names
         // the spec path as the bundle loaded it, not as the macro was given it.

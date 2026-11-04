@@ -57,7 +57,7 @@ fn wasm32() -> TargetContext {
 #[test]
 fn equivalent_native_cfg_spellings_satisfy_the_blocking_requirement() {
     // The three spellings #88 reported: each is a table Cargo applies on exactly the native
-    // targets, and each used to be looked up by its literal key and reported missing.
+    // targets, so each is evaluated as a `cfg` rather than looked up by its literal key.
     for target in [TargetContext::Unknown, linux(), windows()] {
         let failures = [
             r#"cfg(not(target_arch="wasm32"))"#,

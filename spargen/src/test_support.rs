@@ -1,6 +1,4 @@
-//! Helpers the in-crate tests of every subsystem share, compiled only into the test build. Not a
-//! subsystem and not facade plumbing: `spargen/tests/layering/` admits it by name in its
-//! `TEST_SUPPORT` list, so a subsystem's tests reach it without a `layer-deps:` edge.
+//! Helpers the in-crate tests of every subsystem share, compiled only into the test build.
 
 use std::path::{Path, PathBuf};
 
@@ -46,8 +44,8 @@ pub(crate) fn rust_sources(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::read_repo_file;
 
-    /// Once the workspace gate has passed, a missing input is a failure: a skip keyed on the file
-    /// itself turned a renamed `corpus/manifest.toml` or `tests/diff.rs` into a silent pass (#409).
+    /// Once the workspace gate has passed, a missing input is a failure, so a renamed
+    /// `corpus/manifest.toml` or `tests/diff.rs` fails rather than passes silently (#409).
     #[test]
     #[should_panic(expected = "must exist in the repository")]
     fn a_missing_repository_file_fails_rather_than_skips() {

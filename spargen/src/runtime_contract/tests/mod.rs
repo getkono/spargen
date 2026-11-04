@@ -1,8 +1,10 @@
 //! The audit's fixtures, one file per concern: `versions` (floors, ceilings and conditional
 //! requirements), `targets` (target-table evaluation), `workspace` (inheritance and the
 //! workspace-root walk), `explain` (the `E023` explain text) and `deps_block` (the block
-//! `spargen deps` prints). This file holds what they share: the sandbox every audit runs in, the
-//! helpers, the list of test sources the self-reading tests scan, and the tests over those.
+//! `spargen deps` prints). This file holds what they share — the sandbox every audit runs in, the
+//! helpers, and the list of test sources the self-reading tests scan, with the tests over those —
+//! and the tests of the driver in `runtime_contract/mod.rs`: the build-script manifest path, the
+//! directive guard, and the Cargo-integration policy and its messages.
 
 mod deps_block;
 mod explain;
@@ -389,9 +391,9 @@ fn an_empty_manifest_variable_is_taken_as_given() {
 
 #[test]
 fn a_manifest_path_with_a_line_break_is_never_written_as_a_directive() {
-    // Deleting the guard left the whole suite green (#202). Written out, the text after the
-    // break would reach Cargo as a directive of its own, so a crafted directory name could
-    // inject one. Every other path is still named, in the order given.
+    // Written out, the text after the break would reach Cargo as a directive of its own, so a
+    // crafted directory name could inject one (#202). Every other path is still named, in the
+    // order given.
     let manifests = [
         Utf8PathBuf::from("/work/client/Cargo.toml"),
         Utf8PathBuf::from("/work/x\ncargo:rustc-cfg=injected/Cargo.toml"),

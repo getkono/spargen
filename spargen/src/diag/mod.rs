@@ -4,14 +4,15 @@
 //! Diagnostic codes and severities, each code's title and `spargen explain` text, the JSON
 //! Pointer + span model, and the [`InterpId`] (`INT-###`) a code may name for the interpretation
 //! its behavior depends on.
-//! `diag` is the lowest layer, which every pipeline stage may reach, so it depends on nothing.
+//! `diag` is the lowest layer, which the stages that report diagnostics reach and which depends
+//! on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
 //! construct, a [`Span`] (line and column within the file its [`FileId`] names) when the
-//! construct's location is known, a one-line
-//! message, an optional remedy, and the [`OutcomeClaim`] its message makes.
-//! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
-//! at the first error; presentation belongs to the optional binary.
+//! construct's location is known, a one-line message, an optional remedy, and the
+//! [`OutcomeClaim`] its message makes. Generation collects all diagnostics into a capped
+//! [`Diagnostics`] batch rather than stopping at the first error. [`Diagnostic`]'s `Display` is
+//! the one human rendering, which the binary and `Report`'s own `Display` both use.
 
 mod code;
 mod collect;
@@ -48,8 +49,7 @@ pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
 
 /// A single diagnostic emitted during a pipeline run.
 ///
-/// Every field is public, so a caller reads and updates each one directly. The struct is
-/// `#[non_exhaustive]`, so a field can be added without a breaking change: a caller receives a
+/// Every field is public, so a caller reads and updates each one directly; a caller receives a
 /// diagnostic from a run's report rather than building one.
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]
@@ -190,8 +190,9 @@ impl Diagnostic {
     }
 }
 
-/// Fluent builder for a [`Diagnostic`], begun by [`Diagnostic::error`] or [`Diagnostic::warning`]:
-/// attaches the message and remedy, then [`Self::build`] finishes the diagnostic.
+/// Fluent builder for a [`Diagnostic`], begun by [`Diagnostic::error`], [`Diagnostic::warning`]
+/// or [`Diagnostic::at_root`]: attaches the message and remedy, then [`Self::build`] finishes the
+/// diagnostic.
 #[derive(Debug)]
 #[must_use = "a builder does nothing until it is built"]
 pub(crate) struct DiagnosticBuilder {
@@ -243,9 +244,8 @@ mod tests {
 
     #[test]
     fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {
-        // `tests/frontend/` holds every claim to its run's outcome. If every diagnostic were built
-        // `Independent`, that check would pass on every run and hold nothing, including that an
-        // error only ever reaches a rejected run.
+        // A claim checked against its run's outcome holds something only if an error claims the
+        // rejection: built `Independent`, it would be admitted by every run.
         let at = || Provenance::new(JsonPointer::root(), None);
         assert_eq!(
             Diagnostic::error(Code::UnsupportedMediaType, at())
@@ -263,9 +263,9 @@ mod tests {
 
     #[test]
     fn a_root_diagnostic_takes_its_codes_severity_and_points_at_the_root() {
-        // The four root-pointer sites (the facade's pipeline errors, the Cargo-integration
-        // policy, the build cache, and the `E023` audit) built these by hand before; each must
-        // read exactly as it did, which is what the explicit builders produce.
+        // A root diagnostic (the facade's pipeline errors, the Cargo-integration policy, the
+        // build cache, the `E023` audit) serializes exactly as the explicit builder at the root
+        // builds it.
         for (code, built) in [
             (
                 Code::InvalidInput,
