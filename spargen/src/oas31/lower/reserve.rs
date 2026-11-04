@@ -843,7 +843,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // file id: a URL is only one of the spellings that reaches a vendored document, and
             // the map holds at most one entry per open recursion frame. Without it, a remote body
             // whose union collapses onto an open remote reservation passes the guard below and
-            // reaches `TypeGraph::fill` unreported. Only a vendored document whose whole body is
+            // reaches `TypeGraph::fill` with an id it never reserved, instead of being reported
+            // here. Only a vendored document whose whole body is
             // the union matches here, which
             // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` pins.
             for (reference, &(id, _)) in &self.remote_in_progress {
