@@ -344,7 +344,7 @@ fn finite() -> proptest::num::f64::Any {
 
 /// `value` written as JSON text and read back by `serde_json`. Without its `float_roundtrip`
 /// feature, `serde_json` may read a float's shortest text as a neighbouring value, so this, not
-/// `value` itself, is what a header carrying that text can decode to.
+/// `value` itself, is what a header carrying that text can decode to (#1142).
 fn json_read_back(value: f64) -> f64 {
     serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap()
 }

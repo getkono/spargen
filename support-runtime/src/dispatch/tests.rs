@@ -887,7 +887,8 @@ fn interrupted(status: u16) -> reqwest::Response {
 /// Assert `error` is what `Error::from_reqwest` makes of a failed body read, carrying no status,
 /// rather than a response class built from the bytes that did arrive. reqwest reports a body
 /// that fails while `bytes` or `chunk` reads it as a decode-kind error, which `from_reqwest`
-/// classifies as `Protocol`, and so as not transient.
+/// classifies as `Protocol`, and so as not transient, where the stream reports the same failure
+/// as a transient `InterruptedBody` (#1141).
 fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
     let Error::Protocol(protocol) = error else {
         panic!("{reader}: {error:?}");
