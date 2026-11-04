@@ -2,8 +2,7 @@
 //! layer-deps: facade
 //!
 //! The optional analysis binary. It is not a `mod` of the library: `src/bin/spargen.rs` pulls these
-//! files in with `#[path]`, so the CLI depends on the published facade exactly as any other
-//! consumer would, and reaches only spargen's `pub` items, as any consumer does.
+//! files in with `#[path]`, so the CLI reaches only spargen's `pub` items, as any consumer does.
 
 use std::process::ExitCode;
 
@@ -16,8 +15,7 @@ use super::exit::ExitStatus;
 /// Execute a parsed CLI invocation and return the process exit code.
 ///
 /// Delegates to the crate facade, renders diagnostics in the requested [`Format`],
-/// and maps the outcome onto the [`ExitStatus`] contract. Per the DAG, the CLI
-/// depends only on the facade.
+/// and maps the outcome onto the [`ExitStatus`] contract.
 pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Check(args) => with_spec(args.spec, &args.options, |spec| {
@@ -156,10 +154,7 @@ enum Stream {
 /// Every renderable type implements both `Display` (the human form) and `Serialize` (the JSON
 /// form), so every command but `explain` renders through the library's own forms. `explain`
 /// prints its text, or builds its `{ "code", "explain" }` JSON object, inline in [`run`].
-///
-/// `stream` chooses where the *human* rendering goes. JSON goes to stdout whatever `stream` says,
-/// except under [`Stream::Aside`]: a report beside the run's one document goes to stderr in both
-/// formats.
+/// [`Stream`] says where each rendering goes.
 fn emit<T: std::fmt::Display + serde::Serialize>(value: &T, format: Format, stream: Stream) {
     match format {
         Format::Json => {

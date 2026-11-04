@@ -18,7 +18,8 @@ use super::args::SpecArgs;
 ///
 /// The config file is either the explicit `--config` path or, when that is absent, `spargen.toml`
 /// beside the spec (a missing auto-discovered file is fine). Flags are applied last so they win,
-/// each switch pair in either direction and only when one of its flags was given, and omit flags are unioned with the file's `[[omit]]` rules rather than replacing them.
+/// each switch pair in either direction and only when one of its flags was given, and omit flags
+/// are unioned with the file's `[[omit]]` rules rather than replacing them.
 pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, ConfigError> {
     let mut spec = match &args.config {
         Some(config) => Spec::new(path).config_file(config)?,

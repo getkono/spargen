@@ -2,7 +2,7 @@
 //!
 //! Measures spargen's wall-clock cost on representative inputs:
 //!
-//! - `check/*`   — the frontend only (`source` → `oas31` → `ir` → `name`), no codegen or I/O.
+//! - `check/*`   — the frontend only (`source` → `oas31` → `ir` → `name`), no codegen or writes.
 //! - `generate/*` — the full pipeline through `codegen` + `emit`, writing to a scratch tempdir.
 //!
 //! Inputs: a tiny inline spec (fixed cost floor), the 3.1 petstore example, and the real-world

@@ -1,4 +1,6 @@
-//! Content-addressed build-script caching. This module is facade plumbing, not a public subsystem.
+//! Content-addressed build-script caching: the input fingerprint, the cache record, the
+//! `cargo:rerun-if-changed` directives over those inputs, and the atomic write of the generated
+//! output.
 
 use std::io::Write as _;
 
@@ -404,10 +406,9 @@ components:
 
     #[test]
     fn an_input_path_with_a_line_break_is_never_written_as_a_directive() {
-        // Deleting the guard left the whole suite green (#408), as it had for the twin in
-        // `runtime_contract` (#202). Written out, the text after the break would reach Cargo as a
-        // directive of its own, so a crafted file name could inject one. Every other path, the
-        // output module included, is still named, sorted and deduplicated.
+        // Written out, the text after the break would reach Cargo as a directive of its own, so a
+        // crafted file name could inject one (#408; the twin in `runtime_contract` is #202). Every
+        // other path, the output module included, is still named, sorted and deduplicated.
         let build = Spec::new(Utf8PathBuf::from("/work/openapi.yaml"))
             .build(Utf8PathBuf::from("/work/out/api.rs"));
         let snapshot = InputSnapshot {
@@ -580,9 +581,9 @@ components:
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
     }
 
-    /// The whole point of the cache, and the one path the tests above never take: each of them
-    /// destroys the record or the output first, so `Outcome::Cached` was returned by nothing and
-    /// `read_cache` — whose only caller is this branch — ran in no test at all.
+    /// An unchanged rebuild replays the cache: the path through `read_cache` that returns
+    /// `Outcome::Cached`, which every test above, destroying the record or the output first,
+    /// leaves untaken.
     #[test]
     fn an_unchanged_rebuild_is_a_cache_hit_that_rewrites_nothing() {
         let (temp, config) = fixture();
@@ -678,8 +679,8 @@ components:
 
     #[test]
     fn a_cache_hit_replays_the_truncation_of_the_run_that_seeded_it() {
-        // The record once stored the diagnostics but not whether they were cut at `batch_cap`,
-        // so a second build presented a partial list as the whole one (#724).
+        // The record stores whether the diagnostics were cut at `batch_cap`, so a second build
+        // never presents a partial list as the whole one (#724).
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openapi.yaml");
         std::fs::write(
@@ -857,8 +858,8 @@ components:
         // The rule *kind* is part of the fingerprint, not just its payload.
         assert_ne!(digest(&by_path), digest(&by_component));
 
-        // A pointer rule with no file and one naming an empty file are different rules; the
-        // shared canonical encoding keeps them apart where an `unwrap_or("")` conflated them.
+        // A pointer rule with no file and one naming an empty file are different rules, and the
+        // shared canonical encoding keeps them apart.
         let no_file = base.clone().omit_rule(OmitRule::Pointer {
             file: None,
             pointer: "/paths/~1things".into(),
