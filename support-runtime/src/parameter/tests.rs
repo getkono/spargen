@@ -29,7 +29,7 @@ const F: PercentEncoding = PercentEncoding::Form;
 const P: PercentEncoding = PercentEncoding::Passthrough;
 
 #[test]
-fn matrix_table_rows() {
+fn matrix_style_matches_the_specifications_serialization_table() {
     assert_eq!(
         serialize_matrix("color", &undefined(), false, U).unwrap(),
         ";color"
@@ -65,7 +65,7 @@ fn matrix_table_rows() {
 }
 
 #[test]
-fn label_table_rows() {
+fn label_style_matches_the_specifications_serialization_table() {
     // The undefined row is `.`, exactly as the specification's table gives it; the URL builder,
     // not this serializer, refuses it where it forms a whole segment.
     assert_eq!(serialize_label(&undefined(), false, U).unwrap(), ".");
@@ -91,7 +91,7 @@ fn label_table_rows() {
 }
 
 #[test]
-fn simple_table_rows() {
+fn simple_style_matches_the_specifications_serialization_table() {
     assert_eq!(serialize_simple(&undefined(), false, U).unwrap(), "");
     assert_eq!(serialize_simple(&string(), false, U).unwrap(), "blue");
     assert_eq!(
@@ -115,7 +115,7 @@ fn simple_table_rows() {
 }
 
 #[test]
-fn form_table_rows() {
+fn form_style_matches_the_specifications_serialization_table() {
     assert_eq!(
         serialize_form("color", &undefined(), false, F).unwrap(),
         ["color="]
@@ -151,7 +151,7 @@ fn form_table_rows() {
 }
 
 #[test]
-fn cookie_table_rows() {
+fn cookie_style_matches_the_specifications_serialization_table() {
     // `style: cookie` is `form` with no escaping; the caller joins the fragments with "; ".
     assert_eq!(
         serialize_form("color", &string(), false, P).unwrap(),
@@ -177,7 +177,7 @@ fn cookie_table_rows() {
 }
 
 #[test]
-fn space_delimited_table_rows() {
+fn space_delimited_style_matches_the_specifications_serialization_table() {
     assert_eq!(
         serialize_delimited("color", &array(), Delimiter::Space, F).unwrap(),
         ["color=blue%20black%20brown"]
@@ -189,7 +189,7 @@ fn space_delimited_table_rows() {
 }
 
 #[test]
-fn pipe_delimited_table_rows() {
+fn pipe_delimited_style_matches_the_specifications_serialization_table() {
     assert_eq!(
         serialize_delimited("color", &array(), Delimiter::Pipe, F).unwrap(),
         ["color=blue%7Cblack%7Cbrown"]
@@ -209,7 +209,7 @@ fn delimited_styles_reject_scalars() {
 }
 
 #[test]
-fn deep_object_table_row() {
+fn deep_object_style_matches_the_specifications_serialization_table() {
     assert_eq!(
         serialize_deep_object("color", &object(), F).unwrap(),
         ["color%5BB%5D=150", "color%5BG%5D=200", "color%5BR%5D=100"]
@@ -222,6 +222,148 @@ fn deep_object_rejects_non_objects() {
         serialize_deep_object("color", &array(), F),
         Err(ParameterError::ExpectedObject)
     ));
+}
+
+/// The composites the specification's table leaves out: an empty array, an empty object, and
+/// composites holding `null`. An empty composite renders as an empty value, kept under the
+/// parameter name where the unexploded style carries one and dropped where the exploded style
+/// names each member instead. A `null` member renders as an empty scalar in its place.
+#[test]
+fn empty_and_null_bearing_composites_render_per_style_and_explode() {
+    let empty_array = serde_json::json!([]);
+    let empty_object = serde_json::json!({});
+    let null_item = serde_json::json!(["a", null]);
+    let null_member = serde_json::json!({ "a": null, "b": "x" });
+
+    for empty in [&empty_array, &empty_object] {
+        for explode in [false, true] {
+            assert_eq!(serialize_simple(empty, explode, U).unwrap(), "", "{empty}");
+            assert_eq!(serialize_label(empty, explode, U).unwrap(), ".", "{empty}");
+        }
+        assert_eq!(serialize_matrix("c", empty, false, U).unwrap(), ";c=");
+        assert_eq!(serialize_matrix("c", empty, true, U).unwrap(), "");
+        assert_eq!(serialize_form("c", empty, false, F).unwrap(), ["c="]);
+        assert!(serialize_form("c", empty, true, F).unwrap().is_empty());
+        for delimiter in [Delimiter::Space, Delimiter::Pipe] {
+            assert_eq!(
+                serialize_delimited("c", empty, delimiter, F).unwrap(),
+                ["c="]
+            );
+        }
+    }
+    assert!(serialize_deep_object("c", &empty_object, F)
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(serialize_simple(&null_item, false, U).unwrap(), "a,");
+    assert_eq!(serialize_simple(&null_item, true, U).unwrap(), "a,");
+    assert_eq!(serialize_label(&null_item, false, U).unwrap(), ".a,");
+    assert_eq!(serialize_label(&null_item, true, U).unwrap(), ".a.");
+    assert_eq!(
+        serialize_matrix("c", &null_item, false, U).unwrap(),
+        ";c=a,"
+    );
+    assert_eq!(
+        serialize_matrix("c", &null_item, true, U).unwrap(),
+        ";c=a;c="
+    );
+    assert_eq!(serialize_form("c", &null_item, false, F).unwrap(), ["c=a,"]);
+    assert_eq!(
+        serialize_form("c", &null_item, true, F).unwrap(),
+        ["c=a", "c="]
+    );
+    assert_eq!(
+        serialize_delimited("c", &null_item, Delimiter::Pipe, F).unwrap(),
+        ["c=a%7C"]
+    );
+
+    assert_eq!(serialize_simple(&null_member, false, U).unwrap(), "a,,b,x");
+    assert_eq!(serialize_simple(&null_member, true, U).unwrap(), "a=,b=x");
+    assert_eq!(serialize_label(&null_member, false, U).unwrap(), ".a,,b,x");
+    assert_eq!(serialize_label(&null_member, true, U).unwrap(), ".a=.b=x");
+    assert_eq!(
+        serialize_matrix("c", &null_member, false, U).unwrap(),
+        ";c=a,,b,x"
+    );
+    assert_eq!(
+        serialize_matrix("c", &null_member, true, U).unwrap(),
+        ";a=;b=x"
+    );
+    assert_eq!(
+        serialize_form("c", &null_member, false, F).unwrap(),
+        ["c=a,,b,x"]
+    );
+    assert_eq!(
+        serialize_form("c", &null_member, true, F).unwrap(),
+        ["a=", "b=x"]
+    );
+    assert_eq!(
+        serialize_delimited("c", &null_member, Delimiter::Space, F).unwrap(),
+        ["c=a%20%20b%20x"]
+    );
+    assert_eq!(
+        serialize_deep_object("c", &null_member, F).unwrap(),
+        ["c%5Ba%5D=", "c%5Bb%5D=x"]
+    );
+}
+
+/// A boolean or number renders as its JSON literal (`true`, `1.5`, `-2`), never quoted, in
+/// every style, alone and inside a composite.
+#[test]
+fn booleans_and_numbers_render_as_json_literals_in_every_style() {
+    let flag = serde_json::json!(true);
+    let items = serde_json::json!([true, 1.5, -2]);
+    let members = serde_json::json!({ "n": 1.5, "t": false });
+
+    assert_eq!(serialize_simple(&flag, false, U).unwrap(), "true");
+    assert_eq!(serialize_label(&flag, false, U).unwrap(), ".true");
+    assert_eq!(serialize_matrix("v", &flag, false, U).unwrap(), ";v=true");
+    assert_eq!(serialize_form("v", &flag, false, F).unwrap(), ["v=true"]);
+
+    assert_eq!(serialize_simple(&items, false, U).unwrap(), "true,1.5,-2");
+    assert_eq!(serialize_label(&items, false, U).unwrap(), ".true,1.5,-2");
+    assert_eq!(serialize_label(&items, true, U).unwrap(), ".true.1.5.-2");
+    assert_eq!(
+        serialize_matrix("v", &items, false, U).unwrap(),
+        ";v=true,1.5,-2"
+    );
+    assert_eq!(
+        serialize_matrix("v", &items, true, U).unwrap(),
+        ";v=true;v=1.5;v=-2"
+    );
+    assert_eq!(
+        serialize_form("v", &items, false, F).unwrap(),
+        ["v=true,1.5,-2"]
+    );
+    assert_eq!(
+        serialize_form("v", &items, true, F).unwrap(),
+        ["v=true", "v=1.5", "v=-2"]
+    );
+    assert_eq!(
+        serialize_delimited("v", &items, Delimiter::Pipe, F).unwrap(),
+        ["v=true%7C1.5%7C-2"]
+    );
+    assert_eq!(
+        serialize_delimited("v", &items, Delimiter::Space, F).unwrap(),
+        ["v=true%201.5%20-2"]
+    );
+
+    assert_eq!(
+        serialize_simple(&members, false, U).unwrap(),
+        "n,1.5,t,false"
+    );
+    assert_eq!(
+        serialize_simple(&members, true, U).unwrap(),
+        "n=1.5,t=false"
+    );
+    assert_eq!(
+        serialize_form("v", &members, true, F).unwrap(),
+        ["n=1.5", "t=false"]
+    );
+    assert_eq!(
+        serialize_deep_object("v", &members, F).unwrap(),
+        ["v%5Bn%5D=1.5", "v%5Bt%5D=false"]
+    );
 }
 
 #[test]
@@ -252,7 +394,7 @@ fn delimiters_are_distinguishable_from_data() {
 }
 
 #[test]
-fn percent_encoding_sets() {
+fn each_percent_encoding_escapes_exactly_the_bytes_its_set_excludes() {
     let raw = "a/b?c#d e%f~g,h|i[j]k&l=m+n";
     assert_eq!(
         encode(raw, PercentEncoding::Unreserved),

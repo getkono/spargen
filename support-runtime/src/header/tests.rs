@@ -24,10 +24,11 @@ fn set_cookie_is_never_comma_joined() {
     );
 }
 
-/// The same headers under the ordinary list rule are what the defect produced: joined, then
-/// split back apart on every comma, yielding four fragments from two cookies.
+/// The same headers under the ordinary list rule, which `SetCookie` exists to avoid: joined,
+/// then split back apart on every comma, so two cookies come back as three fragments, the first
+/// cut inside its `Expires` date.
 #[test]
-fn the_array_shape_would_have_split_set_cookie_values() {
+fn the_array_shape_splits_set_cookie_values_on_every_comma() {
     let mut map = HeaderMap::new();
     map.append(
         "set-cookie",
@@ -38,9 +39,12 @@ fn the_array_shape_would_have_split_set_cookie_values() {
     map.append("set-cookie", "sessionId=38afes7a8".parse().unwrap());
     let split: Vec<String> = require_header(&map, "set-cookie", HeaderShape::Array, false).unwrap();
     assert_eq!(
-        split.len(),
-        3,
-        "the joined form fragments the cookie: {split:?}"
+        split,
+        [
+            "lang=en; Expires=Wed",
+            " 09 Jun 2021 10:18:14 GMT",
+            "sessionId=38afes7a8"
+        ]
     );
 }
 
@@ -332,19 +336,36 @@ fn round_trip<T: serde::Serialize + DeserializeOwned>(
     )
 }
 
+/// Every finite `f64`: normal and subnormal values of either sign, and both zeros.
+fn finite() -> proptest::num::f64::Any {
+    use proptest::num::f64;
+    f64::POSITIVE | f64::NEGATIVE | f64::NORMAL | f64::SUBNORMAL | f64::ZERO
+}
+
+/// `value` written as JSON text and read back by `serde_json`. Without its `float_roundtrip`
+/// feature, `serde_json` may read a float's shortest text as a neighbouring value, so this, not
+/// `value` itself, is what a header carrying that text can decode to.
+fn json_read_back(value: f64) -> f64 {
+    serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap()
+}
+
 proptest::proptest! {
     /// The module's stated law: parsing is the inverse of `serialize_simple`, for every value
     /// `simple` can carry losslessly — a scalar of each JSON type, a non-empty array whose
-    /// strings hold no `,`, and an object whose keys and values hold neither `,` nor `=` —
-    /// under both `explode` settings. A string spelling a number or a boolean stays a string.
+    /// strings hold no `,`, and an object of up to four members whose keys and values hold
+    /// neither `,` nor `=` — under both `explode` settings. A string spelling a number or a
+    /// boolean stays a string. A finite float, alone or in an array, reads back as `serde_json`
+    /// reads its own text, which the header path adds no loss to.
     #[test]
     fn require_header_inverts_serialize_simple(
         text in token(b""),
         unsigned in proptest::num::u64::ANY,
         signed in proptest::num::i64::ANY,
+        real in finite(),
         flag in proptest::bool::ANY,
         texts in proptest::collection::vec(token(b""), 1..5),
         numbers in proptest::collection::vec(proptest::num::i64::ANY, 1..5),
+        reals in proptest::collection::vec(finite(), 1..5),
         members in proptest::collection::btree_map(token(b"="), token(b"="), 0..5),
         explode in proptest::bool::ANY,
     ) {
@@ -354,6 +375,10 @@ proptest::proptest! {
             unsigned
         );
         proptest::prop_assert_eq!(round_trip(&signed, HeaderShape::Scalar, explode).unwrap(), signed);
+        proptest::prop_assert_eq!(
+            round_trip(&real, HeaderShape::Scalar, explode).unwrap(),
+            json_read_back(real)
+        );
         proptest::prop_assert_eq!(round_trip(&flag, HeaderShape::Scalar, explode).unwrap(), flag);
         proptest::prop_assert_eq!(round_trip(&texts, HeaderShape::Array, explode).unwrap(), texts);
         proptest::prop_assert_eq!(
@@ -361,8 +386,80 @@ proptest::proptest! {
             numbers
         );
         proptest::prop_assert_eq!(
+            round_trip(&reals, HeaderShape::Array, explode).unwrap(),
+            reals.iter().copied().map(json_read_back).collect::<Vec<_>>()
+        );
+        proptest::prop_assert_eq!(
             round_trip(&members, HeaderShape::Object, explode).unwrap(),
             members
         );
     }
+}
+
+/// Why the law above holds only for a non-empty array: `simple` writes an empty array and an
+/// array of one empty string alike, as the empty value, and that reads back as the latter.
+#[test]
+fn an_empty_array_reads_back_as_one_empty_string() {
+    for explode in [false, true] {
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            round_trip(&empty, HeaderShape::Array, explode).unwrap(),
+            [""]
+        );
+    }
+}
+
+/// The unexploded `form`, `matrix` and `label` renderings are `simple`'s value behind a prefix
+/// (`name=`, `;name=`, `.`), so with the prefix removed each decodes back to its value through
+/// `require_header`, scalars, arrays and objects alike.
+#[test]
+fn a_form_rendering_decodes_back_to_its_value() {
+    use crate::parameter::{serialize_form, serialize_label, serialize_matrix};
+
+    /// Each rendering of `value`, with its prefix removed.
+    fn unprefixed<T: serde::Serialize>(value: &T) -> [String; 3] {
+        let p = PercentEncoding::Passthrough;
+        let [form] = <[String; 1]>::try_from(serialize_form("v", value, false, p).unwrap())
+            .expect("an unexploded form value is one fragment");
+        let matrix = serialize_matrix("v", value, false, p).unwrap();
+        let label = serialize_label(value, false, p).unwrap();
+        [
+            form.strip_prefix("v=")
+                .expect("form keeps the name")
+                .to_owned(),
+            matrix
+                .strip_prefix(";v=")
+                .expect("matrix keeps the name")
+                .to_owned(),
+            label
+                .strip_prefix('.')
+                .expect("label opens with a dot")
+                .to_owned(),
+        ]
+    }
+
+    fn decodes<T: serde::Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
+        value: T,
+        shape: HeaderShape,
+    ) {
+        for (style, written) in ["form", "matrix", "label"].iter().zip(unprefixed(&value)) {
+            let read: T =
+                require_header(&headers(&[("x-value", &written)]), "x-value", shape, false)
+                    .unwrap();
+            assert_eq!(read, value, "{style}: {written:?}");
+        }
+    }
+
+    decodes("blue".to_owned(), HeaderShape::Scalar);
+    decodes(-1.5f64, HeaderShape::Scalar);
+    decodes(true, HeaderShape::Scalar);
+    decodes(
+        vec!["blue".to_owned(), "black".to_owned()],
+        HeaderShape::Array,
+    );
+    decodes(vec![3i64, -4], HeaderShape::Array);
+    decodes(
+        std::collections::BTreeMap::from([("R".to_owned(), 100u8), ("G".to_owned(), 200)]),
+        HeaderShape::Object,
+    );
 }
