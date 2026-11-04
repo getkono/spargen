@@ -11,8 +11,10 @@
 //!
 //! The same knobs can be read from a config file, which is available to `build.rs`, the
 //! `generate_api!` macro, and the CLI alike — the file is parsed here, in the library, so the
-//! three cannot drift. Its keys, one omit rule of each kind, and how a rule's kind is told apart
-//! are shown once, in the
+//! three cannot drift. Its keys other than `[[omit]]`, with their defaults, are listed once, in
+//! the CLI reference's
+//! [`spargen.toml` reference](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#spargentoml-reference);
+//! one `[[omit]]` rule of each kind, and how a rule's kind is told apart, are shown once, in the
 //! [compatibility guide](https://github.com/getkono/spargen/blob/master/docs/compatibility.md#spargentoml-and-the-analysis-cli).
 
 use camino::{Utf8Path, Utf8PathBuf};
