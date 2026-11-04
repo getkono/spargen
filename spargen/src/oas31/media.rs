@@ -112,7 +112,7 @@ pub(super) fn media_essence_is_suffix_range(essence: &str) -> bool {
 /// A suffix range is withheld only while another entry is *sendable*: it classifies, it is neither
 /// kind of range, and it is not streaming media. Then the range, which a request cannot send,
 /// never outranks something it could. With no sendable sibling, nothing is withheld, the range is
-/// selected as before, and the request range check refuses it. Keys keep their document order.
+/// selected by its rank, and the request range check refuses it. Keys keep their document order.
 pub(super) fn request_media_candidates<T>(
     content: &IndexMap<String, T>,
 ) -> (IndexMap<String, &T>, Vec<&str>) {
@@ -371,7 +371,7 @@ pub(super) fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 /// Whether a media essence is CBOR (RFC 8949): `application/cbor`, or a concrete subtype carrying
 /// the `+cbor` structured-syntax suffix (RFC 6839) under any type, such as `application/cose+cbor`.
 /// A suffix *range* (`application/*+cbor`) is not concrete and is not CBOR here. Matched
-/// case-insensitively (RFC 9110 § 8.3.1).
+/// case-insensitively, as [`classify_media`] states.
 ///
 /// `classify_media` reads CBOR as opaque octets. Response lowering asks this to announce a CBOR
 /// response's key in the request's `Accept`, and `choose_media` to report every alternative such
@@ -402,8 +402,7 @@ pub(super) fn is_cbor(essence: &str) -> bool {
 /// (`choose_media`), since a range is not a `Content-Type`.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
-/// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
-/// binary would be silently wrong rather than loudly unsupported.
+/// matched case-insensitively, as [`classify_media`] states.
 pub(super) fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
     let family = essence
         .strip_suffix("/*")
@@ -433,8 +432,7 @@ pub(super) fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// 6838 structured-syntax suffix (`image/svg+xml`, or any `+suffix`) is not claimed: the suffix
 /// says the payload is a text syntax, so reading SVG as bytes would be silently wrong, and it stays
 /// unsupported until a codec for the suffix exists in this position. The family is matched
-/// case-insensitively for the same reason the range is (RFC 9110 § 8.3.1): `IMAGE/*` and
-/// `IMAGE/JPEG` must agree.
+/// case-insensitively, as [`classify_media`] states.
 fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
     let (family, subtype) = essence.split_once('/')?;
     if subtype.is_empty() || subtype.contains('*') || subtype.contains('+') {

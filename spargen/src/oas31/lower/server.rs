@@ -13,9 +13,8 @@ use super::append_text;
 /// The specification defines no way for a client to *choose* among several `servers` entries in
 /// this position, so the first is used and the rest are acknowledged as having no effect (`W011`).
 /// Variables are substituted with their declared defaults — what the specification says is sent
-/// when nothing selects another value. Unlike the document's `servers`, a per-operation override
-/// gets no typed builder: there is no constructor to hand a selection to, since the choice is made
-/// per call rather than per client.
+/// when nothing selects another value. The override is rendered once, at its variables' defaults,
+/// into the operation's URL.
 pub(super) fn lower_server_override(
     servers: &[crate::oas31::Server],
     diags: &mut Diagnostics,

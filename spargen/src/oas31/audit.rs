@@ -125,8 +125,7 @@ impl Audit<'_, '_> {
     }
 
     /// Audit the Path Item a Path Item `$ref` names, through the input bundle as lowering resolves
-    /// it. A miss is lowering's to report in its own words, so the resolver's diagnostics are
-    /// discarded, as [`Self::follow_references`] discards them.
+    /// it. A miss is not reported here ([`follow_chain`] says why).
     fn follow_path_item(&mut self, reference: &Reference) {
         let Some(target) = self
             .resolver
@@ -312,14 +311,13 @@ impl Audit<'_, '_> {
     ///
     /// The walk starts only from positions written in the root document, so a schema in a
     /// referenced sub-file or vendored remote document, which lowering reads when a `$ref` reaches
-    /// it, was never audited: no `W001` for its validation-only keywords and no resolution of the
-    /// references under its unlowered keywords. Each reference met in an audited position is
-    /// followed to its `(file, pointer)` target, which is parsed and audited in turn, so the
-    /// target's own references are queued too. [`Self::audit_schema`] audits each target once.
+    /// it, is audited only through this: each reference met in an audited position is followed to
+    /// its `(file, pointer)` target, which is parsed and audited in turn (`W001` for its
+    /// validation-only keywords, resolution of the references under its unlowered keywords), so
+    /// the target's own references are queued too. [`Self::audit_schema`] audits each target once.
     ///
-    /// A miss is not reported here: the reference sits either in a position lowering reads, which
-    /// reports it in its own words, or under a keyword lowering never reads, which
-    /// [`Self::resolve_unlowered`] reports. So the resolver's diagnostics are discarded.
+    /// A miss in a position lowering reads is not reported here ([`follow_chain`] says why); one
+    /// under a keyword lowering never reads is [`Self::resolve_unlowered`]'s to report.
     fn follow_references(&mut self) {
         while let Some((reference, at)) = self.pending.pop() {
             // As lowering reads it: a bare `#/components/schemas/<name>` the root declares is that
@@ -604,8 +602,8 @@ fn consumed_sse_content(
 ///
 /// `None` when a hop targets an object in `done`, the chain cycles, or a hop misses. A miss is
 /// not reported here: lowering follows the same chain and reports it in its own words, so the
-/// resolver's diagnostics are discarded, as [`Audit::follow_references`] discards them. That
-/// silence, and stopping at an object in `done`, are why this is not lowering's
+/// resolver's diagnostics are discarded. That silence, and stopping at an object in `done`, are
+/// why this is not lowering's
 /// `follow_reference_chain`, which reports each hop's documentation and every miss.
 fn follow_chain<T>(
     resolver: &Resolver<'_>,

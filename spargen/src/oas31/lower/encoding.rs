@@ -334,9 +334,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
-        // sent correctly, with the declared header attached. Media types are case-insensitive
-        // (RFC 9110 § 8.3.1) and `classify_media` matches them so: `Application/JSON` selects the
-        // codec `application/json` does, here and in the refusal below.
+        // sent correctly, with the declared header attached. `classify_media` owns the case rule.
         let classified = classify_media(media_essence(&content_type)).map(|(codec, _)| codec);
         let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,

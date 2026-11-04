@@ -257,10 +257,9 @@ fn read_hints(schema: &Schema, hints: &XmlHints, node: XmlNode) -> (Option<Strin
     }
     // OpenAPI 3.2 replaced the `attribute`/`wrapped` flags with `nodeType`, and gave it a
     // *defaulting table*: a `$ref` node and a `type: array` schema default to `none`, and
-    // everything else to `element`. Reading the field as a plain string match misses that, which
-    // is how the two spellings of one construct came to disagree — `wrapped: true` was rejected
-    // while its exact 3.2 equivalent, `nodeType: element` on an array, was waved through and put
-    // unwrapped XML on the wire.
+    // everything else to `element`. The table is read here, so the two spellings of one construct
+    // agree: `nodeType: element` on an array is the exact 3.2 equivalent of `wrapped: true`, and
+    // both are reported unsupported.
     //
     // `none` on a node that defaults to `none` is the default restated: it is a genuine no-op and
     // takes no disposition. Anywhere else it deletes a node from the wire, so it joins

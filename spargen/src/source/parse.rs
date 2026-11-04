@@ -1030,7 +1030,7 @@ impl YamlBuilder<'_> {
 
 /// Interpret a YAML scalar exactly as `yaml_rust2`'s `YamlLoader` does (respecting quoting style
 /// and explicit `!!`-tags), then map it onto a [`Node`]. Reusing the crate's own scalar typing
-/// keeps parsed *values* identical to the previous `YamlLoader`-based path — only spans change.
+/// keeps parsed *values* identical to what `YamlLoader` gives.
 /// A float scalar with no finite value is an error, whose message [`yaml_float`] gives.
 fn scalar_to_node(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> Result<Node, String> {
     let yaml = if style != TScalarStyle::Plain {
@@ -1592,9 +1592,8 @@ mod tests {
 
     #[test]
     fn yaml_alias_is_expanded_like_yamlloader() {
-        // The previous `YamlLoader`-based path expanded aliases into concrete values; that
-        // behavior is preserved so parsed values stay identical (only spans changed). The alias
-        // `*anchor` resolves to a clone of the anchored `1` rather than being rejected.
+        // Aliases expand into concrete values, as `YamlLoader` expands them: the alias `*anchor`
+        // resolves to a clone of the anchored `1` rather than being rejected.
         let root = parse_yaml_ok("a: &anchor 1\nb: *anchor\n");
         assert_eq!(root.get("a").unwrap().node, Node::Number(Number::Int(1)));
         assert_eq!(root.get("b").unwrap().node, Node::Number(Number::Int(1)));
