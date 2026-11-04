@@ -1122,11 +1122,9 @@ fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
 /// The sole-member union collapse reports `E007`, and its pointer is load-bearing for exactly the
 /// reason both `E013` sites' pointers are: `compat::carve_rules` maps it to the smallest omittable
 /// construct, so a provenance that drifted to the document root yields no rule and a carvable
-/// rejection becomes an un-carvable residual — measured, a `--compat` run over this spec flips from
+/// rejection becomes an un-carvable residual — a carve run over this spec would flip from
 /// `Generated` to `Rejected` with nothing generated at all, taking the healthy operation with it.
-///
-/// Both `E013` sites got a pointer assertion and a carve fixture; this site had neither, though the
-/// rationale is the same one word for word.
+/// So this site has a carve fixture of its own, as both `E013` sites do.
 const UNION_COLLAPSE_REJECTION: &str = r##"
 openapi: 3.1.0
 info: { title: Collapse, version: 1.0.0 }

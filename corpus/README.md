@@ -65,30 +65,21 @@ referenced beside `type: string` (33) or `type: [string, 'null']` (2);
 recipes, the only `$ref` with a sibling other than an annotation (`description`, `title`,
 `deprecated`, `default`, 3.0's `nullable`) is `openai-openapi`'s
 `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
-`$ref: '#/components/schemas/Item'`. A union member's `$ref` siblings were dropped before lowering
-until [#279](https://github.com/getkono/spargen/issues/279) was fixed, and since then this member
-reaches the intersection too. Every other intersection behaviour — an empty intersection, a
-recursive target, and a non-empty one of any other shape — is pinned only by inline fixtures:
-those in `spargen/tests/frontend/`, and the two `--compat` carve fixtures in
+`$ref: '#/components/schemas/Item'`; a union member's `$ref` siblings reach the intersection like
+any other's ([#279](https://github.com/getkono/spargen/issues/279)). Every other intersection
+behaviour — an empty intersection, a recursive target, and a non-empty one of any other shape — is
+pinned only by inline fixtures: those in `spargen/tests/frontend/`, and the two carve fixtures in
 `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected` and
 `carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
 `E013`.
 
-Measured by running `spargen check` over every case and recipe that reaches lowering, with one
-mutation of the lowering pass (then `spargen/src/oas31/lower.rs`, now the
-`spargen/src/oas31/lower/` modules) at a time:
-
-- Making every shape-bearing `$ref` sibling that reaches the intersection reject with `E013`
-  rejects `mastodon-openapi` and adds an `E013` to the already-rejected
-  `openai-openapi`, at `/components/schemas/InputItem/oneOf/1`; every other case and recipe keeps
-  its outcome and histogram (measured on `master@38c1154`, where `corpus_manifest` and `snapshot`
-  fail and `recipes` passes). On `master@b1961a4`, before #279 was fixed, only `mastodon-openapi`
-  changed. Before `mastodon-openapi` was added this mutation left the whole corpus green (measured
-  on `master@16eda2e`: `corpus_manifest`, `snapshot` and `recipes` passed with no snapshot
-  changed).
-- Rejecting the recursive-nullable collapse (a single real union member that closes a reference
-  cycle, without sibling keywords) with `E013` rejects `mastodon-openapi`; every
-  other case and recipe keeps its outcome (measured on `master@b1961a4`).
+So the corpus is thin evidence for these constructs. Mutating the lowering pass
+(`spargen/src/oas31/lower/`) so that every shape-bearing `$ref` sibling reaching the intersection
+rejects with `E013` changes only `mastodon-openapi`, which rejects, and `openai-openapi`, which
+gains an `E013` at `/components/schemas/InputItem/oneOf/1`. Mutating it so that the
+recursive-nullable collapse (a single real union member that closes a reference cycle, without
+sibling keywords) rejects with `E013` changes only `mastodon-openapi`. Every other case and recipe
+keeps its outcome under either mutation.
 
 Before relying on a green corpus run for a change to a construct, check that some pinned
 description contains that construct in a position that reaches the code. If none does, the
