@@ -35,10 +35,8 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-/// The future returned by a [`TokenProvider`]. `Send` on native (it is awaited inside a client
-/// shared across tasks); on `wasm32` the browser is single-threaded and reqwest-adjacent futures are
-/// `!Send`, so the `Send` bound is dropped there. `Send` is an auto trait and cannot be swapped for
-/// the non-auto [`crate::MaybeSend`] as an extra trait-object bound, so the alias is `cfg`-gated.
+/// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, through a
+/// `cfg`-gated alias, as the `wasm` module explains.
 #[cfg(not(target_arch = "wasm32"))]
 pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>>;
 /// The future returned by a [`TokenProvider`] (the wasm variant: no `Send`).
@@ -180,13 +178,8 @@ pub async fn attach_auth(
     request: RequestBuilder,
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
-    // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
-    // would fall through the loop below without choosing anything, and the call would fail as
-    // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
-    // — `codegen/dispatch.rs` omits it for an operation with no `security` — but this function
-    // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
-    // a generated client, so this is a contract, not dead code, and spargen's own runtime tests
-    // (which are not embedded) hold it to that.
+    // No requirement attaches nothing, rather than failing as a `MissingCredential` naming no
+    // scheme.
     if requirements.is_empty() {
         return Ok(request);
     }

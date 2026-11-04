@@ -2,11 +2,13 @@
 //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
 //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
 //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
-//! `next().await` convenience method. Reqwest's body stream keeps delivery incremental on native
-//! and browser targets; dropping `EventStream` drops that body stream and cancels the transfer.
+//! `next().await` convenience method. Reqwest's body stream delivers chunks incrementally on native
+//! targets; on `wasm32`, its fetch implementation may buffer the body internally, and the stream
+//! API and framing are the same. Dropping `EventStream` drops that body stream and cancels the
+//! transfer.
 //!
-//! Framing is a pure function ([`next_frame`]) over an owned byte buffer, so the framing/decoding
-//! logic is unit-testable without network IO or an async runtime.
+//! Framing is a pure function ([`next_frame`]) over an owned byte buffer, with no network IO and
+//! no async runtime.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -237,9 +239,8 @@ impl<T: DeserializeOwned> EventStream<T> {
     /// stream (subsequent calls return `None`). A per-frame decode failure also surfaces as
     /// `Some(Err(Error::Decode { .. }))` rather than being silently skipped, but does NOT terminate
     /// the stream — the next call resumes framing the following items, so a single malformed event
-    /// does not abandon the rest. The exception is an item that passes
-    /// `ClientConfig::max_stream_frame` before its terminator arrives: it is also reported as
-    /// `Error::Decode`, and it does end the stream, without consulting a reconnect policy.
+    /// does not abandon the rest. An item that passes `ClientConfig::max_stream_frame` before its
+    /// terminator arrives ends the stream instead, as that limit documents.
     ///
     /// The item type `T` is decoded per-frame with `serde_json::from_slice`.
     pub async fn next(&mut self) -> Option<Result<T, StreamError>> {
@@ -418,9 +419,10 @@ impl<T> EventStream<T> {
         let core = reconnect.core.clone();
         let mut request = reconnect.request.try_clone()?;
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
-        // (the framer keeps every control character but NUL, CR and LF): the server's latest
-        // resume point cannot be sent, and replaying an older one would claim a position it has
-        // superseded, so the reconnect proceeds as a fresh subscription instead of ending.
+        // (the framer drops an id holding NUL, and keeps every other control character but LF and
+        // a line-ending CR): the server's latest resume point cannot be sent, and replaying an
+        // older one would claim a position it has superseded, so the reconnect proceeds as a fresh
+        // subscription instead of ending.
         if let Some(id) = self.last_event_id.as_deref() {
             match reqwest::header::HeaderValue::from_str(id) {
                 Ok(value) if !id.is_empty() => {
@@ -460,7 +462,7 @@ enum FramePoll {
 
 /// Frame the next item out of `buffer`, consuming the bytes it uses. `at_eof` is `true` once no
 /// further bytes will arrive, which lets a trailing frame not terminated by a delimiter still be
-/// emitted. Pure: no IO, no async — the unit tests drive it directly.
+/// emitted. Pure: no IO, no async.
 fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll {
     match framing {
         Framing::Ndjson => ndjson_next(buffer, at_eof),
@@ -700,8 +702,8 @@ fn trim_cr(line: &[u8]) -> &[u8] {
 }
 
 /// Decode one framed JSON payload into `T`. A parse failure becomes [`Error::Decode`] carrying the
-/// status and headers of the response the frame was read from, the serde path, and the raw frame —
-/// never a silent skip. The headers are cloned only on failure.
+/// status and headers of the response the frame was read from, serde's error message, and the raw
+/// frame — never a silent skip. The headers are cloned only on failure.
 fn deserialize_item<T: DeserializeOwned>(
     status: StatusCode,
     headers: &HeaderMap,

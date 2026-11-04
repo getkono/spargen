@@ -26,9 +26,8 @@ use crate::{MaybeSend, MaybeSync, TransportError};
 /// free to return a `'static` future (as [`ReqwestBackend`] does) — a longer lifetime coerces to
 /// the shorter one the trait requires.
 ///
-/// The future is `Send` on native (a backend is shared across tasks) but not on `wasm32`, where
-/// reqwest's `fetch`-backed futures are `!Send`. `Send` is an auto trait and so cannot be swapped
-/// for the non-auto [`MaybeSend`] as an extra trait-object bound; the alias is `cfg`-gated instead.
+/// The future is `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm`
+/// module explains.
 #[cfg(not(target_arch = "wasm32"))]
 pub type ExecuteFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Response, TransportError>> + Send + 'a>>;
@@ -93,11 +92,11 @@ mod tests {
     use crate::tests::poll_ready;
     use crate::{send, ClientCore, HttpBackend, ReqwestBackend};
 
-    // Regression guard for the #21 conditional-Send refactor: on native, ClientCore and the seam
-    // trait objects/futures MUST stay Send + Sync so the client works under tokio::spawn / axum. A
-    // future change that turned a `+ Send` boxed future or a trait-object bound into a non-Send
-    // form would still compile in the single-threaded tests/example but break multi-threaded use;
-    // this catches it at compile time. (On wasm these are intentionally !Send, hence the cfg gate.)
+    // On native, ClientCore and the seam trait objects/futures are Send + Sync, so the client
+    // works under tokio::spawn / axum (#21). A `+ Send` boxed future or trait-object bound turned
+    // non-Send would still compile in the single-threaded tests and example but break
+    // multi-threaded use; this catches it at compile time. (On wasm they are !Send, hence the cfg
+    // gate.)
     #[cfg(not(target_arch = "wasm32"))]
     const _: fn() = || {
         fn assert_send_sync<T: Send + Sync>() {}

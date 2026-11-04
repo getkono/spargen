@@ -46,10 +46,9 @@ fn malformed_xml_yields_a_nonempty_error_path() {
 
 /// An empty body is not an XML document (XML 1.0 `document` requires a root element), so a
 /// status that documents an XML body and sends none is a decode failure, never a defaulted
-/// value. A documented bodyless status reaches this codec only on an error side with one
-/// documented body, when that body sits under a range (`4XX`) or `default` covering the
-/// bodyless status, and then it is this `Decode`; elsewhere it is a unit variant of the
-/// response enum (#121) or `Error::UnexpectedStatus`. Pinned for both the struct shape
+/// value. A documented bodyless status never reaches this codec: beside a documented body it is
+/// a unit variant of the response enum (#121, #204), and otherwise `()` on the success side or
+/// `Error::UnexpectedStatus` on the error side. Pinned for both the struct shape
 /// generated XML bodies take and a bare `String`, so the XML codec cannot quietly acquire the
 /// text codec's empty-string reading.
 #[test]

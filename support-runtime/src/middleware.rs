@@ -22,10 +22,8 @@
 //! chain never clones or reallocates; it just narrows the slice. [`MiddlewareBackend::execute`]
 //! returns [`ExecuteFuture<'_>`], whose `'_` is exactly the borrow of `&self` the [`Next`] is built
 //! over, so the whole chain's future safely borrows the (Arc-held) middleware and backend for the
-//! duration of the call. On native targets `Arc<dyn Middleware>`/`Arc<dyn HttpBackend>` are
-//! `Send + Sync` (via the `MaybeSend`/`MaybeSync` supertraits, which collapse to `Send`/`Sync`
-//! off wasm), so references to them are `Send` and the boxed futures stay `Send`; on `wasm32`
-//! these bounds are relaxed to match reqwest's single-threaded `fetch` backend.
+//! duration of the call. The `Send` bounds on those borrows and futures follow the target, as the
+//! `wasm` module explains.
 //!
 //! ## Ordering
 //!
@@ -111,9 +109,9 @@ impl<'a> Next<'a> {
 /// An [`HttpBackend`] that runs an ordered chain of [`Middleware`] around an inner backend.
 ///
 /// The first middleware in the chain runs outermost (see this module's docs for ordering and
-/// composability). Purely additive: it takes effect only when a caller wraps their backend in it and
-/// installs it via `Client::with_backend`.
-#[derive(Clone)]
+/// composability). It takes effect only when a caller wraps their backend in it and installs it via
+/// `Client::with_backend`.
+#[derive(Clone, Debug)]
 pub struct MiddlewareBackend {
     inner: Arc<dyn HttpBackend>,
     middlewares: Vec<Arc<dyn Middleware>>,
@@ -152,16 +150,6 @@ impl MiddlewareBackend {
     /// The middleware chain, in run order (index 0 is outermost).
     pub fn middlewares(&self) -> &[Arc<dyn Middleware>] {
         &self.middlewares
-    }
-}
-
-// `Middleware: Debug`, so the chain is `Debug`; a manual impl keeps the field names tidy.
-impl std::fmt::Debug for MiddlewareBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MiddlewareBackend")
-            .field("inner", &self.inner)
-            .field("middlewares", &self.middlewares)
-            .finish()
     }
 }
 

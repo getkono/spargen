@@ -57,10 +57,7 @@ use crate::{MaybeSend, MaybeSync, TransportError};
 
 /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
 ///
-/// `Send` on native (the retry loop's future is shared across tasks) but not on `wasm32`, where the
-/// single-threaded browser has no `Send` futures. As with [`crate::ExecuteFuture`], `Send` is an
-/// auto trait and cannot be swapped for the non-auto [`MaybeSend`] as an extra trait-object bound,
-/// so this alias is `cfg`-gated rather than expressed through `MaybeSend`.
+/// `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm` module explains.
 #[cfg(not(target_arch = "wasm32"))]
 pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 /// The boxed backoff future a [`RetryPolicy`] returns (the wasm variant: no `Send`).
@@ -117,13 +114,9 @@ impl<'a> RetryOutcome<'a> {
     /// Whether the outcome is transient by the runtime's default classifier: exactly what
     /// [`crate::Error::is_transient`] answers for the error this outcome becomes. A `429` or `5xx`
     /// response is transient. A transport failure is classified as [`crate::Error::from_reqwest`]
-    /// classifies it, so a timeout or a failed connection is transient, and a redirect-policy or
-    /// protocol failure is not. Neither is a request reqwest refused before sending anything — a
-    /// URL scheme other than `http`/`https`, plain `http` on an `https_only` client — which is
-    /// refused again on every attempt, nor any other request-kind failure, which reqwest may raise
-    /// after the request was transmitted. On `wasm32` that includes a failed connection: reqwest
-    /// offers no connect classification there, so it stays a request-kind failure and is not
-    /// transient. Policies are free to ignore this and key on
+    /// classifies it, so a timeout or a failed connection is transient, and a redirect-policy,
+    /// protocol, or request-kind failure ([`crate::RequestError::Other`]) is not; on `wasm32` a
+    /// failed connection is request-kind too. Policies are free to ignore this and key on
     /// [`Self::status`] / [`Self::transport_error`] directly.
     pub fn is_transient(&self) -> bool {
         match self {
@@ -143,14 +136,13 @@ impl<'a> RetryOutcome<'a> {
 pub trait RetryPolicy: MaybeSend + MaybeSync {
     /// Called after attempt `attempt` (0-based) produced `outcome`. Return `Some(wait)` to retry
     /// after awaiting `wait` (which encapsulates the backoff delay using the caller's timer), or
-    /// `None` to stop and return the outcome. The wait is a [`RetryWait`] — a boxed future that is
-    /// `Send` on native and `!Send` on `wasm32`.
+    /// `None` to stop and return the outcome. The wait is a [`RetryWait`].
     fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>>;
 }
 
 /// An [`HttpBackend`] that retries requests through an inner backend per a [`RetryPolicy`].
 ///
-/// Purely additive: it only takes effect when a caller wraps their backend in it and installs it via
+/// It takes effect only when a caller wraps their backend in it and installs it via
 /// `Client::with_backend`. See this module's docs for the timing and cloneability contracts.
 #[derive(Clone)]
 pub struct RetryBackend {

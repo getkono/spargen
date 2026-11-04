@@ -699,10 +699,9 @@ fn multipart_values_are_never_percent_encoded() {
     );
 }
 
-/// An object has no defined part representation. Reusing the query builders silently produced
-/// one part per member holding only the *value* — the keys were dropped on the floor — so this
-/// now fails loudly. The frontend rejects the construct before generation, making this the
-/// belt to that braces.
+/// An object has no defined part representation, so it fails loudly rather than yielding one
+/// part per member holding only the *value*, with the keys dropped. The frontend rejects the
+/// construct before generation, making this the belt to that braces.
 #[test]
 fn multipart_rejects_object_values_rather_than_dropping_their_keys() {
     assert!(matches!(

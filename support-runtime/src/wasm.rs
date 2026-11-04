@@ -10,8 +10,8 @@
 //! [`MaybeSend`]/[`MaybeSync`] bridge the two: on every non-wasm target they are exactly `Send`/
 //! `Sync` (a blanket impl plus a `Send`/`Sync` supertrait, so a `dyn Trait: MaybeSend` object is
 //! still `Send`), and on wasm they are vacuous marker traits implemented for every type. Because the
-//! native definition *is* `Send`/`Sync`, native behavior, bounds, and trait-object auto-traits are
-//! unchanged — the abstraction collapses away off wasm.
+//! native definition *is* `Send`/`Sync`, native bounds and trait-object auto-traits are exactly
+//! `Send`/`Sync` ones — the abstraction collapses away off wasm.
 //!
 //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
 //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
@@ -62,7 +62,7 @@ mod tests {
 
     // On native, `MaybeSend`/`MaybeSync` must be *exactly* `Send`/`Sync`, so a trait carrying them as
     // supertraits yields a `Send + Sync` trait object — this is what keeps a generated `Client`
-    // shareable across threads unchanged. (On wasm these bounds are vacuous, so the assertion is
+    // shareable across threads. (On wasm these bounds are vacuous, so the assertion is
     // native-only.)
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
