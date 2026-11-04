@@ -9,19 +9,22 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. The first invariant is
-/// referential integrity of the type graph: every [`super::Ty`] reachable from the API —
-/// operation parameters, request bodies, response bodies, response headers, and, transitively,
-/// struct fields, typed additional properties, array items, tuple elements, and union variants —
-/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph) to a definition it does
-/// not [elide](super::TypeGraph::elide). The second is the kind
-/// of an octet-stream request body's type: when a request body with [`MediaType::OctetStream`]
-/// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`] and
-/// the reference is not nullable, because the emitter sends such a body only through its
-/// raw-bytes path, which sets `Content-Type` and passes the value to `.body(..)`, which accepts
-/// `bytes::Bytes` but not `Option<bytes::Bytes>`. A failure here is a frontend bug, not a spec
-/// problem, so it is reported as [`Code::InvalidInput`] against the construct that carries the
-/// violation.
+/// Run unconditionally after every lowering, on every entry point. It checks three invariants:
+///
+/// 1. Referential integrity of the type graph: every [`super::Ty`] reachable from the API —
+///    operation parameters, request bodies, response bodies, response headers, and, transitively,
+///    struct fields, typed additional properties, array items, tuple elements, and union variants
+///    — names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph) to a definition it
+///    does not [elide](super::TypeGraph::elide).
+/// 2. The kind of an octet-stream request body's type: when a request body with
+///    [`MediaType::OctetStream`] media has a type whose definition resolves, that definition's
+///    kind is [`TypeKind::Bytes`] and the reference is not nullable, because the emitter sends
+///    such a body only through its raw-bytes path, which sets `Content-Type` and passes the value
+///    to `.body(..)`, which accepts `bytes::Bytes` but not `Option<bytes::Bytes>`.
+/// 3. No definition that is not elided is still a [`TypeKind::Reserved`].
+///
+/// A failure here is a frontend bug, not a spec problem, so it is reported as
+/// [`Code::InvalidInput`] against the construct that carries the violation.
 ///
 /// Semantic checks that are *not* here, because the frontend enforces them where it has the
 /// document in hand and the diagnostics to point at it: discriminator property existence
@@ -140,7 +143,7 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
 }
 
 /// Walk one response: its body and every documented header. Headers are decoded by generated code
-/// just like a body is, so a dangling header type is exactly as fatal — it was simply never walked.
+/// just like a body is, so a dangling header type is exactly as fatal.
 fn check_response(
     api: &Api,
     response: &super::Response,
@@ -275,11 +278,9 @@ mod tests {
     /// other site say "unreachable" or "unknown" instead of guessing, and what stops a reserved id
     /// reaching codegen, where the emitter's arm is an `unreachable!`.
     ///
-    /// Nothing executed it. Emptying its body left the whole workspace green, and a `panic!` placed
-    /// in it never fired across the entire suite, because no document reaches it — the ordering
-    /// argument that makes a leak impossible is sound and was asserted by nothing. If that argument
-    /// were ever wrong the failure mode is not a diagnostic but a panic inside a consumer's
-    /// `build.rs`, so the check is worth ten lines of direct proof.
+    /// No document reaches it, because lowering fills every id it reserves, so only a hand-built
+    /// graph exercises it. Were that ordering ever wrong, the failure would be a panic inside a
+    /// consumer's `build.rs` rather than a diagnostic.
     #[test]
     fn a_surviving_reservation_is_caught() {
         let mut api = api_with_header_ty(ty(0));
@@ -302,7 +303,7 @@ mod tests {
     #[test]
     fn a_dangling_response_header_type_is_caught() {
         // Response headers are decoded by generated code exactly as bodies are, so a header whose
-        // `TypeId` does not resolve is just as fatal — it was simply never walked.
+        // `TypeId` does not resolve is just as fatal.
         let api = api_with_header_ty(ty(999));
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);

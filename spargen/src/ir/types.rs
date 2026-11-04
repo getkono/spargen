@@ -425,49 +425,18 @@ pub(crate) enum TypeKind {
     /// An untyped value (`{}` / `true` schema). Faithful representation of an untyped spec node.
     Any,
     /// A **reservation**: an id handed out by [`TypeGraph::reserve`] whose body has not been lowered
-    /// yet, so nothing is known about its shape.
-    ///
-    /// This is not a type. It exists so that a cycle-closing `$ref` can box a reference to a
-    /// component while that component is still being lowered, and it is replaced by
-    /// [`TypeGraph::fill`] as soon as the body finishes. No reservation survives a successful
-    /// lowering — [`check_invariants`](super::check_invariants) reports a surviving one — so no
-    /// consumer of a finished [`TypeGraph`] observes one.
+    /// yet, so nothing is known about its shape. It lets a cycle-closing `$ref` box a reference to
+    /// a component still being lowered, and [`TypeGraph::fill`] replaces it as soon as the body
+    /// finishes; [`check_invariants`](super::check_invariants) reports one that survives a
+    /// lowering as `E011`, a frontend bug.
     ///
     /// It is a variant of its own rather than a reuse of [`Self::Any`], because reading a
-    /// reservation as `Any` is a plausible, wrong answer with no diagnostic. Every **exhaustive**
-    /// `match` on [`TypeKind`] states what it does with a back edge, and the compiler holds a new
-    /// one to the same.
-    ///
-    /// **Where the compiler stops, a test takes over.** A dedicated variant turns a read site into
-    /// a compile error only where the `match` is exhaustive; a catch-all arm (`_`, a bare binding,
-    /// `Some(_)`, or a `| _` tail) absorbs it with no error. So a `match` that classifies a
-    /// `TypeKind` either has no catch-all, and the compiler holds it, or names `Reserved` in an
-    /// unguarded arm above its catch-all, and
-    /// `every_type_kind_match_states_its_answer_for_a_reservation` in this module holds it: that
-    /// test walks every `match` in the crate's sources and fails on one that reaches a catch-all
-    /// with no stated answer for a reservation. A site is a `match` at least one of whose arm
-    /// patterns names a `TypeKind` variant; `matches!` and `if let`, which test for one variant
-    /// rather than classify, are not sites, and a catch-all in one position of a tuple pattern
-    /// is not seen. The population is the test's to count.
-    ///
-    /// The answers fall into three kinds. Sites that run only on a checked `Api` — codegen,
-    /// `name`, `surface`, `Api::uses_bytes_serde` — refuse with `unreachable!`, as
-    /// `check_invariants` rejects a surviving reservation before any of them runs. Sites in
-    /// `oas31::lower`, where a reservation really is live, answer "not proven": not the same type,
-    /// not string-like, no `simple` shape, no representable default, no required-key
-    /// discriminator — each routing to the refusal or warning that answer already had. And
-    /// `push_ref_member` refuses an in-progress member
-    /// itself (`E013`'s `allOf` unit rejection) rather than trusting each caller to have guarded
-    /// it, so a new caller inherits the refusal. `intersect_non_null` likewise answers
-    /// `Err(NoMeet::Unrepresentable)` for a reservation in its own first arm instead of relying
-    /// on `intersect_types`' guard alone.
-    ///
-    /// **The invariant's own status.** The reservation arm of
-    /// [`check_invariants`](super::check_invariants) reports a surviving reservation as `E011`
-    /// (`Code::InvalidInput`): a frontend bug, not a spec problem. It shares that code because the
-    /// refusals above keep every document from reaching it, so a code of its own would have no
-    /// fixture to assert it. That holds only while the arm stays unreachable; the documents that
-    /// would reach it without those refusals are fixtures in `spargen/tests/frontend/`.
+    /// reservation as `Any` is a plausible, wrong answer with no diagnostic. Sites that run only on
+    /// a checked `Api` (codegen, `name`, `surface`, the runtime contract) refuse it with
+    /// `unreachable!`; sites in `oas31::lower`, where it is live, answer "not proven". An
+    /// exhaustive `match` is held to stating an answer by the compiler, and one with a catch-all
+    /// arm names `Reserved` above it, which
+    /// `every_type_kind_match_states_its_answer_for_a_reservation` in this module holds.
     Reserved,
 }
 
@@ -624,7 +593,7 @@ pub(crate) struct Field {
     pub(crate) ty: Ty,
     /// Whether the property is `required`.
     pub(crate) required: bool,
-    /// `deprecated` → `#[deprecated]`.
+    /// `deprecated: true`, emitted as a "Deprecated per the spec." rustdoc note on the field.
     pub(crate) deprecated: bool,
     /// `readOnly` annotation (W-class, surfaced in rustdoc).
     pub(crate) read_only: bool,

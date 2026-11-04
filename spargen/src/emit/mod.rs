@@ -29,13 +29,12 @@ pub(crate) struct EmitOptions {
 /// The rendered module: the provenance header followed by the generated module verbatim.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EmitPlan {
-    /// The module's final contents, the one `include!`-safe file spargen writes.
+    /// The module's final contents, the `include!`-safe file spargen writes.
     pub(crate) contents: String,
 }
 
 /// Build the emission plan from generated code and options: stamp the provenance header onto the
-/// generated module. Spargen writes one `include!`-safe file and nothing else — the consuming
-/// package owns its own `Cargo.toml`.
+/// generated module. The consuming package owns its own `Cargo.toml`.
 pub(crate) fn plan(code: &GeneratedCode, options: &EmitOptions) -> EmitPlan {
     let header = provenance_header(&options.spec);
     EmitPlan {

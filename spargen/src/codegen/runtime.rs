@@ -8,8 +8,8 @@ use super::blocking::blocking_cfg;
 
 /// Emit the private `support` module, one submodule per freestanding runtime source: each file's
 /// text up to its `#[cfg(test)]` module, with `crate::` rewritten to `super::`, re-parsed as
-/// tokens. The module carries an outer `#[forbid(unsafe_code)]` (an inner `#![…]` would break
-/// `include!`). When `uses_xml` is set (the API has an `application/xml` / `text/xml` body), the
+/// tokens. The module carries an outer `#[forbid(unsafe_code)]`, outer for the reason
+/// [`super::generate`] gives. When `uses_xml` is set (the API has an `application/xml` / `text/xml` body), the
 /// XML codec module is embedded and its helpers re-exported; otherwise it is omitted entirely, so
 /// a non-XML output carries no `quick-xml` reference. `uses_streams` embeds the sequential-response
 /// `stream` module, and `uses_time` the RFC 3339 `DateTime`/`Date` newtypes, on the same terms.
@@ -56,13 +56,10 @@ pub(super) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     let datetime_reexport = uses_time.then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
-    // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
-    // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
-    // code compiles only when a consumer opts in on a native target, so a default build carries no
-    // tokio reference and a wasm build never pulls tokio even with the feature on (tokio's blocking
-    // runtime cannot run on the single-threaded browser). A consumer opts in by declaring its own
-    // `blocking` feature wired to an optional, non-wasm tokio dependency — which is what
-    // `spargen deps` prints, commented out, and what the audit then requires.
+    // The blocking runtime (`BlockingRuntime`) is embedded unconditionally under `blocking_cfg`. A
+    // consumer opts in by declaring its own `blocking` feature wired to an optional, non-wasm tokio
+    // dependency — which is what `spargen deps` prints, commented out, and what the audit then
+    // requires.
     let blocking_inner = embed(&crate::support::blocking_runtime_file());
     let blocking_cfg = blocking_cfg();
     let blocking_module = quote! {

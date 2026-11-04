@@ -24,8 +24,9 @@ pub(crate) use scope::{RankedRequest, Scope};
 pub(crate) use synth::synth_operation_id;
 
 /// The identifiers allocated for a whole [`Api`]: one per operation, params struct, type, field,
-/// and variant. Codegen looks names up here rather than deriving them, so naming stays in one
-/// place and stays deterministic.
+/// and variant. Codegen looks these names up rather than deriving them; the status-selector
+/// labels are the exception, derived on demand through [`status_label`], which is itself pure and
+/// deterministic.
 #[derive(Debug, Default)]
 pub(crate) struct Names {
     /// Method name per operation.
@@ -495,9 +496,8 @@ pub(crate) fn allocate(api: &Api) -> Names {
                     );
                 }
             }
-            // Names are allocated only for an `Api` that passed `check_invariants`, which rejects
-            // a surviving reservation; allocating nothing for one would leave codegen to find a
-            // missing name far from the cause.
+            // Unreachable on a checked `Api`; see `TypeKind::Reserved`. Allocating nothing would
+            // leave codegen to find a missing name far from the cause.
             TypeKind::Reserved => unreachable!(
                 "a reservation reached name allocation; `check_invariants` should have rejected it"
             ),

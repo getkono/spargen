@@ -770,7 +770,8 @@ fn the_error_shape_grid_over_bodied_errors_and_default_body_presence() {
     // body the shape is `None`; a lone bodied entry is `Single`; anything else is an `Enum`
     // with every declared error entry a variant, so a bodyless `default` or `403` beside one
     // body is a unit variant rather than dropped (issue #204). `codegen`'s classification must
-    // agree cell for cell (`e2e.rs`, `a_bodyless_error_entry_beside_one_error_body_is_its_own_variant`).
+    // agree cell for cell (`a_bodyless_error_entry_beside_one_error_body_is_its_own_variant` in
+    // `tests/e2e/basic_blocking.rs`).
     const DEFAULT: u32 = 9;
     let (e404, e409) = (StatusSpec::Exact(404), StatusSpec::Exact(409));
     let (e403, any) = (StatusSpec::Exact(403), StatusSpec::Default);

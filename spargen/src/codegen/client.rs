@@ -15,9 +15,9 @@ use super::CodegenOptions;
 
 /// The declared security schemes, rendered as rustdoc for `with_credential`.
 ///
-/// This is the one place a caller chooses what to register, so it is where the scheme's own
-/// documentation belongs: the bearer format, the flows that mint a token, the OpenID Connect
-/// discovery URL, and whether the scheme is deprecated.
+/// A caller chooses what to register here, so this is where the scheme's own documentation
+/// belongs: the bearer format, the flows that mint a token, the OpenID Connect discovery URL, and
+/// whether the scheme is deprecated.
 fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
     let documented: Vec<&String> = api
         .security_schemes

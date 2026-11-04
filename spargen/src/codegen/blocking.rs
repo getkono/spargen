@@ -15,17 +15,18 @@ use super::operation::{
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
 /// `BlockingRuntime` beside it: the consumer crate's `blocking` feature, on a non-`wasm32` target.
+/// The items are emitted unconditionally and compiled out by this `cfg`, so a default build
+/// carries no tokio reference, and a wasm build never has one, feature or not, because tokio's
+/// blocking runtime cannot run on the single-threaded browser.
 pub(super) fn blocking_cfg() -> TokenStream {
     quote! { #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))] }
 }
 
 /// Emit the `BlockingClient`: a synchronous facade that owns the async `Client` plus a
-/// current-thread tokio runtime and drives each async operation to completion with `block_on`. It
-/// is compiled only under the consumer crate's `blocking` feature on a non-`wasm32` target
-/// (`cfg(all(feature = "blocking", not(target_arch = "wasm32")))`): tokio's blocking runtime cannot
-/// run on the single-threaded browser, so a wasm build never has one, feature or not. It reuses the
-/// whole async dispatch — every method is a thin shim — so there is zero logic duplication. Its
-/// constructors are the async client's `new`, `with_client` and `with_backend`.
+/// current-thread tokio runtime and drives each async operation to completion with `block_on`,
+/// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
+/// request building and dispatch are the async client's. Its constructors are the async client's
+/// `new`, `with_client` and `with_backend`.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the
