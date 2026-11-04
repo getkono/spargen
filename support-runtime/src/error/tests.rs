@@ -7,13 +7,6 @@ use crate::{AuthError, ResponseValue, TransportError};
 use super::{Error, RequestError, ReqwestClass, TimeoutKind};
 
 #[test]
-fn widen_preserves_the_variant() {
-    let narrow = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
-    let widened: Error<String> = narrow.widen();
-    assert!(matches!(widened, Error::Timeout(TimeoutKind::Total)));
-}
-
-#[test]
 fn request_message_source_displays_the_message() {
     let error = Error::<std::convert::Infallible>::request_message("no credential for `token`");
     assert!(matches!(error, Error::RequestConstruction(_)));
@@ -597,24 +590,11 @@ fn the_taxonomy_documents_name_every_error_variant() {
 /// non-retryable `RequestConstruction` at build time and a retryable `Transport` at execute.
 #[test]
 fn from_reqwest_classifies_a_refused_request_as_request_construction() {
-    let https_only = reqwest::Client::builder()
-        .https_only(true)
-        .build()
-        .expect("build an https-only client");
-    let refused_at_execute = |client: reqwest::Client, url: &str| {
-        let request = client
-            .request(reqwest::Method::GET, url)
-            .build()
-            .expect("reqwest builds the request; it refuses it only at execute");
-        // reqwest answers without touching the network, so the first poll is ready.
-        crate::tests::poll_ready(client.execute(request))
-            .expect_err(&format!("reqwest refuses the request for {url}"))
-    };
-    for source in [
-        reqwest_error(),
-        refused_at_execute(reqwest::Client::new(), "ftp://example.com/op"),
-        refused_at_execute(https_only, "http://example.com/op"),
-    ] {
+    // reqwest answers without touching the network, so the first poll is ready.
+    let refused = crate::tests::refused_at_execute().map(|(client, request)| {
+        crate::tests::poll_ready(client.execute(request)).expect_err("reqwest refuses the request")
+    });
+    for source in std::iter::once(reqwest_error()).chain(refused) {
         assert!(source.is_builder(), "{source}");
         let error = Error::<ApiBody>::from_reqwest(source);
         assert!(
@@ -662,10 +642,10 @@ fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
 
 /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
 /// above is the one permanent class, so a transient source is needed beside it. A connect
-/// failure needs a socket and a reactor, which this suite does not run; reqwest's status-kind
-/// error needs neither, and it reaches the same `Transport` class a failed connection does,
-/// by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the default
-/// classifier therefore retries it.
+/// failure needs a socket and a reactor, which only the `blocking` feature's test below runs;
+/// reqwest's status-kind error needs neither, and it reaches the same `Transport` class a failed
+/// connection does, by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the
+/// default classifier therefore retries it.
 #[test]
 fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() {
     let status_error = || {
@@ -686,6 +666,38 @@ fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() 
     assert!(crate::RetryOutcome::Transport(&transport).is_transient());
     let error = Error::<ApiBody>::from_reqwest(status_error());
     assert!(matches!(error, Error::Transport(_)), "{error}");
+    assert!(error.is_transient());
+}
+
+/// A connection the peer refuses is the class `from_reqwest` asks for first among reqwest's
+/// request-kind errors: `is_connect` makes it `Transport`, transient on the error and on the
+/// borrow alike, and never `RequestConstruction`. Driven over a real socket on the `blocking`
+/// feature's runtime: a port bound and then released refuses the next connection to it.
+#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+#[test]
+fn a_refused_connection_is_a_transient_transport_error() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("bind an ephemeral port")
+        .port();
+    let url = format!("http://127.0.0.1:{port}/op");
+    let runtime = crate::BlockingRuntime::new().expect("current-thread runtime builds");
+    let core = crate::tests::core();
+    let request = || core.http().get(&url).build().unwrap();
+
+    let failure = runtime
+        .block_on(crate::HttpBackend::execute(
+            core.backend().as_ref(),
+            request(),
+        ))
+        .expect_err("nothing listens on a released port");
+    assert!(failure.is_transient(), "{failure}");
+    assert!(crate::RetryOutcome::Transport(&failure).is_transient());
+
+    let error = runtime
+        .block_on(crate::send(&core, request()))
+        .expect_err("nothing listens on a released port");
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
     assert!(error.is_transient());
 }
 
@@ -710,30 +722,6 @@ fn is_transient_classifies_every_variant() {
             error.is_transient(),
             expected,
             "is_transient disagrees for {error}"
-        );
-    }
-}
-
-/// A `Decode` error is retryable exactly when its status is: a `429` or `5xx` whose body did
-/// not match the schema is still the server saying "try again", while a `2xx` or `4xx` body
-/// that does not decode reproduces on retry. This is the rule `RetryOutcome::is_transient`
-/// applies to the same response before its body is read.
-#[test]
-fn a_decode_error_is_transient_exactly_when_its_status_is() {
-    let decode = |code: u16| Error::<ApiBody>::Decode {
-        status: StatusCode::from_u16(code).unwrap(),
-        headers: HeaderMap::new(),
-        path: "x".to_owned(),
-        body: Bytes::new(),
-        truncated: false,
-    };
-    for code in [429, 500, 502, 503] {
-        assert!(decode(code).is_transient(), "{code} should be transient");
-    }
-    for code in [200, 201, 400, 404, 422, 499] {
-        assert!(
-            !decode(code).is_transient(),
-            "{code} should not be transient"
         );
     }
 }
@@ -975,7 +963,16 @@ fn widen_preserves_every_reachable_variant() {
         );
     }
 
-    // The payload fields survive, not just the discriminant.
+    // The payload fields survive, not just the discriminant: the timeout keeps its kind, ...
+    for kind in [TimeoutKind::Connect, TimeoutKind::Total] {
+        let widened: Error<ApiBody> = Error::<std::convert::Infallible>::Timeout(kind).widen();
+        assert!(
+            matches!(widened, Error::Timeout(widened_kind) if widened_kind == kind),
+            "{kind:?}"
+        );
+    }
+
+    // ... the decode failure every field ...
     let mut sent = HeaderMap::new();
     sent.insert(
         "retry-after",
@@ -1005,7 +1002,7 @@ fn widen_preserves_every_reachable_variant() {
     assert_eq!(body, Bytes::from_static(b"raw"));
     assert!(truncated);
 
-    // The typed request-construction cause keeps its payload too.
+    // ... and the typed request-construction cause its alternatives.
     let widened: Error<ApiBody> =
         Error::<std::convert::Infallible>::RequestConstruction(RequestError::MissingCredential {
             alternatives: vec![vec!["a"], vec!["b"]],

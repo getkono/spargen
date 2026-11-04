@@ -71,7 +71,7 @@ fn invalid_utf8_yields_a_decode_error_path() {
 fn xml_decode_failure_honours_the_error_body_cap() {
     use crate::tests::poll_ready;
 
-    let mut core = crate::ClientCore::new("https://example.com").unwrap();
+    let mut core = crate::tests::core();
     core.config_mut().max_error_body = 16;
     // Well-formed UTF-8 that is not valid XML, far larger than the cap.
     let response = reqwest::Response::from(
@@ -126,7 +126,7 @@ fn xml_decode_failures_keep_the_response_status_and_headers() {
         assert_eq!(error.status().map(|s| s.as_u16()), Some(expected));
     }
 
-    let core = crate::ClientCore::new("https://example.com").unwrap();
+    let core = crate::tests::core();
     let success = poll_ready(super::decode_success_xml::<Point>(
         &core,
         response(203, "1"),
@@ -150,7 +150,7 @@ fn xml_codec_rejects_a_zero_length_success_body() {
 
     assert!(decode_xml_body::<Point>(b"").is_err());
     assert!(decode_xml_body::<String>(b"").is_err());
-    let core = crate::ClientCore::new("https://example.com").unwrap();
+    let core = crate::tests::core();
     let response = reqwest::Response::from(
         http::Response::builder()
             .status(204)

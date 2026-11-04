@@ -85,11 +85,11 @@ impl HttpBackend for ReqwestBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use reqwest::{Method, Request};
+    use reqwest::Method;
 
-    use crate::tests::poll_ready;
+    use crate::tests::{poll_ready, SequenceBackend};
     use crate::{send, ClientCore, HttpBackend, ReqwestBackend};
 
     // On native, ClientCore and the seam trait objects/futures are Send + Sync, so the client
@@ -105,33 +105,14 @@ mod tests {
         assert_send_sync::<ReqwestBackend>();
     };
 
-    use super::ExecuteFuture;
+    // Object-safe: a `ReqwestBackend` installs behind `dyn HttpBackend`, as `ClientCore` stores it.
+    const _: fn(ReqwestBackend) -> Arc<dyn HttpBackend> = |backend| Arc::new(backend);
 
-    /// A custom backend that records the request URL it was handed and returns a canned in-memory
-    /// `reqwest::Response` synthesized without a socket — proving `send` routes the execute step
-    /// through the installed backend rather than a hard-wired `reqwest::Client`.
-    #[derive(Debug, Default)]
-    struct RecordingBackend {
-        seen: Mutex<Option<String>>,
-    }
-
-    impl HttpBackend for RecordingBackend {
-        fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-            *self.seen.lock().expect("mutex not poisoned") = Some(request.url().to_string());
-            Box::pin(async {
-                Ok(reqwest::Response::from(
-                    http::Response::builder()
-                        .status(200)
-                        .body(r#"{"ok":true}"#.to_owned())
-                        .expect("valid synthetic response"),
-                ))
-            })
-        }
-    }
-
+    /// `send` routes the execute step through the installed backend rather than a hard-wired
+    /// `reqwest::Client`: the backend sees the request and its response is what `send` returns.
     #[test]
     fn send_routes_through_the_installed_backend() {
-        let backend = Arc::new(RecordingBackend::default());
+        let backend = SequenceBackend::statuses([203]);
         let core = ClientCore::with_backend(backend.clone(), "https://example.com").unwrap();
         // Requests are still BUILT on a reqwest client; only the execute step goes through the seam.
         let request = core
@@ -140,21 +121,24 @@ mod tests {
             .build()
             .unwrap();
         let response = poll_ready(send(&core, request)).unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        // The swapped backend actually saw the request, so dispatch used it, not a default client.
-        assert_eq!(
-            backend.seen.lock().unwrap().as_deref(),
-            Some("https://example.com/op")
-        );
+        assert_eq!(response.status().as_u16(), 203);
+        assert_eq!(backend.urls(), ["https://example.com/op"]);
     }
 
+    /// `ClientCore::new` installs a `ReqwestBackend`, which `ClientCore`'s `Debug` names, since
+    /// `Debug` is required of every backend.
     #[test]
-    fn default_reqwest_backend_constructs_and_is_object_safe() {
-        let backend = ReqwestBackend::new(reqwest::Client::new());
-        // Object-safe: usable behind `dyn` exactly as `ClientCore` stores it.
-        let _erased: Arc<dyn HttpBackend> = Arc::new(backend);
-        // `new` / `with_client` install a default `ReqwestBackend` under the hood.
-        let _core = ClientCore::new("https://example.com").unwrap();
+    fn new_installs_a_reqwest_backend_that_debug_names() {
+        let rendered = format!("{:?}", ReqwestBackend::new(reqwest::Client::new()));
+        assert!(
+            rendered.starts_with("ReqwestBackend { client: Client {"),
+            "{rendered}"
+        );
+        let core = format!("{:?}", ClientCore::new("https://example.com").unwrap());
+        assert!(
+            core.contains("backend: ReqwestBackend { client: Client {"),
+            "{core}"
+        );
     }
 
     /// `client` hands back the wrapped client, not a default one: it still holds the default

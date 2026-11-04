@@ -49,26 +49,22 @@ impl<T: ?Sized> MaybeSync for T {}
 mod tests {
     use super::{MaybeSend, MaybeSync};
 
-    fn assert_maybe_send<T: MaybeSend + ?Sized>() {}
-    fn assert_maybe_sync<T: MaybeSync + ?Sized>() {}
+    // Compile-time checks: each holds when this module builds, so none is a `#[test]`.
 
-    #[test]
-    fn ordinary_types_are_maybe_send_and_maybe_sync() {
-        assert_maybe_send::<i32>();
-        assert_maybe_sync::<i32>();
-        assert_maybe_send::<String>();
-        assert_maybe_sync::<String>();
-    }
+    // Ordinary types are `MaybeSend` and `MaybeSync`.
+    const _: fn() = || {
+        fn assert_maybe_send_sync<T: MaybeSend + MaybeSync + ?Sized>() {}
+        assert_maybe_send_sync::<i32>();
+        assert_maybe_send_sync::<String>();
+    };
 
     // On native, `MaybeSend`/`MaybeSync` must be *exactly* `Send`/`Sync`, so a trait carrying them as
     // supertraits yields a `Send + Sync` trait object — this is what keeps a generated `Client`
-    // shareable across threads. (On wasm these bounds are vacuous, so the assertion is
-    // native-only.)
+    // shareable across threads. (On wasm these bounds are vacuous, so the check is native-only.)
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_maybe_bounds_make_trait_objects_send_and_sync() {
+    const _: fn() = || {
         trait Marker: MaybeSend + MaybeSync {}
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<dyn Marker>();
-    }
+    };
 }

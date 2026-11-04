@@ -1,15 +1,8 @@
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
-use crate::tests::poll_ready;
+use crate::tests::{core, poll_ready, response, Chunk, Chunks};
 use crate::{ClientCore, RequestError};
 use bytes::Bytes;
 
 use super::{build_url_on, build_url_with_query_string_on, is_dot_segment, StatusSpec};
-
-fn core() -> ClientCore {
-    ClientCore::new("https://example.com").unwrap()
-}
 
 fn core_at(base: &str) -> ClientCore {
     ClientCore::new(base).unwrap()
@@ -365,24 +358,9 @@ use super::{
 };
 use crate::{Error, ResponseValue};
 
-/// Synthesize an in-memory `reqwest::Response` (no server, no runtime) so the body readers can be
-/// driven with a poll-once noop waker.
+/// An in-memory response with a borrowed textual body.
 fn json_response(status: u16, body: &str) -> reqwest::Response {
-    reqwest::Response::from(
-        http::Response::builder()
-            .status(status)
-            .body(body.to_owned())
-            .expect("valid synthetic response"),
-    )
-}
-
-fn raw_response(status: u16, body: impl Into<reqwest::Body>) -> reqwest::Response {
-    reqwest::Response::from(
-        http::Response::builder()
-            .status(status)
-            .body(body.into())
-            .expect("valid synthetic response"),
-    )
+    response(status, body.to_owned())
 }
 
 #[derive(serde::Deserialize, Debug, PartialEq)]
@@ -415,14 +393,14 @@ fn textual_codec_uses_raw_utf8_as_a_typed_json_string() {
 fn binary_codec_preserves_success_and_documented_error_bytes() {
     let success = poll_ready(decode_success_bytes(
         &core(),
-        raw_response(200, bytes::Bytes::from_static(b"\0raw\xff")),
+        response(200, bytes::Bytes::from_static(b"\0raw\xff")),
     ))
     .unwrap();
     assert_eq!(&success.into_inner()[..], b"\0raw\xff");
 
     let error = poll_ready(classify_error_bytes::<bytes::Bytes>(
         &core(),
-        raw_response(400, bytes::Bytes::from_static(b"bad\0")),
+        response(400, bytes::Bytes::from_static(b"bad\0")),
         &[StatusSpec::Exact(400)],
     ));
     match error {
@@ -798,45 +776,22 @@ fn capped_error_body_does_not_retain_the_oversized_allocation() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn oversized_error_body_stops_being_read_at_the_cap() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     /// 1 KiB chunks against the 4 KiB cap below: four pulls reach the cap exactly, and the
     /// fifth is the one that proves the remainder is being dropped.
     const PULLS_FOR_4K_CAP: usize = 5;
 
-    // A stream of 1 KiB chunks that counts how many were actually pulled. Always immediately
-    // ready, so the poll-once waker is enough.
-    struct Counting {
-        remaining: usize,
-        pulled: Arc<AtomicUsize>,
-    }
-    impl futures_core::Stream for Counting {
-        type Item = Result<Bytes, std::io::Error>;
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
-            if self.remaining == 0 {
-                return Poll::Ready(None);
-            }
-            self.remaining -= 1;
-            self.pulled.fetch_add(1, Ordering::SeqCst);
-            Poll::Ready(Some(Ok(Bytes::from_static(&[b'x'; 1024]))))
-        }
-    }
-
-    let pulled = Arc::new(AtomicUsize::new(0));
-    let body = reqwest::Body::wrap_stream(Counting {
-        remaining: 1024, // 1 MiB available
-        pulled: Arc::clone(&pulled),
-    });
+    // 1 MiB available, in 1 KiB chunks that count how many were actually pulled.
+    let body = Chunks::repeat(1024, 1024);
+    let pulled = body.pulled();
 
     let mut core = core();
     core.config_mut().max_error_body = 4096; // 4 KiB cap
 
     let (_status, _headers, retained, truncated) = poll_ready(read_error_body::<
         std::convert::Infallible,
-    >(&core, raw_response(500, body)))
+    >(&core, body.into_response(500)))
     .unwrap();
 
     assert!(truncated);
@@ -864,28 +819,12 @@ fn an_under_cap_body_does_not_retain_the_read_buffer() {
     let mut core = core();
     core.config_mut().max_error_body = 64 * 1024;
     // 40 x 1 KiB, all under the cap, so the read runs to EOF and nothing is truncated.
-    // `futures-core` is the only stream dependency here and carries no combinators, so the
-    // stream is hand-rolled; it is always immediately ready, which the poll-once waker needs.
-    struct Chunks(usize);
-    impl futures_core::Stream for Chunks {
-        type Item = Result<Bytes, std::io::Error>;
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
-            if self.0 == 0 {
-                return Poll::Ready(None);
-            }
-            self.0 -= 1;
-            Poll::Ready(Some(Ok(Bytes::from_static(&[b'x'; 1024]))))
-        }
-    }
-
-    let body = reqwest::Body::wrap_stream(Chunks(40));
-    let (_status, _headers, body, truncated) = poll_ready(read_error_body::<
-        std::convert::Infallible,
-    >(&core, raw_response(500, body)))
-    .unwrap();
+    let (_status, _headers, body, truncated) =
+        poll_ready(read_error_body::<std::convert::Infallible>(
+            &core,
+            Chunks::repeat(1024, 40).into_response(500),
+        ))
+        .unwrap();
     assert!(!truncated);
     assert_eq!(body.len(), 40 * 1024);
     let owned = body
@@ -938,6 +877,80 @@ fn a_zero_cap_retains_nothing() {
     .unwrap();
     assert!(!truncated, "nothing was dropped, so nothing was truncated");
     assert!(body.is_empty());
+}
+
+/// A body that arrives in part and then fails to read: one chunk, then a dropped connection.
+fn interrupted(status: u16) -> reqwest::Response {
+    Chunks::new([Chunk::data("{\"partial\":"), Chunk::Fail]).into_response(status)
+}
+
+/// Assert `error` is what `Error::from_reqwest` makes of a failed body read, carrying no status,
+/// rather than a response class built from the bytes that did arrive. reqwest reports a body
+/// that fails while `bytes` or `chunk` reads it as a decode-kind error, which `from_reqwest`
+/// classifies as `Protocol`, and so as not transient.
+fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
+    let Error::Protocol(protocol) = error else {
+        panic!("{reader}: {error:?}");
+    };
+    let source = std::error::Error::source(protocol)
+        .and_then(|source| source.downcast_ref::<reqwest::Error>())
+        .unwrap_or_else(|| panic!("{reader}: a protocol error wraps its reqwest error"));
+    assert!(source.is_decode(), "{reader}: {source:?}");
+    assert!(!error.is_transient(), "{reader}");
+    assert_eq!(error.status(), None, "{reader}");
+}
+
+/// An error response whose body fails mid-read is classified by `Error::from_reqwest`, the
+/// same as a failure before the response: whether its status is documented or not, it never
+/// becomes `Api`, `UnexpectedStatus` or `Decode` over the bytes that did arrive.
+#[test]
+fn an_error_body_that_fails_mid_read_classifies_through_from_reqwest() {
+    let core = core();
+    let documented = [StatusSpec::Exact(503)];
+    match poll_ready(read_error_body::<Infallible>(&core, interrupted(503))) {
+        Err(error) => assert_failed_read(&error, "read_error_body"),
+        Ok(read) => panic!("read_error_body returned {read:?}"),
+    }
+    assert_failed_read(
+        &poll_ready(unexpected_status::<String>(&core, interrupted(503))),
+        "unexpected_status",
+    );
+    assert_failed_read(
+        &poll_ready(classify_error_text::<String>(
+            &core,
+            interrupted(503),
+            &documented,
+        )),
+        "classify_error_text",
+    );
+    assert_failed_read(
+        &poll_ready(classify_error_bytes::<Bytes>(
+            &core,
+            interrupted(503),
+            &documented,
+        )),
+        "classify_error_bytes",
+    );
+}
+
+/// A success response whose body fails mid-read is a failed read, not `Decode`: the bytes never
+/// all arrived, so no value failed to decode, and the error carries neither the status nor the
+/// partial body a `Decode` would.
+#[test]
+fn a_success_body_that_fails_mid_read_is_not_a_decode_error() {
+    let core = core();
+    assert_failed_read(
+        &poll_ready(super::decode_success::<Created>(&core, interrupted(200))).unwrap_err(),
+        "decode_success",
+    );
+    assert_failed_read(
+        &poll_ready(decode_success_text::<String>(&core, interrupted(200))).unwrap_err(),
+        "decode_success_text",
+    );
+    assert_failed_read(
+        &poll_ready(decode_success_bytes(&core, interrupted(200))).unwrap_err(),
+        "decode_success_bytes",
+    );
 }
 
 /// A SUCCESS response that fails to deserialize must also honour the cap: `Error::Decode`
@@ -1003,23 +1016,17 @@ fn assert_empty_body_decode<T: std::fmt::Debug>(
 #[test]
 fn json_codec_rejects_a_zero_length_success_body() {
     assert_empty_body_decode(
-        poll_ready(super::decode_success::<Created>(
-            &core(),
-            raw_response(200, ""),
-        )),
+        poll_ready(super::decode_success::<Created>(&core(), response(200, ""))),
         200,
     );
     assert_empty_body_decode(
-        poll_ready(super::decode_success::<String>(
-            &core(),
-            raw_response(204, ""),
-        )),
+        poll_ready(super::decode_success::<String>(&core(), response(204, ""))),
         204,
     );
     assert_empty_body_decode(
         poll_ready(super::decode_success::<serde_json::Value>(
             &core(),
-            raw_response(204, ""),
+            response(204, ""),
         )),
         204,
     );
@@ -1028,7 +1035,7 @@ fn json_codec_rejects_a_zero_length_success_body() {
 /// A zero-length binary body is an empty `Bytes`: every byte sequence is a valid binary body.
 #[test]
 fn binary_codec_returns_a_zero_length_success_body_as_empty_bytes() {
-    let value = poll_ready(decode_success_bytes(&core(), raw_response(204, ""))).unwrap();
+    let value = poll_ready(decode_success_bytes(&core(), response(204, ""))).unwrap();
     assert_eq!(value.status().as_u16(), 204);
     assert!(value.into_inner().is_empty());
 }
@@ -1064,16 +1071,12 @@ fn text_codec_decodes_a_zero_length_success_body_as_the_empty_string() {
         decode_text_body::<TextChoiceWithEmpty>(b"").unwrap(),
         TextChoiceWithEmpty::Empty
     );
-    let value = poll_ready(decode_success_text::<String>(
-        &core(),
-        raw_response(204, ""),
-    ))
-    .unwrap();
+    let value = poll_ready(decode_success_text::<String>(&core(), response(204, ""))).unwrap();
     assert_eq!(value.status().as_u16(), 204);
     assert_eq!(value.into_inner(), "");
     let value = poll_ready(decode_success_text::<serde_json::Value>(
         &core(),
-        raw_response(200, ""),
+        response(200, ""),
     ))
     .unwrap();
     assert_eq!(value.into_inner(), serde_json::Value::String(String::new()));
@@ -1083,7 +1086,7 @@ fn text_codec_decodes_a_zero_length_success_body_as_the_empty_string() {
     assert_empty_body_decode(
         poll_ready(decode_success_text::<TextChoice>(
             &core(),
-            raw_response(204, ""),
+            response(204, ""),
         )),
         204,
     );
@@ -1099,14 +1102,14 @@ fn text_codec_rejects_a_zero_length_body_for_the_rfc3339_newtypes() {
     assert_empty_body_decode(
         poll_ready(decode_success_text::<crate::DateTime>(
             &core(),
-            raw_response(204, ""),
+            response(204, ""),
         )),
         204,
     );
     assert_empty_body_decode(
         poll_ready(decode_success_text::<crate::Date>(
             &core(),
-            raw_response(200, ""),
+            response(200, ""),
         )),
         200,
     );

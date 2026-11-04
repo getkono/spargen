@@ -97,8 +97,21 @@ pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
 // runtime source is unaffected.
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
+
+    use bytes::Bytes;
+    use reqwest::header::HeaderMap;
+    use reqwest::{Method, Request, Response};
+
+    use crate::{
+        ClientCore, ExecuteFuture, HttpBackend, RetryOutcome, RetryPolicy, RetryWait,
+        TransportError,
+    };
 
     /// Drives `future` with one poll and a noop waker, panicking if it is not ready. The runtime's
     /// tests use no async runtime: their transports answer from canned in-memory responses and
@@ -111,6 +124,322 @@ mod tests {
         {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("future was not immediately ready"),
+        }
+    }
+
+    /// Drives `future` to completion with a noop waker, polling again after every `Pending`, and
+    /// returns its output with how many polls answered `Pending`. Each fake that answers `Pending`
+    /// ([`PendingOnce`], [`Chunk::Pending`], [`Reply::pending`]) is ready on the following poll, so
+    /// a bounded number of re-polls completes the future; one that is still pending after that is
+    /// a hang, and fails the test instead of spinning.
+    pub(crate) fn poll_to_completion<F: Future>(future: F) -> (F::Output, usize) {
+        const MAX_POLLS: usize = 1_000;
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        for pending in 0..MAX_POLLS {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                return (value, pending);
+            }
+        }
+        panic!("future still pending after {MAX_POLLS} polls");
+    }
+
+    /// A future that answers its first poll with `Pending` and every later one as `inner` does,
+    /// so a test can reach the branch a caller takes while it waits.
+    pub(crate) struct PendingOnce<F> {
+        polled: bool,
+        inner: Pin<Box<F>>,
+    }
+
+    impl<F: Future> PendingOnce<F> {
+        pub(crate) fn new(inner: F) -> Self {
+            Self {
+                polled: false,
+                inner: Box::pin(inner),
+            }
+        }
+    }
+
+    impl<F: Future> Future for PendingOnce<F> {
+        type Output = F::Output;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+            if !self.polled {
+                self.polled = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// A `ClientCore` on the default transport. Tests that never send through it, or that build
+    /// absolute request URLs, need nothing more specific.
+    pub(crate) fn core() -> ClientCore {
+        ClientCore::new("https://example.com").expect("a valid base URL")
+    }
+
+    /// A `GET https://example.com/op` built on a default client.
+    pub(crate) fn request() -> Request {
+        reqwest::Client::new()
+            .request(Method::GET, "https://example.com/op")
+            .build()
+            .expect("build request")
+    }
+
+    /// An in-memory response (no server, no runtime) with `status` and `body`.
+    pub(crate) fn response(status: u16, body: impl Into<reqwest::Body>) -> Response {
+        Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(body.into())
+                .expect("valid synthetic response"),
+        )
+    }
+
+    /// The two requests reqwest builds but refuses at `execute`, without any I/O, as a
+    /// builder-kind error: a URL whose scheme is not `http`/`https`, and plain `http` on a client
+    /// configured `https_only`. Each comes with the client that refuses it.
+    pub(crate) fn refused_at_execute() -> [(reqwest::Client, Request); 2] {
+        let https_only = reqwest::Client::builder()
+            .https_only(true)
+            .build()
+            .expect("build an https-only client");
+        [
+            (reqwest::Client::new(), "ftp://example.com/op"),
+            (https_only, "http://example.com/op"),
+        ]
+        .map(|(client, url)| {
+            let request = client
+                .request(Method::GET, url)
+                .build()
+                .expect("reqwest builds the request; it refuses it only at execute");
+            (client, request)
+        })
+    }
+
+    /// A transport failure that `Error::from_reqwest` classifies as `Transport`, and so as
+    /// transient, built without a socket: reqwest's status-kind error, which falls through to the
+    /// same class a failed connection reaches. `status` appears in its message, so a test can
+    /// tell two failures apart.
+    pub(crate) fn transport_failure(status: u16) -> TransportError {
+        TransportError::new(
+            response(status, String::new())
+                .error_for_status()
+                .expect_err("an error status"),
+        )
+    }
+
+    /// One step of a scripted response body.
+    pub(crate) enum Chunk {
+        /// A chunk of body bytes.
+        Data(Bytes),
+        /// One poll that answers `Pending`; the next poll moves on to the following step.
+        Pending,
+        /// A failed read, as a dropped connection reports it.
+        Fail,
+    }
+
+    impl Chunk {
+        pub(crate) fn data(bytes: impl Into<Vec<u8>>) -> Self {
+            Self::Data(Bytes::from(bytes.into()))
+        }
+    }
+
+    /// A response body that plays a script of [`Chunk`]s, then ends. It counts the data chunks
+    /// read, so a test can see where a reader stopped pulling.
+    pub(crate) struct Chunks {
+        script: VecDeque<Chunk>,
+        pulled: Arc<AtomicUsize>,
+    }
+
+    impl Chunks {
+        pub(crate) fn new(script: impl IntoIterator<Item = Chunk>) -> Self {
+            Self {
+                script: script.into_iter().collect(),
+                pulled: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// `count` chunks of `size` bytes of `x`.
+        pub(crate) fn repeat(size: usize, count: usize) -> Self {
+            Self::new((0..count).map(|_| Chunk::data(vec![b'x'; size])))
+        }
+
+        /// The count of data chunks read so far, which stays readable after the body is consumed.
+        pub(crate) fn pulled(&self) -> Arc<AtomicUsize> {
+            Arc::clone(&self.pulled)
+        }
+
+        /// A response with `status` whose body plays this script.
+        pub(crate) fn into_response(self, status: u16) -> Response {
+            response(status, reqwest::Body::wrap_stream(self))
+        }
+    }
+
+    impl futures_core::Stream for Chunks {
+        type Item = Result<Bytes, std::io::Error>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            match this.script.pop_front() {
+                None => Poll::Ready(None),
+                Some(Chunk::Data(bytes)) => {
+                    this.pulled.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(Some(Ok(bytes)))
+                }
+                Some(Chunk::Pending) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Some(Chunk::Fail) => Poll::Ready(Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset mid-body",
+                )))),
+            }
+        }
+    }
+
+    /// What a [`SequenceBackend`] answers one request with.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Reply {
+        outcome: Result<(u16, String), u16>,
+        headers: Vec<(&'static str, String)>,
+        pending: bool,
+    }
+
+    impl Reply {
+        /// A response with `status` and `body`.
+        pub(crate) fn status(status: u16, body: &str) -> Self {
+            Self {
+                outcome: Ok((status, body.to_owned())),
+                headers: Vec::new(),
+                pending: false,
+            }
+        }
+
+        /// The [`transport_failure`] for `status`.
+        pub(crate) fn failure(status: u16) -> Self {
+            Self {
+                outcome: Err(status),
+                headers: Vec::new(),
+                pending: false,
+            }
+        }
+
+        /// Add a response header.
+        pub(crate) fn header(mut self, name: &'static str, value: &str) -> Self {
+            self.headers.push((name, value.to_owned()));
+            self
+        }
+
+        /// Answer the first poll of the execute future with `Pending`.
+        pub(crate) fn pending(mut self) -> Self {
+            self.pending = true;
+            self
+        }
+    }
+
+    /// A transport that answers each request with the next [`Reply`] of its script, the last one
+    /// repeating once the script is spent, and records every request it is handed. Each response
+    /// also carries `x-response: backend`, so a test can tell it from one built by hand.
+    #[derive(Debug)]
+    pub(crate) struct SequenceBackend {
+        script: Mutex<VecDeque<Reply>>,
+        requests: Mutex<Vec<(String, HeaderMap)>>,
+    }
+
+    impl SequenceBackend {
+        pub(crate) fn new(script: impl IntoIterator<Item = Reply>) -> Arc<Self> {
+            Arc::new(Self {
+                script: Mutex::new(script.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// One `status` response with an empty body per entry.
+        pub(crate) fn statuses(statuses: impl IntoIterator<Item = u16>) -> Arc<Self> {
+            Self::new(statuses.into_iter().map(|status| Reply::status(status, "")))
+        }
+
+        /// How many requests it has been handed.
+        pub(crate) fn calls(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+
+        /// The URL of every request, in order.
+        pub(crate) fn urls(&self) -> Vec<String> {
+            let requests = self.requests.lock().unwrap();
+            requests.iter().map(|(url, _)| url.clone()).collect()
+        }
+
+        /// Header `name` of every request, in order, `None` where a request lacked it.
+        pub(crate) fn header(&self, name: &str) -> Vec<Option<String>> {
+            let requests = self.requests.lock().unwrap();
+            requests
+                .iter()
+                .map(|(_, headers)| {
+                    headers
+                        .get(name)
+                        .map(|value| value.to_str().expect("a visible-ASCII header").to_owned())
+                })
+                .collect()
+        }
+    }
+
+    impl HttpBackend for SequenceBackend {
+        fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.url().to_string(), request.headers().clone()));
+            let Reply {
+                outcome,
+                headers,
+                pending,
+            } = {
+                let mut script = self.script.lock().unwrap();
+                if script.len() > 1 {
+                    script.pop_front()
+                } else {
+                    script.front().cloned()
+                }
+                .expect("a SequenceBackend holds at least one reply")
+            };
+            let reply = async move {
+                match outcome {
+                    Ok((status, body)) => {
+                        let mut builder = http::Response::builder()
+                            .status(status)
+                            .header("x-response", "backend");
+                        for (name, value) in headers {
+                            builder = builder.header(name, value);
+                        }
+                        Ok(Response::from(
+                            builder.body(body).expect("valid synthetic response"),
+                        ))
+                    }
+                    Err(status) => Err(transport_failure(status)),
+                }
+            };
+            if pending {
+                Box::pin(PendingOnce::new(reply))
+            } else {
+                Box::pin(reply)
+            }
+        }
+    }
+
+    /// Retries every transient outcome until `max_retries` retries have been made, with an
+    /// already-ready wait standing in for the caller's timer.
+    pub(crate) struct RetryTransient {
+        pub(crate) max_retries: u32,
+    }
+
+    impl RetryPolicy for RetryTransient {
+        fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
+            (attempt < self.max_retries && outcome.is_transient())
+                .then(|| Box::pin(std::future::ready(())) as RetryWait<'a>)
         }
     }
 }
