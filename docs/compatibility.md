@@ -113,24 +113,18 @@ failures should be fixed promptly.
 ## `spargen.toml` and the analysis CLI
 
 The analysis subcommands that read a spec — `check`, `deps`, `lock`, and `diff` — apply the
-settings in `spargen.toml` and the shared flags while they work (`lock` uses only `batch_cap` of
-them). None of them generates code; keep the generation profile in `build.rs` or the macro
-invocation.
+settings in `spargen.toml` and the shared flags while they work. None of them generates code; put
+settings both the build and these commands must agree on in `spargen.toml`.
 
-`spargen.toml` is auto-discovered beside the spec (`--config <path>` overrides the location). Its
-omit-rule kinds are discriminated by **field presence** (TOML has no enums), and an entry that
-also sets a key its kind does not use — `file` or `name` beside `path`, `path`, `method` or
-`file` beside `component`, `name` beside `pointer` — is a config error naming the key and the
-kind, not a key silently dropped:
+`spargen.toml` is auto-discovered beside the spec (`--config <path>` overrides the location). The
+CLI reference's
+[`spargen.toml` reference](https://github.com/getkono/spargen/blob/master/docs/book/src/cli.md#spargentoml-reference)
+lists its other keys; this page covers its `[[omit]]` rules. Their kinds are discriminated by
+**field presence** (TOML has no enums), and an entry that also sets a key its kind does not use —
+`file` or `name` beside `path`, `path`, `method` or `file` beside `component`, `name` beside
+`pointer` — is a config error naming the key and the kind, not a key silently dropped:
 
 ```toml
-uuid = true             # optional (default true); map `format: uuid` to `uuid::Uuid`
-time = true             # optional (default true); map `format: date-time`/`date` to `time`
-carve = false           # optional; auto-carve unsupported constructs
-batch_cap = 100         # optional (default 100)
-error_body_cap = 65536  # optional (default 64 KiB)
-open_narrowing = false  # optional (default false); open a response body's string `enum`/`const` narrowings
-
 [[omit]]
 path = "/pets/{id}"                     # → OmitRule::Path (exact)
 
@@ -158,10 +152,6 @@ fingerprint they stamp into generated output does not depend on where the checko
 for a document the description reaches by an absolute-path `$ref`, which lies outside the root
 document's directory and is named by that absolute path instead. The description itself fixes that
 location, so moving the checkout already breaks such a `$ref`.
-
-`error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
-([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
-one statement of what it bounds on each target and which paths it does not cap.
 
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 
