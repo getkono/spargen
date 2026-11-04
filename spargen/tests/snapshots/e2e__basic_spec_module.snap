@@ -8037,7 +8037,7 @@ impl Client {
             Err(support::unexpected_status::<ReadFileError>(&self.core, response).await)
         }
     }
-    ///The URL `read_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `read_file` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn read_file_url(
         &self,
@@ -8163,7 +8163,7 @@ impl Client {
             )
         }
     }
-    ///The URL `binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `binding_collisions` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn binding_collisions_url(
         &self,
@@ -8289,7 +8289,7 @@ impl Client {
             )
         }
     }
-    ///The URL `signature_binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `signature_binding_collisions` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn signature_binding_collisions_url(
         &self,
@@ -8440,7 +8440,7 @@ impl Client {
             )
         }
     }
-    ///The URL `serialize_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `serialize_params` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn serialize_params_url(
         &self,
@@ -8556,7 +8556,7 @@ impl Client {
             )
         }
     }
-    ///The URL `get_conjunction` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_conjunction` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_conjunction_url(
         &self,
@@ -8657,7 +8657,7 @@ impl Client {
             Err(support::unexpected_status::<GetUserError>(&self.core, response).await)
         }
     }
-    ///The URL `get_user` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_user` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_user_url(
         &self,
@@ -8847,7 +8847,7 @@ Response `409`: Conflict*/
             })
         }
     }
-    ///The URL `get_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_multi_url(
         &self,
@@ -8959,7 +8959,7 @@ Response `409`: Conflict*/
             })
         }
     }
-    ///The URL `get_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_shared_url(
         &self,
@@ -9092,7 +9092,7 @@ Response `default`: Anything else*/
             })
         }
     }
-    ///The URL `get_maybe` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_maybe` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_maybe_url(
         &self,
@@ -9163,7 +9163,7 @@ Response `default`: Anything else*/
             )
         }
     }
-    ///The URL `get_multi_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_multi_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_multi_default_url(
         &self,
@@ -9204,7 +9204,7 @@ Response `default`: Anything else*/
             )
         }
     }
-    ///The URL `get_plain_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_plain_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_plain_default_url(
         &self,
@@ -9242,7 +9242,7 @@ Response `default`: Anything else*/
             )
         }
     }
-    ///The URL `get_unit_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_unit_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_unit_default_url(
         &self,
@@ -9326,7 +9326,7 @@ Response `default`: Anything else*/
             })
         }
     }
-    ///The URL `get_bodyless_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_bodyless_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_bodyless_default_url(
         &self,
@@ -9441,7 +9441,7 @@ Response `default`: Anything else*/
             })
         }
     }
-    ///The URL `get_bodyless_default_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_bodyless_default_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_bodyless_default_multi_url(
         &self,
@@ -9525,7 +9525,7 @@ Response `404`: Not Found*/
             })
         }
     }
-    ///The URL `get_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_bodyless_sibling_url(
         &self,
@@ -9607,7 +9607,7 @@ Response `404`: Not Found*/
             })
         }
     }
-    ///The URL `get_xml_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_xml_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_xml_bodyless_sibling_url(
         &self,
@@ -9692,7 +9692,7 @@ Response `default`: Anything else*/
             })
         }
     }
-    ///The URL `get_conditional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_conditional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_conditional_url(
         &self,
@@ -9730,7 +9730,7 @@ Response `400`: Bad Request*/
             )
         }
     }
-    ///The URL `get_maybe_single` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_maybe_single` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_maybe_single_url(
         &self,
@@ -9829,7 +9829,7 @@ Response `409`: Conflict*/
             })
         }
     }
-    ///The URL `get_alias_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_alias_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_alias_shared_url(
         &self,
@@ -9901,7 +9901,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `upload_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `upload_file` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn upload_file_url(
         &self,
@@ -9958,7 +9958,7 @@ Response `409`: Conflict*/
             Err(support::unexpected_status::<GetBlobError>(&self.core, response).await)
         }
     }
-    ///The URL `get_blob` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_blob` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_blob_url(
         &self,
@@ -10019,7 +10019,7 @@ Response `409`: Conflict*/
             Err(support::unexpected_status::<PostRawError>(&self.core, response).await)
         }
     }
-    ///The URL `post_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `post_raw` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn post_raw_url(
         &self,
@@ -10078,7 +10078,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `post_nullable_bytes` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `post_nullable_bytes` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn post_nullable_bytes_url(
         &self,
@@ -10145,7 +10145,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `post_nullable_parts` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `post_nullable_parts` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn post_nullable_parts_url(
         &self,
@@ -10183,7 +10183,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `render_html` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `render_html` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn render_html_url(
         &self,
@@ -10221,7 +10221,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `get_octocat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_octocat` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_octocat_url(
         &self,
@@ -10258,7 +10258,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `download_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `download_raw` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn download_raw_url(
         &self,
@@ -10296,7 +10296,7 @@ Response `409`: Conflict*/
             Err(support::unexpected_status::<PutRangedError>(&self.core, response).await)
         }
     }
-    ///The URL `put_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `put_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn put_ranged_url(
         &self,
@@ -10344,7 +10344,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `get_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_artwork` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_artwork_url(
         &self,
@@ -10405,7 +10405,7 @@ Response `409`: Conflict*/
             )
         }
     }
-    ///The URL `put_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `put_artwork` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn put_artwork_url(
         &self,
@@ -10456,7 +10456,7 @@ Response `400`: textual failure*/
             )
         }
     }
-    ///The URL `get_text_error` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_text_error` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[deprecated]
     #[inline]
     pub fn get_text_error_url(
@@ -10592,7 +10592,7 @@ Response `409`: binary error*/
             })
         }
     }
-    ///The URL `get_raw_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_raw_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_raw_multi_url(
         &self,
@@ -10634,7 +10634,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `submit_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `submit_order` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn submit_order_url(
         &self,
@@ -10688,7 +10688,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `patch_merge_document` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `patch_merge_document` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn patch_merge_document_url(
         &self,
@@ -10739,7 +10739,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `submit_legacy_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `submit_legacy_order` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn submit_legacy_order_url(
         &self,
@@ -10782,7 +10782,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `post_json_meta` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `post_json_meta` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn post_json_meta_url(
         &self,
@@ -10824,7 +10824,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `stream_chat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `stream_chat` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn stream_chat_url(
         &self,
@@ -10867,7 +10867,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `stream_chat_lines` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `stream_chat_lines` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn stream_chat_lines_url(
         &self,
@@ -10912,7 +10912,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `stream_chat_sequence` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `stream_chat_sequence` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn stream_chat_sequence_url(
         &self,
@@ -10972,7 +10972,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `get_alternate_auth` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_alternate_auth` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_alternate_auth_url(
         &self,
@@ -11091,7 +11091,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `serialize_styles` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `serialize_styles` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn serialize_styles_url(
         &self,
@@ -11259,7 +11259,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `serialize_content_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `serialize_content_params` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn serialize_content_params_url(
         &self,
@@ -11341,7 +11341,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `submit_form` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `submit_form` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn submit_form_url(
         &self,
@@ -11393,7 +11393,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `submit_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `submit_form_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn submit_form_additional_url(
         &self,
@@ -11451,7 +11451,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `submit_nullable_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `submit_nullable_form_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn submit_nullable_form_additional_url(
         &self,
@@ -11506,7 +11506,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `upload_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `upload_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn upload_additional_url(
         &self,
@@ -11542,7 +11542,7 @@ Response `409`: binary error*/
             )
         }
     }
-    ///The URL `documented_headers` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `documented_headers` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn documented_headers_url(
         &self,
@@ -11642,7 +11642,7 @@ Response `default`: Anything else*/
             })
         }
     }
-    ///The URL `get_no_success` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_no_success` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_no_success_url(
         &self,
@@ -11705,7 +11705,7 @@ Response `204`: No Content*/
             )
         }
     }
-    ///The URL `get_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_maybe_empty` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_maybe_empty_url(
         &self,
@@ -11767,7 +11767,7 @@ Response `204`: No Content*/
             )
         }
     }
-    ///The URL `get_xml_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_xml_maybe_empty` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_xml_maybe_empty_url(
         &self,
@@ -11828,7 +11828,7 @@ Response `200`: OK*/
             Err(support::unexpected_status::<GetRangedError>(&self.core, response).await)
         }
     }
-    ///The URL `get_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_ranged_url(
         &self,
@@ -11930,7 +11930,7 @@ Response `409`: Conflict*/
             })
         }
     }
-    ///The URL `get_error_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    ///The URL `get_error_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
     #[inline]
     pub fn get_error_ranged_url(
         &self,
@@ -12031,7 +12031,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         ) -> Result<support::ResponseValue<()>, support::Error<ReadFileError>> {
             self.runtime.block_on(self.inner.read_file(path))
         }
-        ///The URL `read_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `read_file` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn read_file_url(
             &self,
@@ -12054,7 +12054,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                     self.inner.binding_collisions(query, url, request, cookies, params),
                 )
         }
-        ///The URL `binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `binding_collisions` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn binding_collisions_url(
             &self,
@@ -12088,7 +12088,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
                         ),
                 )
         }
-        ///The URL `signature_binding_collisions` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `signature_binding_collisions` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn signature_binding_collisions_url(
             &self,
@@ -12110,7 +12110,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             self.runtime
                 .block_on(self.inner.serialize_params(ids, workflow_id, x_flags, params))
         }
-        ///The URL `serialize_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `serialize_params` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn serialize_params_url(
             &self,
@@ -12127,7 +12127,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         ) -> Result<support::ResponseValue<()>, support::Error<GetConjunctionError>> {
             self.runtime.block_on(self.inner.get_conjunction())
         }
-        ///The URL `get_conjunction` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_conjunction` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_conjunction_url(
             &self,
@@ -12143,7 +12143,7 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         ) -> Result<support::ResponseValue<types::User>, support::Error<GetUserError>> {
             self.runtime.block_on(self.inner.get_user(id, params))
         }
-        ///The URL `get_user` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_user` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_user_url(
             &self,
@@ -12170,7 +12170,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_multi())
         }
-        ///The URL `get_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_multi_url(
             &self,
@@ -12190,7 +12190,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetSharedError>> {
             self.runtime.block_on(self.inner.get_shared())
         }
-        ///The URL `get_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_shared_url(
             &self,
@@ -12210,7 +12210,7 @@ Response `default`: Anything else*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeError>> {
             self.runtime.block_on(self.inner.get_maybe())
         }
-        ///The URL `get_maybe` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_maybe` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_maybe_url(
             &self,
@@ -12231,7 +12231,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_multi_default())
         }
-        ///The URL `get_multi_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_multi_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_multi_default_url(
             &self,
@@ -12250,7 +12250,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_plain_default())
         }
-        ///The URL `get_plain_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_plain_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_plain_default_url(
             &self,
@@ -12266,7 +12266,7 @@ Response `default`: Anything else*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetUnitDefaultError>> {
             self.runtime.block_on(self.inner.get_unit_default())
         }
-        ///The URL `get_unit_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_unit_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_unit_default_url(
             &self,
@@ -12287,7 +12287,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_bodyless_default())
         }
-        ///The URL `get_bodyless_default` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_bodyless_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_bodyless_default_url(
             &self,
@@ -12310,7 +12310,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_bodyless_default_multi())
         }
-        ///The URL `get_bodyless_default_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_bodyless_default_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_bodyless_default_multi_url(
             &self,
@@ -12331,7 +12331,7 @@ Response `404`: Not Found*/
         > {
             self.runtime.block_on(self.inner.get_bodyless_sibling())
         }
-        ///The URL `get_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_bodyless_sibling_url(
             &self,
@@ -12352,7 +12352,7 @@ Response `404`: Not Found*/
         > {
             self.runtime.block_on(self.inner.get_xml_bodyless_sibling())
         }
-        ///The URL `get_xml_bodyless_sibling` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_xml_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_xml_bodyless_sibling_url(
             &self,
@@ -12371,7 +12371,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_conditional())
         }
-        ///The URL `get_conditional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_conditional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_conditional_url(
             &self,
@@ -12387,7 +12387,7 @@ Response `400`: Bad Request*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetMaybeSingleError>> {
             self.runtime.block_on(self.inner.get_maybe_single())
         }
-        ///The URL `get_maybe_single` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_maybe_single` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_maybe_single_url(
             &self,
@@ -12405,7 +12405,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetAliasSharedError>> {
             self.runtime.block_on(self.inner.get_alias_shared())
         }
-        ///The URL `get_alias_shared` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_alias_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_alias_shared_url(
             &self,
@@ -12420,7 +12420,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<UploadFileError>> {
             self.runtime.block_on(self.inner.upload_file(body))
         }
-        ///The URL `upload_file` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `upload_file` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn upload_file_url(
             &self,
@@ -12436,7 +12436,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetBlobError>> {
             self.runtime.block_on(self.inner.get_blob(token, params))
         }
-        ///The URL `get_blob` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_blob` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_blob_url(
             &self,
@@ -12453,7 +12453,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<PostRawError>> {
             self.runtime.block_on(self.inner.post_raw(body))
         }
-        ///The URL `post_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `post_raw` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn post_raw_url(
             &self,
@@ -12472,7 +12472,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.post_nullable_bytes(params, body))
         }
-        ///The URL `post_nullable_bytes` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `post_nullable_bytes` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn post_nullable_bytes_url(
             &self,
@@ -12488,7 +12488,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<PostNullablePartsError>> {
             self.runtime.block_on(self.inner.post_nullable_parts(body))
         }
-        ///The URL `post_nullable_parts` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `post_nullable_parts` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn post_nullable_parts_url(
             &self,
@@ -12505,7 +12505,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.render_html())
         }
-        ///The URL `render_html` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `render_html` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn render_html_url(
             &self,
@@ -12522,7 +12522,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_octocat())
         }
-        ///The URL `get_octocat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_octocat` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_octocat_url(
             &self,
@@ -12539,7 +12539,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.download_raw())
         }
-        ///The URL `download_raw` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `download_raw` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn download_raw_url(
             &self,
@@ -12557,7 +12557,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.put_ranged(body))
         }
-        ///The URL `put_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `put_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn put_ranged_url(
             &self,
@@ -12575,7 +12575,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_artwork(id))
         }
-        ///The URL `get_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_artwork` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_artwork_url(
             &self,
@@ -12592,7 +12592,7 @@ Response `409`: Conflict*/
         ) -> Result<support::ResponseValue<()>, support::Error<PutArtworkError>> {
             self.runtime.block_on(self.inner.put_artwork(id, body))
         }
-        ///The URL `put_artwork` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `put_artwork` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn put_artwork_url(
             &self,
@@ -12610,7 +12610,7 @@ Response `400`: textual failure*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetTextErrorError>> {
             self.runtime.block_on(self.inner.get_text_error())
         }
-        ///The URL `get_text_error` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_text_error` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[deprecated]
         #[inline]
         pub fn get_text_error_url(
@@ -12634,7 +12634,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.get_raw_multi())
         }
-        ///The URL `get_raw_multi` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_raw_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_raw_multi_url(
             &self,
@@ -12652,7 +12652,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_order(body))
         }
-        ///The URL `submit_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `submit_order` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn submit_order_url(
             &self,
@@ -12671,7 +12671,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.patch_merge_document(id, body))
         }
-        ///The URL `patch_merge_document` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `patch_merge_document` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn patch_merge_document_url(
             &self,
@@ -12687,7 +12687,7 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitLegacyOrderError>> {
             self.runtime.block_on(self.inner.submit_legacy_order(body))
         }
-        ///The URL `submit_legacy_order` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `submit_legacy_order` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn submit_legacy_order_url(
             &self,
@@ -12705,7 +12705,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.post_json_meta(body))
         }
-        ///The URL `post_json_meta` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `post_json_meta` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn post_json_meta_url(
             &self,
@@ -12722,7 +12722,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.stream_chat())
         }
-        ///The URL `stream_chat` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `stream_chat` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn stream_chat_url(
             &self,
@@ -12739,7 +12739,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.stream_chat_lines())
         }
-        ///The URL `stream_chat_lines` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `stream_chat_lines` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn stream_chat_lines_url(
             &self,
@@ -12756,7 +12756,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.stream_chat_sequence())
         }
-        ///The URL `stream_chat_sequence` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `stream_chat_sequence` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn stream_chat_sequence_url(
             &self,
@@ -12770,7 +12770,7 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<GetAlternateAuthError>> {
             self.runtime.block_on(self.inner.get_alternate_auth())
         }
-        ///The URL `get_alternate_auth` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_alternate_auth` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_alternate_auth_url(
             &self,
@@ -12789,7 +12789,7 @@ Response `409`: binary error*/
             self.runtime
                 .block_on(self.inner.serialize_styles(matrix, label, raw, params))
         }
-        ///The URL `serialize_styles` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `serialize_styles` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn serialize_styles_url(
             &self,
@@ -12817,7 +12817,7 @@ Response `409`: binary error*/
                     self.inner.serialize_content_params(text, json, x_text, x_json),
                 )
         }
-        ///The URL `serialize_content_params` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `serialize_content_params` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn serialize_content_params_url(
             &self,
@@ -12834,7 +12834,7 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<SubmitFormError>> {
             self.runtime.block_on(self.inner.submit_form(body))
         }
-        ///The URL `submit_form` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `submit_form` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn submit_form_url(
             &self,
@@ -12852,7 +12852,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_form_additional(body))
         }
-        ///The URL `submit_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `submit_form_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn submit_form_additional_url(
             &self,
@@ -12870,7 +12870,7 @@ Response `409`: binary error*/
         > {
             self.runtime.block_on(self.inner.submit_nullable_form_additional(body))
         }
-        ///The URL `submit_nullable_form_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `submit_nullable_form_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn submit_nullable_form_additional_url(
             &self,
@@ -12885,7 +12885,7 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<UploadAdditionalError>> {
             self.runtime.block_on(self.inner.upload_additional(body))
         }
-        ///The URL `upload_additional` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `upload_additional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn upload_additional_url(
             &self,
@@ -12899,7 +12899,7 @@ Response `409`: binary error*/
         ) -> Result<support::ResponseValue<()>, support::Error<DocumentedHeadersError>> {
             self.runtime.block_on(self.inner.documented_headers())
         }
-        ///The URL `documented_headers` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `documented_headers` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn documented_headers_url(
             &self,
@@ -12918,7 +12918,7 @@ Response `default`: Anything else*/
         > {
             self.runtime.block_on(self.inner.get_no_success())
         }
-        ///The URL `get_no_success` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_no_success` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_no_success_url(
             &self,
@@ -12937,7 +12937,7 @@ Response `204`: No Content*/
         > {
             self.runtime.block_on(self.inner.get_maybe_empty())
         }
-        ///The URL `get_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_maybe_empty` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_maybe_empty_url(
             &self,
@@ -12956,7 +12956,7 @@ Response `204`: No Content*/
         > {
             self.runtime.block_on(self.inner.get_xml_maybe_empty())
         }
-        ///The URL `get_xml_maybe_empty` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_xml_maybe_empty` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_xml_maybe_empty_url(
             &self,
@@ -12975,7 +12975,7 @@ Response `200`: OK*/
         > {
             self.runtime.block_on(self.inner.get_ranged())
         }
-        ///The URL `get_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_ranged_url(
             &self,
@@ -12996,7 +12996,7 @@ Response `409`: Conflict*/
         > {
             self.runtime.block_on(self.inner.get_error_ranged())
         }
-        ///The URL `get_error_ranged` sends its request to, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        ///The URL `get_error_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
         #[inline]
         pub fn get_error_ranged_url(
             &self,
