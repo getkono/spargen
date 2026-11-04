@@ -38,9 +38,14 @@ static MOCK_REQUESTS: AtomicU32 = AtomicU32::new(0);
 /// How many times the token provider has been asked for a token.
 static PROVIDER_CALLS: AtomicU32 = AtomicU32::new(0);
 
-/// The `X-Request-ID` header the last `GET /pets` carried, or `None` when it carried none, so the
-/// list scenario can assert that its header parameter reached the wire.
-static LIST_REQUEST_ID: Mutex<Option<String>> = Mutex::new(None);
+/// The `X-Request-ID` header (`None` when absent) and the query string the last `GET /pets`
+/// carried, so the list scenario can assert that its parameters reached the wire.
+static LIST_REQUEST: Mutex<Option<(Option<String>, String)>> = Mutex::new(None);
+
+/// The `Content-Type` header and the body the last `POST /pets/1/photo` carried, so the upload
+/// scenario can assert each part's declared type. The mock only records: a panic on its
+/// connection thread would reach `main` as a dropped connection, not as the failed assertion.
+static PHOTO_UPLOAD: Mutex<Option<(String, Vec<u8>)>> = Mutex::new(None);
 
 /// The body the mock answers an unauthorized request with, so the 401 scenario can assert that
 /// the client preserved it byte for byte.
@@ -112,11 +117,26 @@ async fn main() {
     // A documented response header is read through a typed accessor — an explicit second step, so a
     // malformed header can never turn a successful call into a failure.
     let totals = petstore::ListPetsStatus200Headers::from_response(&pets).expect("typed headers");
+    let (request_id, query) = LIST_REQUEST
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the mock recorded the list request");
     // The header parameter reached the wire under its declared name, with the value set above.
     assert_eq!(
-        LIST_REQUEST_ID.lock().unwrap().as_deref(),
+        request_id.as_deref(),
         Some("example-1"),
         "list_pets must send its x-request-id header parameter"
+    );
+    // `deepObject` sends one bracketed pair per member, and an absent member sends nothing at
+    // all — a JSON blob or a `filter=name,Rex` join would both be wrong.
+    assert!(
+        query.contains("filter%5Bname%5D=Rex"),
+        "deepObject filter must travel as filter[name]=Rex: {query}"
+    );
+    assert!(
+        !query.contains("filter%5Btag%5D"),
+        "an absent deepObject member must not be sent: {query}"
     );
     assert_eq!(totals.x_total_count, 1);
     let pets = pets.into_inner();
@@ -174,7 +194,10 @@ async fn main() {
                 problem.r#type.to_string(),
                 "https://petstore.example/problems/name-reserved"
             );
-            println!("typed 409 with an unlisted problem type: {}", problem.r#type);
+            println!(
+                "typed 409 with an unlisted problem type: {}",
+                problem.r#type
+            );
         }
         other => panic!("expected a typed 409, got {other:?}"),
     }
@@ -221,6 +244,27 @@ async fn main() {
         .await
         .expect("upload_photo");
     assert_eq!(stored.status(), 204);
+    let (content_type, body) = PHOTO_UPLOAD
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the mock recorded the photo upload");
+    assert!(
+        content_type.starts_with("multipart/form-data; boundary="),
+        "photo upload must be multipart: {content_type}"
+    );
+    // Every part carries the Content-Type the Encoding Object declared for it.
+    let text = String::from_utf8_lossy(&body);
+    for (part, declared) in [("photo", "image/png"), ("meta", "application/json")] {
+        let at = text
+            .find(&format!("name=\"{part}\""))
+            .unwrap_or_else(|| panic!("part `{part}` missing: {text}"));
+        let header = text[at..].split("\r\n\r\n").next().unwrap_or("");
+        assert!(
+            header.contains(&format!("Content-Type: {declared}")),
+            "part `{part}` must declare {declared}: {header}"
+        );
+    }
     println!("uploaded a photo with typed multipart part Content-Types");
 
     // A bodied 200 beside a documented bodyless 204: each status is its own variant, so the empty
@@ -455,17 +499,7 @@ fn handle(mut stream: TcpStream) {
     } else {
         match (method, path) {
             ("GET", "/pets") => {
-                *LIST_REQUEST_ID.lock().unwrap() = request_id;
-                // `deepObject` sends one bracketed pair per member, and an absent member sends
-                // nothing at all — a JSON blob or a `filter=name,Rex` join would both be wrong.
-                assert!(
-                    query.contains("filter%5Bname%5D=Rex"),
-                    "deepObject filter must travel as filter[name]=Rex: {query}"
-                );
-                assert!(
-                    !query.contains("filter%5Btag%5D"),
-                    "an absent deepObject member must not be sent: {query}"
-                );
+                *LIST_REQUEST.lock().unwrap() = Some((request_id, query.to_owned()));
                 extra_headers.push_str("X-Total-Count: 1\r\n");
                 (
                     "200 OK",
@@ -473,22 +507,7 @@ fn handle(mut stream: TcpStream) {
                 )
             }
             ("POST", "/pets/1/photo") => {
-                // Every part carries the Content-Type the Encoding Object declared for it.
-                assert!(
-                    content_type.starts_with("multipart/form-data; boundary="),
-                    "photo upload must be multipart: {content_type}"
-                );
-                let text = String::from_utf8_lossy(&body);
-                for (part, declared) in [("photo", "image/png"), ("meta", "application/json")] {
-                    let at = text
-                        .find(&format!("name=\"{part}\""))
-                        .unwrap_or_else(|| panic!("part `{part}` missing: {text}"));
-                    let header = text[at..].split("\r\n\r\n").next().unwrap_or("");
-                    assert!(
-                        header.contains(&format!("Content-Type: {declared}")),
-                        "part `{part}` must declare {declared}: {header}"
-                    );
-                }
+                *PHOTO_UPLOAD.lock().unwrap() = Some((content_type, body));
                 ("204 No Content", String::new())
             }
             ("POST", "/pets") => {
