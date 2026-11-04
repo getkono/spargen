@@ -402,10 +402,10 @@ impl Responses {
     /// declares: the count and the variants follow what lowering kept. `default` is *offered*
     /// here whenever it is declared — including when it is also the operation's sole success
     /// source (see [`Self::success`]), which then types both sides with that one body, as the
-    /// specification does: `default` documents every undeclared status, of either class. (A bodied *streaming*
-    /// `default` cannot be typed on both sides — the success side would stream and this side
-    /// decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].) With
-    /// no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
+    /// specification does: `default` documents every undeclared status, of either class. (A bodied
+    /// *streaming* `default` cannot be typed on both sides — the success side would stream and this
+    /// side decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].)
+    /// With no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
     /// non-success status is then `UnexpectedStatus`, retaining at most `max_error_body` bytes of
     /// the body (see [`ErrorShape::None`]).
     pub(crate) fn error(&self) -> ErrorShape {

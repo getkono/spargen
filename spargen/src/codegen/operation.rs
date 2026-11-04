@@ -223,9 +223,9 @@ pub(super) fn url_accessor_doc(method_ident: &crate::name::Ident) -> String {
     let method = method_ident.as_str().trim_start_matches("r#");
     normalize_rustdoc(&format!(
         "The URL `{method}` sends its request to, less any `apiKey` query credential, with the \
-         same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is \
-         sent and no credential is attached: this is for a URL handed to something that fetches \
-         it itself."
+         same path and query encoding, resolved against the client's base URL or the operation's \
+         server override. Nothing is sent and no credential is attached: this is for a URL handed \
+         to something that fetches it itself."
     ))
 }
 

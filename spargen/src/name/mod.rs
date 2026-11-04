@@ -1323,9 +1323,9 @@ mod tests {
         /// success enums, beside the runtime re-exports), the client methods and their URL
         /// accessors (beside the fixed ones), each struct's fields with its overflow map, each
         /// enum's and union's variants with an open enum's catch-all, each operation's method
-        /// arguments with its generator bindings and its `…Params` fields, each header struct's fields, the `servers` module
-        /// (the server builders and the server-variable enums `emit_servers` declares side by
-        /// side), and each server's setters and each server variable's values. Every member is
+        /// arguments with its generator bindings and its `…Params` fields, each header struct's
+        /// fields, the `servers` module (the server builders and the server-variable enums
+        /// `emit_servers` declares side by side), and each server's setters and each server variable's values. Every member is
         /// allocated, so the property cannot pass by allocating nothing.
         #[test]
         fn every_allocation_is_legal_and_distinct_within_its_scope(

@@ -13,8 +13,8 @@
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
 //! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, [`idents`] (the
 //! allocated-name lookups and status variant names the operation, blocking-client, parameter,
-//! response and dispatch emitters read), and [`format`](mod@format) (the `prettyplease` pass over the
-//! assembled tokens).
+//! response and dispatch emitters read), and [`format`](mod@format) (the `prettyplease` pass over
+//! the assembled tokens).
 
 mod blocking;
 mod body;
