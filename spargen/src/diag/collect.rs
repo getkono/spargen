@@ -205,7 +205,7 @@ mod tests {
 
     /// A diagnostic names the file its span lies in once that file is registered, and the
     /// rendering puts the path before the line and column; one with no span, or a span in a file
-    /// the run never registered, names none and renders as before (#727).
+    /// the run never registered, names none and renders only the line and column (#727).
     #[test]
     fn a_spanned_diagnostic_names_the_registered_file_its_span_lies_in() {
         let at = |file: u32, line: u32| {

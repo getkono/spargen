@@ -1,91 +1,46 @@
 use super::*;
 
 /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
-/// that body specifies workspace-dependency inheritance as an algorithm rather than describing
-/// the audit in a paragraph. Nothing else holds it to anything —
-/// `every_code_has_title_and_explain_text` asserts only that it is non-empty, and
-/// `docs/errors.md` carries titles.
+/// that body specifies workspace-dependency inheritance as an algorithm. This test pins the body
+/// byte for byte; `diag/code/tests.rs` holds the support matrix's `E023` row to it and records the
+/// fixtures behind its consumer-obligation clauses in `EXPLAIN_CLAUSES_OWNED_ELSEWHERE`.
 ///
-/// The rule, rather than a list: **every clause of that body which states what the resolver
-/// does is asserted here, against the fixture in this module that makes it true, named in the
-/// comment beside it.** Clauses that give advice, describe how the crate is built, give a
-/// rationale, or restate what Cargo and rustc do afterwards are not asserted, because nothing
-/// in this module observes them — but each is still *listed*, by `unasserted`, with the reason
-/// it is exempt. No count of the body's propositions is offered.
+/// Every clause of the body which states what the resolver does is asserted here, exactly once,
+/// against the fixture in this module that makes it true, named in the comment beside it. Every
+/// other clause (advice, how the crate is built, a rationale, what Cargo and rustc do afterwards)
+/// is listed by `unasserted` with the reason nothing here observes it. The coverage check claims
+/// the body byte by byte: every `promises` and `unasserted` entry marks the one span it matches,
+/// and outside those spans only punctuation and the connectives in `CONNECTIVES` may stand, so a
+/// sentence added to the body fails until its author cites a fixture or classifies it (#209).
+/// Review, not this test, judges a classification and the choice among connectives.
 ///
-/// The listing is what makes the rule total. The body is claimed byte by byte: every
-/// `promises` and `unasserted` entry marks the one span it matches, and outside those spans
-/// only punctuation and the connectives in `CONNECTIVES` may stand. So a sentence typed into
-/// the body — and into the expected file beside it — fails here until its author either cites
-/// the fixture that makes it true or states, in an `unasserted` entry, why nothing observes it.
-/// Without that coverage check, a sentence added to both copies would leave every assertion
-/// here passing, however little of it is true (#209). What the check cannot do is judge a
-/// classification: listing a resolver claim as `unasserted` passes, and only review of that
-/// entry catches it. Nor does it judge the connectives, which may be swapped for one another.
-///
-/// Why the body is pinned twice, and what each pin is worth. The equality assertion against
-/// `runtime_contract_e023_explain.txt` **logically implies every clause assertion above it** —
-/// the same string has the same substrings, the same counts and the same order — so the clause
-/// assertions add no coverage. Their entire value is the failure message: equality says the
-/// text changed, and they say **which promise broke** and which fixture was supposed to make it
-/// true. That is worth keeping and is not worth claiming as coverage.
-///
-/// Equality constrains **drift between the two copies**, and nothing else. It is symmetric:
-/// the same text typed into both copies passes it, whatever that text says, so it does not
-/// stop a sentence being added that contradicts the algorithm, nor a line prefixed saying none
-/// of the description is accurate. The coverage check is what stops those, by refusing any
-/// word it has not been told how to classify.
-///
-/// The cost, stated rather than discovered. Requiring each clause **exactly once** is a
-/// false-gate hazard: a short clause such as "taking the version from there" or "the union of
-/// both feature lists" will red this test if a future edit legitimately uses the same words a
-/// second time, even though nothing is wrong. That is the price of closing the
-/// matched-the-wrong-occurrence class, and the fix in that case is to lengthen the assertion,
-/// not to drop the rule. Equality is likewise deliberate friction, and the friction is the
-/// mechanism: editing the explain text means re-typing it into a second file.
-///
-/// What the three therefore deliver, exactly: **no clause can change, and none can be added,
-/// without someone re-typing it in the test and classifying it there.** They do not make the
-/// body true. A false clause stays false with every guard green (#171), and a maintainer who
-/// re-types a change into the expected file has made this test agree with it, not verified
-/// it.
+/// The equality assertion against `runtime_contract_e023_explain.txt` implies every clause
+/// assertion; the clause assertions exist for their failure message, which names the promise that
+/// broke and the fixture meant to keep it. Equality catches drift between the two copies and
+/// nothing else. A clause that legitimately occurs twice is lengthened until it occurs once, not
+/// dropped. None of this makes the body true: a false clause stays false with every guard green
+/// (#171).
 #[test]
 fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     let explain = Code::RuntimeDependencyContract.explain();
-    // The expected body lives in its own file, not in this one, and that placement is the
-    // guard. With the mirror inline, a single find-and-replace over the module's source would
-    // rewrite the mirror and every clause assertion in one stroke, and leave the suite green.
-    // An edit to `code.rs` must be re-typed in a second file that no edit to this module can
-    // reach.
-    // It sits beside `runtime_contract/`, under `src/`, so it ships in the published crate and
-    // this test still compiles there. Being test-only, it is not needed to build the packaged
-    // library, so `every_included_file_ships_in_the_published_crate` in
-    // `tests/layering/packaging.rs` is what holds it in the package.
-    // The file carries a trailing newline, as a text file should; the explain body does not.
+    // The expected body lives in its own file, so an edit to `code.rs` must be re-typed in a
+    // second file that no find-and-replace over this module reaches. It sits under `src/` so it
+    // ships in the published crate and this test compiles there;
+    // `every_included_file_ships_in_the_published_crate` in `tests/layering/packaging.rs` holds it
+    // in the package. The file carries a trailing newline; the explain body does not.
     let expected = include_str!("../../runtime_contract_e023_explain.txt").trim_end_matches('\n');
 
-    // The fixture each clause names as its pin is checked to resolve against the source of every
-    // file of this test module (`TEST_SOURCES`).
-    //
-    // Be precise about what that is worth. The check catches a **rename or a typo** and nothing
-    // else: it verifies the name belongs to a `#[test]` in this module, not that the test has
-    // anything to do with the clause citing it. Repointing the version clause at
-    // `the_time_requirement_never_asks_for_serde`, which asserts nothing about versions, passes.
-    // Before round 6 it did not even require a test — `fn messages(`, `fn linux(` and any other
-    // helper satisfied it. Turning a citation into *evidence* means deriving the text from the
-    // behaviour, which is #137's subject and not this test's.
-    //
-    // A cited name must be a `#[test]` in this module: the attribute immediately precedes it,
-    // with only whitespace between. The predicate is shared with `diag/code.rs`'s
-    // `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` check, so a fix to it reaches both.
+    // Each fixture a clause names must be a `#[test]` in this module (`TEST_SOURCES`), through the
+    // predicate `diag/code.rs`'s `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` check shares. That catches a
+    // rename or a typo, not a citation of a test unrelated to its clause (#137).
 
     // Every span of the body some entry below claims, for the coverage check at the end.
     let mut claimed: Vec<&str> = Vec::new();
     // Exactly once, not merely present: an assertion whose text also occurs earlier or later
     // matches the wrong sentence and leaves the one it was written for unpinned.
-    // `[workspace.dependencies]` appears twice in this body, and that is how the opening
-    // clause below went unasserted while reading as though it were covered. The same holds
-    // for an `unasserted` entry, which would otherwise exempt the wrong occurrence.
+    // `[workspace.dependencies]` appears twice in this body, so a presence check on the opening
+    // clause below would read as covered while pinning neither occurrence. The same holds for
+    // an `unasserted` entry, which would otherwise exempt the wrong occurrence.
     let occurs_once = |clause: &str| {
         let occurrences = explain.matches(clause).count();
         // The body is deliberately not printed here, for the same reason the equality

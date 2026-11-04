@@ -1,13 +1,11 @@
-//! Cargo manifest auditing for the runtime required by generated output.
-//!
-//! This is facade plumbing rather than a public subsystem: the lowered API determines the
-//! requirements, while Cargo remains responsible for resolving the consumer's declared graph.
+//! Cargo manifest auditing for the runtime required by generated output. The lowered API
+//! determines the requirements, while Cargo remains responsible for resolving the consumer's
+//! declared graph.
 //!
 //! This file is the audit's driver: it reads the consumer manifest, locates the workspace root,
 //! runs every requirement through the checks, and owns the `E023` diagnostic and the
 //! `cargo:rerun-if-changed` lines. It also holds the Cargo-integration policy
-//! ([`CargoEnvironment`]): whether this run emits directives and audits a manifest at all, and the
-//! `W012`/`W013`/`E024` diagnostics that say why not. The rest is split by concern:
+//! ([`CargoEnvironment`]). The rest is split by concern:
 //!
 //! - `requirements` — the tested dependency floors, what one lowered API requires, and the
 //!   requirement table both the audit and `spargen deps` read;
@@ -374,13 +372,11 @@ const AUDITED_MANIFEST: &str = "; audited manifest: ";
 /// An `E023` diagnostic whose message ends by naming `audited`, the absolutized consumer manifest
 /// the audit read.
 ///
-/// It is the only constructor, so no message can leave out which file it is about. It rides on the
-/// message rather than the `help:` remedy because `generate_api!` reports only code, message, and
-/// pointer: a manifest-discovery mismatch shows on the macro path (#71), and a remedy does not
-/// reach that report. A message that already names this file in its own clause (a
-/// read failure of the consumer manifest, or a self-rooted workspace declaring no entry) still
-/// carries the suffix: the clause names the file in its role there, and the suffix names it in the
-/// same shape on every message.
+/// It is the only constructor, so no message can leave out which file it is about, on the build
+/// script and macro paths alike (a manifest-discovery mismatch shows on the macro path, #71). A
+/// message that already names this file in its own clause (a read failure of the consumer
+/// manifest, or a self-rooted workspace declaring no entry) still carries the suffix: the clause
+/// names the file in its role there, and the suffix names it in the same shape on every message.
 fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
     // A TOML parse error ends in a newline, which would strand the suffix on a line of its own.
     message.truncate(message.trim_end().len());

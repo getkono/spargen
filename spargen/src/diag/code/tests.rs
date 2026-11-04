@@ -464,7 +464,8 @@ struct Case {
     reserved_wording: Option<&'static str>,
 }
 
-/// The codes whose explain body enumerates the cases that reach them. See [`Code::explain`].
+/// The codes whose explain body enumerates the cases that reach them. See the comment in
+/// [`Code::explain`].
 const ENUMERATED_CASES: &[(Code, &[Case])] = &[
     (
         Code::ValidationKeywordIgnored,
@@ -941,8 +942,6 @@ fn case_marker(line: &str) -> Option<(&str, Vec<&str>)> {
 
 /// `spargen explain` prints an explain body verbatim, and a body that lists the cases reaching
 /// its code makes a claim about the generator a test can check: that the list is exhaustive.
-/// `E004`'s once was not — a security scheme alias miss and a chained Path Item `$ref` reached
-/// the code while the body listed neither — and the only assertion on it was `!is_empty()`.
 ///
 /// So every occurrence of such a code in the crate's sources (outside `diag`, which declares
 /// it) must carry a case marker within [`MARKER_REACH`] lines above it, every tag a marker
@@ -1209,12 +1208,10 @@ const RUNTIME_CONTRACT: (&str, &str) = (
 ///
 /// `E023`'s body is pinned byte for byte by
 /// `runtime_contract::tests::explain::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`,
-/// which additionally cites a fixture for each sentence stating what the resolver does, and by
-/// its own rule does not cite fixtures for sentences that give advice. The consumer-obligations
-/// clauses below fall outside that rule — most read as advice — yet each is enforced by an
-/// existing fixture, and one (reqwest's default features) is a named `E023` trigger in the
-/// support matrix's rejected column, not advice at all. This table is where that ownership is
-/// recorded, so the byte-for-byte test's rule need not change.
+/// which cites fixtures for the clauses stating what the resolver does. The consumer-obligation
+/// clauses below mostly read as advice, yet each is enforced by an existing fixture, and one
+/// (reqwest's default features) is a named `E023` trigger in the support matrix's rejected
+/// column. This table records that ownership.
 ///
 /// What the check is worth, precisely: it catches a clause edited or deleted from the body and
 /// a fixture renamed or removed. It does not verify that a cited fixture has anything to do

@@ -7,12 +7,6 @@
 //! module, so it takes a `Build`, and the other entry points demand no output path they would
 //! never use.
 //!
-//! Both types have private fields and chained setters, so a new knob is an additive change rather
-//! than a breaking one.
-//!
-//! This module is facade plumbing, not a subsystem: it carries no `layer-deps:` header, and the
-//! layering lint skips it.
-//!
 //! # `spargen.toml`
 //!
 //! The same knobs can be read from a config file, which is available to `build.rs`, the
@@ -77,10 +71,6 @@ impl Spec {
     pub fn path(&self) -> &Utf8Path {
         &self.path
     }
-
-    // A setter holds each knob's plain name, so the getter that reads it back adds the setter's
-    // parameter name (`uuid(enabled)` ⇒ `uuid_enabled`, `batch_cap(count)` ⇒ `batch_cap_count`).
-    // `omit(omit)` would double the word, so its getter is `omissions`.
 
     /// Whether `format: uuid` maps to `uuid::Uuid`, as [`uuid`](Self::uuid) set it.
     pub fn uuid_enabled(&self) -> bool {
@@ -303,7 +293,7 @@ impl Spec {
 /// Both need a real build-script process (`OUT_DIR` and friends in the environment). Outside
 /// one — a test, a CLI wrapper, an ad-hoc binary — spargen cannot emit directives Cargo would
 /// read, nor find the manifest to audit. This enum makes that a decision rather than a silent
-/// degradation. `#[non_exhaustive]`, so a policy can be added without a breaking change.
+/// degradation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum CargoIntegration {
@@ -321,13 +311,7 @@ pub enum CargoIntegration {
 }
 
 /// Where to generate: a [`Spec`] plus the output path and Cargo integration policy. The input to
-/// [`generate`](crate::generate).
-///
-/// ```no_run
-/// // build.rs — spec to first typed API call in well under ten lines.
-/// let build = spargen::Spec::new("api/openapi.yaml").build("src/api.rs");
-/// spargen::generate(&build).expect_success();
-/// ```
+/// [`generate`](crate::generate), whose doc shows the `build.rs` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
     pub(crate) spec: Spec,

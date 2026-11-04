@@ -92,10 +92,8 @@ impl RuntimeRequirements {
     }
 }
 
-/// One dependency the consuming package must declare, as spargen derived it from the lowered API.
-///
-/// This is the single source of truth behind both the audit (`E023`) and `spargen deps`: the two
-/// read the same table, so what the audit demands and what `deps` prints cannot drift.
+/// One dependency the consuming package must declare, as spargen derived it from the lowered API:
+/// a row of the table both the audit (`E023`) and `spargen deps` read.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Requirement {
     /// The manifest table `spargen deps` prints it in — `dependencies`, or a target-specific
@@ -125,7 +123,7 @@ pub(super) enum Placement {
 }
 
 /// The `cfg` generated code puts around every use of the blocking client's `tokio` (together with
-/// `feature = "blocking"`), and the table `spargen deps` prints for it.
+/// `feature = "blocking"`).
 pub(super) const BLOCKING_GATE: &str = "not(target_arch = \"wasm32\")";
 
 /// The target the native-only rule is anchored to: the only wasm target generated code supports.
@@ -249,12 +247,8 @@ impl RequiredDependency {
 }
 
 /// Every dependency generated output from one spec requires — what `spargen deps` prints and what
-/// the `E023` audit checks a consumer manifest against.
-///
-/// Both read one private requirement table, so the block [`Requirements::manifest_block`] prints
-/// passes the audit: as printed for a package that declares no opt-in feature, and with that
-/// feature's commented lines uncommented (merged into any table or key the manifest already
-/// declares) for one that does.
+/// the `E023` audit checks a consumer manifest against. Both read one requirement table, so the
+/// block [`Requirements::manifest_block`] prints passes the audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct Requirements {
