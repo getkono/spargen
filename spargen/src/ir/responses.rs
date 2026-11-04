@@ -18,7 +18,8 @@ impl StatusSpec {
     /// class RFC 9110 §15.3 calls successful and the emitted dispatch enters its success branch on
     /// through `StatusCode::is_success()`, so every other selector, `304` included, is on the error
     /// side (issue #198) and `default` is never a success selector (see
-    /// [`Responses::default_is_success_source`]).
+    /// [`Responses::default_is_success_source`]). A documented `301`/`302`/`303`/`307`/`308`
+    /// reaches the error side only when the injected client's redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),

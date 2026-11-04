@@ -113,7 +113,8 @@ pub(crate) struct Parameter {
     pub(crate) allow_reserved: bool,
     /// Whether array/object values use the style's exploded representation.
     pub(crate) explode: bool,
-    /// `deprecated: true`, emitted as a "Deprecated per the spec." rustdoc note on the field.
+    /// `deprecated: true`. An optional parameter's `…Params` field carries a "Deprecated per the
+    /// spec." rustdoc note; a required parameter is positional and gets no note.
     pub(crate) deprecated: bool,
     /// The rendered `default` value, if the parameter schema declared one. Documented in rustdoc
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the
