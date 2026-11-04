@@ -46,7 +46,8 @@
 //! [`Build`], [`DiffRejection`] and [`DiffSides`] keep their fields private and are read through
 //! accessors, and `Spec` and `Build` are set through chained setters, so a new field or knob is
 //! additive. A type with public fields or variants that may grow — [`Diagnostic`], [`Outcome`],
-//! [`Code`] and [`CargoIntegration`] among them — is `#[non_exhaustive]` instead.
+//! [`Code`] and [`CargoIntegration`] among them — is `#[non_exhaustive]` instead. [`Severity`]
+//! stays exhaustive: its two variants are the error/warning partition every [`Report`] splits on.
 
 mod diag;
 
