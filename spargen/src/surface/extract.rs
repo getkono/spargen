@@ -284,12 +284,8 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
         Some(TypeKind::Null) => "()".to_owned(),
         Some(TypeKind::Never) => nominal_name(ty, names),
-        // A reservation has no structure to canonicalise. `spargen diff` compares two finished
-        // surfaces, and `check_invariants` rejects a graph that still holds one, so this is
-        // unreachable — and says so structurally, as `type_kind_tokens` in `codegen::models` does for
-        // the same variant. A rendered placeholder would be a string nothing asserts and a later
-        // hand could fold into the `Value` arm below without anything noticing, which is the
-        // silent fall-through to `Any` this variant was introduced to prevent.
+        // Unreachable on a checked `Api`; see `TypeKind::Reserved`. A rendered placeholder here
+        // could be folded into the `Value` arm below without anything noticing.
         Some(TypeKind::Reserved) => {
             unreachable!(
                 "a reservation reached the surface; `check_invariants` should have rejected it"

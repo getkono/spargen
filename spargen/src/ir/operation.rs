@@ -41,8 +41,9 @@ impl Method {
     }
 }
 
-/// A parsed path template, split into literal and parameter segments so URL construction is
-/// static segment concatenation with no runtime regex.
+/// A parsed path template. The segments are what lowering checks path parameters against and what
+/// a synthesized operation ID is built from; the emitted URL code starts from `raw` and replaces
+/// each `{name}` placeholder with its encoded value.
 #[derive(Debug, Clone)]
 pub(crate) struct PathTemplate {
     /// The raw template, e.g. `/users/{id}/posts`.
@@ -112,7 +113,8 @@ pub(crate) struct Parameter {
     pub(crate) allow_reserved: bool,
     /// Whether array/object values use the style's exploded representation.
     pub(crate) explode: bool,
-    /// `deprecated` → `#[deprecated]`.
+    /// `deprecated: true`. An optional parameter's `…Params` field carries a "Deprecated per the
+    /// spec." rustdoc note.
     pub(crate) deprecated: bool,
     /// The rendered `default` value, if the parameter schema declared one. Documented in rustdoc
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the

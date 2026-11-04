@@ -1,8 +1,7 @@
 //! The identifiers an emitted item is declared or referenced by: lookups into the
 //! [`Names`] table `name` allocated, and the status-selector variant names derived from a
-//! [`StatusSpec`](crate::ir::StatusSpec). Each lookup here is written once, key and failure
-//! message included, for the operation, blocking-client, parameter, response and dispatch
-//! emitters that read it.
+//! [`StatusSpec`](crate::ir::StatusSpec), read by the operation, blocking-client, parameter,
+//! response and dispatch emitters.
 
 use quote::format_ident;
 

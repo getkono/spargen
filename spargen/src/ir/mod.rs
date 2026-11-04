@@ -56,8 +56,8 @@ pub(crate) struct Api {
 
 impl Api {
     /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
-    /// the feature-gated `quick-xml` dependency in the synthesized manifest and the conditional
-    /// embedding of the XML runtime helpers — both deterministic functions of the API.
+    /// the `quick-xml` row of the consumer requirements table (`runtime_contract`) and the
+    /// conditional embedding of the XML runtime helpers — both deterministic functions of the API.
     pub(crate) fn uses_xml(&self) -> bool {
         self.operations.iter().any(|operation| {
             let request_xml = operation
@@ -112,9 +112,8 @@ impl Api {
                     TypeKind::Struct(_) | TypeKind::Union(_) => {
                         contains_bytes(&self.types, id, &mut BTreeSet::new())
                     }
-                    // Requirements are derived only from an `Api` that passed `check_invariants`,
-                    // which rejects a surviving reservation. Answering `false` would under-declare
-                    // a runtime dependency for a shape nobody computed.
+                    // Unreachable on a checked `Api`; see `TypeKind::Reserved`. Answering `false`
+                    // would under-declare a runtime dependency for a shape nobody computed.
                     TypeKind::Reserved => unreachable!(
                         "a reservation reached the runtime contract; `check_invariants` should \
                      have rejected it"
@@ -186,8 +185,7 @@ fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>
             .variants
             .iter()
             .any(|variant| contains_bytes(types, variant.ty.id, visiting)),
-        // Unreachable for the reason `Api::uses_bytes_serde` states: only a checked `Api` gets
-        // here.
+        // Unreachable on a checked `Api`; see `TypeKind::Reserved`.
         Some(TypeKind::Reserved) => unreachable!(
             "a reservation reached the runtime contract; `check_invariants` should have rejected it"
         ),

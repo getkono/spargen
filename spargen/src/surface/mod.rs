@@ -276,8 +276,9 @@ pub enum ChangeKind {
     TypeAdded,
     /// A public type was removed. **Major**.
     TypeRemoved,
-    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union` ↔ `newtype`), or a
-    /// `pub type` alias of the same name became one of those, or the reverse. **Major**.
+    /// A public type's generation kind changed (`struct` ↔ `enum` ↔ `union` ↔ `newtype` ↔
+    /// `empty enum`), or a `pub type` alias of the same name became one of those, or the reverse.
+    /// **Major**.
     TypeKindChanged,
     /// A new optional field was added to a struct. **Minor**.
     FieldAdded,

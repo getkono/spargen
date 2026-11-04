@@ -245,7 +245,8 @@ mod tests {
     /// `gen` is an ordinary identifier in edition 2021 and reserved in 2024. Generated output
     /// adopts the consumer's edition, so it has to be escaped even though every test oracle in this
     /// crate — `proc_macro2`, compiled at edition 2021 — considers the bare word perfectly valid.
-    /// The end-to-end proof is `a_gen_named_spec_compiles_under_edition_2024` in `e2e.rs`.
+    /// The end-to-end proof is `a_gen_named_spec_compiles_under_edition_2024` in
+    /// `tests/e2e/collisions.rs`.
     #[test]
     fn gen_is_escaped_although_edition_2021_would_accept_it() {
         for role in [IdentRole::Field, IdentRole::Method, IdentRole::Param] {
@@ -298,7 +299,7 @@ mod tests {
     }
 
     /// A `matches!` chain warns on a repeated arm; a flat slice does not, so the duplicate check
-    /// that the old table got from the compiler has to be written down.
+    /// is written down here.
     #[test]
     fn the_keyword_table_has_no_duplicates() {
         let unique: std::collections::BTreeSet<&str> = KEYWORDS.iter().copied().collect();

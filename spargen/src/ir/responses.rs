@@ -14,21 +14,12 @@ pub(crate) enum StatusSpec {
 }
 
 impl StatusSpec {
-    /// Whether the selector covers only success (2xx) statuses: an exact code in `200..=299`, or
-    /// the `2XX` range. Every other selector — `1XX`, `3XX`, `4XX`, `5XX`, and each exact code in
-    /// them — is on the error side of the generated shape, `304 Not Modified` included (issue
-    /// #198). That is RFC 9110's own classification (§15.3 "Successful 2xx"; 304 is in §15.4
-    /// "Redirection 3xx"), and it is the only one the generated dispatch can honour: an emitted
-    /// method enters its success branch on the transport's `StatusCode::is_success()`, which is
-    /// exactly 2xx, so a status this predicate put on the success side would be a variant no
-    /// response could reach. A documented bodyless `304` therefore reaches the caller from the
-    /// error side: as a unit variant where that side documents any error body (the `304` is then
-    /// one more entry of the error enum; see `Responses::error`), and as `UnexpectedStatus`
-    /// carrying the status where it documents none. A documented
-    /// `301`/`302`/`303`/`307`/`308` reaches the error side only when the injected client's
-    /// redirect policy does not follow it. `default` is not a success selector: it documents
-    /// statuses of either class, and [`Responses::success`] decides separately when it is the
-    /// success source.
+    /// Whether the selector covers only 2xx statuses (an exact code in `200..=299`, or `2XX`), the
+    /// class RFC 9110 §15.3 calls successful and the emitted dispatch enters its success branch on
+    /// through `StatusCode::is_success()`, so every other selector, `304` included, is on the error
+    /// side (issue #198) and `default` is never a success selector (see
+    /// [`Responses::default_is_success_source`]). A documented `301`/`302`/`303`/`307`/`308`
+    /// reaches the error side only when the injected client's redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),
@@ -160,14 +151,14 @@ impl Responses {
     /// decodes to a stream that yields nothing.
     ///
     /// The entries are the lowered success statuses of `by_status`, not everything the document
-    /// declares; `default` is never among them. A success status is a 2xx one as
-    /// [`StatusSpec::is_success`] decides it, so a documented `3XX` — `304 Not Modified` included —
-    /// is never an entry here and never promotes a lone body to the enum: `200` with a body beside
-    /// a bodyless `304` is plain `T`, and the `304` is on the error side (issues #198 and
-    /// #105; the tests below pin both). It is the success source only when `by_status`
-    /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
-    /// return that bypasses the count above — and is offered to the error shape as
-    /// [`StatusSpec::Default`] whenever it is declared, subject there to the same entry rule (see
+    /// declares; `default` is never among them (#105). A success status is a 2xx one as
+    /// [`StatusSpec::is_success`] decides it, so a documented `3XX` never promotes a lone body to
+    /// the enum: `200` with a body beside a bodyless `304` is plain `T`, and the `304` is on the
+    /// error side (#198; pinned by
+    /// `a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum` in
+    /// `responses/tests.rs`). `default` is the success source only when `by_status` documents no
+    /// success status at all (see [`Self::default_is_success_source`]) — the early return that
+    /// bypasses the count above — and is offered to the error shape whenever it is declared (see
     /// [`Self::error`]).
     ///
     /// The two `default` claims above, pinned through the public pipeline (this item is private, so
@@ -280,9 +271,10 @@ impl Responses {
     /// carries a body and that body was lowered from a streaming media. The generated method then
     /// returns `EventStream<T>` in place of `ResponseValue<T>`. Media selection (`choose_media`)
     /// ranks JSON above every streaming media, so a response that also offers a JSON alternative
-    /// lowers to that JSON body and never reaches here as a stream. A streaming body in any other position — beside a second bodied success, or on the
-    /// error side — is rejected during lowering (see [`Self::stream_outside_single_success`]), so
-    /// no generated operation decodes a stream as a whole body.
+    /// lowers to that JSON body and never reaches here as a stream. A streaming body in any other
+    /// position — beside a second bodied success, or on the error side — is rejected during
+    /// lowering (see [`Self::stream_outside_single_success`]), so no generated operation decodes a
+    /// stream as a whole body.
     pub(crate) fn stream_success(&self) -> Option<(Framing, Ty)> {
         let response = sole_bodied(self.success_responses())?;
         Some((response.stream?, response.body?))
@@ -374,17 +366,9 @@ impl Responses {
     }
 
     /// Whether `default` is the operation's success source: exactly when `by_status` documents no
-    /// success status — it is empty, or holds only non-2xx statuses such as `404`. The
-    /// specification defines `default` as the documentation of every status not declared
-    /// explicitly, so with no success status declared it is what documents a 2xx response. While
-    /// any success status is declared, `default` stays on the error side alone, and satisfies no
-    /// undeclared 2xx in any [`SuccessShape`] (issue #151). That is deliberate: the specification's
-    /// own example pairs a `200` with a `default` "for others (implying an error)", so its body is
-    /// in practice an error model — often one whose optional fields match any object, which would
-    /// type a success silently as an error body — and one response object would then generate a
-    /// success variant and an error variant at once. `Unit` and `Plain` name no status, so they take
-    /// an undeclared 2xx as their one success; only `Enum` can tell it apart, and surfaces it as
-    /// `UnexpectedStatus` with the body preserved, rather than guess.
+    /// success status (it is empty, or holds only non-2xx statuses such as `404`), because while
+    /// any is declared `default` documents the errors "for others" and stays on the error side
+    /// alone, never a success entry or a fallback for an undeclared 2xx (issue #151).
     fn default_is_success_source(&self) -> bool {
         !self.by_status.iter().any(|(status, _)| status.is_success())
     }
@@ -417,14 +401,14 @@ impl Responses {
     /// The entries are the lowered non-success statuses of `by_status` plus the
     /// [`StatusSpec::Default`] entry a declared `default` contributes, not everything the document
     /// declares: the count and the variants follow what lowering kept. `default` is *offered*
-    /// here whenever it is declared — including when it is also the operation's sole success source (see
-    /// [`Self::success`]), which then types both sides with that one body, as the specification
-    /// does: `default` documents every undeclared status, of either class. (A bodied *streaming*
-    /// `default` cannot be typed on both sides — the success side would stream and this side
-    /// decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].) With
-    /// no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
-    /// non-success status is then `UnexpectedStatus`, retaining at most `max_error_body` bytes of
-    /// the body (see [`ErrorShape::None`]).
+    /// here whenever it is declared — including when it is also the operation's sole success
+    /// source (see [`Self::success`]), which then types both sides with that one body, as the
+    /// specification does: `default` documents every undeclared status, of either class. (A bodied
+    /// *streaming* `default` cannot be typed on both sides — the success side would stream and this
+    /// side decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].)
+    /// With no bodied entry at all the shape is `None`, whatever bodyless entries are declared:
+    /// every non-success status is then `UnexpectedStatus`, retaining at most `max_error_body`
+    /// bytes of the body (see [`ErrorShape::None`]).
     pub(crate) fn error(&self) -> ErrorShape {
         let entries: Vec<(StatusSpec, Option<Ty>)> = self
             .entries()
@@ -503,10 +487,8 @@ fn has_two_bodied(responses: &[&Response]) -> bool {
 /// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
 /// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
 /// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
-/// name no status, so they draw no distinction between a documented 2xx and any other. `default`
-/// reaches the success side only when `by_status` documents no success status; while it holds any
-/// success entry, `default` is not among them and is no success fallback for a 2xx that matches
-/// none of them — which is a fact about the lowered entries, not about what the document declares.
+/// name no status, so they draw no distinction between a documented 2xx and any other. When
+/// `default` reaches the success side is [`Responses::default_is_success_source`]'s rule.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
     /// No success body.
@@ -519,8 +501,8 @@ pub(crate) enum SuccessShape {
     /// the `204`'s empty body as a malformed `T`). Generated as a per-operation
     /// response enum, one variant per entry — a payload-carrying variant for a bodied status, a
     /// unit variant for a bodyless one (e.g. `204`). Entries are the lowered *success* statuses
-    /// only, not everything the document declares — `default` is never among them — pre-sorted
-    /// into decode precedence (exact before range); decode dispatches by HTTP status in that
+    /// only (see [`Responses::default_is_success_source`] for `default`), pre-sorted into decode
+    /// precedence (exact before range); decode dispatches by HTTP status in that
     /// order and rejects any other 2xx as `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }

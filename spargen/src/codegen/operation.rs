@@ -47,8 +47,8 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
 
-    // The typed argument list (required params, the optional-params struct, the body) is shared
-    // verbatim with the blocking shim so the two signatures can never drift.
+    // The typed argument list (required params, the optional-params struct, the body); see
+    // `operation_args`.
     let (args, _arg_names) = operation_args(operation, api, names);
     let UrlBuilding {
         statements: url_statements,
@@ -184,11 +184,8 @@ pub(super) fn operation_url_args(
     (kept(args), kept(forwards))
 }
 
-/// Emit one operation's URL accessor on `Client`: a `pub fn {method}_url` taking the parameters
-/// that shape the URL and returning the URL the operation method sends its request to, built by
-/// the same [`url_building`] statements, against the client's base URL or the operation's server
-/// override. Nothing is sent, and no credential is attached. It serves a caller that hands the URL
-/// to something that fetches it itself, a media player or a browser.
+/// Emit one operation's URL accessor on `Client`, built by the same [`url_building`] statements as
+/// the operation method and documented by [`url_accessor_doc`].
 fn emit_operation_url(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let url_ident = operation_url_ident(operation, names);
     let method_ident = operation_method_ident(operation, names);
@@ -225,10 +222,10 @@ fn emit_operation_url(operation: &Operation, api: &Api, names: &Names) -> TokenS
 pub(super) fn url_accessor_doc(method_ident: &crate::name::Ident) -> String {
     let method = method_ident.as_str().trim_start_matches("r#");
     normalize_rustdoc(&format!(
-        "The URL `{method}` sends its request to, with the same path and query encoding, \
-         resolved against the client's base URL or the operation's server override. Nothing is \
-         sent and no credential is attached: this is for a URL handed to something that fetches \
-         it itself."
+        "The URL `{method}` sends its request to, less any `apiKey` query credential, with the \
+         same path and query encoding, resolved against the client's base URL or the operation's \
+         server override. Nothing is sent and no credential is attached: this is for a URL handed \
+         to something that fetches it itself."
     ))
 }
 
@@ -398,12 +395,12 @@ fn operation_arg_normalizations(
 }
 
 /// The typed method arguments and their bare forwarding names for an operation. Shared by
-/// [`emit_operation`] (the async method) and
-/// `blocking::emit_blocking_operation` (its synchronous shim, private to that module) so
-/// the two signatures are constructed from one source and can never drift. The first vector holds
-/// `name: Type` argument declarations; the second holds just the `name`s, in the same order, for the
-/// shim's `self.inner.<op>(<names>)` forwarding call. Body args are already `&T`, so the forwarding
-/// name (`body`) passes the reference straight through.
+/// [`emit_operation`] (the async method) and `blocking::emit_blocking_operation` (its synchronous
+/// shim), as [`operation_return_ty`] and [`param_default_docs_tokens`] are, so the two signatures
+/// are built from one source. The first vector holds `name: Type` argument declarations; the
+/// second holds just the `name`s, in the same order, for the shim's `self.inner.<op>(<names>)`
+/// forwarding call. Body args are already `&T`, so the forwarding name (`body`) passes the
+/// reference straight through.
 pub(super) fn operation_args(
     operation: &Operation,
     api: &Api,
@@ -422,7 +419,7 @@ pub(super) fn operation_args(
         if takes_into_string(api, param.ty) {
             // `Into<#ty>`, not `Into<String>`: a `$ref`'d string component lowers to a transparent
             // `pub type WorkflowId = String`, so the bound is the same one either way — but naming
-            // the component keeps the generated signature as self-describing as it was.
+            // the component keeps the generated signature self-describing.
             args.push(quote! { #ident: impl Into<#ty> });
         } else {
             args.push(quote! { #ident: #ty });
@@ -457,7 +454,7 @@ pub(super) fn operation_args(
 
 /// The `Ok`/`Err` types of an operation's `Result` return: `(return_ok_ty, error_ty)`. A streaming
 /// success yields `EventStream<T>`, every other success `ResponseValue<T>`. Shared with the blocking
-/// shim so the async and sync return types stay identical.
+/// shim (see [`operation_args`]).
 pub(super) fn operation_return_ty(
     operation: &Operation,
     names: &Names,
@@ -473,7 +470,7 @@ pub(super) fn operation_return_ty(
 
 /// The rustdoc `#[doc = …]` notes carrying required parameters' spec `default`s. Required params are
 /// positional arguments with no attribute slot of their own, so their defaults are documented on the
-/// method. Shared verbatim between the async method and its blocking shim.
+/// method. Shared with the blocking shim (see [`operation_args`]).
 pub(super) fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStream> {
     operation
         .params

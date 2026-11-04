@@ -13,11 +13,8 @@ use super::params::emit_params_struct;
 use super::responses::{emit_error_enum, emit_response_enum, emit_response_headers};
 use super::CodegenOptions;
 
-/// The declared security schemes, rendered as rustdoc for `with_credential`.
-///
-/// This is the one place a caller chooses what to register, so it is where the scheme's own
-/// documentation belongs: the bearer format, the flows that mint a token, the OpenID Connect
-/// discovery URL, and whether the scheme is deprecated.
+/// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
+/// [`crate::ir::SecuritySchemeDef`] gives.
 fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
     let documented: Vec<&String> = api
         .security_schemes

@@ -11,9 +11,10 @@
 //! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
 //! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
 //! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
-//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, and [`idents`] (the
+//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, [`idents`] (the
 //! allocated-name lookups and status variant names the operation, blocking-client, parameter,
-//! response and dispatch emitters read).
+//! response and dispatch emitters read), and [`format`](mod@format) (the `prettyplease` pass over
+//! the assembled tokens).
 
 mod blocking;
 mod body;
@@ -92,9 +93,8 @@ impl std::fmt::Display for CodegenError {
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
-/// produces stable diffs. Codegen emits no diagnostics: every spec construct is decided during
-/// lowering, so it takes no `Diagnostics` (multi-status responses lower to typed per-operation
-/// response enums). Its one failure is a token stream that does not parse as a Rust file, returned
+/// produces stable diffs. Every spec construct is decided during lowering, so codegen takes no
+/// `Diagnostics`. Its one failure is a token stream that does not parse as a Rust file, returned
 /// as a [`CodegenError`] for the caller to report.
 pub(crate) fn generate(
     api: &Api,
@@ -108,8 +108,7 @@ pub(crate) fn generate(
     let support = runtime::emit_support(api.uses_xml(), uses_streams, uses_time);
     let models = models::emit_models(api, names, options, uses_time);
     let client = client::emit_client(api, names, options);
-    // The synchronous facade is always emitted, gated on the user-opt-in `blocking` feature; a
-    // default build compiles it out entirely (no tokio reference, no `BlockingClient`).
+    // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
     let blocking = blocking::emit_blocking_client(api, names);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.

@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn the_documented_example_holds() {
-        // `GET /users/{id}` → `get_users_by_id`, the example in this module's own doc comment.
+        // `GET /users/{id}` → `get_users_by_id`, the example in `synth_operation_id`'s doc.
         let template = path(
             "/users/{id}",
             vec![

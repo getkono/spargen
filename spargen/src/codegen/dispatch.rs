@@ -263,9 +263,9 @@ pub(super) fn success_decode_tokens(
     // A streaming success response (`text/event-stream` / `application/x-ndjson`) returns an
     // `EventStream<T>` instead of a `ResponseValue<T>`: on success the whole `response` is handed
     // to the stream with its framing mode, and items are decoded lazily as the caller pulls them.
-    // The error path is unchanged (streaming error bodies are out of scope). `success_ty` is the
-    // streamed item type `T` — `stream_success` fires only in the single-success-body case, where
-    // `success()` is `Plain(T)` and `success_type` renders `T`.
+    // The error path is a whole-body response's (lowering rejects a streaming error body).
+    // `success_ty` is the streamed item type `T` — `stream_success` fires only in the
+    // single-success-body case, where `success()` is `Plain(T)` and `success_type` renders `T`.
     let stream_framing = operation
         .responses
         .stream_success()
