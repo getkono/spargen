@@ -344,11 +344,9 @@ components:
                 "{spelling}/{entry}: {report:#?}"
             );
             // The code being right is not the same as the message being true. Both spellings name
-            // one document, so both must name the same cause — decision 23's rule applied to the
-            // wording rather than only to the verdict. The explicit spelling reported the generic
-            // empty-intersection message, which is FALSE here: the intersection is inhabited and
-            // representable, and the reader who goes looking for a contradiction will not find one.
-            // Asserting only the code cannot see that; asserting per spelling can.
+            // one document, so both must name the same cause: one verdict and one wording for every
+            // spelling of a reference. The generic empty-intersection message would be FALSE here:
+            // the intersection is inhabited and representable. Asserting per spelling sees that.
             let messages = messages_for(report, Code::AllOfIrreconcilable);
             assert!(
                 messages

@@ -90,8 +90,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// member, in `null` alone, which then matches them all.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
-    /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
-    /// is a component body.
+    /// graph insert (last-insert invariant: `lower_into_reservation`).
     pub(super) fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         self.closed_narrowing(|ctx| ctx.lower_union_closed(schema, hint))
     }
@@ -222,10 +221,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
-        // member's kind as this position's own def so it is the final graph insert — mirroring the
-        // allOf single-member collapse — which keeps the `ensure_component` last-insert invariant
-        // when the union is a component body (a bare `$ref` member would otherwise return an existing
-        // id and leave the popped root mismatched).
+        // member's kind as this position's own def so it is the final graph insert, as the allOf
+        // single-member collapse does (last-insert invariant: `lower_into_reservation`); a bare
+        // `$ref` member would otherwise return an existing id.
         let members = UnionMembers {
             real: real_members,
             mode,

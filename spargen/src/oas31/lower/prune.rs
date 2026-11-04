@@ -12,8 +12,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [Elide](TypeGraph::elide) every type in `lowered` that nothing can name any more. `lowered`
     /// holds the ids a union was lowered into, with its merge held back ([`Self::unmerged_union`]),
     /// before [`Self::meet_union_with_all_of`] or a `$ref`'s target met it. The pre-meet union
-    /// itself and the branch types the meet replaced were emitted as public types nothing referred
-    /// to (#561). [`Self::meet_ref_union_sibling`] also passes the ids the keywords beside the
+    /// itself and the branch types the meet replaced are otherwise public types nothing refers to
+    /// (#561). [`Self::meet_ref_union_sibling`] also passes the ids the keywords beside the
     /// union were lowered into, an input to the same meet (#571). A position that drops or
     /// replaces the type its schema lowered to passes that lowering too: a `format: binary`
     /// parameter's bytes type, which the client takes as a `String` copy, and a response header

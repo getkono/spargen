@@ -14,7 +14,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower an object schema's `properties`/`required`/`additionalProperties` into the pieces of a
     /// [`Struct`] *without* inserting the struct itself. Shared by [`Self::lower_object`] and the
     /// `allOf` merge, which collects field/additional pieces from several members before inserting a
-    /// single merged struct as the final graph insert (the `ensure_component` last-insert invariant).
+    /// single merged struct as the final graph insert (last-insert invariant:
+    /// `lower_into_reservation`).
     ///
     /// [`Struct`]: crate::ir::Struct
     pub(super) fn object_body(

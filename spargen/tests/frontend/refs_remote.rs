@@ -781,16 +781,10 @@ fn a_vendored_remote_all_of_member_reached_back_through_a_field_generates() {
 /// recursion sits at a property or an `allOf` member, whose pointer is not the frame's.
 ///
 /// Without the canonicalisation this document does not reject. The collapse hands
-/// `ensure_remote` a foreign id and reserves nothing, and `TypeDefs::fill` is then called on an
-/// id that was never reserved — `fill of an unreserved id`, a **process abort** from inside a
-/// consumer's `build.rs` with no code, no pointer and no `--carve` escape. A panic is not an
-/// `Outcome`, so nothing in this suite could have observed it. That assertion is a
-/// `debug_assert!`, so a build with debug assertions off does not abort: it fills the
-/// unreserved id and carries on, which is worse and not better.
-///
-/// The loop had zero iterations across the whole workspace before this fixture, while carrying
-/// a paragraph crediting it with a fix the two-file remote fixture passes without. It is this
-/// document that the paragraph is true of.
+/// `ensure_remote` a foreign id and reserves nothing, and `TypeGraph::fill` is then called on an
+/// id that was never reserved — `fill of an unreserved id`, a `debug_assert!` that aborts the
+/// consumer's `build.rs` with no code and no pointer where debug assertions are on, and fills the
+/// unreserved id and carries on where they are off.
 #[test]
 fn a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected() {
     const SELFY_URL: &str = "https://api.example.com/schemas/selfy.yaml";

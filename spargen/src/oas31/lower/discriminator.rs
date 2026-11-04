@@ -420,12 +420,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// or a tag from, exactly as the same pointer written against a relative file has none, and neither
 /// has any file reference.
 ///
-/// Written in a sub-file, the same spelling keeps the variant name it has always had. That route
-/// resolved through the resolver before same-file deep pointers did in the root, and its members
-/// were named from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`).
-/// Dropping the name there would rename those variants in documents that generate today; the
-/// root-only filter confines the change to what previously rejected. The name is no component
-/// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
+/// Written in a sub-file, the same spelling names its variant from the pointer text
+/// (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`), so the root-only filter keeps
+/// those variant names stable. The name is no component name, so it supplies no implicit
+/// discriminator tag ([`is_schema_component_name`]).
 pub(super) fn member_component_name<'m>(
     member: &'m SchemaOr,
     resolver: &Resolver<'_>,

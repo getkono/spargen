@@ -12,8 +12,7 @@ use super::super::{JsonType, TypeSet, ValidationKeywords};
 use super::{expect_array, expect_bool, expect_string, provenance};
 
 /// A Schema Object's `required`: an array of property names, or `E011` at the keyword when it is
-/// not an array and at the element when one is not a string. Either used to be dropped, leaving
-/// the property optional.
+/// not an array and at the element when one is not a string.
 pub(super) fn parse_required(
     value: Option<&SpannedValue>,
     pointer: &JsonPointer,
@@ -155,7 +154,7 @@ pub(super) fn parse_validation(
 }
 
 /// A numeric keyword (`minimum`, `multipleOf`, ...) of the schema at `pointer`: absent, or a
-/// number, or `E011` at the keyword, which used to read as no constraint at all.
+/// number, or `E011` at the keyword.
 fn number(
     map: &SpannedMap,
     keyword: &str,
@@ -194,7 +193,7 @@ fn exclusive_bound(
 }
 
 /// A count keyword (`minLength`, `maxItems`, ...) of the schema at `pointer`: absent, or a
-/// non-negative integer, or `E011` at the keyword, which used to read as no bound at all.
+/// non-negative integer, or `E011` at the keyword.
 fn count(
     map: &SpannedMap,
     keyword: &str,

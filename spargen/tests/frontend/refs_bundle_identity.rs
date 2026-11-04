@@ -182,15 +182,13 @@ components:
     );
 }
 
-/// Decision 23's invariant, applied to the sub-file spelling.
+/// A document gets one cycle verdict whatever order its schemas are declared in, applied to the
+/// sub-file spelling.
 ///
-/// Every spelling now asks the DOCUMENT whether a `$ref` closes a cycle through a schema enclosing
-/// it, so the verdict is order-independent by construction. With siblings on both edges it was
-/// order-independent even when the sub-file spelling still asked `is_in_progress_root`: the
-/// reservation is made *before* the body is lowered, so whichever of a mutually recursive pair is
-/// lowered first, the re-entrant edge meets an open reservation. This fixture writes the same two
-/// schemas in both orders and requires one verdict; the one-edge fixture below is the case that
-/// lowering-state question got wrong.
+/// Every spelling asks the DOCUMENT whether a `$ref` closes a cycle through a schema enclosing it,
+/// so the verdict is order-independent by construction. This fixture writes the same two schemas,
+/// with siblings on both edges, in both orders and requires one verdict; the one-edge fixture
+/// below is the case a lowering-state question (`is_in_progress_root`) gets wrong.
 #[test]
 fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declared() {
     const A: &str = r##"    A:

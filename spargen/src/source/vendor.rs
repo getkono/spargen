@@ -1,9 +1,10 @@
 //! The network-only vendor step behind `spargen lock`.
 //!
 //! It fetches through the injected [`RemoteFetch`] seam, whose real implementation is
-//! [`ReqwestFetcher`], so tests exercise the walk with a stub instead of real HTTP. It walks every remote `$ref` reachable from the spec (recursing
-//! through local sub-files and through fetched remote documents), fetches each once, writes the
-//! bytes under `.spargen/vendor/`, and records a hash pin in `spargen.lock`.
+//! [`ReqwestFetcher`], so tests exercise the walk with a stub instead of real HTTP. It walks every
+//! remote `$ref` reachable from the spec (recursing through local sub-files and through fetched
+//! remote documents), fetches each once, writes the bytes under `.spargen/vendor/`, and records a
+//! hash pin in `spargen.lock`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -39,8 +40,6 @@ pub(crate) struct Fetched {
 }
 
 /// One vendored remote document, reported back from [`crate::vendor`].
-///
-/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]
 pub struct VendoredRef {
@@ -53,8 +52,6 @@ pub struct VendoredRef {
 }
 
 /// The result of a successful [`crate::vendor`] run.
-///
-/// `#[non_exhaustive]`, so a field can be added without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
 #[non_exhaustive]
 pub struct VendorReport {
@@ -216,8 +213,9 @@ impl Scanned {
 /// where it has none). Every document's `$self` sets its base and names it, as in the build. It
 /// follows exactly the references the build's bundle loader does: none inside a specification
 /// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
-/// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
-/// remote ref it hides surfaces later as an actionable `E003` on the next `generate`.
+/// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is
+/// best-effort: a fetched document that does not parse is still vendored and pinned; the next
+/// `generate` rejects it as `E011`.
 ///
 /// A fetch that fails is `E025`, and the lock is still written: every document fetched is pinned
 /// at what it served, and every pin of the earlier lock for a URL this run left unpinned is kept.
@@ -488,8 +486,7 @@ fn input_error(diags: &mut Diagnostics, message: String) {
     .emit(diags);
 }
 
-/// The real, reqwest-backed fetcher used by `spargen lock`. Present only under the `remote-fetch`
-/// feature, which gates this whole module, so a library-only build carries no HTTP stack.
+/// The real, reqwest-backed fetcher used by `spargen lock`.
 pub(crate) struct ReqwestFetcher;
 
 impl RemoteFetch for ReqwestFetcher {

@@ -68,7 +68,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A `oneOf`'s branches are compared by generated type, as the inline merge compares them
         // (#402): two distinct `i64`-alias enums are one Rust type, so no value tells them apart,
         // and two structs or string enums of one structure decode the same values (#492).
-        // An `anyOf` keeps the identity comparison it has always had.
+        // An `anyOf` compares its branches by identity.
         match self.indistinguishable_union_variant(met, one_of) {
             // Every branch of the intersected union is one and the same type: the branches differ
             // only in keywords the lowered shape does not carry, such as a branch of nothing but
@@ -201,7 +201,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// meet of a union member (#643). The scalar meet intersects a union branch by branch, so an
     /// `anyOf` member met with a `oneOf` member is an `anyOf` of `oneOf`s, each the second union
     /// met with one branch of the first; branches it leaves sharing one generated type are
-    /// indistinguishable, and were emitted as such with no diagnostic. A union is collapsed after
+    /// indistinguishable, so they collapse rather than emit as such. A union is collapsed after
     /// its variants are, so an outer `oneOf` compares the variants as they end up.
     ///
     /// Only types inserted since `mark`, which the meet made, are read, and the union members
