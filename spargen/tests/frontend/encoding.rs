@@ -65,8 +65,9 @@ paths:
 
 #[test]
 fn encoding_on_a_form_or_multipart_key_in_another_letter_case_takes_effect() {
-    // A media key's type and subtype are case-insensitive, so `Multipart/Form-Data` is the
-    // multipart body `multipart/form-data` is: its `encoding` is applied, not a `W011`.
+    // The form and multipart positions of `bodies_media_keys`'s
+    // `any_letter_case_of_every_media_key_generates_the_same_module`: `Multipart/Form-Data` is the
+    // multipart body `multipart/form-data` is, so its `encoding` is applied, not a `W011`.
     let spec = |media: &str, encoding: &str| {
         format!(
             r##"
@@ -357,10 +358,10 @@ fn e009_a_form_urlencoded_string_property_declaring_a_binary_family_content_type
     // the disposition `application/octet-stream` already has there — and the message names what
     // was declared, since the schema itself is a plain string a reader cannot call binary.
     //
-    // #399: the classification is case-insensitive, so `Application/Octet-Stream` is the binary
-    // declaration its lowercase spelling is. Before, the mixed-case spelling missed every
-    // classifier arm, fell through to the string's natural codec, and was generated as
-    // `FormMode::Text`.
+    // #399: a declared `contentType` is classified in any letter case (`bodies_media_keys`'s
+    // `any_letter_case_of_every_media_key_generates_the_same_module`), so
+    // `Application/Octet-Stream` is the binary declaration its lowercase spelling is, never the
+    // string's natural `FormMode::Text`.
     for declared in [
         "image/png",
         "application/octet-stream",
@@ -524,10 +525,10 @@ paths:
 
 #[test]
 fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively() {
-    // #399: a binary property's declared `contentType` is classified lowercased, so `Text/Plain`
-    // reaches the outcome `text/plain` does. Before, the mixed-case spelling missed the `text/`
-    // arm, fell through to the property's natural octet-stream codec, and was rejected `E009`
-    // while its lowercase spelling generated.
+    // #399: a binary property's declared `contentType` is classified in any letter case
+    // (`bodies_media_keys`'s `any_letter_case_of_every_media_key_generates_the_same_module`), so
+    // `Text/Plain` reaches the outcome `text/plain` does, not the `E009` of the property's natural
+    // octet-stream codec.
     let binary = "{ type: string, contentEncoding: base64 }";
     for declared in ["text/plain", "Text/Plain", "TEXT/PLAIN"] {
         let spec = form_field_declaring(binary, declared);
@@ -672,10 +673,10 @@ fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
 #[test]
 fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
     // The boundary of the rejection above: a JSON-rendered part declaring JSON (plain or a
-    // `+json` structured suffix, in any letter case, since media types are case-insensitive) is
-    // what it says, and a scalar or bytes part carries any well-formed declaration as its header —
-    // a string is the text the document described and bytes are whatever the caller supplies, so
-    // neither is re-encoded against the header.
+    // `+json` structured suffix, in any letter case) is what it says, and a scalar or bytes part
+    // carries any well-formed declaration as its header — a string is the text the document
+    // described and bytes are whatever the caller supplies, so neither is re-encoded against the
+    // header.
     let object = "{ type: object, properties: { id: { type: integer } } }";
     let cases = [
         (object, "application/json", "serde_json::to_string("),

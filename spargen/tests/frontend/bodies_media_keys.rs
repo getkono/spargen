@@ -1,6 +1,9 @@
 //! Request and response bodies, third part: `E009` outside the byte families, the `W014`
-//! decode-alike rules, the media-range and media-key grammar, structured-suffix ranges, and what a
-//! rejected or accepted response selection claims.
+//! decode-alike rules, the media-range and media-key grammar and its letter-case law
+//! ([`any_letter_case_of_every_media_key_generates_the_same_module`]), structured-suffix ranges,
+//! and what a rejected or accepted response selection claims.
+
+use proptest::prelude::*;
 
 use super::*;
 
@@ -688,8 +691,8 @@ components:
 
 #[test]
 fn a_media_range_is_matched_case_insensitively() {
-    // Media types are case-insensitive (RFC 9110 § 8.3.1). Reading `TEXT/*` as a binary family
-    // would be silently wrong rather than loudly unsupported.
+    // The range position of `any_letter_case_of_every_media_key_generates_the_same_module`: reading
+    // `TEXT/*` as a binary family would be silently wrong rather than loudly unsupported.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -1408,4 +1411,171 @@ paths:
         has_code(&report, Code::AlternativeMediaIgnored),
         "{report:#?}"
     );
+}
+
+/// Each media key [`MEDIA_KEY_DOCUMENT`] writes, in its lowercase spelling, at the position its
+/// placeholder `@N@` (`N` its index here) marks: a JSON request body and a JSON response body, a
+/// multipart body and the `+json` type its part declares, a form body and the JSON type its field
+/// declares, an event stream, an octet-stream response, and a text range.
+const MEDIA_KEYS: [&str; 9] = [
+    "application/json",
+    "application/json",
+    "multipart/form-data",
+    "application/vnd.api+json",
+    "application/x-www-form-urlencoded",
+    "application/json",
+    "text/event-stream",
+    "application/octet-stream",
+    "text/*",
+];
+
+/// One document holding a media key at every position [`MEDIA_KEYS`] lists. Every body but the
+/// event stream's names a component, so no two anonymous bodies contest one name: the contested
+/// name is disambiguated by a hash of its pointer, which spells the media key verbatim (#1153).
+const MEDIA_KEY_DOCUMENT: &str = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          "@0@": { schema: { $ref: '#/components/schemas/Pet' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            "@1@": { schema: { $ref: '#/components/schemas/Pet' } }
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          "@2@":
+            schema: { $ref: '#/components/schemas/Upload' }
+            encoding:
+              pet: { contentType: "@3@" }
+      responses:
+        '204': { description: ok }
+  /form:
+    post:
+      operationId: submitForm
+      requestBody:
+        content:
+          "@4@":
+            schema: { $ref: '#/components/schemas/Form' }
+            encoding:
+              count: { contentType: "@5@" }
+              tags: { style: form, explode: true }
+      responses:
+        '204': { description: ok }
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        '200':
+          description: ok
+          content:
+            "@6@":
+              itemSchema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: string
+                    contentMediaType: application/json
+                    contentSchema: { type: string, maxLength: 5 }
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        '200':
+          description: ok
+          content:
+            "@7@": { schema: { $ref: '#/components/schemas/Blob' } }
+  /note:
+    get:
+      operationId: getNote
+      responses:
+        '200':
+          description: ok
+          content:
+            "@8@": { schema: { $ref: '#/components/schemas/Note' } }
+components:
+  schemas:
+    Blob: { type: string, format: binary }
+    Form:
+      type: object
+      properties:
+        count: { type: integer }
+        tags: { type: array, items: { type: string } }
+    Note: { type: string }
+    Upload:
+      type: object
+      properties:
+        pet: { $ref: '#/components/schemas/Pet' }
+        file: { type: string, format: binary }
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+"##;
+
+/// [`MEDIA_KEY_DOCUMENT`] with each placeholder replaced by its key in `spellings`.
+fn media_key_document(spellings: &[String]) -> String {
+    spellings
+        .iter()
+        .enumerate()
+        .fold(MEDIA_KEY_DOCUMENT.to_owned(), |document, (at, key)| {
+            document.replace(&format!("@{at}@"), key)
+        })
+}
+
+/// One spelling of each of [`MEDIA_KEYS`]: every letter upper-cased or not, independently.
+fn media_key_spellings() -> impl Strategy<Value = Vec<String>> {
+    MEDIA_KEYS
+        .iter()
+        .map(|key| {
+            proptest::collection::vec(any::<bool>(), key.len()).prop_map(move |upper| {
+                key.chars()
+                    .zip(upper)
+                    .map(|(c, upper)| if upper { c.to_ascii_uppercase() } else { c })
+                    .collect::<String>()
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// Media types are case-insensitive (RFC 9110 § 8.3.1), so a media key in any letter case is
+    /// the key its lowercase spelling is, at every position [`MEDIA_KEYS`] lists: the same
+    /// diagnostics, and the same module up to the places that quote the document's own spelling.
+    /// This is the law each position's fixture is one example of.
+    #[test]
+    fn any_letter_case_of_every_media_key_generates_the_same_module(
+        spellings in media_key_spellings()
+    ) {
+        let lowercase: Vec<String> = MEDIA_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        let (lower_report, lower_code) = generate_with_code(&media_key_document(&lowercase));
+        prop_assert_eq!(lower_report.outcome(), Outcome::Generated, "{:#?}", lower_report);
+        let document = media_key_document(&spellings);
+        let (report, code) = generate_with_code(&document);
+        prop_assert_eq!(codes(&report), codes(&lower_report), "{:#?}\n{}", report, document);
+        // Longest first, so no spelling is rewritten inside a longer one that contains it.
+        let mut quoted: Vec<(&String, &str)> = spellings.iter().zip(MEDIA_KEYS).collect();
+        quoted.sort_by_key(|(spelling, _)| std::cmp::Reverse(spelling.len()));
+        let normalised = quoted
+            .into_iter()
+            .fold(code, |code, (spelling, key)| code.replace(spelling.as_str(), key));
+        prop_assert!(
+            module_body(&normalised) == module_body(&lower_code),
+            "{:?} generates a different module from the lowercase keys",
+            spellings
+        );
+    }
 }
