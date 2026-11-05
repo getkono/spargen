@@ -325,10 +325,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Inserting no def is safe exactly where this union is not itself the body of a type
         // whose root id was reserved before lowering began. Where it is, the caller pops the
         // last insert and lifts it into that reserved root, so returning a foreign id would
-        // relocate the wrong def and dangle the component. `ensure_component` recognises that
-        // shape as a nullable alias before it reserves anything, so the root-component spelling
-        // never arrives here; a sub-file or remote body reaching it is refused rather than
-        // mis-assembled.
+        // relocate the wrong def and dangle the component. `ensure_component`, `ensure_resolved`
+        // and `ensure_remote` recognise that shape as a nullable alias before they reserve
+        // anything, following a member that is a bare alias of the open target to it whichever
+        // of the two `components.schemas` declares first (#1189); a body that still reaches here
+        // is refused rather than mis-assembled.
         if self.is_reservation(inner.id) {
             if self.reservation_at(&schema.provenance).is_some() {
                 return self.reject_self_referential_union(
@@ -892,9 +893,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // boxed so the cycle has a finite size, with no def of its own. Where this union is
             // itself the body of a reserved root, the caller lifts the last insert into that
             // root, so a foreign id cannot be handed back, and the shape is refused as that path
-            // refuses it. A body whose members are bare `$ref`s to that one open target never
-            // gets here: it is a nullable alias ([`Self::nullable_alias_back_edge`], #1176). What
-            // does is a member that reaches it through a component alias of the target.
+            // refuses it. A body whose members are bare `$ref`s to that one open target, directly
+            // or through bare aliases of it, is a nullable alias instead
+            // ([`Self::nullable_alias_back_edge`], #1176, #1189), so its outcome does not depend
+            // on which of them `components.schemas` declares first.
             if self.is_reservation(inner.id) {
                 if self.reservation_at(&schema.provenance).is_some() {
                     return self.reject_self_referential_union(
