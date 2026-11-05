@@ -135,7 +135,7 @@ pub(super) fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStrea
     }
     let explode = param.explode;
     let encoding = percent_encoding_tokens(param);
-    let name = param.name.clone();
+    let name = &param.name;
     match &param.style {
         crate::ir::ParamStyle::Matrix => quote! {
             support::serialize_matrix(#name, #value, #explode, #encoding)

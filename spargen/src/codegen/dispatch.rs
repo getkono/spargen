@@ -69,11 +69,10 @@ pub(super) fn error_branch_tokens(
     names: &Names,
     error_ident: &crate::name::Ident,
 ) -> TokenStream {
-    let error_ty = quote! { #error_ident };
     let error_shape = operation.responses.error();
     match &error_shape {
         ErrorShape::None => quote! {
-            Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
+            Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
         },
         // A single documented error body, the operation's only error entry: classify against its
         // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
@@ -94,9 +93,9 @@ pub(super) fn error_branch_tokens(
             let classifier =
                 match BodyCodec::of(api, *body_ty, operation.responses.single_error_media()) {
                     BodyCodec::Bytes => quote! { classify_error_bytes },
-                    BodyCodec::Xml => quote! { classify_error_xml::<#error_ty> },
-                    BodyCodec::Text => quote! { classify_error_text::<#error_ty> },
-                    BodyCodec::Json => quote! { classify_error::<#error_ty> },
+                    BodyCodec::Xml => quote! { classify_error_xml::<#error_ident> },
+                    BodyCodec::Text => quote! { classify_error_text::<#error_ident> },
+                    BodyCodec::Json => quote! { classify_error::<#error_ident> },
                 };
             let classify = quote! {
                 support::#classifier(
@@ -156,7 +155,7 @@ pub(super) fn error_branch_tokens(
             });
             quote! {
                 let (status, headers, body, truncated) =
-                    match support::read_error_body::<#error_ty>(&self.core, response).await {
+                    match support::read_error_body::<#error_ident>(&self.core, response).await {
                         Ok(parts) => parts,
                         Err(error) => return Err(error),
                     };
@@ -180,7 +179,6 @@ pub(super) fn success_decode_tokens(
 ) -> (TokenStream, Option<TokenStream>) {
     let request_binding = &bindings.request;
     let reconnect_request_binding = &bindings.reconnect_request;
-    let error_ty = quote! { #error_ident };
     let success_decode = match operation.responses.success() {
         SuccessShape::Unit => quote! {
             let status = response.status();
@@ -255,7 +253,7 @@ pub(super) fn success_decode_tokens(
             quote! {
                 let status = response.status();
                 #(#arms)*
-                Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
+                Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
             }
         }
     };

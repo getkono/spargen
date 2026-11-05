@@ -33,20 +33,18 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
             let field = field_ident(header);
             // Header structs live beside `Client`, not inside `types`, so the type path must be
             // qualified — a header whose schema lowered to a named type would not resolve here.
-            let ty = ty_tokens(header.ty, names, true);
+            let mut ty = ty_tokens(header.ty, names, true);
             // An optional header is absent-able; a required one is documented as always present.
-            let ty = if header.required {
-                quote! { #ty }
-            } else {
-                quote! { Option<#ty> }
-            };
+            if !header.required {
+                ty = quote! { Option<#ty> };
+            }
             let docs = doc_tokens(&header.docs);
             let deprecated = header.deprecated.then(|| quote! { #[deprecated] });
             quote! { #docs #deprecated pub #field: #ty }
         });
         let reads = response.headers.iter().map(|header| {
             let field = field_ident(header);
-            let name = header.name.clone();
+            let name = &header.name;
             let shape = match header.shape {
                 crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
                 crate::ir::HeaderShape::Array => quote! { support::HeaderShape::Array },

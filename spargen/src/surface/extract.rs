@@ -46,6 +46,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             ty: canon_ty(ty, api, names),
             required: body.required,
         });
+        let error = operation.responses.error();
 
         operations.insert(
             key,
@@ -55,8 +56,8 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 params,
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names),
-                error: error_sig(&operation.responses.error(), api, names),
-                error_body: error_body_sig(&operation.responses.error(), api, names),
+                error: error_sig(&error, api, names),
+                error_body: error_body_sig(&error, api, names),
                 response_headers: response_headers(operation, api, names),
             },
         );

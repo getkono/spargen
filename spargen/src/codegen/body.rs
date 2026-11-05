@@ -162,7 +162,7 @@ fn form_properties_tokens(encoding: &crate::ir::BodyEncoding) -> Vec<TokenStream
         .properties
         .iter()
         .map(|property| {
-            let name = property.name.clone();
+            let name = &property.name;
             let mode = form_mode_tokens(&property.mode);
             quote! { support::FormProperty { name: #name, mode: #mode } }
         })

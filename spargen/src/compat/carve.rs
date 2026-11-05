@@ -65,7 +65,7 @@ pub(crate) fn carve_rules(diagnostics: &[Diagnostic], bundle: &InputBundle) -> V
     }
     let mut rules = carver.rules;
     // Deterministic carve set: order is independent of diagnostic order.
-    rules.sort_by_key(|rule| rule.describe());
+    rules.sort_by_cached_key(|rule| rule.describe());
     rules
 }
 

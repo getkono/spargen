@@ -187,11 +187,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         return quote! {};
     }
     let builders = api.servers.iter().enumerate().map(|(index, server)| {
-        let ident = names
-            .servers
-            .get(index)
-            .expect("server name allocated")
-            .clone();
+        let ident = names.servers.get(index).expect("server name allocated");
         let mut docs = vec![format!("Server `{}`.", server.url)];
         if let Some(description) = &server.description {
             docs.push(description.clone());
@@ -367,7 +363,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
             }
         }
     });
-    let first = names.servers.first().expect("at least one server").clone();
+    let first = names.servers.first().expect("at least one server");
     quote! {
         /// Base URLs declared by the API description.
         #[allow(dead_code)]
