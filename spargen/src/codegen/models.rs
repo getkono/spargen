@@ -62,11 +62,12 @@ pub(super) fn emit_models(
 /// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
 /// string and matches it, reaching the catch-all only for a value no unit variant lists.
 ///
-/// `display_arms` are the closed enum's `Display` arms, which map each unit variant to its value.
+/// `listed` are the [`string_variants`] the closed enum declares, and `display_arms` its `Display`
+/// arms, which map each unit variant to its value.
 fn emit_open_string_enum(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
-    enumeration: &crate::ir::ScalarEnum,
+    listed: &[(&String, &crate::name::Ident)],
     names: &Names,
     docs: TokenStream,
     deprecated: Option<TokenStream>,
@@ -76,7 +77,6 @@ fn emit_open_string_enum(
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
-    let listed = string_variants(id, enumeration, names);
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
@@ -183,7 +183,7 @@ fn emit_type_def(
             // equal to the identifier is the serde name already.
             let xml_root = types
                 .xml_root_name(id)
-                .filter(|name| *name != ident.to_string())
+                .filter(|name| *name != ident.as_str())
                 .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
@@ -229,7 +229,7 @@ fn emit_type_def(
                 return emit_open_string_enum(
                     id,
                     ident,
-                    enumeration,
+                    &listed,
                     names,
                     docs,
                     deprecated,
