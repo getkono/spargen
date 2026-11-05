@@ -48,7 +48,21 @@ run = [
 [tasks.deny]
 # CI's `deny` job in deny.yml runs these commands. AGENTS.md's "Lockfiles and advisories" states the
 # rules they implement; `the_deny_gate_states_the_feature_scope_it_audits` and
-# `the_lockfile_audit_reads_every_committed_lockfile` pin their shape.
+# `the_lockfile_audit_reads_every_committed_lockfile` pin their shape. Why each part is there:
+# - `--all-features`: rustls enters the graph only under it, so without it an advisory against
+#   rustls is clean here and failing in CI (#141).
+# - `--locked` on the root only: without it a skewed `Cargo.lock` was silently rewritten (or a
+#   missing one written) and the rewrite audited (#146). The example workspaces are audited
+#   unlocked, like every gate that compiles them: release-plz leaves their `spargen` stamp stale on
+#   each release, so `--locked` would turn every release red (#184).
+# - `cargo audit` over each lockfile: cargo-deny filters out entries no feature activates (a weak
+#   `dep?/feature` target such as reqwest's quinn), so a yanked `chacha20` sat in `Cargo.lock` with
+#   this audit green; `cargo audit` reads every entry (#187).
+# - `cargo fetch` before each `--no-fetch` audit, and the error/warning guard after it: with
+#   `--no-fetch` cargo-audit's yank check reads only Cargo's local index cache, and on an empty one
+#   it printed "couldn't check if the package is yanked" for every entry and exited 0 (#414). The
+#   fetch fills that cache; the guard fails a run that still could not check an entry.
+# - The `git log` line prints the advisory-database revision every verdict was reached against.
 description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
 run = [
   "cargo deny fetch db",
@@ -70,7 +84,11 @@ run = [
 [tasks.deny-published]
 # Audits the `Cargo.lock` that `cargo install spargen --features cli --locked` installs (#178);
 # AGENTS.md's "Lockfiles and advisories" says when it runs and who fixes it.
-# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape.
+# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. The empty `[workspace]`
+# appended to the extracted manifest keeps cargo from reading it as a member of this one, and
+# `--locked` fails the audit if the shipped lockfile would be rewritten. The `cargo audit`, its
+# preceding `cargo fetch` and its warning guard are there for the reasons given under `deny`
+# (#187, #414).
 description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io (needs curl, jq and tar)"
 run = [
   '''
@@ -115,6 +133,10 @@ description = "Mutation testing over the runtime, ir/media.rs, the response part
 # stay out because their coverage lives in the integration suites, which `--lib` does not run.
 # - `--config` names `.cargo/mutants.toml` explicitly, so a missing file fails the run rather than
 #   dropping every exclusion.
+# - `--all-features` builds the `xml`, `blocking` and `time` modules: a mutant in code the build
+#   leaves out compiles, passes every test, and would be reported missed.
+# - `-- --lib` runs only the unit tests beside the code in scope; running the integration suites
+#   per mutant would take hours, so a mutant only they would catch is reported missed.
 # - `|| test $? -eq 3` accepts cargo-mutants' "some mutant timed out": cargo-mutants checks for a
 #   timeout before it checks for a missed mutant, so a run with any timeout exits 3 however many it
 #   missed (#881). The `jq` line therefore fails the gate on any missed mutant.
