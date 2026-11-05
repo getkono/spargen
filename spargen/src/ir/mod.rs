@@ -8,6 +8,7 @@
 //! version would lower into it too, touching nothing downstream.
 
 mod auth;
+mod graph;
 mod invariant;
 mod media;
 mod operation;
@@ -21,6 +22,7 @@ use indexmap::IndexMap;
 pub(crate) use auth::{
     ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
 };
+pub(crate) use graph::{Emission, TypeGraph};
 pub(crate) use invariant::check_invariants;
 pub(crate) use media::{
     BodyEncoding, EncodingMode, Framing, MediaType, PropertyEncoding, RequestBody,
@@ -34,9 +36,9 @@ pub(crate) use responses::{
     SuccessShape,
 };
 pub(crate) use types::{
-    AdditionalProps, DefaultValue, DisjointFeature, Emission, Field, FieldDefault, JsonCategory,
-    Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef,
-    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,
+    Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeId, TypeKind,
+    Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.

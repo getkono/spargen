@@ -13,7 +13,7 @@
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
 //!   metacharacter is an exact rule and removes exactly the one construct it names. A backslash
 //!   escapes a metacharacter, in exact and glob rules alike, as `glob` states; rules that
-//!   auto-carve builds from literal document text are escaped. See [`glob_match`] for the
+//!   auto-carve builds from literal document text are escaped. See [`glob_match`](glob::glob_match) for the
 //!   semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
