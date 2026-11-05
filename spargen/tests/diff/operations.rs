@@ -769,10 +769,11 @@ fn losing_api_error_body_is_major_and_gaining_it_is_minor() {
 }
 
 #[test]
-fn api_error_body_loss_is_reported_where_the_error_signature_cannot_see_it() {
-    // A bodyless `410` and a `410` whose JSON body is exactly `null` both render as `410:()` in
-    // the error signature, so no `ErrorTypeChanged` fires. The `null` body is a third body type
-    // beside two `String`s, though, so the error type stops implementing `ApiErrorBody`.
+fn a_null_error_body_where_a_bodyless_status_was_changes_the_error_type_and_loses_api_error_body() {
+    // A `410` whose JSON body is exactly `null` is the null type `type: 'null'` lowers to on its
+    // own, `Option<()>` (#1184), so the error signature tells it from a bodyless `410`'s `()` and
+    // `ErrorTypeChanged` fires. The `null` body is also a third body type beside two `String`s,
+    // so the error type stops implementing `ApiErrorBody`, which is reported on its own.
     let bodyless = "        '410':
           description: gone
 ";
@@ -793,7 +794,10 @@ fn api_error_body_loss_is_reported_where_the_error_signature_cannot_see_it() {
     let report = diff(&old, &new);
     assert_eq!(
         kinds(&report),
-        vec![ChangeKind::ApiErrorBodyRemoved],
+        vec![
+            ChangeKind::ApiErrorBodyRemoved,
+            ChangeKind::ErrorTypeChanged
+        ],
         "{:?}",
         report.changes
     );

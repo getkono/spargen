@@ -341,8 +341,8 @@ fn error_sig(shape: &ErrorShape, api: &Api, names: &Names) -> String {
 
 /// The canonical `<E as ApiErrorBody>::Body` of an operation's error type, or `None` when the type
 /// does not implement `ApiErrorBody`. Recorded directly rather than derived from [`error_sig`]:
-/// the rendered signature cannot see every change in whether the trait is implemented (a bodyless
-/// status and a `null` body both render `()`, and a tuple item's `Box` is not rendered at all).
+/// the rendered signature cannot see every change in whether the trait is implemented (a tuple
+/// item's `Box` is not rendered at all).
 fn error_body_sig(shape: &ErrorShape, api: &Api, names: &Names) -> Option<String> {
     shape
         .api_error_body(&api.types)
