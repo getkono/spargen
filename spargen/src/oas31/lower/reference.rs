@@ -412,42 +412,61 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut at = at.clone();
         // Lowering the chain already refused an alias cycle; the bound only keeps this total.
         for _ in 0..MAX_SCHEMA_DEPTH {
-            let component = reference
-                .strip_prefix("#/components/schemas/")
-                .and_then(|name| self.document.components.schemas.get(name));
-            let target = match component {
-                Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
-                Some(RefOr::Ref(alias)) => {
-                    reference.clone_from(&alias.reference);
-                    at = alias.provenance.clone();
-                    continue;
+            match self.ref_target_hop(&reference, &at)? {
+                RefHop::Body(target) => return Some(*target),
+                RefHop::Alias(next, next_at) => {
+                    reference = next;
+                    at = next_at;
                 }
-                None => {
-                    let from = if is_remote_ref(&reference) {
-                        &self.document.provenance
-                    } else {
-                        &at
-                    };
-                    let Ok(resolved) =
-                        self.resolver
-                            .resolve(&reference, from, &mut Diagnostics::new(0))
-                    else {
-                        return None;
-                    };
-                    resolved.schema
-                }
-            };
-            let Some(next) = &target.reference else {
-                return Some(target);
-            };
-            if ref_siblings_bear_shape(&target) {
-                return Some(target);
             }
-            reference.clone_from(next);
-            at = target.provenance.clone();
         }
         None
     }
+
+    /// One step of [`Self::ref_target_body`]'s walk: the schema the `$ref` written at `at` names,
+    /// or, where that schema is a bare alias (a `$ref` with no shape-bearing sibling), the
+    /// reference it is an alias for and where that reference is written. A root component is read
+    /// first, as lowering reads it; any other target is resolved from the referring file, or from
+    /// the root for a remote reference, reporting nothing. `None` where the target cannot be read.
+    pub(super) fn ref_target_hop(&self, reference: &str, at: &Provenance) -> Option<RefHop<'_>> {
+        let component = reference
+            .strip_prefix("#/components/schemas/")
+            .and_then(|name| self.document.components.schemas.get(name));
+        let target = match component {
+            Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
+            Some(RefOr::Ref(alias)) => {
+                return Some(RefHop::Alias(
+                    alias.reference.clone(),
+                    alias.provenance.clone(),
+                ));
+            }
+            None => {
+                let from = if is_remote_ref(reference) {
+                    &self.document.provenance
+                } else {
+                    at
+                };
+                self.resolver
+                    .resolve(reference, from, &mut Diagnostics::new(0))
+                    .ok()?
+                    .schema
+            }
+        };
+        match &target.reference {
+            Some(next) if !ref_siblings_bear_shape(&target) => {
+                Some(RefHop::Alias(next.clone(), target.provenance.clone()))
+            }
+            _ => Some(RefHop::Body(Box::new(target))),
+        }
+    }
+}
+
+/// What [`LowerCtx::ref_target_hop`] finds at a `$ref`'s target.
+pub(super) enum RefHop<'s> {
+    /// The target is a schema of its own: the body the reference names.
+    Body(Box<std::borrow::Cow<'s, Schema>>),
+    /// The target is a bare alias for the reference given, written at the provenance given.
+    Alias(String, Provenance),
 }
 
 /// One kind of Reference Object chain [`LowerCtx::follow_reference_chain`] follows: a link `S`

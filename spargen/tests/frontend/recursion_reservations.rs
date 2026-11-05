@@ -772,41 +772,81 @@ components:
     }
 }
 
-/// The same merge where one member reaches the open target through a component alias of it
-/// (`A = B | C`, `C = B`, `B.x -> A`) is not that nullable alias, as `A = C` alone is not: the
-/// merged union has no def to hand back as `A`'s root, so it is refused as `E007` with its own
-/// wording rather than failing the IR invariant as `E011` (#1152).
+/// The same merge where one member reaches the target through a component alias of it
+/// (`A = B | C`, `C = B`, `B.x -> A`) generates in every order `components.schemas` declares the
+/// three in, as the one-member alias spelling `A = C | null` does (#1189). Lowered `A` first, `B`
+/// finishes inside `A` and the union is `B`'s shape re-emitted as `A`; lowered `B` first, `A` is
+/// reached while `B` is open and the alias `C` is followed to `B`, so `A` is the nullable alias
+/// for `B` rather than the `E007` "cannot be given a generated type" refusal it once drew in that
+/// order alone (#1152). `C` written as a root alias of a sub-file alias of `B` is followed the
+/// same way.
 #[test]
-fn a_component_body_merging_a_cycle_closing_ref_through_an_alias_is_refused_as_e007() {
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths: {}
-components:
-  schemas:
-    B:
-      type: object
-      properties:
-        x: { $ref: '#/components/schemas/A' }
-    A:
-      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/C' }]
-    C:
-      $ref: '#/components/schemas/B'
-"##;
-    for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let errors: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.severity == spargen::Severity::Error)
-            .collect();
-        assert!(
-            errors.iter().all(|d| d.code == Code::NonDisjointUnion
-                && d.pointer.as_str() == "/components/schemas/A"
-                && d.message.contains("members all lower to one `$ref`")),
-            "{entry}: the only error must be `E007` at `A`: {report:#?}"
-        );
-        assert!(!errors.is_empty(), "{entry}: {report:#?}");
+fn a_component_body_reaching_a_cycle_closing_ref_through_an_alias_generates_in_every_order() {
+    let b = "    B:\n      type: object\n      properties:\n        x: { $ref: '#/components/schemas/A' }\n";
+    let bodies = [
+        (
+            "oneOf",
+            "    A:\n      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/C' }]\n",
+        ),
+        (
+            "nullable",
+            "    A:\n      oneOf: [{ $ref: '#/components/schemas/C' }, { type: 'null' }]\n",
+        ),
+    ];
+    let aliases = [
+        ("root", "    C:\n      $ref: '#/components/schemas/B'\n"),
+        ("sub-file", "    C:\n      $ref: './lib.yaml#/C'\n"),
+    ];
+    let lib = "C:\n  $ref: './openapi.yaml#/components/schemas/B'\n";
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for (body, a) in bodies {
+        for (alias, c) in aliases {
+            for order in orders {
+                let entries = [a, b, c];
+                let schemas: String = order.iter().map(|&i| entries[i]).collect();
+                let spec = format!(
+                    "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n\
+                     components:\n  schemas:\n{schemas}"
+                );
+                let (generated, checked, code) =
+                    generate_and_check_files(&[("openapi.yaml", &spec), ("lib.yaml", lib)]);
+                let case = format!("{body} {alias} {order:?}");
+                for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                    assert!(
+                        report.outcome().is_success()
+                            && report
+                                .diagnostics()
+                                .iter()
+                                .all(|d| d.severity != spargen::Severity::Error),
+                        "{case} {entry}: every order must generate without an error: \
+                         {report:#?}"
+                    );
+                    assert_eq!(
+                        body == "oneOf",
+                        report.diagnostics().iter().any(|d| {
+                            d.code == Code::ValidationKeywordIgnored
+                                && d.pointer.as_str() == "/components/schemas/A"
+                                && d.message
+                                    .contains("members 0, 1 lower to the same generated type")
+                        }),
+                        "{case} {entry}: the repeated member is `W001` at `A` exactly where \
+                         `A` repeats it: {report:#?}"
+                    );
+                }
+                let types = types_module(&code);
+                assert!(
+                    types.contains("pub struct B"),
+                    "{case}: `B` must be generated: {types}"
+                );
+            }
+        }
     }
 }
 

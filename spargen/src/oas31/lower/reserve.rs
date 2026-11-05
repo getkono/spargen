@@ -10,8 +10,11 @@ use crate::source::is_remote_ref;
 use super::cycle::{Opening, Via};
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
+use super::reference::RefHop;
 use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
-use super::{append_text, resolved_hint, resolved_identity, LowerCtx, Reservation};
+use super::{
+    append_text, resolved_hint, resolved_identity, LowerCtx, Reservation, MAX_SCHEMA_DEPTH,
+};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower the schema `$ref` `reference`, written at `at`, to its shared, cycle-safe type through
@@ -532,7 +535,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// besides look up is raise the shadowed-component `W011` when it answers `Some` for a name
     /// a sub-file also declares, because answering `Some` is answering *instead of*
     /// [`Self::ensure_component`], which is where that warning otherwise lives.
+    ///
+    /// A target that is itself a bare alias (a `$ref` with no shape-bearing sibling, whether a
+    /// root component, a sub-file schema or a vendored document) is followed to what it names, as
+    /// lowering chains it, and the open reservation at the end of that chain is the answer. Without
+    /// that, the answer for a union member spelled through an alias (`A = B | C`, `C = B`) would
+    /// depend on whether the alias was reached before or after its target opened, which is the
+    /// order `components.schemas` declares them in (#1189). Each root-component hop the chain
+    /// passes is a reference lowering would have taken through [`Self::ensure_component`], so
+    /// each raises the shadowed-component `W011` that lowering it would.
     fn open_reservation_for_ref(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(TypeId, bool)> {
+        let mut reference = reference.to_owned();
+        let mut at = at.clone();
+        let mut passed: Vec<(String, Provenance)> = Vec::new();
+        // An alias loop reaches no open reservation, and lowering reports it as `E004`; the bound
+        // only keeps this total.
+        for _ in 0..MAX_SCHEMA_DEPTH {
+            if let Some(entry) = self.open_reservation_at_target(&reference, &at) {
+                for (reference, at) in &passed {
+                    if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                        self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
+                    }
+                }
+                return Some(entry);
+            }
+            let RefHop::Alias(next, next_at) = self.ref_target_hop(&reference, &at)? else {
+                return None;
+            };
+            passed.push((
+                std::mem::replace(&mut reference, next),
+                std::mem::replace(&mut at, next_at),
+            ));
+        }
+        None
+    }
+
+    /// [`Self::open_reservation_for_ref`] for the target `reference` names directly, without
+    /// following an alias there.
+    fn open_reservation_at_target(
         &mut self,
         reference: &str,
         at: &Provenance,
