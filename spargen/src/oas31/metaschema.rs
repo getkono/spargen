@@ -77,6 +77,13 @@ impl MetaSchemaValidator {
             None => &self.oas31,
         };
 
+        // What the reader is told about the version a Path Item is held to (see `describe`).
+        let declared = if root.get("openapi").and_then(SpannedValue::as_str).is_some() {
+            "this document declares 3.1"
+        } else {
+            "this document declares no `openapi` version, so it is validated as 3.1"
+        };
+
         let root_id = bundle.root_id();
         let mut instances: HashMap<FileId, Value> = HashMap::new();
         let mut reporter = Reporter::default();
@@ -92,7 +99,7 @@ impl MetaSchemaValidator {
                 root_id,
                 &JsonPointer::root(),
                 &at,
-                describe(&error, version.label, &JsonPointer::root()),
+                describe(&error, version.label, declared, &JsonPointer::root()),
                 None,
                 diags,
             );
@@ -134,7 +141,7 @@ impl MetaSchemaValidator {
                 .map(|error| {
                     (
                         JsonPointer::from(error.instance_path().as_str().to_owned()),
-                        describe(&error, version.label, &pending.location),
+                        describe(&error, version.label, declared, &pending.location),
                     )
                 })
                 .collect();
@@ -180,10 +187,12 @@ const PATH_ITEM_UNEVALUATED: &str = "/$defs/path-item/unevaluatedProperties";
 ///
 /// `location` is the vendored-schema location the failing validator was compiled at, which the
 /// error's schema path is relative to: the root for the whole document, a `$ref` target's
-/// location otherwise.
+/// location otherwise. `declared` states the version the document is held to: the one it
+/// declares, or, with no `openapi` field, the 3.1 schema selected in its absence.
 fn describe(
     error: &jsonschema::ValidationError<'_>,
     version: &str,
+    declared: &str,
     location: &JsonPointer,
 ) -> String {
     let text = error.to_string();
@@ -202,11 +211,9 @@ fn describe(
         .collect();
     match fields.as_slice() {
         [] => text,
-        [field] => format!(
-            "{text}; {field} is an OpenAPI 3.2 Path Item field, and this document declares 3.1"
-        ),
+        [field] => format!("{text}; {field} is an OpenAPI 3.2 Path Item field, and {declared}"),
         fields => format!(
-            "{text}; {} are OpenAPI 3.2 Path Item fields, and this document declares 3.1",
+            "{text}; {} are OpenAPI 3.2 Path Item fields, and {declared}",
             fields.join(" and ")
         ),
     }

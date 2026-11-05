@@ -835,6 +835,37 @@ paths:
     );
 }
 
+/// A document with no `openapi` field is validated against the 3.1 schema, and the message says
+/// so rather than claiming a declaration the document does not make.
+#[test]
+fn e011_a_path_item_with_query_in_a_document_declaring_no_version_names_no_declaration() {
+    let spec = r##"
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    query:
+      operationId: searchItems
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let path_item: Vec<_> = invalid_input_at(&report)
+        .into_iter()
+        .filter(|(pointer, _)| *pointer == "/paths/~1search")
+        .collect();
+    assert_eq!(
+        path_item,
+        [(
+            "/paths/~1search",
+            "OpenAPI structure violation: Unevaluated properties are not allowed ('query' was \
+             unexpected); `query` is an OpenAPI 3.2 Path Item field, and this document declares \
+             no `openapi` version, so it is validated as 3.1"
+        )],
+        "{report:#?}"
+    );
+}
+
 /// A Path Item in another file is held to the root's 3.1 schema, and is told the same.
 #[test]
 fn e011_an_oas31_path_item_reached_by_ref_with_both_oas32_fields_names_both() {
