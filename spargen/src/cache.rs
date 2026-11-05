@@ -1,16 +1,14 @@
-//! Content-addressed build-script caching: the input fingerprint, the cache record, the
-//! `cargo:rerun-if-changed` directives over those inputs, and the atomic write of the generated
-//! output.
-
-use std::io::Write as _;
+//! Content-addressed build-script caching: the input fingerprint, the cache record, and the
+//! `cargo:rerun-if-changed` directives over those inputs.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
-use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
+use crate::output::atomic_write;
+use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
-use crate::{Build, Code, Spec};
+use crate::{Build, Code, Report, Spec};
 
 const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -25,37 +23,7 @@ impl InputSnapshot {
     /// The error carries the whole diagnostic batch, not just its items, so a caller can tell a
     /// complete failure list from one the `batch_cap` truncated.
     pub(crate) fn load(spec: &Spec) -> Result<Self, Diagnostics> {
-        let mut diagnostics = Diagnostics::new(spec.batch_cap);
-        let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
-            Ok(bundle) => bundle,
-            Err(_) => return Err(diagnostics),
-        };
-
-        let mut inputs = bundle
-            .source_inputs()
-            .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
-            .collect::<Vec<_>>();
-        let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
-        let lock = spec_dir.join(LOCK_FILE_NAME);
-        // The applied config files are read like `spargen.lock`: a file that existed when it was
-        // applied and cannot be read now fails the build rather than dropping out of the inputs.
-        let lock = lock.is_file().then_some(lock);
-        for path in lock.iter().chain(&spec.config_files) {
-            match std::fs::read(path) {
-                Ok(bytes) => inputs.push((path.clone(), bytes)),
-                Err(error) => {
-                    Diagnostic::at_root(
-                        Code::InvalidInput,
-                        format!("failed to read build input `{path}`: {error}"),
-                    )
-                    .emit(&mut diagnostics);
-                    return Err(diagnostics);
-                }
-            }
-        }
-        inputs.sort_by(|left, right| left.0.cmp(&right.0));
-        inputs.dedup_by(|left, right| left.0 == right.0);
-
+        let inputs = read_inputs(spec)?;
         let mut fingerprint = b"spargen-build-input-v1\0".to_vec();
         append(&mut fingerprint, env!("CARGO_PKG_VERSION").as_bytes());
         append(
@@ -87,16 +55,54 @@ impl InputSnapshot {
     }
 }
 
-pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) {
-    for directive in rerun_directives(build, snapshot) {
-        println!("{directive}");
-    }
+/// The paths [`InputSnapshot::load`] fingerprints, read without hashing them.
+pub(crate) fn input_paths(spec: &Spec) -> Result<Vec<Utf8PathBuf>, Diagnostics> {
+    Ok(read_inputs(spec)?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
 }
 
-/// One `cargo:rerun-if-changed` line per input the snapshot read (only the root spec when there is
-/// no snapshot), per applied config file, and for the output module, sorted and deduplicated. A
-/// path carrying a line break is left out, as [`rerun_if_changed_lines`] describes.
-fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
+/// Every build input `spec` reads, with its bytes, sorted and deduplicated by path: the bundle's
+/// files, `spargen.lock` beside the spec when there is one, and the applied config files.
+fn read_inputs(spec: &Spec) -> Result<Vec<(Utf8PathBuf, Vec<u8>)>, Diagnostics> {
+    let mut diagnostics = Diagnostics::new(spec.batch_cap);
+    let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
+        Ok(bundle) => bundle,
+        Err(_) => return Err(diagnostics),
+    };
+
+    let mut inputs = bundle
+        .source_inputs()
+        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
+        .collect::<Vec<_>>();
+    let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
+    let lock = spec_dir.join(LOCK_FILE_NAME);
+    // The applied config files are read like `spargen.lock`: a file that existed when it was
+    // applied and cannot be read now fails the build rather than dropping out of the inputs.
+    let lock = lock.is_file().then_some(lock);
+    for path in lock.iter().chain(&spec.config_files) {
+        match std::fs::read(path) {
+            Ok(bytes) => inputs.push((path.clone(), bytes)),
+            Err(error) => {
+                Diagnostic::at_root(
+                    Code::InvalidInput,
+                    format!("failed to read build input `{path}`: {error}"),
+                )
+                .emit(&mut diagnostics);
+                return Err(diagnostics);
+            }
+        }
+    }
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    inputs.dedup_by(|left, right| left.0 == right.0);
+    Ok(inputs)
+}
+
+/// The paths a build names to Cargo as `cargo:rerun-if-changed`: each input the snapshot read
+/// (only the root spec when there is no snapshot), each applied config file, and the output
+/// module, sorted and deduplicated.
+pub(crate) fn rerun_paths(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Utf8PathBuf> {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
         .unwrap_or_else(|| vec![build.spec.path.clone()]);
@@ -104,7 +110,7 @@ fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Stri
     paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
-    rerun_if_changed_lines(&paths)
+    paths
 }
 
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
@@ -184,75 +190,29 @@ pub(crate) fn read_cache(
     })
 }
 
+/// Record `report`, the run that generated the output, so a later cache hit replays its
+/// diagnostics and truncation.
 pub(crate) fn write_cache(
     path: &Utf8Path,
     input_digest: &str,
     content_digest: &str,
-    diagnostics: &[Diagnostic],
-    truncated: bool,
+    report: &Report,
     requirements: &RuntimeRequirements,
 ) -> Result<(), String> {
     let record = CacheRecord {
         format: CACHE_FORMAT,
         input_sha256: input_digest.to_owned(),
         content_sha256: content_digest.to_owned(),
-        diagnostics: diagnostics.iter().map(CachedDiagnostic::from).collect(),
-        truncated,
+        diagnostics: report
+            .diagnostics
+            .iter()
+            .map(CachedDiagnostic::from)
+            .collect(),
+        truncated: report.truncated,
         requirements: requirements.clone(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
-}
-
-/// Write the rendered module to `path`, leaving the file untouched when it already holds exactly
-/// `contents`, so an [`Outcome::Generated`](crate::Outcome::Generated) run rewrites the output
-/// only when its bytes change.
-pub(crate) fn write_output(path: &Utf8Path, contents: &str) -> Result<(), String> {
-    if std::fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
-        return Ok(());
-    }
-    atomic_write(path, contents.as_bytes())
-        .map_err(|error| format!("failed to write generated module `{path}`: {error}"))
-}
-
-fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let name = path.file_name().unwrap_or("spargen-output");
-    let mut attempt = 0u32;
-    let temporary = loop {
-        let candidate = parent.join(format!(
-            ".{name}.spargen-{}-{attempt}.tmp",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&candidate)
-        {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-                    let _ = std::fs::remove_file(&candidate);
-                    return Err(error);
-                }
-                break candidate;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                attempt = attempt.saturating_add(1);
-            }
-            Err(error) => return Err(error),
-        }
-    };
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        #[cfg(windows)]
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            std::fs::remove_file(path)?;
-            return std::fs::rename(&temporary, path);
-        }
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
 }
 
 fn append(output: &mut Vec<u8>, bytes: &[u8]) {
@@ -374,11 +334,17 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{
-        append, cache_path, finalized, rerun_directives, verified_output, CachedDiagnostic,
-        Diagnostic, InputSnapshot, JsonPointer, OutcomeClaim,
+        append, cache_path, finalized, rerun_paths, verified_output, CachedDiagnostic, Diagnostic,
+        InputSnapshot, JsonPointer, OutcomeClaim,
     };
+    use crate::runtime_contract::rerun_if_changed_lines;
     use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
     use camino::Utf8PathBuf;
+
+    /// The `cargo:rerun-if-changed` lines a build prints for its inputs and output.
+    fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
+        rerun_if_changed_lines(&rerun_paths(build, snapshot))
+    }
 
     fn fixture() -> (tempfile::TempDir, Build) {
         let temp = tempfile::tempdir().unwrap();
@@ -553,7 +519,7 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let original = std::fs::read_to_string(&config.output).unwrap();
         let record = cache_path(&cache_dir, &config.output);
@@ -564,7 +530,7 @@ components:
             .unwrap();
 
         std::fs::remove_file(&record).unwrap();
-        let seeded = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let seeded = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(seeded.outcome(), Outcome::Generated, "{seeded:#?}");
         assert!(
             record.is_file(),
@@ -583,12 +549,12 @@ components:
         );
 
         std::fs::write(&config.output, format!("{original}// manual edit\n")).unwrap();
-        let repaired = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let repaired = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(repaired.outcome(), Outcome::Generated, "{repaired:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::remove_file(&config.output).unwrap();
-        let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let restored = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(restored.outcome(), Outcome::Generated, "{restored:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
     }
@@ -601,7 +567,7 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let generated = std::fs::read_to_string(&config.output).unwrap();
         let written_at = std::fs::metadata(&config.output)
@@ -609,7 +575,7 @@ components:
             .modified()
             .unwrap();
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(
             second.outcome(),
             Outcome::Cached,
@@ -635,7 +601,7 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
         let record = cache_path(&cache_dir, &config.output);
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
 
         // A corruption that moves one field of the record: a number up by one, a digest by an
@@ -664,7 +630,7 @@ components:
         ];
 
         for (corruption, field) in corruptions {
-            let hit = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+            let hit = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
             assert_eq!(
                 hit.outcome(),
                 Outcome::Cached,
@@ -675,14 +641,14 @@ components:
                 ("absent", None) => std::fs::remove_file(&record).unwrap(),
                 (_, None) => std::fs::write(&record, b"not a cache record").unwrap(),
             }
-            let rerun = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+            let rerun = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
             assert_eq!(
                 rerun.outcome(),
                 Outcome::Generated,
                 "a record made {corruption} must rerun the pipeline: {rerun:#?}"
             );
         }
-        let last = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let last = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(last.outcome(), Outcome::Cached, "{last:#?}");
     }
 
@@ -737,7 +703,7 @@ components:
             .cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let mut seeded: Vec<(&str, Option<&str>)> = first
             .diagnostics()
@@ -757,7 +723,7 @@ components:
             "the seeding run must name the referenced file the warning lies in: {seeded:?}"
         );
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
         let mut replayed: Vec<(&str, Option<&str>)> = second
             .diagnostics()
@@ -795,14 +761,14 @@ components:
             .cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         assert!(
             first.truncated(),
             "the fixture must warn past batch_cap: {first:#?}"
         );
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
         assert!(
             second.truncated(),

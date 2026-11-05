@@ -1489,10 +1489,12 @@ const RUNTIME_CONTRACT: (&str, &str) = (
     concat!(
         include_str!("../../runtime_contract/tests/deps_block.rs"),
         include_str!("../../runtime_contract/tests/explain.rs"),
+        include_str!("../../runtime_contract/tests/inheritance.rs"),
+        include_str!("../../runtime_contract/tests/manifest_naming.rs"),
         include_str!("../../runtime_contract/tests/mod.rs"),
         include_str!("../../runtime_contract/tests/targets.rs"),
         include_str!("../../runtime_contract/tests/versions.rs"),
-        include_str!("../../runtime_contract/tests/workspace.rs"),
+        include_str!("../../runtime_contract/tests/walk.rs"),
     ),
 );
 
@@ -1583,7 +1585,7 @@ fn explain_clause_owner_failures(owner: &ExplainClauseOwner) -> Vec<String> {
     }
     let (module, source) = owner.module;
     for fixture in owner.fixtures {
-        if !crate::diag::is_test_fn(source, fixture) {
+        if !crate::test_support::is_test_fn(source, fixture) {
             failures.push(format!(
                 "{code}'s {:?} names `{fixture}` as a fixture that enforces it, and no \
                      `#[test]` of that name exists in {module}",

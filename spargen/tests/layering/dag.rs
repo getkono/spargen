@@ -15,7 +15,15 @@ const SUBSYSTEMS: &[&str] = &[
 
 /// Facade plumbing: named in `lib.rs` as explicitly *not* subsystems, and therefore never a legal
 /// dependency of one. A subsystem reaching into these inverts the layering.
-const FACADE_PLUMBING: &[&str] = &["cache", "config", "runtime_contract"];
+const FACADE_PLUMBING: &[&str] = &[
+    "cache",
+    "config",
+    "diff_api",
+    "output",
+    "pipeline",
+    "report",
+    "runtime_contract",
+];
 
 /// The `#[cfg(test)]` modules `lib.rs` declares for the in-crate tests of every subsystem: shared
 /// test helpers, compiled only into the test build. Neither a subsystem nor facade plumbing, so a

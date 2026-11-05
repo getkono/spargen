@@ -23,7 +23,7 @@ use crate::codegen::DEFAULT_ERROR_BODY_CAP;
 use crate::compat::{Omit, OmitRule, UnknownOmitToken};
 
 /// The default cap on diagnostics collected before batching stops.
-pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
+const DEFAULT_BATCH_CAP: usize = 100;
 
 /// What to generate: the spec to read plus every knob that can change the generated API.
 ///
@@ -247,7 +247,7 @@ impl Spec {
     }
 
     /// Apply already-read config-file text. Split out so the parser is testable without I/O.
-    pub(crate) fn apply_config(mut self, text: &str, path: &Utf8Path) -> Result<Self, ConfigError> {
+    fn apply_config(mut self, text: &str, path: &Utf8Path) -> Result<Self, ConfigError> {
         let file = toml::from_str::<FileConfig>(text)
             .map_err(|error| ConfigError::new(format!("invalid config file `{path}`: {error}")))?;
         if file.features.is_some() {

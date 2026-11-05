@@ -7,7 +7,7 @@ use cfg_expr::expr::TargetMatcher;
 use cfg_expr::targets::{Endian, TargetInfo};
 use cfg_expr::{Expression, Predicate, TargetPredicate};
 
-use super::under_build_script;
+use super::integration::under_build_script;
 
 /// What the audit knows about the target it audits for.
 ///
@@ -113,7 +113,7 @@ pub(super) enum Subject<'t> {
 }
 
 impl<'t> Subject<'t> {
-    pub(super) fn triple(self) -> &'t str {
+    fn triple(self) -> &'t str {
         match self {
             Self::Build(build) => build.triple(),
             Self::Builtin(info) => info.triple.as_str(),
