@@ -100,9 +100,9 @@ struct OpSurface {
     url_accessor_name: String,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
-    params: BTreeMap<ParamKey, ParamSurface>,
+    params: BTreeMap<ParamKey, MemberSurface>,
     /// The request body, or `None` for a bodyless operation or a body without a type.
-    request_body: Option<BodySurface>,
+    request_body: Option<MemberSurface>,
     /// Canonical rendering of the success return type.
     success: String,
     /// Canonical rendering of the error type.
@@ -122,27 +122,27 @@ struct HeadersSurface {
     /// The generated struct name.
     name: String,
     /// The header fields, keyed by generated field name.
-    fields: BTreeMap<String, FieldSurface>,
+    fields: BTreeMap<String, MemberSurface>,
 }
 
-/// A request body's surface: a required body is a `&T` argument in the generated signature, an
-/// optional one `Option<&T>`.
-struct BodySurface {
-    /// The canonical body type.
+/// A typed member's surface — a parameter, the request body, a struct field, or a response
+/// header: its canonical type and whether it is required, which the consumer sees in each:
+///
+/// - a required parameter is a positional method argument, an optional one rides in the `…Params`
+///   struct;
+/// - a required body is a `&T` argument in the generated signature, an optional one `Option<&T>`;
+/// - a struct field is both read (a required field is `T`, an optional one `Option<T>`) and
+///   constructed (a newly-required field breaks every existing constructor);
+/// - a required header is a `T` field read with `require_header`, an optional one an `Option<T>`.
+struct MemberSurface {
+    /// The canonical type.
     ty: String,
-    /// Whether the body is `required`.
+    /// Whether the member is required.
     required: bool,
 }
 
 /// A parameter's identity: its wire name and its location as the OpenAPI `in` value spells it.
 type ParamKey = (String, &'static str);
-
-/// A single parameter's surface: its canonical type and whether it is required (required params are
-/// positional method arguments; optional ones ride in the `…Params` struct).
-struct ParamSurface {
-    ty: String,
-    required: bool,
-}
 
 /// A public model type's surface, by generation kind. Only nominal types with real distinct
 /// structure are modelled: structs, string `enum`s, unions, cycle-member newtypes, and uninhabited
@@ -153,7 +153,7 @@ struct ParamSurface {
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name, and its typed `additionalProperties` map,
     /// when it has one.
-    Struct(BTreeMap<String, FieldSurface>, Option<OverflowSurface>),
+    Struct(BTreeMap<String, MemberSurface>, Option<OverflowSurface>),
     /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
     /// the generated name of the variant holding any other string.
     Enum(BTreeSet<String>, Option<String>),
@@ -178,14 +178,6 @@ impl TypeSurface {
             TypeSurface::Never => "empty enum",
         }
     }
-}
-
-/// A struct field's surface: its canonical type and whether it is required. Required-ness matters
-/// because the consumer both reads the field (a required field is `T`, optional is `Option<T>`) and
-/// constructs the value (a newly-required field breaks every existing constructor).
-struct FieldSurface {
-    ty: String,
-    required: bool,
 }
 
 /// A struct's typed `additionalProperties` map, emitted as a public `#[serde(flatten)]` field of

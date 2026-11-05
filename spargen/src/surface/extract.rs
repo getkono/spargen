@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    BodySurface, FieldSurface, HeadersSurface, OpSurface, OverflowSurface, ParamSurface,
-    ServerSurface, ServerVariableSurface, Surface, TypeSurface,
+    HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
+    ServerVariableSurface, Surface, TypeSurface,
 };
 use crate::ir::{
     AdditionalProps, Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec,
@@ -35,14 +35,14 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             };
             params.insert(
                 (param.name.clone(), param.location.as_openapi_in()),
-                ParamSurface {
+                MemberSurface {
                     ty,
                     required: param.required,
                 },
             );
         }
 
-        let request_body = operation.typed_body().map(|(body, ty)| BodySurface {
+        let request_body = operation.typed_body().map(|(body, ty)| MemberSurface {
             ty: canon_ty(ty, api, names),
             required: body.required,
         });
@@ -85,7 +85,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         .to_owned();
                     fields.insert(
                         field_name,
-                        FieldSurface {
+                        MemberSurface {
                             ty: canon_ty(field.ty, api, names),
                             required: field.required,
                         },
@@ -232,7 +232,7 @@ fn response_headers(
             .iter()
             .map(|header| {
                 let field = header_names.field(&header.name).as_str().to_owned();
-                let surface = FieldSurface {
+                let surface = MemberSurface {
                     ty: canon_ty(header.ty, api, names),
                     required: header.required,
                 };
