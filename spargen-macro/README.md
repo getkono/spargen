@@ -15,8 +15,8 @@ beside the spec is always discovered and applied first; the four switches overri
 direction, the two caps replace its values, and `omit { ... }` adds rules to its `[[omit]]` rules.
 Each switch — `uuid`, `time`, `carve`, `open_narrowing` — takes `= true` or `= false`; written
 alone it means `= true`, and `no_uuid` / `no_time` are shorthand for `uuid = false` /
-`time = false`. A switch the macro is not given leaves the file's value, and one given twice is a
-compile error:
+`time = false`. A switch or cap the macro is not given leaves the file's value, and one given
+twice is a compile error:
 
 ```rust,ignore
 spargen_macro::generate_api!(

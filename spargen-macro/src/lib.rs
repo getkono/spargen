@@ -141,14 +141,8 @@ impl Parse for Args {
                     "open_narrowing" => {
                         parse_switch(input, &key, "open_narrowing", &mut open_narrowing, false)?
                     }
-                    "error_body_cap" => {
-                        input.parse::<Token![=]>()?;
-                        error_body_cap = Some(parse_usize(input)?);
-                    }
-                    "batch_cap" => {
-                        input.parse::<Token![=]>()?;
-                        batch_cap = Some(parse_usize(input)?);
-                    }
+                    "error_body_cap" => parse_cap(input, &key, &mut error_body_cap)?,
+                    "batch_cap" => parse_cap(input, &key, &mut batch_cap)?,
                     "omit" => parse_omit(input, &mut omit)?,
                     other => {
                         return Err(syn::Error::new(
@@ -291,9 +285,19 @@ fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
     config
 }
 
-fn parse_usize(input: ParseStream) -> syn::Result<usize> {
-    let value: LitInt = input.parse()?;
-    value.base10_parse()
+/// Parse the cap `key` (`= <integer>`) into `slot`. A cap set twice is an error rather than a
+/// silent last-wins, as a repeated switch is.
+fn parse_cap(input: ParseStream, key: &Ident, slot: &mut Option<usize>) -> syn::Result<()> {
+    input.parse::<Token![=]>()?;
+    let value: usize = input.parse::<LitInt>()?.base10_parse()?;
+    if slot.is_some() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!("`{key}` given more than once"),
+        ));
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 fn parse_omit(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> {
@@ -997,6 +1001,14 @@ paths:
     #[test]
     fn every_argument_parse_error_names_what_was_wrong() {
         let cases: &[(&str, &str)] = &[
+            (
+                r#""a.yaml", batch_cap = 1, batch_cap = 2"#,
+                "`batch_cap` given more than once",
+            ),
+            (
+                r#""a.yaml", error_body_cap = 1, error_body_cap = 2"#,
+                "`error_body_cap` given more than once",
+            ),
             (r#""a.yaml", "b.yaml""#, "spec path given more than once"),
             (
                 r#""a.yaml", spec = "b.yaml""#,
