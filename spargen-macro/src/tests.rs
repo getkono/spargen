@@ -1,0 +1,607 @@
+use super::{config, failure_message, spec_for, tracking, Args, Consumer};
+use spargen::{ComponentKind, OmitMethod, OmitRule, Spec};
+
+fn os(value: &str) -> Option<std::ffi::OsString> {
+    Some(value.into())
+}
+
+#[test]
+fn an_unnamed_consumer_is_an_error_not_the_working_directory() {
+    // #195: with neither variable set, auditing `./Cargo.toml` would read the (usually
+    // virtual) workspace root under a workspace build and report every runtime dependency
+    // missing at spargen's floor version. Not knowing the crate is an error.
+    let error = Consumer::locate(None, None).unwrap_err();
+    assert!(
+        error.contains("CARGO_MANIFEST_PATH") && error.contains("CARGO_MANIFEST_DIR"),
+        "{error}"
+    );
+    // An empty value joined onto would reproduce the same working-directory guess.
+    assert_eq!(Consumer::locate(os(""), os("")).unwrap_err(), error);
+}
+
+#[test]
+fn the_consumer_comes_from_whichever_variable_cargo_set() {
+    let dir = "/work/member";
+    let manifest = "/work/member/Cargo.toml";
+    let expected = Consumer {
+        dir: dir.to_owned(),
+        manifest: manifest.to_owned(),
+    };
+    assert_eq!(Consumer::locate(os(manifest), os(dir)).unwrap(), expected);
+    assert_eq!(Consumer::locate(None, os(dir)).unwrap(), expected);
+    assert_eq!(Consumer::locate(os(manifest), None).unwrap(), expected);
+    // An empty variable beside a set one is ignored, not joined onto.
+    assert_eq!(Consumer::locate(os(""), os(dir)).unwrap(), expected);
+    assert_eq!(Consumer::locate(os(manifest), os("")).unwrap(), expected);
+
+    let consumer = Consumer::locate(None, os(dir)).unwrap();
+    assert_eq!(
+        consumer.resolve_spec_path("openapi.yaml"),
+        std::path::Path::new(dir)
+            .join("openapi.yaml")
+            .to_string_lossy()
+    );
+    assert_eq!(consumer.resolve_spec_path(manifest), manifest);
+
+    // A bare relative manifest path has an empty parent; the spec directory is then the one
+    // that path is relative to, spelled `.`, never an empty prefix.
+    let bare = Consumer::locate(os("Cargo.toml"), None).unwrap();
+    assert_eq!(
+        bare,
+        Consumer {
+            dir: ".".to_owned(),
+            manifest: "Cargo.toml".to_owned(),
+        }
+    );
+    assert_eq!(
+        bare.resolve_spec_path("openapi.yaml"),
+        std::path::Path::new(".")
+            .join("openapi.yaml")
+            .to_string_lossy()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_location_is_an_error_not_a_lossy_path() {
+    use std::os::unix::ffi::OsStringExt;
+    let invalid = std::ffi::OsString::from_vec(b"/work/\xFF/Cargo.toml".to_vec());
+    let error = Consumer::locate(Some(invalid), None).unwrap_err();
+    assert!(
+        error.contains("`CARGO_MANIFEST_PATH` is not valid UTF-8"),
+        "{error}"
+    );
+}
+
+/// Every argument the keyed form accepts, each set away from its default.
+const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, no_time, carve, open_narrowing,
+               error_body_cap = 4096, batch_cap = 7,
+               omit {
+                   operations { post "/legacy"; }
+                   paths { "/internal/**"; }
+                   components { schemas { "Legacy"; } }
+                   pointers { "/webhooks"; }
+                   file("shared.yaml") { pointers { "/Legacy"; } }
+               }"#;
+
+/// The rules [`EVERY_CONTROL`]'s `omit` block names, in the order it names them.
+fn every_omit_rule() -> Vec<OmitRule> {
+    vec![
+        OmitRule::operation(OmitMethod::Post, "/legacy"),
+        OmitRule::path("/internal/**"),
+        OmitRule::component(ComponentKind::Schemas, "Legacy"),
+        OmitRule::pointer(None, "/webhooks"),
+        OmitRule::pointer(Some("shared.yaml".into()), "/Legacy"),
+    ]
+}
+
+#[test]
+fn parses_every_build_configuration_control() {
+    let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
+
+    assert_eq!(args.spec.value(), "openapi.yaml");
+    assert_eq!(args.uuid, Some(false));
+    assert_eq!(args.time, Some(false));
+    assert_eq!(args.carve, Some(true));
+    assert_eq!(args.open_narrowing, Some(true));
+    assert_eq!(args.error_body_cap, Some(4096));
+    assert_eq!(args.batch_cap, Some(7));
+    assert_eq!(args.omit.rules, every_omit_rule());
+}
+
+#[test]
+fn a_bare_spec_path_sets_no_control() {
+    let args: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
+
+    assert_eq!(args.spec.value(), "openapi.yaml");
+    assert_eq!(args.uuid, None);
+    assert_eq!(args.time, None);
+    assert_eq!(args.carve, None);
+    assert_eq!(args.open_narrowing, None);
+    assert_eq!(args.error_body_cap, None);
+    assert_eq!(args.batch_cap, None);
+    assert_eq!(args.omit.rules, Vec::new());
+}
+
+/// Each argument reaches the `Spec` field it names, and nothing else changes.
+#[test]
+fn every_argument_maps_onto_its_spec_field() {
+    let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
+    let mut expected = Spec::new("openapi.yaml")
+        .uuid(false)
+        .time(false)
+        .carve(true)
+        .open_narrowing(true)
+        .error_body_cap(4096)
+        .batch_cap(7);
+    for rule in every_omit_rule() {
+        expected = expected.omit_rule(rule);
+    }
+    assert_eq!(config(&args, Spec::new("openapi.yaml")), expected);
+}
+
+/// The macro overrides the discovered config file only where it was given an argument: an
+/// absent flag keeps the file's value rather than resetting it, and omit rules append.
+#[test]
+fn an_absent_argument_keeps_the_config_files_value() {
+    let discovered = Spec::new("openapi.yaml")
+        .uuid(false)
+        .time(false)
+        .carve(true)
+        .open_narrowing(true)
+        .error_body_cap(1024)
+        .batch_cap(3)
+        .omit_rule(OmitRule::path("/from-file"));
+
+    let bare: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
+    assert_eq!(config(&bare, discovered.clone()), discovered);
+
+    let capped: Args =
+        syn::parse_str(r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } }"#)
+            .unwrap();
+    assert_eq!(
+        config(&capped, discovered.clone()),
+        discovered
+            .batch_cap(9)
+            .omit_rule(OmitRule::path("/from-macro"))
+    );
+}
+
+/// Each switch overrides the config file in both directions: its `= bool` form sets either
+/// value, its bare key sets `true`, and `no_uuid` / `no_time` set `false`.
+#[test]
+fn each_switch_overrides_the_config_file_either_way() {
+    let on = Spec::new("openapi.yaml")
+        .uuid(true)
+        .time(true)
+        .carve(true)
+        .open_narrowing(true);
+    let off = Spec::new("openapi.yaml")
+        .uuid(false)
+        .time(false)
+        .carve(false)
+        .open_narrowing(false);
+
+    let turn_off = args(
+        r#""openapi.yaml", uuid = false, time = false, carve = false, open_narrowing = false"#,
+    );
+    assert_eq!(config(&turn_off, on.clone()), off);
+    let turn_on =
+        args(r#""openapi.yaml", uuid = true, time = true, carve = true, open_narrowing = true"#);
+    assert_eq!(config(&turn_on, off.clone()), on);
+    let bare = args(r#""openapi.yaml", uuid, time, carve, open_narrowing"#);
+    assert_eq!(config(&bare, off.clone()), on);
+    let negated = args(r#""openapi.yaml", no_uuid, no_time"#);
+    assert_eq!(config(&negated, on.clone()), on.uuid(false).time(false));
+}
+
+/// Each switch sets its own `Spec` field: `uuid` and `time`, and `carve` and
+/// `open_narrowing`, are given opposite values over a base holding the inverse of each, so a
+/// switch wired to another's setting changes the result.
+#[test]
+fn each_switch_reaches_its_own_field_when_the_values_differ() {
+    let base = Spec::new("openapi.yaml")
+        .uuid(true)
+        .time(false)
+        .carve(false)
+        .open_narrowing(true);
+    let expected = Spec::new("openapi.yaml")
+        .uuid(false)
+        .time(true)
+        .carve(true)
+        .open_narrowing(false);
+
+    let valued =
+        args(r#""openapi.yaml", uuid = false, time = true, carve = true, open_narrowing = false"#);
+    assert_eq!(config(&valued, base.clone()), expected);
+    let spelled = args(r#""openapi.yaml", no_uuid, time, carve, open_narrowing = false"#);
+    assert_eq!(config(&spelled, base), expected);
+}
+
+/// A directory under the system temporary directory, removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("spargen-macro-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// The UTF-8 path of `relative` inside this directory.
+    fn path(&self, relative: &str) -> String {
+        self.0.join(relative).to_str().unwrap().to_owned()
+    }
+
+    /// Write `text` to `relative`, creating its parent, and return its path.
+    fn write(&self, relative: &str, text: &str) -> String {
+        let path = self.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        self.path(relative)
+    }
+
+    /// The consumer whose crate directory this is, with its `Cargo.toml` as the manifest.
+    fn consumer(&self) -> Consumer {
+        Consumer {
+            dir: self.path(""),
+            manifest: self.path("Cargo.toml"),
+        }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A spec that generates, its one schema reached through a relative-file `$ref`.
+const SPLIT_SPEC: &str = r#"openapi: 3.1.0
+info: { title: Split, version: "1" }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "schemas.yaml#/Pet" }
+"#;
+
+const SPLIT_SCHEMAS: &str = "Pet:\n  type: object\n  properties:\n    name: { type: string }\n";
+
+fn args(source: &str) -> Args {
+    match syn::parse_str(source) {
+        Ok(args) => args,
+        Err(error) => panic!("`{source}` did not parse: {error}"),
+    }
+}
+
+fn parse_error(source: &str) -> String {
+    match syn::parse_str::<Args>(source) {
+        Ok(_) => panic!("`{source}` parsed"),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[test]
+fn no_config_file_leaves_the_spec_at_its_defaults() {
+    let scratch = Scratch::new("no-config");
+    let spec = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+    assert_eq!(spec, Spec::new(scratch.path("openapi.yaml")));
+}
+
+/// The `spargen.toml` read is the one beside the spec, not the one beside the consumer's
+/// `Cargo.toml`, and the macro arguments override it.
+#[test]
+fn the_config_file_beside_the_spec_is_applied_under_the_arguments() {
+    let scratch = Scratch::new("config-beside-spec");
+    scratch.write("spargen.toml", "open_narrowing = true\n");
+    scratch.write("api/spargen.toml", "carve = true\nbatch_cap = 3\n");
+
+    // `Spec` equality covers the config files applied, so this also pins which file was
+    // recorded: the one beside the spec, once.
+    let applied = Spec::new(scratch.path("api/openapi.yaml"))
+        .config_file(scratch.path("api/spargen.toml"))
+        .unwrap();
+    assert_eq!(applied, applied.clone().carve(true).batch_cap(3));
+    let spec = spec_for(&args(r#""api/openapi.yaml""#), &scratch.consumer()).unwrap();
+    assert_eq!(spec, applied);
+
+    let spec = spec_for(
+        &args(r#""api/openapi.yaml", batch_cap = 9"#),
+        &scratch.consumer(),
+    )
+    .unwrap();
+    assert_eq!(spec, applied.batch_cap(9));
+}
+
+#[test]
+fn an_invalid_config_file_is_an_error_naming_it() {
+    let scratch = Scratch::new("invalid-config");
+    let config = scratch.write("spargen.toml", "[features]\ncarve = true\n");
+    let error = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "invalid config file `{config}`: the `[features]` table was removed; move its \
+                 keys (`carve`, `batch_cap`, …) to the top level of the file"
+        )
+    );
+}
+
+#[test]
+fn a_generated_preview_is_no_failure() {
+    let scratch = Scratch::new("generated");
+    let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
+    scratch.write("schemas.yaml", SPLIT_SCHEMAS);
+    let preview = spargen::__private::preview(&Spec::new(spec));
+    assert_eq!(failure_message("openapi.yaml", &preview), None);
+}
+
+/// The `compile_error!` text: the spec as the macro was given it, then each error-severity
+/// diagnostic in `Diagnostic`'s own `Display`: code and message, span, pointer, and remedy.
+#[test]
+fn a_rejected_spec_renders_each_error_with_its_code_span_and_remedy() {
+    let scratch = Scratch::new("rejected");
+    let spec = scratch.write(
+        "openapi.yaml",
+        "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
+    );
+    let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
+    // A frontend rejection retains no module; the macro raises `compile_error!` on any
+    // rejected outcome rather than emitting the code it may hold.
+    assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+    assert!(
+        preview.contents.is_none(),
+        "a frontend rejection retains no generated module"
+    );
+    // A root-level diagnostic's pointer is empty, so no `at` line is rendered. The span names
+    // the spec path as the bundle loaded it, not as the macro was given it.
+    assert_eq!(
+        failure_message("specs/old.yaml", &preview).unwrap(),
+        format!(
+            "spargen could not generate a client from `specs/old.yaml`\n\
+                 error[E001]: unsupported OpenAPI version `3.0.3`; spargen implements 3.1.x and \
+                 3.2.x\n  --> {spec}:1:10\n  \
+                 help: use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses \
+                 different schema semantics"
+        )
+    );
+}
+
+/// Several errors are each rendered in turn, in the report's order; a warning beside them is
+/// not rendered.
+#[test]
+fn every_error_is_rendered_in_order_and_warnings_are_left_out() {
+    let scratch = Scratch::new("several");
+    let spec = scratch.write(
+        "openapi.yaml",
+        r##"openapi: 3.1.0
+info: { title: Dangling, version: "1" }
+paths:
+  /a:
+    get:
+      operationId: getA
+      parameters:
+        - { name: q, in: query, schema: { type: string, pattern: "^a" } }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Missing" }
+  /b:
+    get:
+      operationId: getB
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlsoMissing" }
+"##,
+    );
+    let preview = spargen::__private::preview(&Spec::new(spec.as_str()));
+    assert!(
+        preview
+            .report
+            .diagnostics()
+            .iter()
+            .any(|d| d.severity == spargen::Severity::Warning),
+        "the fixture must carry a warning for its omission to be observed"
+    );
+    assert_eq!(
+        failure_message("openapi.yaml", &preview).unwrap(),
+        format!(
+            "spargen could not generate a client from `openapi.yaml`\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/Missing`\n  \
+                 --> {spec}:14:23\n  \
+                 at /paths/~1a/get/responses/200/content/application~1json/schema\n\
+                 error[E004]: unresolved schema reference `#/components/schemas/AlsoMissing`\n  \
+                 --> {spec}:23:23\n  \
+                 at /paths/~1b/get/responses/200/content/application~1json/schema"
+        )
+    );
+}
+
+/// A preview that produced no client and retained no error says so in place of a diagnostic
+/// list: a rejection whose errors `batch_cap = 0` dropped, and a generated outcome holding no
+/// module.
+#[test]
+fn a_failure_with_no_retained_error_says_generation_did_not_succeed() {
+    let scratch = Scratch::new("no-retained-error");
+    let rejected = scratch.write(
+        "openapi.yaml",
+        "openapi: 3.0.3\ninfo: { title: Old, version: \"1\" }\npaths: {}\n",
+    );
+    let preview = spargen::__private::preview(&Spec::new(rejected.as_str()).batch_cap(0));
+    assert_eq!(preview.report.outcome(), spargen::Outcome::Rejected);
+    assert!(
+        preview.report.diagnostics().is_empty(),
+        "a zero cap retains no diagnostic"
+    );
+    let expected = "spargen could not generate a client from `openapi.yaml`: generation did \
+                        not succeed";
+    assert_eq!(
+        failure_message("openapi.yaml", &preview).as_deref(),
+        Some(expected)
+    );
+
+    let generated = scratch.write("split/openapi.yaml", SPLIT_SPEC);
+    scratch.write("split/schemas.yaml", SPLIT_SCHEMAS);
+    let mut preview = spargen::__private::preview(&Spec::new(generated));
+    assert_eq!(preview.report.outcome(), spargen::Outcome::Generated);
+    preview.contents = None;
+    assert_eq!(
+        failure_message("openapi.yaml", &preview).as_deref(),
+        Some(expected)
+    );
+}
+
+/// The files a successful expansion `include_bytes!`s, and so the files whose edit makes
+/// Cargo re-expand it: the spec, every file its `$ref`s load, the manifest the audit read, a
+/// `spargen.lock` beside the spec, and the `spargen.toml` `spec_for` applied (#686).
+#[test]
+fn tracking_includes_the_spec_its_refs_the_manifest_the_lock_and_the_config() {
+    let scratch = Scratch::new("tracking");
+    let spec = scratch.write("openapi.yaml", SPLIT_SPEC);
+    let schemas = scratch.write("schemas.yaml", SPLIT_SCHEMAS);
+    let lock = scratch.write("spargen.lock", "version = 1\n");
+    let config = scratch.write("spargen.toml", "carve = false\n");
+    let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).unwrap();
+    // `[workspace]` makes the fixture its own workspace root, so the audit's walk upward for
+    // one stops here instead of reading an ancestor manifest above the temporary directory.
+    let manifest = scratch.write(
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [workspace]\n\n{}",
+            requirements.manifest_block()
+        ),
+    );
+
+    let configured = spec_for(&args(r#""openapi.yaml""#), &scratch.consumer()).unwrap();
+    assert_eq!(configured.path().as_str(), spec);
+    let preview = spargen::__private::preview_for_macro(&configured, &manifest);
+    assert_eq!(failure_message("openapi.yaml", &preview), None);
+    let mut expected = vec![manifest, spec, schemas, lock, config];
+    expected.sort();
+    assert_eq!(
+        tracking(&preview).to_string(),
+        quote::quote! { #(const _: &[u8] = include_bytes!(#expected);)* }.to_string()
+    );
+}
+
+#[test]
+fn every_argument_parse_error_names_what_was_wrong() {
+    let cases: &[(&str, &str)] = &[
+        (
+            r#""a.yaml", batch_cap = 1, batch_cap = 2"#,
+            "`batch_cap` given more than once",
+        ),
+        (
+            r#""a.yaml", error_body_cap = 1, error_body_cap = 2"#,
+            "`error_body_cap` given more than once",
+        ),
+        (r#""a.yaml", "b.yaml""#, "spec path given more than once"),
+        (
+            r#""a.yaml", spec = "b.yaml""#,
+            "spec path given more than once",
+        ),
+        (r#"spec "a.yaml""#, "expected `=`"),
+        (r#"spec = 1"#, "expected string literal"),
+        (r#"42"#, "expected identifier"),
+        (
+            r#""a.yaml", uuids"#,
+            "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, time, \
+                 no_time, carve, open_narrowing, error_body_cap, batch_cap, omit",
+        ),
+        (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
+        (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
+        (
+            r#""a.yaml", no_uuid = true"#,
+            "`no_uuid` takes no value; write `uuid = true` or `uuid = false`",
+        ),
+        (
+            r#""a.yaml", no_time = false"#,
+            "`no_time` takes no value; write `time = true` or `time = false`",
+        ),
+        (
+            r#""a.yaml", no_uuid, uuid = true"#,
+            "`uuid` given more than once",
+        ),
+        (r#""a.yaml", time, no_time"#, "`time` given more than once"),
+        (
+            r#""a.yaml", carve, carve = false"#,
+            "`carve` given more than once",
+        ),
+        (
+            r#""a.yaml", open_narrowing = true, open_narrowing"#,
+            "`open_narrowing` given more than once",
+        ),
+        (r#""a.yaml" no_uuid"#, "expected `,`"),
+        (
+            "no_uuid",
+            "unexpected end of input, expected a spec path, e.g. \
+                 generate_api!(\"openapi.yaml\")",
+        ),
+        (
+            r#""a.yaml", error_body_cap = "big""#,
+            "expected integer literal",
+        ),
+        (
+            r#""a.yaml", error_body_cap = 99999999999999999999999"#,
+            "number too large to fit in target type",
+        ),
+        (r#""a.yaml", batch_cap 3"#, "expected `=`"),
+        (
+            r#""a.yaml", batch_cap = -1"#,
+            "invalid digit found in string",
+        ),
+        (r#""a.yaml", omit ( )"#, "expected curly braces"),
+        (
+            r#""a.yaml", omit { schemas { } }"#,
+            "unknown omit section `schemas`",
+        ),
+        (
+            r#""a.yaml", omit { operations { fetch "/a"; } }"#,
+            "unknown HTTP method: `fetch`; \
+                 expected one of get/put/post/delete/options/head/patch/trace/query",
+        ),
+        (
+            r#""a.yaml", omit { operations { get "/a" } }"#,
+            "expected `;`",
+        ),
+        (r#""a.yaml", omit { paths { "/a" } }"#, "expected `;`"),
+        (
+            r#""a.yaml", omit { components { models { "A"; } } }"#,
+            "unknown component kind: `models`; expected one of \
+                 schemas/responses/parameters/request_bodies/headers/security_schemes/\
+                 path_items/media_types",
+        ),
+        (r#""a.yaml", omit { pointers { "/a" } }"#, "expected `;`"),
+        (
+            r#""a.yaml", omit { file("b.yaml") { paths { "/a"; } } }"#,
+            "expected `pointers`",
+        ),
+        (
+            r#""a.yaml", omit { file { pointers { "/a"; } } }"#,
+            "expected parentheses",
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (source, expected) in cases {
+        let actual = parse_error(source);
+        if actual != *expected {
+            mismatches.push(format!(
+                "{source}\n  expected: {expected}\n  actual:   {actual}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
