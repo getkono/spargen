@@ -69,11 +69,15 @@ pub enum ParameterError {
     Serialize(serde_json::Error),
     /// A nested array or object appeared where OpenAPI parameter serialization requires a scalar.
     NestedValue,
-    /// A value that must be an object was not one. Three emitters return it: a `deepObject` query
-    /// parameter over a non-object value ([`serialize_deep_object`]), a form-urlencoded body that
-    /// does not serialize to a JSON object ([`serialize_form_body`]), and a multipart part asked for
-    /// the query-only `deepObject` style ([`serialize_multipart_values`]).
+    /// A `style: deepObject` query parameter's value was not an object
+    /// ([`serialize_deep_object`]).
     ExpectedObject,
+    /// A form-urlencoded request body did not serialize to a JSON object
+    /// ([`serialize_form_body`]).
+    FormBodyNotObject,
+    /// A multipart part was asked for the query-only `deepObject` style
+    /// ([`serialize_multipart_values`]).
+    DeepObjectInMultipart,
     /// A style defined only for arrays and objects (`spaceDelimited`, `pipeDelimited`) received a
     /// scalar or undefined value.
     ExpectedComposite,
@@ -89,6 +93,12 @@ impl fmt::Display for ParameterError {
             Self::ExpectedObject => {
                 formatter.write_str("`style: deepObject` requires an object parameter value")
             }
+            Self::FormBodyNotObject => formatter.write_str(
+                "an `application/x-www-form-urlencoded` request body requires an object value",
+            ),
+            Self::DeepObjectInMultipart => formatter.write_str(
+                "`style: deepObject` is defined only for query parameters, not multipart part values",
+            ),
             Self::ExpectedComposite => formatter.write_str(
                 "`style: spaceDelimited` and `style: pipeDelimited` require an array or object \
                  parameter value",
@@ -101,7 +111,11 @@ impl std::error::Error for ParameterError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialize(error) => Some(error),
-            Self::NestedValue | Self::ExpectedObject | Self::ExpectedComposite => None,
+            Self::NestedValue
+            | Self::ExpectedObject
+            | Self::FormBodyNotObject
+            | Self::DeepObjectInMultipart
+            | Self::ExpectedComposite => None,
         }
     }
 }
@@ -433,7 +447,7 @@ pub enum FormStyle {
 /// is, or nothing when that property is absent, as in a multipart body.
 ///
 /// A `value` that does not serialize to a JSON object is refused with
-/// `ParameterError::ExpectedObject`.
+/// `ParameterError::FormBodyNotObject`.
 pub fn serialize_form_body<T: Serialize>(
     value: &T,
     properties: &[FormProperty],
@@ -445,7 +459,7 @@ pub fn serialize_form_body<T: Serialize>(
     // skipped as `None`.
     let text = serde_json::to_vec(value)?;
     if text.first() != Some(&b'{') {
-        return Err(ParameterError::ExpectedObject);
+        return Err(ParameterError::FormBodyNotObject);
     }
     let OrderedMembers(members) = serde_json::from_slice(&text)?;
     let overflow_len = additional.map_or(0, |(_, len)| len);
@@ -541,7 +555,7 @@ fn push_form_member(
 /// Object values never reach here: the specification defines no part representation for them, so
 /// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
 /// style) rather than guessing at one. A `deepObject` `style` is refused with
-/// `ParameterError::ExpectedObject`.
+/// `ParameterError::DeepObjectInMultipart`.
 pub fn serialize_multipart_values<T: Serialize>(
     value: &T,
     style: FormStyle,
@@ -554,7 +568,7 @@ pub fn serialize_multipart_values<T: Serialize>(
         FormStyle::Delimited(Delimiter::Space) => " ",
         FormStyle::Delimited(Delimiter::Pipe) => "|",
         // Defined only for `in: query`: its `name[key]=value` syntax has no meaning as a part value.
-        FormStyle::DeepObject => return Err(ParameterError::ExpectedObject),
+        FormStyle::DeepObject => return Err(ParameterError::DeepObjectInMultipart),
     };
     match serde_json::to_value(value)? {
         Value::Null => Ok(vec![String::new()]),
