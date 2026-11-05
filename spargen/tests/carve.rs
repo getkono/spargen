@@ -77,8 +77,22 @@ fn w009_count(report: &Report) -> usize {
         .count()
 }
 
-/// The operation methods of the generated `impl Client`, sorted: its `async` methods, since the
-/// fixed methods and the `{op}_url` accessors (which `contains("fn op")` also matches) are not.
+/// The fixed inherent methods of `Client`: `name::CLIENT_METHODS`, which this crate-external test
+/// cannot name. A fixed method missing here shows up in every `operation_methods` result, so a
+/// stale copy fails the assertions rather than loosening them.
+const FIXED_CLIENT_METHODS: &[&str] = &[
+    "new",
+    "with_default_server",
+    "with_client",
+    "with_backend",
+    "core",
+    "with_credential",
+    "without_credential",
+    "inner",
+];
+
+/// Every method the generated `impl Client` defines per operation, sorted: each operation's
+/// method and its `{op}_url` accessor, so a carved operation leaves neither behind.
 fn operation_methods(generated: &str) -> Vec<String> {
     let file = syn::parse_file(generated).expect("the generated module parses");
     let mut methods: Vec<String> = (file.items.iter())
@@ -91,10 +105,10 @@ fn operation_methods(generated: &str) -> Vec<String> {
         )
         .flat_map(|block| &block.items)
         .filter_map(|item| match item {
-            syn::ImplItem::Fn(method) if method.sig.asyncness.is_some() => Some(method),
+            syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
             _ => None,
         })
-        .map(|method| method.sig.ident.to_string())
+        .filter(|name| !FIXED_CLIENT_METHODS.contains(&name.as_str()))
         .collect();
     methods.sort();
     methods
@@ -132,7 +146,7 @@ fn glob_omit_path_removes_all_matching_operations() {
 
     let generated = std::fs::read_to_string(&out).unwrap();
     // Both admin ops removed, the public one survives.
-    assert_eq!(operation_methods(&generated), ["health"]);
+    assert_eq!(operation_methods(&generated), ["health", "health_url"]);
 
     assert_eq!(
         w009_count(&report),
@@ -153,7 +167,10 @@ fn exact_omit_path_still_removes_exactly_one() {
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
     // The exact path removed, its sibling survives.
-    assert_eq!(operation_methods(&generated), ["delete_user", "health"]);
+    assert_eq!(
+        operation_methods(&generated),
+        ["delete_user", "delete_user_url", "health", "health_url"]
+    );
 
     assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
@@ -184,7 +201,10 @@ paths:
     let report = spargen::generate(&omitting(&spec, &out, omit));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert_eq!(operation_methods(&generated), ["get_health"]);
+    assert_eq!(
+        operation_methods(&generated),
+        ["get_health", "get_health_url"]
+    );
     assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
 
@@ -265,7 +285,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
 
     let generated = std::fs::read_to_string(&out).unwrap();
     // The rest is generated, and the rejecting op is absent.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
 #[test]
@@ -405,7 +425,7 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy op is generated; the dynamic-ref op and the one that referenced the carved
     // component are absent.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
 // --- (c2) The `$ref`-sibling flavour of E013 carves like the allOf one ---------------------------
@@ -477,7 +497,7 @@ fn carve_removes_a_ref_whose_siblings_cannot_be_intersected() {
     );
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy op is generated, the carved op absent.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
 // --- (d) Carve is a no-op on a clean spec -------------------------------------------------------
@@ -607,7 +627,10 @@ fn carve_targets_a_query_operation_without_taking_its_path() {
 
     let generated = std::fs::read_to_string(&out).unwrap();
     // The supported sibling survives; the unsupported `query` operation is carved.
-    assert_eq!(operation_methods(&generated), ["list_items"]);
+    assert_eq!(
+        operation_methods(&generated),
+        ["list_items", "list_items_url"]
+    );
     assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
 }
 
@@ -636,7 +659,10 @@ fn carve_targets_an_additional_operation_without_taking_its_path() {
 
     let generated = std::fs::read_to_string(&out).unwrap();
     // The supported sibling survives; the unsupported `additionalOperations` method is carved.
-    assert_eq!(operation_methods(&generated), ["list_items"]);
+    assert_eq!(
+        operation_methods(&generated),
+        ["list_items", "list_items_url"]
+    );
     assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
 }
 
@@ -749,7 +775,7 @@ components:
     );
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy operation survives.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 
     // Auto-carve reaches the same place without the consumer naming the component.
     let report = spargen::generate(&carving(&spec, &out));
@@ -1087,7 +1113,7 @@ fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
     );
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy op is generated, the carved op absent.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
 /// The sole-member union collapse reports `E007`, and its pointer is load-bearing for exactly the
@@ -1158,7 +1184,7 @@ fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
     );
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy op survives the carve, the carved op is absent.
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
 
 /// The W009 messages of a report, which name the rule that removed each construct.
@@ -1224,7 +1250,12 @@ fn carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file() {
     // The same-named component in `xlib.yaml` is not the one carved.
     assert_eq!(
         operation_methods(&generated),
-        ["get_good", "get_uses_healthy"]
+        [
+            "get_good",
+            "get_good_url",
+            "get_uses_healthy",
+            "get_uses_healthy_url"
+        ]
     );
 
     // The derived rule names the sub-file relative to the root document, so the omit fingerprint
@@ -1393,7 +1424,15 @@ properties:
         "only the root operation that reaches the bad file is carved: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert_eq!(operation_methods(&generated), ["get_also_good", "get_good"]);
+    assert_eq!(
+        operation_methods(&generated),
+        [
+            "get_also_good",
+            "get_also_good_url",
+            "get_good",
+            "get_good_url"
+        ]
+    );
 }
 
 /// A sub-file that declares `paths` of its own is carved at the same three depths the root is: a
@@ -1476,7 +1515,14 @@ paths:
     // `get_x`, `purge_y` and `get_z` are carved.
     assert_eq!(
         operation_methods(&generated),
-        ["get_good", "get_y", "post_x"]
+        [
+            "get_good",
+            "get_good_url",
+            "get_y",
+            "get_y_url",
+            "post_x",
+            "post_x_url"
+        ]
     );
 }
 
@@ -1548,7 +1594,10 @@ get:
     );
     let generated = std::fs::read_to_string(&out).unwrap();
     // The healthy sibling `post_z` survives; `get_z` and `get_w` are carved.
-    assert_eq!(operation_methods(&generated), ["get_good", "post_z"]);
+    assert_eq!(
+        operation_methods(&generated),
+        ["get_good", "get_good_url", "post_z", "post_z_url"]
+    );
 }
 
 /// A sub-file the description names by an absolute path lies outside the root document's
@@ -1611,5 +1660,5 @@ paths:
         "{report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert_eq!(operation_methods(&generated), ["get_good"]);
+    assert_eq!(operation_methods(&generated), ["get_good", "get_good_url"]);
 }
