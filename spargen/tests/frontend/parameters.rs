@@ -1486,3 +1486,44 @@ paths:
         assert_eq!(flat.matches(sentence).count(), 4, "{sentence}: {code}");
     }
 }
+
+/// Issue #1121: a required parameter is a positional argument with no attribute slot, so its
+/// `deprecated: true` is noted in its method's rustdoc, before its `default` note, as an optional
+/// parameter's `…Params` field carries both. A required parameter that is not deprecated gets no
+/// such note.
+#[test]
+fn a_deprecated_required_parameter_is_noted_in_its_method_docs() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items/{id}:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: id, in: path, required: true, deprecated: true, schema: { type: string } }
+        - name: sort
+          in: query
+          required: true
+          deprecated: true
+          schema: { type: string, default: name }
+        - { name: kept, in: query, required: true, schema: { type: string } }
+        - { name: page, in: query, deprecated: true, schema: { type: integer } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    let notes = "///Parameter `id` is deprecated per the spec. \
+                 ///Parameter `sort` is deprecated per the spec. \
+                 ///Parameter `sort` default: `name`. \
+                 #[inline] pub async fn list_items(";
+    assert!(flat.contains(notes), "{code}");
+    assert!(!flat.contains("Parameter `kept`"), "{code}");
+    assert!(!flat.contains("Parameter `page`"), "{code}");
+    assert!(
+        flat.contains("///Deprecated per the spec. #[serde(rename = \"page\""),
+        "{code}"
+    );
+}

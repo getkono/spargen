@@ -363,7 +363,8 @@ pub(super) struct Arg {
 /// by the async method, its blocking shim, and both of their URL accessors, so every one of them
 /// is declared from one source.
 pub(super) struct OperationSig {
-    /// The method's rustdoc, its required parameters' `default` notes, and its deprecation.
+    /// The method's rustdoc, its required parameters' deprecation and `default` notes, and its
+    /// deprecation.
     attrs: TokenStream,
     /// `#[deprecated]` where the operation is, for the method and its URL accessor alike.
     deprecated: Option<TokenStream>,
@@ -387,24 +388,30 @@ impl OperationSig {
 
         let docs = doc_tokens(&operation.docs);
         // Required parameters are positional method arguments with no attribute slot of their
-        // own, so a required parameter's `default` is surfaced in the method rustdoc instead.
-        let param_default_docs = operation
+        // own, so a required parameter's deprecation and `default` are surfaced in the method
+        // rustdoc instead, in the order an optional parameter's `…Params` field carries them.
+        let param_docs = operation
             .params
             .iter()
             .filter(|param| param.required)
-            .filter_map(|param| {
-                param.default_display.as_ref().map(|default| {
-                    let note = normalize_rustdoc(&format!(
-                        "Parameter `{}` default: `{default}`.",
-                        param.name
-                    ));
-                    quote! { #[doc = #note] }
-                })
+            .flat_map(|param| {
+                let deprecated = param
+                    .deprecated
+                    .then(|| format!("Parameter `{}` is deprecated per the spec.", param.name));
+                let default = param
+                    .default_display
+                    .as_ref()
+                    .map(|default| format!("Parameter `{}` default: `{default}`.", param.name));
+                deprecated.into_iter().chain(default)
+            })
+            .map(|note| {
+                let note = normalize_rustdoc(&note);
+                quote! { #[doc = #note] }
             });
         let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
         let attrs = quote! {
             #docs
-            #(#param_default_docs)*
+            #(#param_docs)*
             #deprecated
         };
 
@@ -501,7 +508,7 @@ impl OperationSig {
         self.args.iter().filter(|arg| arg.shapes_url)
     }
 
-    /// The method's rustdoc, required-parameter `default` notes, and deprecation.
+    /// The method's rustdoc, required-parameter deprecation and `default` notes, and deprecation.
     pub(super) fn attrs(&self) -> &TokenStream {
         &self.attrs
     }
