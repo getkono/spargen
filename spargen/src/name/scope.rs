@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::diag::JsonPointer;
+use crate::diag::{fnv1a64, JsonPointer};
 
 use super::{Ident, IdentRole};
 
@@ -117,12 +117,7 @@ impl Scope {
 }
 
 fn stable_suffix(input: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:08x}", hash as u32)
+    format!("{:08x}", fnv1a64(input.as_bytes()) as u32)
 }
 
 #[cfg(test)]

@@ -29,7 +29,9 @@ mod rule;
 
 use std::cmp::Ordering;
 
-use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Span};
+use crate::diag::{
+    fnv1a64, Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Span,
+};
 use crate::source::{InputBundle, Node, SpannedValue};
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
@@ -66,15 +68,11 @@ impl Omit {
         diags.result(())
     }
 
-    /// Stable fingerprint used in generated provenance headers: FNV-1a 64 over
-    /// the profile's canonical rule encoding ([`Omit::canonical_encoding`]), not over derived
-    /// [`Hash`](std::hash::Hash), whose byte stream std documents as unstable across platforms
-    /// and compiler releases. The value is therefore the same on every host and toolchain for the
-    /// same rules.
+    /// Stable fingerprint used in generated provenance headers: [`fnv1a64`] over the profile's
+    /// canonical rule encoding ([`Omit::canonical_encoding`]), so the value is the same on every
+    /// host and toolchain for the same rules.
     pub(crate) fn fingerprint(&self) -> String {
-        let mut hasher = Fnv64::new();
-        hasher.write(&self.canonical_encoding());
-        format!("{:016x}", hasher.finish())
+        format!("{:016x}", fnv1a64(&self.canonical_encoding()))
     }
 
     /// The one canonical byte encoding of the profile, shared by [`Omit::fingerprint`] and the
@@ -442,27 +440,6 @@ fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
                 .to_owned(),
             diags,
         );
-    }
-}
-
-/// FNV-1a 64 over explicitly written bytes. Deliberately not a [`std::hash::Hasher`], so derived
-/// `Hash` (whose byte stream is platform- and toolchain-dependent) cannot be fed into it.
-struct Fnv64(u64);
-
-impl Fnv64 {
-    fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
     }
 }
 
