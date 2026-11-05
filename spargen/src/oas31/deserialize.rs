@@ -208,7 +208,7 @@ fn parse_info(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Info> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     Some(Info {
         title: value
             .get("title")
@@ -253,7 +253,7 @@ fn parse_server(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Server> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     Some(Server {
         name: value
             .get("name")
@@ -422,7 +422,7 @@ fn parse_operation(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<OperationObject> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     if let Some(callbacks) = value.get("callbacks") {
         Diagnostic::warning(
             Code::ServerInitiatedFlowIgnored,
@@ -489,7 +489,7 @@ pub(super) fn parse_parameter(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<ParameterObject> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     Some(ParameterObject {
         name: value
             .get("name")
@@ -538,7 +538,7 @@ pub(super) fn parse_request_body(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<RequestBodyObject> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     Some(RequestBodyObject {
         content: value
             .get("content")
@@ -585,7 +585,7 @@ pub(super) fn parse_response(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<ResponseObject> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     if let Some(links) = value.get("links") {
         Diagnostic::warning(
             Code::ServerInitiatedFlowIgnored,
@@ -638,7 +638,7 @@ fn parse_tags(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnosti
         .enumerate()
         .filter_map(|(index, value)| {
             let pointer = pointer.index(index);
-            let _ = object(value, &pointer, diags)?;
+            require_object(value, &pointer, diags)?;
             Some(Tag {
                 name: value
                     .get("name")
@@ -974,7 +974,7 @@ pub(super) fn parse_security_scheme(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<SecuritySchemeObject> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     Some(SecuritySchemeObject {
         scheme_type: value
             .get("type")
@@ -1231,6 +1231,15 @@ fn object<'a>(
             .emit(diags);
     }
     object
+}
+
+/// [`object`]'s check alone, for a parser that reads `value`'s members through `value` itself.
+fn require_object(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<()> {
+    object(value, pointer, diags).map(|_| ())
 }
 
 fn provenance(pointer: &JsonPointer, value: &SpannedValue) -> Provenance {

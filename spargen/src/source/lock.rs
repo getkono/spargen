@@ -100,9 +100,10 @@ impl Lock {
     pub(crate) fn keep_unpinned_from(&mut self, earlier: Lock) {
         for entry in earlier.entries {
             if self.get(&entry.url).is_none() {
-                self.upsert(entry);
+                self.entries.push(entry);
             }
         }
+        self.entries.sort_by(|a, b| a.url.cmp(&b.url));
     }
 
     /// Render the lock to deterministic TOML: `version` first, then each `[[remote]]` table in

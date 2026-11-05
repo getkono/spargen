@@ -14,7 +14,7 @@ use super::super::{
 use super::keywords::{parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS};
 use super::{
     expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
-    required,
+    require_object, required,
 };
 
 /// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
@@ -226,7 +226,7 @@ fn parse_discriminator(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     let mut malformed = false;
     let property_name = required(value, "propertyName", pointer, diags).and_then(|name| {
         let name = expect_string(name, &pointer.push("propertyName"), diags);
