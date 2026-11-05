@@ -85,9 +85,10 @@ debug = false
 # removes symbols and debug info from the binary. Cargo reads profiles only from the root manifest
 # of the workspace it builds, and `cargo package` writes each published crate's manifest without
 # this table, so `cargo install spargen` and every consumer build `spargen` and `spargen-macro`
-# under their own profiles (Cargo's default release profile has no LTO): the bench numbers describe
-# this workspace's build, not theirs. To measure that default, override one run rather than editing
-# this: `CARGO_PROFILE_BENCH_LTO=false cargo bench --bench generate`.
+# under their own profiles (Cargo's default release profile, `lto = false`, does thin-local LTO
+# within each crate but no cross-crate LTO): the bench numbers describe this workspace's build, not
+# theirs. To measure that default, override one run rather than editing this:
+# `CARGO_PROFILE_BENCH_LTO=false cargo bench --bench generate`.
 [profile.release]
 strip = true
 lto = "thin"
