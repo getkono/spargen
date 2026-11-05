@@ -433,7 +433,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
         names.operation_urls.insert(
             operation.id.clone(),
             operation_scope.alloc(
-                &format!("{}_url", method.as_str().trim_start_matches("r#")),
+                &format!("{}_url", method.unraw()),
                 IdentRole::Method,
                 &operation.provenance.pointer,
             ),
@@ -532,7 +532,7 @@ fn allocate_operation_types(api: &Api, names: &mut Names, scope: &mut Scope) {
                 .operations
                 .get(&operation.id)
                 .expect("every operation's method is allocated before its types");
-            (operation, method.as_str().trim_start_matches("r#"))
+            (operation, method.unraw())
         })
         .collect();
 

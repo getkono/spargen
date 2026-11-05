@@ -220,7 +220,7 @@ fn emit_operation_url(operation: &Operation, api: &Api, names: &Names) -> TokenS
 
 /// The rustdoc of an operation's URL accessor, on `Client` and `BlockingClient` alike.
 pub(super) fn url_accessor_doc(method_ident: &crate::name::Ident) -> String {
-    let method = method_ident.as_str().trim_start_matches("r#");
+    let method = method_ident.unraw();
     normalize_rustdoc(&format!(
         "The URL `{method}` sends its request to, less any `apiKey` query credential, with the \
          same path and query encoding, resolved against the client's base URL or the operation's \

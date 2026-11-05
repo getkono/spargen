@@ -16,6 +16,11 @@ impl Ident {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The identifier text without its `r#` prefix, for deriving another name from this one.
+    pub(crate) fn unraw(&self) -> &str {
+        self.0.strip_prefix("r#").unwrap_or(&self.0)
+    }
 }
 
 impl std::fmt::Display for Ident {
@@ -26,8 +31,8 @@ impl std::fmt::Display for Ident {
 
 impl ToTokens for Ident {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let ident = if let Some(raw) = self.0.strip_prefix("r#") {
-            proc_macro2::Ident::new_raw(raw, proc_macro2::Span::call_site())
+        let ident = if self.0.starts_with("r#") {
+            proc_macro2::Ident::new_raw(self.unraw(), proc_macro2::Span::call_site())
         } else {
             proc_macro2::Ident::new(&self.0, proc_macro2::Span::call_site())
         };
@@ -65,6 +70,12 @@ mod tests {
         };
         assert!(tokens.next().is_none(), "expected exactly one token");
         assert_eq!(single.to_string(), "r#type");
+    }
+
+    #[test]
+    fn unraw_strips_only_the_raw_prefix() {
+        assert_eq!(escape("type", IdentRole::Field).unraw(), "type");
+        assert_eq!(escape("petId", IdentRole::Field).unraw(), "pet_id");
     }
 
     #[test]

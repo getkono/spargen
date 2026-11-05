@@ -406,7 +406,7 @@ fn default_provider_ident(
     format_ident!(
         "default_{}_{}",
         id.0,
-        field_ident.as_str().trim_start_matches("r#")
+        field_ident.unraw()
     )
 }
 

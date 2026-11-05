@@ -104,7 +104,7 @@ impl Scope {
 
     /// The first free pointer-seeded spelling of `base`, which is already taken.
     fn disambiguate(&mut self, base: &Ident, role: IdentRole, provenance: &JsonPointer) -> Ident {
-        let raw_base = base.as_str().trim_start_matches("r#");
+        let raw_base = base.unraw();
         let suffix = stable_suffix(provenance.as_str());
         let mut candidate = super::escape(&format!("{raw_base}_{suffix}"), role);
         let mut counter = 2usize;
