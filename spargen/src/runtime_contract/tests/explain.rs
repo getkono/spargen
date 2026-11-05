@@ -296,7 +296,7 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     // member's half of the union.
     let from_the_root: &[&str] = &[
         "workspace_inheritance_uses_the_workspace_version_and_features",
-        "the_manifests_reported_in_issue_71_pass_as_written",
+        "a_member_inheriting_plain_and_table_dependencies_with_an_added_feature_passes",
     ];
     promises("taking the version from there", from_the_root);
     promises("the union of both feature lists", from_the_root);
