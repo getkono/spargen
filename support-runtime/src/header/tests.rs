@@ -342,20 +342,12 @@ fn finite() -> proptest::num::f64::Any {
     f64::POSITIVE | f64::NEGATIVE | f64::NORMAL | f64::SUBNORMAL | f64::ZERO
 }
 
-/// `value` written as JSON text and read back by `serde_json`. Without its `float_roundtrip`
-/// feature, `serde_json` may read a float's shortest text as a neighbouring value, so this, not
-/// `value` itself, is what a header carrying that text can decode to (#1142).
-fn json_read_back(value: f64) -> f64 {
-    serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap()
-}
-
 proptest::proptest! {
     /// The module's stated law: parsing is the inverse of `serialize_simple`, for every value
     /// `simple` can carry losslessly — a scalar of each JSON type, a non-empty array whose
     /// strings hold no `,`, and an object of up to four members whose keys and values hold
     /// neither `,` nor `=` — under both `explode` settings. A string spelling a number or a
-    /// boolean stays a string. A finite float, alone or in an array, reads back as `serde_json`
-    /// reads its own text, which the header path adds no loss to.
+    /// boolean stays a string. A finite float, alone or in an array, reads back as itself.
     #[test]
     fn require_header_inverts_serialize_simple(
         text in token(b""),
@@ -377,7 +369,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(round_trip(&signed, HeaderShape::Scalar, explode).unwrap(), signed);
         proptest::prop_assert_eq!(
             round_trip(&real, HeaderShape::Scalar, explode).unwrap(),
-            json_read_back(real)
+            real
         );
         proptest::prop_assert_eq!(round_trip(&flag, HeaderShape::Scalar, explode).unwrap(), flag);
         proptest::prop_assert_eq!(round_trip(&texts, HeaderShape::Array, explode).unwrap(), texts);
@@ -387,7 +379,7 @@ proptest::proptest! {
         );
         proptest::prop_assert_eq!(
             round_trip(&reals, HeaderShape::Array, explode).unwrap(),
-            reals.iter().copied().map(json_read_back).collect::<Vec<_>>()
+            reals
         );
         proptest::prop_assert_eq!(
             round_trip(&members, HeaderShape::Object, explode).unwrap(),
@@ -407,6 +399,46 @@ fn an_empty_array_reads_back_as_one_empty_string() {
             [""]
         );
     }
+}
+
+/// A float whose shortest text `serde_json`, without `float_roundtrip`, reads as its neighbour
+/// (#1142) reads back as itself from a header, alone, in an array, and as an object member, and
+/// so does that text with JSON whitespace around it.
+#[test]
+fn a_float_serde_json_misreads_reads_back_exactly() {
+    let value = -3.009_224_478_676_051_8e292_f64;
+    let text = "-3.0092244786760518e+292";
+    assert_eq!(serde_json::to_string(&value).unwrap(), text);
+    assert_eq!(text.parse::<f64>().unwrap(), value);
+
+    let read: f64 = require_header(
+        &headers(&[("x-value", text)]),
+        "x-value",
+        HeaderShape::Scalar,
+        false,
+    )
+    .unwrap();
+    assert_eq!(read, value);
+    let read: Vec<f64> = require_header(
+        &headers(&[("x-value", &format!("{text},{text}"))]),
+        "x-value",
+        HeaderShape::Array,
+        false,
+    )
+    .unwrap();
+    assert_eq!(read, [value, value]);
+    let read: std::collections::BTreeMap<String, f64> = require_header(
+        &headers(&[("x-value", &format!("a={text}"))]),
+        "x-value",
+        HeaderShape::Object,
+        true,
+    )
+    .unwrap();
+    assert_eq!(read["a"], value);
+    assert_eq!(
+        scalar(&format!("\t{text} "), Scalars::Json),
+        Value::Number(serde_json::Number::from_f64(value).unwrap())
+    );
 }
 
 /// The unexploded `form`, `matrix` and `label` renderings are `simple`'s value behind a prefix
