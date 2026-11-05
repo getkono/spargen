@@ -1,6 +1,7 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
-//! the request it describes, RFC 6570 multipart parts, CBOR bodies, and an explicit `null` content
-//! parameter, and the mock server's reading of a chunked request body.
+//! the request it describes, RFC 6570 multipart parts, CBOR bodies, an explicit `null` content
+//! parameter, cookie parameters and cookie credentials in one `Cookie` header, and the mock
+//! server's reading of a chunked request body.
 
 use super::*;
 
@@ -679,6 +680,91 @@ fn absent_null_and_a_value_are_three_requests() {
         status.success(),
         "the explicit-null wire round-trip must pass"
     );
+}
+
+/// RFC 6265 §5.4 allows a request one `Cookie` header. An operation with a cookie parameter whose
+/// security alternative names two cookie `apiKey` schemes sends all three cookies in that one
+/// header: the parameters first, then each credential in the alternative's order.
+#[test]
+fn cookie_parameters_and_cookie_api_keys_share_one_cookie_header() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: Cookies, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      security: [ { session: [], csrf: [] } ]
+      parameters:
+        - { name: theme, in: cookie, schema: { type: string } }
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: SESSION }
+    csrf: { type: apiKey, in: cookie, name: CSRF }
+"##,
+    );
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "cookies_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    write_fixture_test(
+        &out,
+        "cookies",
+        r##"#![cfg(feature = "blocking")]
+
+mod common;
+
+use common::header;
+
+/// Send one `listItems` call with `params` and return the request head it arrived as.
+fn request_head(params: cookies_client::ListItemsParams) -> String {
+    let (base, server) = common::serve_no_content();
+    let client = cookies_client::BlockingClient::new(&base)
+        .unwrap()
+        .with_credential(
+            "session",
+            cookies_client::Credential::ApiKey(cookies_client::SecretString::from("s3ss")),
+        )
+        .with_credential(
+            "csrf",
+            cookies_client::Credential::ApiKey(cookies_client::SecretString::from("t0k")),
+        );
+    client.list_items(params).expect("the call round-trips");
+    server.join().unwrap().head
+}
+
+#[test]
+fn every_cookie_rides_in_one_header() {
+    let with_param =
+        request_head(cookies_client::ListItemsParams::default().theme("dark".to_owned()));
+    assert_eq!(
+        header(&with_param, "cookie"),
+        ["theme=dark; SESSION=s3ss; CSRF=t0k"],
+        "{with_param}"
+    );
+
+    let without_param = request_head(cookies_client::ListItemsParams::default());
+    assert_eq!(
+        header(&without_param, "cookie"),
+        ["SESSION=s3ss; CSRF=t0k"],
+        "{without_param}"
+    );
+}
+"##,
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["test", "--features", "blocking", "--test", "cookies"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "every cookie must share one header");
 }
 
 /// The mock server ends a chunked request body at its zero-size chunk's trailer section, read
