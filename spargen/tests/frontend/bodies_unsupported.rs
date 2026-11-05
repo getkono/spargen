@@ -127,7 +127,7 @@ paths:
 fn e009_a_concrete_type_outside_the_byte_families_stays_unsupported() {
     // `application/*` mixes binary (`pdf`) with textual (`sdp`) subtypes and `font/*` is not
     // claimed, so none of them may be read as bytes on the strength of a prefix. This is the
-    // response-side twin of `e009_unsupported_media_type`, and what keeps the openai corpus
+    // response-side twin of `e009_a_media_type_naming_no_codec_is_unsupported`, and what keeps the openai corpus
     // expectation honest.
     // A family key with no subtype, or with a wildcard that does not make it a range, is not a
     // member of the family either.

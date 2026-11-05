@@ -60,7 +60,7 @@ components:
 }
 
 #[test]
-fn e008_non_scalar_enum() {
+fn e008_an_enum_mixing_scalar_kinds_is_rejected() {
     // Mixed scalar kinds with no null are genuinely unrepresentable: still E008.
     let report = generate(
         r##"

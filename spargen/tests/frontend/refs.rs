@@ -798,7 +798,7 @@ fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
 }
 
 #[test]
-fn e006_dynamic_ref_rejected() {
+fn e006_a_dynamic_ref_is_rejected() {
     let report = generate(
         r##"
 openapi: 3.1.0

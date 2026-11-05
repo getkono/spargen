@@ -3,11 +3,30 @@
 
 use super::*;
 
+/// `W005_SPEC` gives `Thing.count` a string default on an integer and `Thing.meta` an object
+/// default: neither is a scalar of its field's type, so each is reported once, at its own
+/// property, and the run still generates.
 #[test]
-fn w005_schema_default_not_applied_still_generates() {
+fn w005_reports_each_default_it_cannot_apply_at_its_property() {
     let report = generate(W005_SPEC);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(has_code(&report, Code::SchemaDefaultNotApplied));
+    let mut sites: Vec<(&str, &str)> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::SchemaDefaultNotApplied)
+        .map(|diagnostic| (diagnostic.pointer.as_str(), diagnostic.message.as_str()))
+        .collect();
+    sites.sort_unstable();
+    let message = "schema `default` is not a scalar matching the field type; it is documented in \
+                   rustdoc but not applied as a deserialization default";
+    assert_eq!(
+        sites,
+        [
+            ("/components/schemas/Thing/properties/count", message),
+            ("/components/schemas/Thing/properties/meta", message),
+        ],
+        "{report:#?}"
+    );
 }
 
 /// A representable scalar default on an optional field is applied via serde and must not raise

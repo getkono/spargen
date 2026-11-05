@@ -12,7 +12,7 @@ fn e011_official_structure_schema_rejects_missing_info() {
 }
 
 #[test]
-fn e002_unsupported_dialect() {
+fn e002_a_json_schema_dialect_outside_the_base_is_rejected_at_its_value() {
     let report = generate(
         r##"
 openapi: 3.1.0

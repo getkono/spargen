@@ -226,11 +226,28 @@ components:
     assert_eq!(declared_fields(&types, item), ["name"], "{types}");
 }
 
+/// `ALL_OF_CONFLICT_SPEC` types `Conflict.x` `string` in one `allOf` member and `integer` in the
+/// other, which requires it: the meet is empty and `x` cannot be omitted, so the conflict is the
+/// required-property case of `E013`, at the composition.
 #[test]
-fn e013_all_of_conflicting_property_types_rejected() {
+fn e013_a_required_property_the_all_of_members_type_apart_is_irreconcilable() {
     let report = generate(ALL_OF_CONFLICT_SPEC);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfIrreconcilable));
+    let e013: Vec<(&str, &str)> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::AllOfIrreconcilable)
+        .map(|diagnostic| (diagnostic.pointer.as_str(), diagnostic.message.as_str()))
+        .collect();
+    assert_eq!(
+        e013,
+        [(
+            "/components/schemas/Conflict",
+            "property `x` appears in multiple `allOf` members with conflicting types, and a \
+             member requires it"
+        )],
+        "{report:#?}"
+    );
 }
 
 /// Mixing an object member with a scalar member has no single representable type → E013.

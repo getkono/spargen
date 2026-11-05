@@ -768,7 +768,7 @@ fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
     //
     // This pins the wording. The principle is held by `run_generate`/`run_check`, which compare
     // each diagnostic's structured `claim` with the run's outcome (#413); see
-    // `a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false`.
+    // `a_w014_generation_claim_is_refused_on_every_run_that_writes_nothing`.
     let spec = W014_REJECTED_ELSEWHERE;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
