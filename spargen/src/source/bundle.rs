@@ -8,8 +8,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, P
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
-    split_fragment, CollectedRef, RefTarget,
+    classify_ref, classify_self, collect_refs, enters_extension, split_fragment, CollectedRef,
+    RefTarget, SelfIdentity,
 };
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
@@ -451,61 +451,18 @@ impl InputBundle {
         let identity = classify_self(&self_uri, retrieval_url, self.base_path(file));
         match identity {
             None => {}
-            Some(SelfRegistration::Remote(canonical)) => {
+            Some(SelfIdentity::Remote(canonical)) => {
                 self.origins.insert(file, Origin::Remote(canonical.clone()));
                 self.url_to_file.insert(canonical, file);
             }
-            Some(SelfRegistration::Local(canonical)) => {
+            Some(SelfIdentity::Local(canonical)) => {
                 self.origins.insert(file, Origin::Local(canonical));
             }
-            Some(SelfRegistration::Opaque(uri)) => {
+            Some(SelfIdentity::Opaque(uri)) => {
                 self.url_to_file.insert(uri, file);
             }
         }
     }
-}
-
-/// What the build registers a document's `$self` as: see [`InputBundle::register_self_identity`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SelfRegistration {
-    /// An `http`/`https` identity: the document's base and a URL a reference reaches it by.
-    Remote(String),
-    /// A local identity: the document's base and a path a reference reaches it by.
-    Local(Utf8PathBuf),
-    /// Any other identity with a scheme: a URI a reference naming it exactly reaches the document
-    /// by. It supplies no hierarchical base, so the document keeps the one it was reached at.
-    Opaque(String),
-}
-
-/// Classify the `$self` value `self_uri` of a document retrieved from `retrieval_url` (remote), or
-/// read with its relative paths resolving against `base_path` (local), or `None` where it is empty
-/// or fragment-only.
-pub(super) fn classify_self(
-    self_uri: &str,
-    retrieval_url: Option<&str>,
-    base_path: &Utf8Path,
-) -> Option<SelfRegistration> {
-    let (base, _) = split_fragment(self_uri);
-    if base.is_empty() {
-        return None;
-    }
-    Some(
-        if retrieval_url.is_some() && !is_http_url(base) && has_uri_scheme(base) {
-            // Absolute, so not resolved against the retrieval URL (#718); opaque, so no base.
-            SelfRegistration::Opaque(base.to_owned())
-        } else if let Some(retrieval_url) = retrieval_url {
-            SelfRegistration::Remote(resolve_ref_url(retrieval_url, base))
-        } else if base.starts_with("http://") || base.starts_with("https://") {
-            SelfRegistration::Remote(base.to_owned())
-        } else if !base.contains(':') {
-            let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-            SelfRegistration::Local(parent.join(base))
-        } else {
-            // Opaque canonical identities can still resolve exact absolute references back to this
-            // document. They cannot supply a hierarchical base for relative reference resolution.
-            SelfRegistration::Opaque(base.to_owned())
-        },
-    )
 }
 
 /// Where a diagnostic about `collected`'s target is raised: at the reference that names it, in

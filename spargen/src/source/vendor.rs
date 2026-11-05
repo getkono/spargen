@@ -15,8 +15,8 @@ use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenanc
 use super::bundle::{local_identity, parse_by_extension, working_dir};
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{
-    classify_ref, collect_refs, enters_extension, has_uri_scheme, is_http_url, resolve_ref_url,
-    split_fragment, RefTarget,
+    classify_ref, classify_self, collect_refs, enters_extension, split_fragment, RefTarget,
+    SelfIdentity,
 };
 use super::sha256::sha256_hex;
 use super::SpannedValue;
@@ -95,7 +95,7 @@ fn serialize_path<S: serde::Serializer>(
 }
 
 #[derive(Clone)]
-pub(super) enum Base {
+enum Base {
     Local(Utf8PathBuf),
     Remote(String),
 }
@@ -105,43 +105,14 @@ struct ScanDoc {
     base: Base,
 }
 
-/// What a document's OpenAPI 3.2 `$self` makes it, read exactly as the build's
-/// `InputBundle::register_self_identity` reads it, so `spargen lock` resolves each relative `$ref`
-/// to the document the build will ask for (#426).
-pub(super) enum SelfIdentity {
-    /// An `http`/`https` URL: the base the document's relative references resolve against, and a
-    /// URL a reference reaches the document by.
-    Remote(String),
-    /// A local path: the base the document's relative references resolve against, and a path a
-    /// reference reaches the document by.
-    Local(Utf8PathBuf),
-    /// Any other absolute URI: a reference naming it exactly reaches the document, but it supplies
-    /// no hierarchical base, so the document keeps the one it was reached at.
-    Opaque(String),
-}
-
-/// The identity `value`'s `$self` gives a document reached at `base`, or `None` where it carries
-/// none (or an empty or fragment-only one). A remote document's relative `$self` is resolved
-/// against the URL it was retrieved from; a local document's relative `$self` against its own
-/// path. A non-`http(s)` `$self` with a scheme is opaque in either.
-pub(super) fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
-    let (identity, _) = split_fragment(value.get("$self")?.as_str()?);
-    if identity.is_empty() {
-        return None;
+/// The identity `value`'s `$self` gives a document reached at `base`, read by the build's own
+/// [`classify_self`], or `None` where it carries none (or an empty or fragment-only one).
+fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
+    let self_uri = value.get("$self")?.as_str()?;
+    match base {
+        Base::Remote(retrieved) => classify_self(self_uri, Some(retrieved), Utf8Path::new("")),
+        Base::Local(path) => classify_self(self_uri, None, path),
     }
-    Some(match base {
-        Base::Remote(_) if !is_http_url(identity) && has_uri_scheme(identity) => {
-            SelfIdentity::Opaque(identity.to_owned())
-        }
-        Base::Remote(retrieved) => SelfIdentity::Remote(resolve_ref_url(retrieved, identity)),
-        Base::Local(_) if is_http_url(identity) => SelfIdentity::Remote(identity.to_owned()),
-        Base::Local(path) if !identity.contains(':') => SelfIdentity::Local(
-            path.parent()
-                .unwrap_or_else(|| Utf8Path::new(""))
-                .join(identity),
-        ),
-        Base::Local(_) => SelfIdentity::Opaque(identity.to_owned()),
-    })
 }
 
 /// Every document the walk has scanned, and the names a reference reaches each one by.
