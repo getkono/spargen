@@ -6,7 +6,7 @@ const BLOCKING_OPT_IN: &str = r#"
 # [features]
 # blocking = ["dep:tokio"]
 # [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# tokio = { version = "1.53.1", features = ["rt"], optional = true }
+# tokio = { version = "1.53.3", features = ["rt"], optional = true }
 "#;
 
 #[test]

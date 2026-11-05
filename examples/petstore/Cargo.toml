@@ -27,4 +27,4 @@ serde_json = "1.0.151"
 # The example's own dependency, not the generated client's: `main.rs` runs on tokio, and `time`
 # powers the bring-your-own retry wait (tokio::time::sleep) it feeds RetryBackend. The generated
 # client leaves timing to the caller.
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time"] }

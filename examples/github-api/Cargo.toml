@@ -22,7 +22,7 @@ uuid = { version = "1.24.0", features = ["serde"] }
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.53.1", features = ["rt"], optional = true }
+tokio = { version = "1.53.3", features = ["rt"], optional = true }
 
 [build-dependencies]
 spargen = { path = "../../spargen", default-features = false }

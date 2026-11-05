@@ -28,4 +28,4 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
 # The example's own dependency, not the generated client's: `main.rs` runs on tokio.
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread"] }
