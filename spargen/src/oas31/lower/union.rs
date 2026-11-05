@@ -1111,12 +1111,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .variants
             .iter()
             .zip(labels)
-            .filter(|(variant, _)| {
-                matches!(
-                    self.graph.get(variant.ty.id).map(|def| &def.kind),
-                    Some(TypeKind::Any)
-                )
-            })
+            .filter(|(variant, _)| matches!(self.kind_of(variant.ty.id), Some(TypeKind::Any)))
             .map(|(variant, label)| (variant.name_hint.clone(), *label))
             .collect()
     }

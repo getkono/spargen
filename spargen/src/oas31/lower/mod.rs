@@ -38,7 +38,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::diag::{Aborted, Diagnostics, Provenance};
-use crate::ir::{Api, Info, Ty, TypeGraph, TypeId};
+use crate::ir::{Api, Info, Ty, TypeGraph, TypeId, TypeKind};
 
 use super::{Document, Resolver, Schema};
 
@@ -685,6 +685,13 @@ struct LowerCtx<'a, 'doc> {
     /// with the object's provenance, in source order; [`Self::check_deferred_map_values`] decides
     /// them once lowering has filled every reservation.
     deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
+}
+
+impl LowerCtx<'_, '_> {
+    /// The kind of the definition `id` names, while the graph holds one.
+    fn kind_of(&self, id: TypeId) -> Option<&TypeKind> {
+        self.graph.get(id).map(|def| &def.kind)
+    }
 }
 
 /// The options that change what lowering produces.

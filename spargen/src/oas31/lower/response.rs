@@ -341,7 +341,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // line. The declared schema therefore describes ONE cookie, and the accessor is a list
             // of them — a schema that is already a list is taken to be that list.
             let (ty, shape) = if name.eq_ignore_ascii_case("set-cookie") {
-                let already_list = match self.graph.get(ty.id).map(|def| &def.kind) {
+                let already_list = match self.kind_of(ty.id) {
                     Some(TypeKind::Array(_)) => true,
                     // `header_shape` refused a reservation above, so none reaches here; were one
                     // to, it is not known to be a list, and the declared schema is one cookie.
@@ -380,7 +380,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The `simple` wire shape of a lowered header type, or `None` when it has none.
     fn header_shape(&self, ty: Ty) -> Option<crate::ir::HeaderShape> {
-        match self.graph.get(ty.id).map(|def| &def.kind) {
+        match self.kind_of(ty.id) {
             Some(TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Null) => {
                 Some(crate::ir::HeaderShape::Scalar)
             }

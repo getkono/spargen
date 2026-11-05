@@ -239,10 +239,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Encoding Object applies to the *entire value* for a non-array property, but
         // defines no part representation for an object, so there is nothing to generate.
         if media == MediaType::Multipart
-            && matches!(
-                self.graph.get(field_ty.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            )
+            && matches!(self.kind_of(field_ty.id), Some(TypeKind::Struct(_)))
         {
             // E009 case: undefined-rfc6570
             Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
@@ -501,7 +498,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// How a property's value is rendered into bytes, from its lowered type alone.
     fn natural_codec(&self, ty: Ty) -> MediaType {
-        match self.graph.get(ty.id).map(|def| &def.kind) {
+        match self.kind_of(ty.id) {
             Some(TypeKind::Bytes) => MediaType::OctetStream,
             Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
             // Encodings are lowered per operation, after every component the body reaches is
@@ -515,7 +512,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// The Encoding Object's default `contentType` for a property, from its lowered type.
     fn default_content_type(&self, ty: Ty) -> String {
-        match self.graph.get(ty.id).map(|def| &def.kind) {
+        match self.kind_of(ty.id) {
             Some(TypeKind::Bytes) => "application/octet-stream".to_owned(),
             Some(TypeKind::Struct(_)) | Some(TypeKind::Union(_)) | Some(TypeKind::Any) => {
                 "application/json".to_owned()

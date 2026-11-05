@@ -802,7 +802,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
         // arm is the whole guard against reading one. Recorded first, as the root-component
         // pre-check records it (`record_open_member`).
-        match self.graph.get(ty.id).map(|def| &def.kind) {
+        match self.kind_of(ty.id) {
             Some(TypeKind::Reserved) => {
                 self.record_open_member(ty.id);
                 return self.reject_all_of_cycle(provenance.clone(), recursive);

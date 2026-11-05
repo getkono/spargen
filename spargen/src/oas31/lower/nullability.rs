@@ -222,7 +222,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A union of this lowering's own whose every variant is the exact null type accepts `null`
         // alone: it is the null type, as the sibling spelling collapses such an `anyOf` (#625).
         if ty.id.0 >= mark && !self.is_component_root(ty.id) {
-            if let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) {
+            if let Some(TypeKind::Union(union)) = self.kind_of(ty.id) {
                 if union
                     .variants
                     .iter()
@@ -369,7 +369,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.id.0 >= mark
             && !self.is_component_root(ty.id)
             && matches!(
-                self.graph.get(ty.id).map(|def| &def.kind),
+                self.kind_of(ty.id),
                 Some(TypeKind::Union(Union {
                     strategy: UnionStrategy::Trial {
                         mode: UnionMode::AnyOf,
@@ -384,7 +384,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `ty` is a union with a variant that is the exact null type (a `()` arm).
     fn has_exact_null_variant(&self, ty: Ty) -> bool {
         matches!(
-            self.graph.get(ty.id).map(|def| &def.kind),
+            self.kind_of(ty.id),
             Some(TypeKind::Union(union))
                 if union.variants.iter().any(|variant| self.is_exact_null(variant.ty))
         )
@@ -395,7 +395,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nullable, where the one merged branch `null` matches is its only source.
     fn carries_null(&self, ty: Ty) -> bool {
         ty.nullable
-            || match self.graph.get(ty.id).map(|def| &def.kind) {
+            || match self.kind_of(ty.id) {
                 Some(TypeKind::Null) => true,
                 Some(TypeKind::Union(union)) => union
                     .variants
@@ -467,10 +467,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether `ty` is the exact JSON `null` (`()`), as a `const: null` or `enum: [null]` branch
     /// lowers: a branch `null` matches without its `Ty` being nullable.
     pub(super) fn is_exact_null(&self, ty: Ty) -> bool {
-        matches!(
-            self.graph.get(ty.id).map(|def| &def.kind),
-            Some(TypeKind::Null)
-        )
+        matches!(self.kind_of(ty.id), Some(TypeKind::Null))
     }
 
     /// Whether `member`, a union branch lowered to `ty`, is an object or array whose lowered
@@ -489,7 +486,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let SchemaOr::Schema(member) = member else {
             return false;
         };
-        let undecided_kind = match self.graph.get(ty.id).map(|def| &def.kind) {
+        let undecided_kind = match self.kind_of(ty.id) {
             Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_)) => true,
             Some(TypeKind::Reserved) => member.reference.as_deref().is_some_and(|reference| {
                 self.ref_target_is_untyped_shape(reference, &member.provenance, 0)
@@ -882,15 +879,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             composed.nullable = true;
         }
         composed
-    }
-
-    /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.
-    /// [`type_accepts_null`] needs the kind beside the [`Ty`]; callers outside the intersection
-    /// machinery hold only the [`Ty`].
-    pub(super) fn ty_accepts_null(&self, ty: Ty) -> bool {
-        self.graph
-            .get(ty.id)
-            .is_some_and(|def| type_accepts_null(ty, &def.kind))
     }
 
     /// The `union` member of an `allOf` of scalars, lowered on its own to `ty`, as it meets the

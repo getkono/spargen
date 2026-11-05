@@ -69,10 +69,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // An unconstrained field simply takes the value type. A map value dropped its `Box`
         // because the map is the indirection a cycle-closing reference needs; a plain field has
         // none, so it is boxed again exactly when the value's target is still being lowered.
-        if matches!(
-            self.graph.get(field.id).map(|def| &def.kind),
-            Some(TypeKind::Any)
-        ) {
+        if matches!(self.kind_of(field.id), Some(TypeKind::Any)) {
             let mut ty = **value;
             ty.boxed = self.is_in_progress_root(ty.id);
             return Ok(ty);

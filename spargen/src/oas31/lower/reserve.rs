@@ -770,10 +770,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ever `fill`, and `Api::check_invariants` reports that as `E011` against a document that is
     /// not malformed.
     pub(super) fn is_reservation(&self, id: TypeId) -> bool {
-        matches!(
-            self.graph.get(id).map(|def| &def.kind),
-            Some(TypeKind::Reserved)
-        )
+        matches!(self.kind_of(id), Some(TypeKind::Reserved))
     }
 
     /// The reserved id of the schema *at* `provenance`, when that schema is one whose body is

@@ -7,7 +7,7 @@ use crate::ir::{Docs, JsonCategory, Prim, Ty, TypeGraph, TypeId, TypeKind, Union
 use crate::oas31::{JsonType, Schema, SchemaOr, ValidationKeywords};
 
 use super::meet::{same_ty, value_category, NoMeet};
-use super::nullability::non_nullable;
+use super::nullability::{non_nullable, type_accepts_null};
 use super::shape::{
     ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
 };
@@ -353,10 +353,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         debug_assert!(matches!(refiner, Refiner::Scoped(_)));
-        if matches!(
-            self.graph.get(target.id).map(|def| &def.kind),
-            Some(TypeKind::Union(_))
-        ) {
+        if matches!(self.kind_of(target.id), Some(TypeKind::Union(_))) {
             return self.meet_refiner(target, refiner, reach, hint);
         }
         self.closed_narrowing(|ctx| ctx.meet_refiner(target, refiner, reach, hint))
@@ -434,12 +431,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         met: Result<Ty, NoMeet>,
     ) -> Result<Ty, NoMeet> {
         match met {
-            Err(NoMeet::Empty)
-                if matches!(
-                    self.graph.get(union.id).map(|def| &def.kind),
-                    Some(TypeKind::Never)
-                ) =>
-            {
+            Err(NoMeet::Empty) if matches!(self.kind_of(union.id), Some(TypeKind::Never)) => {
                 Ok(non_nullable(union))
             }
             met => met,
@@ -450,7 +442,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// real branch was excluded: the sibling's own answer.
     pub(super) fn refiner_accepts_null(&self, refiner: Refiner) -> bool {
         match refiner {
-            Refiner::Whole(ty) => self.ty_accepts_null(ty),
+            Refiner::Whole(ty) => self
+                .kind_of(ty.id)
+                .is_some_and(|kind| type_accepts_null(ty, kind)),
             Refiner::Scoped(scoped) => scoped.admits_null,
         }
     }
