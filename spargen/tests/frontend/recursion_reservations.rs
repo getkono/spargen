@@ -636,6 +636,82 @@ components:
     );
 }
 
+/// The same merge with a `null` member beside the repeated cycle-closing `$ref`, at a required
+/// property, an array's items and a map's values: each position is the component itself taking
+/// the union's `null` (`Option<Box<S2>>` although the property is required, `Option<S2>` inside
+/// the `Vec` and the map), and no type is emitted for any of the merged unions (#1152).
+#[test]
+fn a_nullable_one_of_repeating_a_cycle_closing_ref_merges_to_the_optional_boxed_component() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      required: [a]
+      properties:
+        a:
+          oneOf:
+            - { $ref: '#/components/schemas/S2' }
+            - { $ref: '#/components/schemas/S2' }
+            - { type: 'null' }
+        b:
+          type: array
+          items:
+            oneOf:
+              - { $ref: '#/components/schemas/S2' }
+              - { $ref: '#/components/schemas/S2' }
+              - { type: 'null' }
+        c:
+          type: object
+          additionalProperties:
+            oneOf:
+              - { $ref: '#/components/schemas/S2' }
+              - { $ref: '#/components/schemas/S2' }
+              - { type: 'null' }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{entry}: the merged nullable self-reference must raise no error: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                    && d.message.contains("same generated type")
+            }),
+            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub a: Option<Box<S2>>"),
+        "the required `S2.a` must be the nullable boxed component itself: {types}"
+    );
+    assert!(
+        types.contains("pub type S2b = Vec<Option<S2>>;"),
+        "`S2.b`'s items must be the nullable component itself: {types}"
+    );
+    assert!(
+        types.contains("pub additional: BTreeMap<String, Option<S2>>,"),
+        "`S2.c`'s values must be the nullable component itself: {types}"
+    );
+    for merged in ["S2a", "S2bItem", "S2cAdditional", "Variant"] {
+        assert!(
+            !types.contains(merged),
+            "no merged union may be re-emitted as a type of its own (`{merged}`): {types}"
+        );
+    }
+}
+
 /// The same merge where the union is a component's whole body and its one member closes a cycle
 /// through another component (`A = B | B`, `B.x -> A`) has no def to hand back as `A`'s root, so
 /// it is refused as `E007` with its own wording rather than failing the IR invariant as `E011`
