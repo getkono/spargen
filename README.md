@@ -119,7 +119,8 @@ the version it emits, and the idioms spargen handles.
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
   preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except
   on the one path the emitted `ClientConfig::max_error_body` doc names), interrupted body
-  (`Error::InterruptedBody`). Every generated error
+  (`Error::InterruptedBody`), pagination cycle (`Error::PaginationCycle`: a `LinkPaginator`
+  `next` link back to a page it already fetched). Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
   bodied statuses carry the same body type (one schema, or schemas that generate the same Rust

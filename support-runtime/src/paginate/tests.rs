@@ -423,6 +423,68 @@ fn next_page_fetches_and_decodes_the_armed_url() {
     );
 }
 
+/// A page whose `rel="next"` names its own URL is yielded, and the pull after it ends the chain
+/// as `PaginationCycle` without sending the request again. The link carries a fragment, which is
+/// never sent, so it names the same page.
+#[test]
+fn a_self_link_ends_the_chain_as_a_pagination_cycle() {
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [page(
+            200,
+            "[1]",
+            Some(r#"<https://x/items?page=1#top>; rel="next""#),
+        )],
+        "https://x/items?page=1",
+    );
+    let first = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(first.into_inner(), vec![1]);
+    assert!(pager.has_next(), "the cycle is still reported");
+    match poll_ready(pager.next_page()) {
+        Some(Err(error @ Error::PaginationCycle { .. })) => {
+            assert!(!error.is_transient(), "{error}");
+            assert!(error.status().is_none(), "{error}");
+            let Error::PaginationCycle { url } = error else {
+                unreachable!()
+            };
+            assert_eq!(url.as_str(), "https://x/items?page=1#top");
+        }
+        other => panic!("expected a PaginationCycle error, got {other:?}"),
+    }
+    assert!(!pager.has_next());
+    assert!(poll_ready(pager.next_page()).is_none());
+    assert_eq!(backend.urls(), ["https://x/items?page=1"]);
+}
+
+/// A longer cycle (page 1 → page 2 → page 1) is caught too, not only a self-link: both pages are
+/// yielded, and the link back to page 1 ends the chain without refetching it. A relative link
+/// is compared after it resolves against the page that carried it.
+#[test]
+fn a_link_back_to_an_earlier_page_ends_the_chain_as_a_pagination_cycle() {
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [
+            page(200, "[1]", Some(r#"<https://x/items?page=2>; rel="next""#)),
+            page(200, "[2]", Some(r#"</items?page=1>; rel="next""#)),
+        ],
+        "https://x/items?page=1",
+    );
+    let first = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(first.into_inner(), vec![1]);
+    let second = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(second.into_inner(), vec![2]);
+    match poll_ready(pager.next_page()) {
+        Some(Err(Error::PaginationCycle { url })) => {
+            assert_eq!(url.as_str(), "https://x/items?page=1");
+        }
+        other => panic!("expected a PaginationCycle error, got {other:?}"),
+    }
+    assert!(!pager.has_next());
+    assert!(poll_ready(pager.next_page()).is_none());
+    assert_eq!(
+        backend.urls(),
+        ["https://x/items?page=1", "https://x/items?page=2"]
+    );
+}
+
 /// A paginator seeded with no next link answers `None` on its first pull without building or
 /// sending a request.
 #[test]

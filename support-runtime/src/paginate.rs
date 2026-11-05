@@ -26,10 +26,15 @@
 //! carries them. A page that comes back non-`2xx` (e.g. a `401` on an unauthenticated page 2)
 //! terminates the paginator as an [`Error::UnexpectedStatus`](crate::Error), never a decoded page.
 //!
-//! Termination is otherwise entirely driven by the server's `rel="next"` links, so a buggy or
-//! malicious server can advertise a self-referential or cyclic `next`, yielding an unbounded chain.
-//! The iterator is pull-based (nothing is fetched until you call `next_page`), so bound your own loop
-//! — e.g. cap the number of pages you will follow.
+//! Termination is otherwise driven by the server's `rel="next"` links. The paginator remembers
+//! every URL it has fetched, and a `next` link that resolves to one of them — a page linking to
+//! itself, or a longer cycle such as page 1 → page 2 → page 1 — ends the chain with
+//! [`Error::PaginationCycle`](crate::Error) instead of fetching it again, so a buggy server's cycle
+//! surfaces as an error rather than as an endless loop or a silently truncated collection. URLs
+//! are compared as parsed, without their fragment, which is never sent. A server that mints a
+//! fresh URL for every page can still advertise an unbounded chain; the iterator is pull-based
+//! (nothing is fetched until you call `next_page`), so cap the number of pages you will follow
+//! where that matters.
 //!
 //! # Cursor / offset / page-number pagination (bring your own)
 //!
@@ -56,6 +61,7 @@
 //! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
 //! type, and a plain loop over the generated operation method is clearer and fully typed.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::marker::PhantomData;
 
@@ -79,6 +85,9 @@ pub struct LinkPaginator<T> {
     core: ClientCore,
     /// The next page to fetch; `None` once the chain is exhausted or an error terminated it.
     next: Option<Url>,
+    /// Every URL this paginator has requested, fragment removed: a `next` that names one of them
+    /// is a cycle.
+    fetched: HashSet<Url>,
     /// `T` is produced, never consumed; the `fn() -> T` marker keeps `LinkPaginator<T>: Send + Sync`
     /// regardless of `T`.
     _marker: PhantomData<fn() -> T>,
@@ -91,6 +100,7 @@ impl<T> LinkPaginator<T> {
         Self {
             core,
             next: Some(first),
+            fetched: HashSet::new(),
             _marker: PhantomData,
         }
     }
@@ -98,16 +108,20 @@ impl<T> LinkPaginator<T> {
     /// Seed a paginator from the headers of an already-fetched first response (the `rel="next"`
     /// link), so a caller who fetched page one through a normal operation method can continue from
     /// its headers. Only an absolute `next` URL is followed; a relative one yields no next page (use
-    /// [`Self::new`] with the resolved URL instead).
+    /// [`Self::new`] with the resolved URL instead). The first page's own URL is not known here,
+    /// so a cycle back to it is caught one fetch later, when the refetched first page links on to
+    /// a page this paginator already fetched.
     pub fn from_headers(core: ClientCore, headers: &HeaderMap) -> Self {
         Self {
             core,
             next: next_link(headers),
+            fetched: HashSet::new(),
             _marker: PhantomData,
         }
     }
 
-    /// Whether another page will be fetched by the next [`Self::next_page`] call.
+    /// Whether the next [`Self::next_page`] call returns `Some`: a fetched page, or the error that
+    /// ends the chain, [`Error::PaginationCycle`] included.
     pub fn has_next(&self) -> bool {
         self.next.is_some()
     }
@@ -118,8 +132,11 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     ///
     /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
     /// relative target against the fetched URL) to arm the following page, then decodes the body as
-    /// `T`. Four things terminate the paginator (subsequent calls return `None`):
+    /// `T`. Five things terminate the paginator (subsequent calls return `None`):
     ///
+    /// * a `next` URL the paginator has already fetched (fragments aside) →
+    ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
+    ///   link closed the cycle was already yielded by the call before;
     /// * a request for the `next` URL that cannot be built →
     ///   `Some(Err(Error::RequestConstruction(..)))`;
     /// * a **transport failure** → `Some(Err(..))`;
@@ -136,6 +153,11 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
         // Take the pending URL: the paginator is now disarmed and only re-armed on a successful
         // decode, so any error path below leaves `next` as `None` and terminates the chain.
         let url = self.next.take()?;
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if !self.fetched.insert(key) {
+            return Some(Err(Error::PaginationCycle { url }));
+        }
         let request = match self.core.http().get(url.clone()).build() {
             Ok(request) => request,
             Err(error) => return Some(Err(Error::request_construction(error))),

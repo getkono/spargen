@@ -305,7 +305,7 @@ fn reqwest_error() -> reqwest::Error {
 
 /// How many variants `Error` has. `every_variant` returns an array of exactly this length, so
 /// raising it will not compile until a value of the new variant is listed.
-const ERROR_VARIANTS: usize = 9;
+const ERROR_VARIANTS: usize = 10;
 
 /// Each variant's position in `every_variant`. Indices are dense and unique. This is the same
 /// guard `request_variant_index` carries, applied to the other taxonomy that is a semver
@@ -321,6 +321,7 @@ fn error_variant_index(error: &Error<ApiBody>) -> usize {
         Error::UnexpectedStatus { .. } => 6,
         Error::Decode { .. } => 7,
         Error::InterruptedBody(_) => 8,
+        Error::PaginationCycle { .. } => 9,
     }
 }
 
@@ -379,6 +380,9 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
             truncated: false,
         },
         Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::PaginationCycle {
+            url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
     ]
 }
 
@@ -523,7 +527,10 @@ fn is_transient_classifies_every_variant() {
                 *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
             }
             // Deterministic failures: retrying reproduces them.
-            Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
+            Error::RequestConstruction(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::PaginationCycle { .. } => false,
         };
         assert_eq!(
             error.is_transient(),
@@ -546,7 +553,8 @@ fn status_is_present_exactly_on_the_three_status_variants() {
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => None,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
         };
         assert_eq!(error.status(), expected, "status() disagrees for {error}");
     }
@@ -590,6 +598,9 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
             truncated: true,
         },
         Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::PaginationCycle {
+            url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
     ];
     for error in &narrow {
         let expected = match error {
@@ -600,7 +611,8 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => None,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
         };
         assert_eq!(error.status(), expected, "status() disagrees for {error}");
     }
@@ -652,6 +664,7 @@ fn every_variant_displays_something_that_names_its_class() {
             Error::UnexpectedStatus { .. } => "unexpected response status",
             Error::Decode { .. } => "response decode failed",
             Error::InterruptedBody(_) => "response body was interrupted",
+            Error::PaginationCycle { .. } => "pagination cycle",
         };
         assert!(
             rendered.contains(expected),
@@ -711,7 +724,10 @@ fn source_is_present_exactly_where_the_taxonomy_carries_a_cause() {
             | Error::Redirect(_)
             | Error::Api(_)
             | Error::InterruptedBody(_) => true,
-            Error::Timeout(_) | Error::UnexpectedStatus { .. } | Error::Decode { .. } => false,
+            Error::Timeout(_)
+            | Error::UnexpectedStatus { .. }
+            | Error::Decode { .. }
+            | Error::PaginationCycle { .. } => false,
         };
         assert_eq!(
             std::error::Error::source(&error).is_some(),
@@ -756,6 +772,9 @@ fn widen_preserves_every_reachable_variant() {
             truncated: true,
         },
         Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::PaginationCycle {
+            url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
+        },
     ];
 
     for error in narrow {
@@ -820,6 +839,17 @@ fn widen_preserves_every_reachable_variant() {
         panic!("widen changed the variant");
     };
     assert_eq!(alternatives, [vec!["a"], vec!["b"]]);
+
+    // ... and the pagination cycle the URL it revisited.
+    let revisited = reqwest::Url::parse("https://x/items?page=2").unwrap();
+    let widened: Error<ApiBody> = Error::<std::convert::Infallible>::PaginationCycle {
+        url: revisited.clone(),
+    }
+    .widen();
+    let Error::PaginationCycle { url } = widened else {
+        panic!("widen changed the variant");
+    };
+    assert_eq!(url, revisited);
 }
 
 impl super::ApiErrorBody for ApiBody {
@@ -845,7 +875,8 @@ fn api_body_is_present_exactly_on_the_documented_api_error() {
             | Error::Redirect(_)
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
-            | Error::InterruptedBody(_) => false,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => false,
         };
         assert_eq!(
             error.api_body().is_some(),
@@ -889,7 +920,8 @@ fn status_and_api_body_agree_on_every_variant() {
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => {
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => {
                 assert!(error.status().is_none(), "{error}");
                 assert!(error.api_body().is_none(), "{error}");
             }
@@ -941,7 +973,8 @@ fn problem_is_read_exactly_where_an_error_body_was_received() {
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => assert!(problem.is_none(), "{error}"),
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => assert!(problem.is_none(), "{error}"),
         }
     }
 }
