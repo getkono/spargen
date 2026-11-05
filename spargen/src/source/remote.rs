@@ -718,6 +718,16 @@ mod tests {
                 opaque("Http://h.example/api.yaml"),
                 opaque("Http://h.example/api.yaml"),
             ),
+            (
+                "https://other.example/api.yaml",
+                remote("https://other.example/api.yaml"),
+                remote("https://other.example/api.yaml"),
+            ),
+            (
+                "HTTPS://other.example/api.yaml",
+                opaque("HTTPS://other.example/api.yaml"),
+                opaque("HTTPS://other.example/api.yaml"),
+            ),
             // Other schemes, a drive letter, and a colon in a relative path.
             (
                 "urn:example:api",
@@ -767,6 +777,11 @@ mod tests {
                 remote("https://h.example/v1/self.yaml"),
             ),
             (
+                "../self.yaml",
+                local("specs/../self.yaml"),
+                remote("https://h.example/self.yaml"),
+            ),
+            (
                 "../../self.yaml",
                 local("specs/../../self.yaml"),
                 remote("https://h.example/self.yaml"),
@@ -775,6 +790,11 @@ mod tests {
                 "/abs/self.yaml",
                 local("/abs/self.yaml"),
                 remote("https://h.example/abs/self.yaml"),
+            ),
+            (
+                "//h.example/self.yaml",
+                local("//h.example/self.yaml"),
+                remote("https://h.example/h.example/self.yaml"),
             ),
             (
                 "//other.example/self.yaml",
