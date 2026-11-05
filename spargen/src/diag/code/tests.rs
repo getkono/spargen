@@ -1084,7 +1084,8 @@ fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
 #[test]
 fn every_code_is_asserted_by_the_suite_that_owns_it() {
     const OWNED_ELSEWHERE: &[(&str, &str)] = &[
-        // `compat` rules: the frontend never sees an omit rule.
+        // `compat` rules: the frontend never sees an omit rule. `carve.rs` asserts each through
+        // the public API; `compat`'s in-module tests also pin `W009` and `E019` per rule.
         ("InvalidOmitRule", "carve.rs"),
         ("OmitCreatedInvalidDocument", "carve.rs"),
         ("OmittedConstruct", "carve.rs"),
