@@ -118,6 +118,10 @@ pub struct EventStream<T> {
     max_error_body: usize,
     /// The framing mode for this body.
     framing: Framing,
+    /// Whether the current connection's SSE body may still open with a UTF-8 byte order mark not
+    /// yet stripped: set for every SSE body the stream opens, the first and each reconnect's, and
+    /// cleared once its first bytes rule a mark in or out.
+    bom_pending: bool,
     last_event_id: Option<String>,
     reconnect_delay: Option<Duration>,
     reconnect: Option<ReconnectContext>,
@@ -161,6 +165,7 @@ impl<T> EventStream<T> {
             max_frame: config.max_stream_frame,
             max_error_body: config.max_error_body,
             framing,
+            bom_pending: is_sse(framing),
             last_event_id: None,
             reconnect_delay: None,
             reconnect: None,
@@ -288,6 +293,9 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                     Poll::Ready(Some(Ok(chunk))) => {
                         this.state = StreamState::Body(body);
                         this.buffer.extend_from_slice(&chunk);
+                        if this.bom_pending {
+                            this.bom_pending = strip_leading_bom(&mut this.buffer);
+                        }
                     }
                     Poll::Ready(Some(Err(error))) => {
                         let error = Error::InterruptedBody(TransportError::new(error));
@@ -328,6 +336,7 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                     Poll::Ready(Ok(mut response)) => {
                         this.status = response.status();
                         this.headers = std::mem::take(response.headers_mut());
+                        this.bom_pending = is_sse(this.framing);
                         this.state = StreamState::Body(Box::pin(response.bytes_stream()));
                     }
                     Poll::Ready(Err(error)) => {
@@ -416,10 +425,10 @@ impl<T> EventStream<T> {
         let core = reconnect.core.clone();
         let mut request = reconnect.request.try_clone()?;
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
-        // (the framer drops an id holding NUL, and keeps every other control character but LF and
-        // a line-ending CR): the server's latest resume point cannot be sent, and replaying an
-        // older one would claim a position it has superseded, so the reconnect proceeds as a fresh
-        // subscription instead of ending.
+        // (the framer drops an id holding NUL, and keeps every other control character but the
+        // line-ending LF and CR): the server's latest resume point cannot be sent, and replaying
+        // an older one would claim a position it has superseded, so the reconnect proceeds as a
+        // fresh subscription instead of ending.
         if let Some(id) = self.last_event_id.as_deref() {
             match reqwest::header::HeaderValue::from_str(id) {
                 Ok(value) if !id.is_empty() => {
@@ -538,6 +547,15 @@ fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             return frame_item(payload);
         }
     }
+}
+
+/// Whether `framing` reads its body as Server-Sent Events, whose stream may open with a UTF-8 byte
+/// order mark.
+fn is_sse(framing: Framing) -> bool {
+    matches!(
+        framing,
+        Framing::Sse | Framing::SseEvent | Framing::SseJsonData
+    )
 }
 
 fn frame_item(payload: Vec<u8>) -> FramePoll {
@@ -685,15 +703,40 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
     FramePoll::Item { payload, metadata }
 }
 
-/// If `buf[from..]` holds a complete `\n`-terminated line, return it (trailing `\r\n`/`\n` stripped)
-/// and the index just past the newline. Returns `None` when no full line is buffered yet.
+/// If `buf[from..]` holds a complete SSE line, return it without its terminator and the index just
+/// past that terminator. As the SSE specification's grammar requires, a line ends at CRLF, at a
+/// bare LF, or at a bare CR. Returns `None` when no full line is buffered yet, which includes a CR
+/// that is the last buffered byte: the byte after it decides whether it ends the line alone or
+/// begins a CRLF, so it is held until that byte arrives (at EOF, `sse_next` takes the tail itself).
 fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
     let rest = &buf[from..];
-    let nl = rest.iter().position(|&b| b == b'\n')?;
-    Some((trim_cr(&rest[..nl]), from + nl + 1))
+    let end = rest.iter().position(|&b| b == b'\n' || b == b'\r')?;
+    let next = match (rest[end], rest.get(end + 1)) {
+        (b'\r', None) => return None,
+        (b'\r', Some(b'\n')) => end + 2,
+        _ => end + 1,
+    };
+    Some((&rest[..end], from + next))
 }
 
-/// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n`.
+/// The UTF-8 byte order mark an SSE body may open with, which the SSE specification strips.
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// Strip a UTF-8 byte order mark from the start of a freshly opened SSE body. Returns `true` while
+/// `buffer` is still a proper prefix of the mark (empty included), so the decision waits for more
+/// bytes, and `false` once it is made, whether or not a mark was removed.
+fn strip_leading_bom(buffer: &mut Vec<u8>) -> bool {
+    if buffer.len() < UTF8_BOM.len() && UTF8_BOM.starts_with(buffer) {
+        return true;
+    }
+    if buffer.starts_with(UTF8_BOM) {
+        buffer.drain(..UTF8_BOM.len());
+    }
+    false
+}
+
+/// `line` without one trailing `\r`, so a CRLF line ending reads the same as a bare `\n` to the
+/// ndjson framer, and an SSE tail at EOF ending in a CR loses that line ending.
 fn trim_cr(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
