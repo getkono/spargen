@@ -494,7 +494,7 @@ const W014_GENERATION_WORDING: &str =
     "`text/plain` is generated; the alternative media type(s) `text/html` are not";
 
 #[test]
-fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
+fn a_w014_generation_claim_is_refused_on_every_run_that_writes_nothing() {
     // #174's four axes reduce to two outcomes for this message: `check`, which generates nothing
     // on any document, and a run rejected on another path. On each, a `W014` that declared the
     // generation its old wording asserted is refused by the claim check, and the old wording,

@@ -819,38 +819,40 @@ components:
     );
 }
 
+// E020 case: required-root-field, no-root-member
 #[test]
-fn omitting_the_last_root_collection_is_still_rejected() {
+fn omitting_a_required_root_field_or_the_last_root_collection_is_rejected() {
     // The other half of the `anyOf`: strip the only surviving member and the document really is
-    // invalid, so `E020` must still fire.
+    // invalid, so `E020` must still fire. Stripping the required `info` is `E020` too.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(
         temp.path(),
         "openapi.yaml",
-        r#"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /items:
-    get:
-      operationId: listItems
-      responses: { "204": { description: No Content } }
-"#,
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /items:\n    get:\n      \
+         operationId: listItems\n      responses: { \"204\": { description: No Content } }\n",
     );
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&omitting(
-        &spec,
-        &out,
-        spargen::omit! { pointers { "/paths"; } },
-    ));
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
+    for (omit, message) in [
+        (
+            spargen::omit! { pointers { "/paths"; } },
+            "omit profile left no `paths`, `components`, or `webhooks`; an OpenAPI root requires \
+             at least one of the three",
+        ),
+        (
+            spargen::omit! { pointers { "/info"; } },
+            "omit profile removed required OpenAPI root fields: info",
+        ),
+    ] {
+        let report = spargen::generate(&omitting(&spec, &out, omit));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let e020: Vec<_> = report
             .diagnostics()
             .iter()
-            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
-        "{report:#?}"
-    );
+            .filter(|d| d.code == Code::OmitCreatedInvalidDocument)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(e020, [message], "{report:#?}");
+    }
 }
 
 #[test]

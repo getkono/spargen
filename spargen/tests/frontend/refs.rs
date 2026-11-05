@@ -10,6 +10,7 @@ use super::*;
 /// an undeclared component as `unresolved … reference` naming the reference as written, a
 /// pointer with nothing at it as `not found in the input bundle`, and only a reference the
 /// bundle cannot place as `unsupported or unresolved`.
+// E004 case: absent-target, undeclared-component, unsupported-or-unresolved
 #[test]
 fn e004_header_and_media_type_walkers_report_each_case_in_its_own_words() {
     let valid = r##"
@@ -798,7 +799,7 @@ fn an_unreadable_relative_file_ref_is_e011_at_the_ref() {
 }
 
 #[test]
-fn e006_dynamic_ref_rejected() {
+fn e006_a_dynamic_ref_is_rejected() {
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -817,6 +818,7 @@ components:
 /// A schema that opens a static resource scope, by `$id` or by `$anchor`, is `E004`'s
 /// resource-scope case at that schema, with the remedy that says no reference is literally
 /// unresolved.
+// E004 case: resource-scope
 #[test]
 fn e004_a_schema_resource_scope_is_rejected_at_the_schema() {
     for keyword in ["$id: https://example.com/thing", "$anchor: thing"] {
@@ -827,6 +829,11 @@ fn e004_a_schema_resource_scope_is_rejected_at_the_schema() {
         assert_eq!(
             e004_pointers(&report, keyword),
             ["/components/schemas/Thing"],
+            "{keyword}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::UnresolvedRef),
+            ["static `$id`/`$anchor` schema resource scopes are not yet supported"],
             "{keyword}"
         );
         let remedy = report

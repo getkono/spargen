@@ -243,6 +243,7 @@ paths:
 /// parameter rejects with `E010` — naming the property and why, rather than the generic "nested
 /// arrays or objects", which describes nothing the author wrote. A value schema that is a scalar
 /// gives the field a serialization, and the parameter generates.
+// E010 case: unconstrained-property
 #[test]
 fn an_object_parameters_undeclared_required_name_needs_a_scalar_value_schema() {
     const TEMPLATE: &str = r##"
@@ -366,6 +367,7 @@ paths:
 /// the only message was the generic "nested arrays or objects", which describes nothing the author
 /// wrote. An uninhabited schema below a genuinely nested object is still reported as the nesting,
 /// since that is the shape the style cannot serialize whatever the inner schema says.
+// E010 case: uninhabited-schema
 #[test]
 fn a_parameter_with_an_uninhabited_schema_is_reported_as_uninhabited() {
     const TEMPLATE: &str = r##"
@@ -706,6 +708,7 @@ paths:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
 }
 
+// E010 case: delimited-explode
 #[test]
 fn e010_delimited_style_with_explode_true() {
     // The specification's own serialization table marks this combination n/a, so there is no
@@ -729,7 +732,12 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    assert!(
+        messages_for(&report, Code::UnsupportedParameterStyle)
+            .iter()
+            .any(|message| message.contains("with `explode: true` has no defined serialization")),
+        "{report:#?}"
+    );
 }
 
 /// `spaceDelimited`/`pipeDelimited` are defined only for arrays and objects, and `deepObject`
@@ -741,6 +749,7 @@ paths:
 /// `oneOf`/`anyOf` with a scalar member, `null` on a required parameter, or a `oneOf` member
 /// that is `null` (here through a `$ref`) on any parameter. An optional nullable parameter is
 /// fine, since its `None` is simply not sent.
+// E010 case: style-domain
 #[test]
 fn e010_a_query_style_over_a_schema_admitting_a_value_it_cannot_serialize() {
     const TEMPLATE: &str = r##"
@@ -1000,6 +1009,7 @@ paths:
     );
 }
 
+// W011 case: allow-reserved-parameter
 #[test]
 fn w011_allow_reserved_has_no_effect_where_nothing_is_encoded() {
     // OpenAPI 3.1 scopes `allowReserved` to `in: query`, so its metaschema rejects it elsewhere
@@ -1027,7 +1037,9 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("this parameter is sent without percent-encoding")),
         "{report:#?}"
     );
 }
@@ -1054,6 +1066,7 @@ paths:
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
+// E010 case: nested-value
 #[test]
 fn e010_nested_parameter_value() {
     let spec = r##"
@@ -1075,9 +1088,17 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    assert!(
+        messages_for(&report, Code::UnsupportedParameterStyle)
+            .iter()
+            .any(|message| message.contains(
+                "simple/form parameter serialization does not support nested arrays or objects"
+            )),
+        "{report:#?}"
+    );
 }
 
+// W011 case: reserved-header-parameter
 #[test]
 fn w011_reserved_header_parameters_are_ignored() {
     // `Accept`, `Content-Type`, and `Authorization` belong to the protocol layer.
@@ -1099,14 +1120,17 @@ paths:
 "##;
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::DeclarationHasNoEffect);
     assert_eq!(
-        report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::DeclarationHasNoEffect)
-            .count(),
+        messages.len(),
         2,
         "one per reserved header, matched case-insensitively: {report:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.contains("the specification reserves `Accept`")),
+        "{report:#?}"
     );
 }
 
@@ -1134,6 +1158,7 @@ paths:
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
+// W011 case: allow-empty-value
 #[test]
 fn w011_allow_empty_value_has_no_effect() {
     // Deprecated in 3.2 and inert for a typed client: an omitted optional parameter is not sent.
@@ -1154,11 +1179,15 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("`allowEmptyValue` has no effect: an optional parameter the caller omits is not sent at all")),
         "{report:#?}"
     );
 }
 
+// E010 case: querystring-content
+// E009 case: content-parameter
 #[test]
 fn a_binary_family_parameter_content_is_rejected_by_its_position() {
     // Parameter `content` shares the body classifier, so `image/png` there classifies as octets
@@ -1274,6 +1303,42 @@ paths:
     }
 }
 
+/// A `querystring` parameter is one typed argument, so its content entry needs a schema to type
+/// it, and a form-urlencoded entry an object schema whose properties become the query's pairs.
+/// Each shortfall is `E010` in its own words.
+// E010 case: querystring-content
+#[test]
+fn e010_a_querystring_content_entry_with_no_usable_schema_is_unsupported() {
+    for (content, expected) in [
+        (
+            "application/json: {}",
+            "querystring content requires a schema for a typed client argument",
+        ),
+        (
+            "application/x-www-form-urlencoded: { schema: { type: string } }",
+            "form-urlencoded querystring parameters require an object schema",
+        ),
+    ] {
+        let report = generate(&format!(
+            "openapi: 3.2.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n  /search:\n    \
+             get:\n      operationId: search\n      parameters:\n        - name: q\n          \
+             in: querystring\n          content: {{ {content} }}\n      responses:\n        \
+             '204': {{ description: ok }}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{content}: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedParameterStyle),
+            [expected],
+            "{content}: {report:#?}"
+        );
+    }
+}
+
+// E010 case: content-without-schema
 #[test]
 fn e010_a_content_parameter_whose_media_entry_has_no_schema() {
     // Issue #699: a schema-less `content` entry lowered to nothing through a bare `?`, and the

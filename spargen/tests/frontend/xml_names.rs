@@ -1,4 +1,5 @@
-//! `xml.name` held to the XML 1.1 `Name` production, wherever the `xml` object is written.
+//! `xml.name` held to the XML 1.1 `Name` production, wherever the `xml` object is written, and a
+//! component name that is no XML name not applied as the element name OpenAPI infers from it.
 
 use super::*;
 
@@ -117,5 +118,75 @@ fn an_xml_name_the_xml_name_production_admits_generates() {
             !has_code(&report, Code::InvalidInput),
             "`{good}`: {report:#?}"
         );
+    }
+}
+
+/// A component key may be no XML name (a leading digit, `-` or `.`), and quick-xml refuses to
+/// write such an element at run time. The name OpenAPI infers from it is not applied: each struct
+/// an XML body reaches reports it (`W006`) and keeps its Rust name, while a struct no XML body
+/// reaches has nothing to report.
+#[test]
+fn a_component_name_that_is_no_xml_name_is_reported_and_not_applied() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /receipts:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/1-receipt' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: '#/components/schemas/-order' } }
+  /dots:
+    post:
+      requestBody:
+        content:
+          application/xml: { schema: { $ref: '#/components/schemas/.dot' } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/2-json' } }
+components:
+  schemas:
+    1-receipt:
+      type: object
+      properties:
+        id: { type: integer }
+    '-order':
+      type: object
+      properties:
+        id: { type: integer }
+    .dot:
+      type: object
+      properties:
+        id: { type: integer }
+    2-json:
+      type: object
+      properties:
+        id: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut messages = messages_for(&report, Code::XmlHintIgnored);
+    messages.sort_unstable();
+    assert_eq!(messages.len(), 3, "{report:#?}");
+    for (message, name) in messages.iter().zip(["-order", ".dot", "1-receipt"]) {
+        assert!(
+            message.contains(&format!("component name `{name}` is not an XML name")),
+            "{message}"
+        );
+    }
+    // Each struct keeps its Rust name on the wire: no container rename at all.
+    for ty in ["N1Receipt", "Order", "Dot", "N2Json"] {
+        let renames: Vec<_> = struct_attributes(&code, ty)
+            .into_iter()
+            .filter(|line| line.contains("rename"))
+            .collect();
+        assert!(renames.is_empty(), "{ty}: {renames:?}\n{code}");
     }
 }

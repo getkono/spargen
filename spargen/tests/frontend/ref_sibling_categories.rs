@@ -10,6 +10,7 @@ use super::*;
 /// vacuously satisfied by it — so a nullable target stays nullable through the intersection; and a
 /// sibling carrying both kinds with no `type` to pick one is rejected rather than lowered to either
 /// category, which would silently discard the other kind's keywords.
+// E013 case: inferred-category
 #[test]
 fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null() {
     const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \

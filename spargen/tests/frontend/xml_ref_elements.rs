@@ -171,9 +171,17 @@ components:
             Outcome::Generated,
             "{version}: {report:#?}"
         );
-        assert!(!code.contains(r#"rename = "pet","#), "{version}: {code}");
-        assert!(code.contains(r#"rename = "cats","#), "{version}: {code}");
-        assert!(code.contains(r#"rename = "dogs","#), "{version}: {code}");
+        for field in ["cats", "dogs"] {
+            let attributes = field_attributes(&code, "Owner", field);
+            let renames = |name: &str| {
+                let rename = format!(r#"rename = "{name}""#);
+                attributes
+                    .iter()
+                    .any(|attribute| attribute.contains(&rename))
+            };
+            assert!(renames(field), "{version} {field}: {attributes:?}");
+            assert!(!renames("pet"), "{version} {field}: {attributes:?}");
+        }
         assert!(
             messages_for(&report, Code::XmlHintIgnored)
                 .iter()
@@ -219,11 +227,19 @@ components:
 "##;
     let (report, code) = generate_with_code(spec);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert!(code.contains(r#"rename = "favourite","#), "{code}");
-    assert!(code.contains(r#"rename = "others","#), "{code}");
+    let renamed = |field: &str, name: &str| {
+        let rename = format!(r#"rename = "{name}""#);
+        field_attributes(&code, "Owner", field)
+            .iter()
+            .any(|attribute| attribute.contains(&rename))
+    };
     // Items naming a root-named struct keep the property name too: `element` is the items' own.
-    assert!(code.contains(r#"rename = "named","#), "{code}");
-    assert!(!code.contains(r#"rename = "pet","#), "{code}");
+    for field in ["favourite", "others", "named"] {
+        assert!(renamed(field, field), "{field}: {code}");
+    }
+    for field in ["favourite", "others", "named", "spare"] {
+        assert!(!renamed(field, "pet"), "{field}: {code}");
+    }
     // `none`, restated, is the default: the referenced element stands in its place.
-    assert!(code.contains(r#"rename = "Dog","#), "{code}");
+    assert!(renamed("spare", "Dog"), "{code}");
 }

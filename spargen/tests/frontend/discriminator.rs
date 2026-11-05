@@ -106,6 +106,7 @@ const CAT_AND_DOG: &str = "        - { $ref: '#/components/schemas/Cat' }\n     
 /// `E004`, reported at the mapping entry itself so the rejection names (and auto-carve can reach)
 /// the site that is wrong. The same holds for 3.2 `defaultMapping`, which used to be reported as a
 /// membership problem (`E007`) about a schema that was never declared at all.
+// E004 case: discriminator-target
 #[test]
 fn a_discriminator_mapping_value_naming_an_undeclared_schema_is_e004_at_the_entry() {
     let cases = [
@@ -356,6 +357,7 @@ fn standalone_discriminators(mapping: &str) -> Vec<(&'static str, String, &'stat
 /// `allOf`, so the form is not generated: the schema lowers by its other keywords, and the
 /// discriminator is acknowledged as `W011` at its own site. A mapping naming declared schemas is
 /// otherwise fine — with no union there is no membership to check, so no `E007` either.
+// W011 case: standalone-discriminator
 #[test]
 fn a_discriminator_beside_no_union_is_w011_at_the_discriminator() {
     for (what, spec, pointer) in standalone_discriminators("cat: Cat") {
@@ -673,6 +675,7 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
 /// for the tagged one and the untagged one takes no tag; with no tagged member at all the union is
 /// decoded by its members' schemas with no tag dispatch. A `mapping` entry naming it, or
 /// `defaultMapping` falling back to it, reaches it with no warning.
+// W011 case: untagged-discriminated-member
 #[test]
 fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag() {
     let spec = |members: &str, discriminator: &str, version: &str| {

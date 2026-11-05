@@ -330,6 +330,7 @@ components:
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
+// E007 case: unrepresentable-applicators
 #[test]
 fn e007_combined_one_of_and_any_of_applicators_rejected() {
     let spec = r##"
@@ -348,7 +349,13 @@ components:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert!(
+        messages_for(&report, Code::NonDisjointUnion)
+            .iter()
+            .any(|message| message
+                .contains("a single schema node declares both `oneOf` and `anyOf`")),
+        "{report:#?}"
+    );
 }
 
 #[test]

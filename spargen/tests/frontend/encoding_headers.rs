@@ -400,6 +400,7 @@ paths:
 
 /// Every offending header of one property is reported, not only the first, so one generation
 /// names every header the author must fix before the body is refused.
+// E009 case: part-header
 #[test]
 fn e009_every_encoding_header_that_is_not_an_http_field_is_reported() {
     let spec = r##"
@@ -442,6 +443,7 @@ paths:
 
 /// A form-urlencoded field is one name/value pair with no headers of its own, so `headers` there
 /// is acknowledged and dropped. The header pins a `const`, so nothing but this rule reports it.
+// W011 case: encoding-headers-non-multipart
 #[test]
 fn w011_encoding_headers_on_a_form_urlencoded_body_have_no_effect() {
     let spec = r##"
@@ -478,6 +480,7 @@ paths:
 
 /// A Header Object describes a header and carries no value; one whose schema pins none gives the
 /// client nothing to send, so it is acknowledged rather than sent empty or dropped in silence.
+// W011 case: encoding-header-no-value
 #[test]
 fn w011_an_encoding_header_that_pins_no_value_has_no_effect() {
     let spec = r##"

@@ -1,6 +1,6 @@
-//! Request and response bodies, second part: `format: binary` in every position, optional request
-//! bodies, the basic `W014` alternative pair, byte bodies across the binary media families and
-//! their ranking against media ranges, CBOR as a byte body, and nullable raw bodies.
+//! Byte bodies: `format: binary` in every position, optional request bodies, byte bodies across
+//! the binary media families and their ranking against media ranges (with the `W014` a byte
+//! alternative draws), CBOR as a byte body, and nullable raw bodies.
 
 use super::*;
 
@@ -156,59 +156,6 @@ paths:
     assert!(
         code.contains("body: &"),
         "a required body is passed by reference: {code}"
-    );
-}
-
-#[test]
-fn w014_alternative_media_type_is_not_generated() {
-    // A generated method sends and decodes exactly one media type, so a body offering both JSON and
-    // XML narrows to JSON. That is a real reduction of the documented surface and used to happen
-    // with no diagnostic at all — the one silent disposition left in the media path.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    post:
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { type: string }
-          application/xml:
-            schema: { type: string }
-      responses:
-        "204": { description: No Content }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        has_code(&report, Code::AlternativeMediaIgnored),
-        "{report:#?}"
-    );
-}
-
-#[test]
-fn a_single_media_type_draws_no_alternative_warning() {
-    // The warning must fire only when something is actually dropped.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    post:
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { type: string }
-      responses:
-        "204": { description: No Content }
-"##;
-    let report = generate(spec);
-    assert!(
-        !has_code(&report, Code::AlternativeMediaIgnored),
-        "{report:#?}"
     );
 }
 
@@ -876,6 +823,7 @@ paths:
     }
 }
 
+// E009 case: request-range
 #[test]
 fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
     // With no concrete key at all every candidate is a range, so the ladder and then source order
@@ -1376,6 +1324,7 @@ fn assert_rejected_as_nullable_raw_body(spec: &str) {
     }
 }
 
+// E009 case: raw-null
 #[test]
 fn e009_a_nullable_raw_request_body_is_rejected() {
     // A raw request body is sent verbatim as octets, and octets carry no `null`: an

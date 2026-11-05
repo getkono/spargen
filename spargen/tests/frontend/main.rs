@@ -46,9 +46,11 @@ mod all_of_nullability;
 mod all_of_union_meet;
 mod all_of_union_spellings;
 mod audit_reach;
+mod bodies_alternatives;
 mod bodies_binary;
 mod bodies_media_keys;
 mod bodies_streaming;
+mod bodies_unsupported;
 mod defaults;
 mod diagnostics_meta;
 mod discriminator;
@@ -62,6 +64,7 @@ mod parameters;
 mod pattern_properties;
 mod placement;
 mod recursion_aliases;
+mod recursion_cycle_closing;
 mod recursion_cycles;
 mod recursion_reservations;
 mod ref_sibling_categories;
@@ -71,17 +74,17 @@ mod refs;
 mod refs_bundle_identity;
 mod refs_remote;
 mod refs_sub_files;
-mod requirements;
 mod responses;
 mod schema_keywords;
 mod schemas;
 mod security;
 mod servers;
-mod union_categories;
-mod union_nullability;
+mod source_parse;
+mod unions_categories;
 mod unions_collapse;
 mod unions_dispatch;
 mod unions_null_branches;
+mod unions_nullability;
 mod unions_siblings;
 mod untyped_branch_nullability;
 mod xml;
@@ -272,6 +275,57 @@ fn assert_no_untyped_value(code: &str) {
         degraded.is_empty(),
         "a typed schema degraded to `serde_json::Value`: {degraded:#?}\n{types}"
     );
+}
+
+/// The attribute lines directly above `pub struct {ty} {` in the generated `types` module.
+fn struct_attributes(code: &str, ty: &str) -> Vec<String> {
+    let types = types_module(code);
+    let declaration = format!("pub struct {ty} {{");
+    let at = types
+        .find(&declaration)
+        .unwrap_or_else(|| panic!("no `{declaration}` in the generated module:\n{code}"));
+    types[..at]
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| line.trim_start().starts_with("#["))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+/// The attributes on field `field` of `pub struct {ty}` in the generated `types` module, one
+/// string per attribute with an attribute rustfmt broke over several lines joined back onto one,
+/// so an assertion reads the field it names rather than the whole module.
+fn field_attributes(code: &str, ty: &str, field: &str) -> Vec<String> {
+    let types = types_module(code);
+    let declaration = format!("pub struct {ty} {{");
+    let at = types
+        .find(&declaration)
+        .unwrap_or_else(|| panic!("no `{declaration}` in the generated module:\n{code}"));
+    let head = format!("pub {field}:");
+    let (mut attributes, mut open, mut depth) = (Vec::new(), String::new(), 0_i32);
+    for line in types[at + declaration.len()..].lines().map(str::trim) {
+        if depth == 0 && line == "}" {
+            break;
+        }
+        if depth > 0 || line.starts_with("#[") {
+            open.push_str(if open.is_empty() || open.ends_with('(') {
+                ""
+            } else {
+                " "
+            });
+            open.push_str(line);
+            depth += line.matches('[').count() as i32 - line.matches(']').count() as i32;
+            if depth == 0 {
+                attributes.push(std::mem::take(&mut open));
+            }
+        } else if line.starts_with(&head) {
+            return attributes;
+        } else if line.starts_with("pub ") {
+            attributes.clear();
+        }
+    }
+    panic!("no field `{field}` in `pub struct {ty}`:\n{code}")
 }
 
 /// A document whose only component `U` is `body`, reached from one response body.

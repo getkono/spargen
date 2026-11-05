@@ -934,6 +934,7 @@ components:
 /// behaviour the standing invariants forbid, and prose in a comment does not remove silence. `W011`
 /// (a declaration that has no effect) is exactly what the sub-file's own `Shared` is here, and it
 /// already has a code, a matrix cell and an `errors.md` row, so no ordinal moves.
+// W011 case: shadowed-component
 #[test]
 fn a_sub_file_component_shadowed_by_the_root_is_acknowledged() {
     let temp = tempfile::tempdir().unwrap();

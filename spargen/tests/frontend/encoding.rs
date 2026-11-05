@@ -125,6 +125,7 @@ paths:
     }
 }
 
+// W011 case: encoding-on-other-media
 #[test]
 fn w011_encoding_on_a_json_body_has_no_effect() {
     // `encoding` applies only to form and multipart content; elsewhere the specification says it
@@ -147,11 +148,16 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains(
+                "it applies only to `multipart` and `application/x-www-form-urlencoded` content"
+            )),
         "{report:#?}"
     );
 }
 
+// W011 case: encoding-unknown-property
 #[test]
 fn w011_encoding_entry_without_a_property_has_no_effect() {
     let spec = r##"
@@ -174,11 +180,15 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message
+                .contains("names no property of the body schema, so it is ignored")),
         "{report:#?}"
     );
 }
 
+// E009 case: nested-encoding
 #[test]
 fn e009_nested_encoding_object() {
     // The part is a string, so `multipart/mixed` over it is a header its text bytes may carry: no
@@ -213,6 +223,7 @@ paths:
     }
 }
 
+// E009 case: wildcard-content-type
 #[test]
 fn e009_wildcard_encoding_content_type() {
     let spec = r##"
@@ -234,7 +245,13 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("is a wildcard; a client must send one concrete media type")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -315,6 +332,7 @@ paths:
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
+// W011 case: allow-reserved-multipart
 #[test]
 fn w011_allow_reserved_on_a_multipart_part_has_no_effect() {
     // A multipart part's value is sent as its own bytes and never percent-encoded, so there is no
@@ -406,6 +424,7 @@ paths:
     }
 }
 
+// E009 case: form-binary
 #[test]
 fn e009_a_form_urlencoded_binary_property_without_a_declared_content_type() {
     // The other arm of the same rejection: no Encoding Object at all, so the property is binary
@@ -611,6 +630,7 @@ paths:
     )
 }
 
+// E009 case: non-json-structured
 #[test]
 fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
     // A part whose property is not a scalar or bytes is rendered as JSON whatever its
@@ -848,6 +868,7 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
     );
 }
 
+// E009 case: content-type-not-media, content-type-parameter
 #[test]
 fn e009_a_malformed_encoding_content_type_is_unsupported() {
     // An Encoding Object's `contentType` is held to the same RFC 6838 well-formedness rule as a
@@ -1065,6 +1086,7 @@ paths:
     }
 }
 
+// E009 case: form-body-not-object
 #[test]
 fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
     // `multipart/form-data` outranks `application/octet-stream`, so it is selected, and then its
@@ -1216,6 +1238,7 @@ components:
 /// the note, so the override was dropped with nothing said, at both places a header is resolved:
 /// a response's `headers` and a multipart `encoding` entry's `headers`. Each documented reference
 /// is reported exactly once, and an undocumented one not at all.
+// W011 case: reference-docs
 #[test]
 fn w011_header_reference_summary_documents_the_use_site() {
     let spec = r##"
@@ -1261,6 +1284,7 @@ components:
     }
 }
 
+// W011 case: positional-encoding-form
 #[test]
 fn w011_prefix_encoding_on_form_urlencoded_has_no_effect() {
     // The specification scopes `prefixEncoding`/`itemEncoding` to `multipart`, so on a form body
@@ -1283,11 +1307,14 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("the specification scopes it to `multipart` content")),
         "{report:#?}"
     );
 }
 
+// E009 case: positional-encoding
 #[test]
 fn e009_prefix_encoding_on_multipart_is_rejected() {
     let spec = r##"
@@ -1307,7 +1334,13 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("describes positional parts of an array-shaped multipart body")),
+        "{report:#?}"
+    );
 }
 
 #[test]
