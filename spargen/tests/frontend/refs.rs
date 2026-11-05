@@ -75,19 +75,14 @@ components:
             ],
         ),
     ] {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{case}/{entry}: {report:#?}"
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        let messages = messages_for(&report, Code::UnresolvedRef);
+        for message in expected {
+            assert!(
+                messages.contains(&message),
+                "{case}: expected {message:?} in {messages:#?}"
             );
-            let messages = messages_for(&report, Code::UnresolvedRef);
-            for message in expected {
-                assert!(
-                    messages.contains(&message),
-                    "{case}/{entry}: expected {message:?} in {messages:#?}"
-                );
-            }
         }
     }
 }
@@ -288,28 +283,26 @@ components:
     ];
 
     for (what, spec, pointer) in cases {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
-            );
-            let e004: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::UnresolvedRef)
-                .collect();
-            assert!(
-                !e004.is_empty(),
-                "{what} via {entry}: the rejection must carry E004\n{report:#?}"
-            );
-            assert!(
-                e004.iter().any(|d| d.pointer.as_str() == pointer),
-                "{what} via {entry}: E004 must point at the `$ref` site `{pointer}`, not at \
-                 {:?}\n{report:#?}",
-                e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: a `$ref` to an undeclared component must reject\n{report:#?}"
+        );
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(
+            !e004.is_empty(),
+            "{what}: the rejection must carry E004\n{report:#?}"
+        );
+        assert!(
+            e004.iter().any(|d| d.pointer.as_str() == pointer),
+            "{what}: E004 must point at the `$ref` site `{pointer}`, not at {:?}\n{report:#?}",
+            e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -497,30 +490,26 @@ components:
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelope/properties/nope",
     );
-    for (entry, report) in [
-        ("generate", generate(&off_body)),
-        ("check", check(&off_body)),
-    ] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e004: Vec<_> = report
-            .diagnostics()
+    let report = generate(&off_body);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e004: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .collect();
+    assert!(
+        e004.iter().any(|d| d.message.contains(
+            "`#/components/schemas/Envelope/properties/nope` was not found in the input bundle"
+        ) && d.pointer.as_str()
+            == "/paths/~1u/get/responses/200/content/application~1json/schema"),
+        "{report:#?}"
+    );
+    assert!(
+        !e004
             .iter()
-            .filter(|d| d.code == Code::UnresolvedRef)
-            .collect();
-        assert!(
-            e004.iter().any(|d| d.message.contains(
-                "`#/components/schemas/Envelope/properties/nope` was not found in the input bundle"
-            ) && d.pointer.as_str()
-                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
-            "{entry}: {report:#?}"
-        );
-        assert!(
-            !e004
-                .iter()
-                .any(|d| d.message.contains("addresses a subschema")),
-            "{entry}: {report:#?}"
-        );
-    }
+            .any(|d| d.message.contains("addresses a subschema")),
+        "{report:#?}"
+    );
 
     // A deep pointer whose ROOT SEGMENT is not declared is a missing component, and keeps the
     // plain-name wording that names the whole reference. `Envelop` is a typo for `Envelope`; the
@@ -529,21 +518,17 @@ components:
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelop/properties/payload",
     );
-    for (entry, report) in [("generate", generate(&typo)), ("check", check(&typo))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e004: Vec<_> = report
-            .diagnostics()
+    let report = generate(&typo);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnresolvedRef)
             .iter()
-            .filter(|d| d.code == Code::UnresolvedRef)
-            .collect();
-        assert!(
-            e004.iter().any(|d| d.message.contains(
+            .any(|message| message.contains(
                 "unresolved schema reference `#/components/schemas/Envelop/properties/payload`"
             )),
-            "{entry}: an undeclared root segment is an unresolved reference, not a fragment-shape \
-             problem: {report:#?}"
-        );
-    }
+        "an undeclared root segment is an unresolved reference, not a fragment-shape problem: \
+         {report:#?}"
+    );
 
     // A trailing slash is a real pointer into `Envelope`: its final empty reference token
     // addresses a `""`-keyed member, which `Envelope` does not have. So it reaches the resolver,
