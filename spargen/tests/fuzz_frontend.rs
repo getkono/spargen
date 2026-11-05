@@ -37,10 +37,12 @@
 //!     (the release-mode assertion abort of issue #148).
 //!
 //! Every document a `check_never_panics_*` test draws is fed through BOTH the JSON and the YAML
-//! parser (by file extension; JSON is a subset of YAML). The run is deterministic and bounded: a
-//! fixed-seed RNG and capped case counts / input sizes keep `mise run test` fast and non-flaky. A
-//! panic anywhere inside `check` fails the test with the (shrunk) offending input, and a stack
-//! overflow aborts the test process. A hang shows up as a test that never finishes.
+//! parser (by file extension; JSON is a subset of YAML), except the block-style YAML of
+//! `check_never_panics_on_deeply_nested_yaml`, which is not JSON and goes through the YAML parser
+//! only. The run is deterministic and bounded: a fixed-seed RNG and capped case counts / input
+//! sizes keep `mise run test` fast and non-flaky. A panic anywhere inside `check` fails the test
+//! with the (shrunk) offending input, and a stack overflow aborts the test process. A hang shows up
+//! as a test that never finishes.
 
 use std::cell::Cell;
 

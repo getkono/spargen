@@ -673,10 +673,11 @@ fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
 #[test]
 fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
     // The boundary of the rejection above: a JSON-rendered part declaring JSON (plain or a
-    // `+json` structured suffix, in any letter case) is what it says, and a scalar or bytes part
-    // carries any well-formed declaration as its header — a string is the text the document
-    // described and bytes are whatever the caller supplies, so neither is re-encoded against the
-    // header.
+    // `+json` structured suffix, its letter case the multipart-part position of
+    // `bodies_media_keys`'s `any_letter_case_of_every_media_key_generates_the_same_module`) is
+    // what it says, and a scalar or bytes part carries any well-formed declaration as its header —
+    // a string is the text the document described and bytes are whatever the caller supplies, so
+    // neither is re-encoded against the header.
     let object = "{ type: object, properties: { id: { type: integer } } }";
     let cases = [
         (object, "application/json", "serde_json::to_string("),
@@ -777,11 +778,13 @@ fn e009_a_form_urlencoded_json_rendered_field_declaring_a_non_json_content_type(
 
 #[test]
 fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
-    // The boundary of the rejection above: a non-scalar field declaring JSON, in any letter case
-    // or as a `+json` type, is serialized as the JSON it declares; a scalar field declaring
-    // `text/plain` (or a syntax with no codec, whose text is the value itself) is sent as text,
-    // and one declaring JSON as a JSON value; and RFC 6570 serialization of an object makes its
-    // `contentType` inert, so the rule does not reach it.
+    // The boundary of the rejection above: a non-scalar field declaring JSON, plain or as a
+    // `+json` type, is serialized as the JSON it declares; a scalar field declaring `text/plain`
+    // (or a syntax with no codec, whose text is the value itself) is sent as text, and one
+    // declaring JSON as a JSON value; and RFC 6570 serialization of an object makes its
+    // `contentType` inert, so the rule does not reach it. The mixed-case rows are the form-field
+    // position of `bodies_media_keys`'s
+    // `any_letter_case_of_every_media_key_generates_the_same_module`.
     let object = "{ type: object, properties: { id: { type: integer } } }";
     let cases = [
         (object, "application/json", "FormMode::Json"),
@@ -795,9 +798,10 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
         ("{ type: string }", "text/plain", "FormMode::Text"),
         ("{ type: string }", "application/xml", "FormMode::Text"),
         ("{ type: integer }", "application/json", "FormMode::Json"),
-        // #399: the codec is chosen from the declared media type case-insensitively, as the
-        // refusal above judges it, so a scalar declaring `Application/JSON` is the JSON value its
-        // lowercase spelling is, not the text its natural codec would make it.
+        // #399: the form-field position of `bodies_media_keys`'s
+        // `any_letter_case_of_every_media_key_generates_the_same_module`, so a scalar declaring
+        // `Application/JSON` is the JSON value its lowercase spelling is, not the text its natural
+        // codec would make it.
         ("{ type: integer }", "Application/JSON", "FormMode::Json"),
         ("{ type: object }", "Application/JSON", "FormMode::Json"),
         (
