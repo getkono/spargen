@@ -1,0 +1,132 @@
+name: Feature request
+description: Propose support for a construct spargen rejects or warns on, or an addition to the generated client or the CLI.
+title: "feat(scope): "
+labels: ["enhancement"]
+type: Feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Spargen is opinionated on purpose, and some edges are closed rather than
+        undecided. Permanently out of scope: **OpenAPI 3.0.x and older** (rejected,
+        never converted), **`serde(untagged)` or any first-match-wins union**,
+        **degrading a typed schema to `serde_json::Value`**, **interpreting the
+        spec at runtime**, **a spargen crate in the consumer's runtime
+        dependency tree**, a **`generate` subcommand** (generation runs from
+        `build.rs` or the macro, nowhere else), and **network access outside
+        `spargen lock`**.
+
+        The README's design guarantees and `docs/support-matrix.md` are
+        normative. A request that contradicts them is closed rather than
+        argued, so read them before writing.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the open and closed issues and this is not a duplicate.
+          required: true
+        - label: I read the README's design guarantees and `docs/support-matrix.md`; this contradicts neither.
+          required: true
+        - label: A human wrote and reviewed this request.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Matches the repository's `area:` labels.
+      options:
+        - Schema lowering and type coverage
+        - Request and response media types
+        - Spec parsing, version handling, or `$ref` resolution
+        - Embedded runtime and generated-API ergonomics
+        - CLI, configuration, or developer experience
+        - Adoption, integrations, corpus, or docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: diagnostic
+    attributes:
+      label: Diagnostic today
+      description: >
+        The code spargen reports for the construct this concerns, if any, and
+        whether it is a rejection (`E###`) or a warning (`W###`). Write `none`
+        if this is not about a construct in a spec.
+      placeholder: E013
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you cannot generate or express today
+      description: >
+        Show the minimal OpenAPI fragment and what spargen does with it — the
+        diagnostic, or the generated code that does not serve you. Start from
+        the obstacle, not from the solution. If it comes from a real-world or
+        framework-emitted description (utoipa, aide, poem-openapi, ...), say
+        which; a public one is a corpus candidate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed generated API
+      description: >
+        The Rust you would want emitted — types, `Client` method signatures,
+        error variants — not prose. For a CLI or configuration change, the
+        command line or `spargen.toml` keys.
+      placeholder: |
+        ```rust
+        pub enum Pet { Cat(Cat), Dog(Dog) }
+
+        impl Client {
+            pub async fn get_pet(&self, id: i64) -> Result<Pet, Error<GetPetError>> { /* ... */ }
+        }
+        ```
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Impact on generated output
+      description: The semver surface is the public API of generated output, as `spargen diff` classifies it.
+      options:
+        - Additive — a rejected construct now generates; existing output unchanged
+        - Changes the output of specs that generate today
+        - Library, CLI, or configuration only; generated output unchanged
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: spec
+    attributes:
+      label: Specification basis
+      description: The OpenAPI 3.1 / 3.2 or JSON Schema 2020-12 section that requires or permits this, if one does.
+      placeholder: OpenAPI 3.2 §4.8.24, or JSON Schema 2020-12 §10.2.1.3
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+      description: >
+        Your current workaround, and why it is not enough. Say explicitly
+        whether an omit rule or auto-carve (`--omit-*`, `carve`) already lets
+        you generate the rest of the spec, and what that costs you.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to implement this.
+        - label: I would need guidance on where it belongs before starting.

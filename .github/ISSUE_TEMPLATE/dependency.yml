@@ -1,0 +1,137 @@
+name: Dependency change
+description: A dependency is behind or vulnerable, a runtime floor should move, or the dependency graph should change.
+title: "fix(deps): "
+labels: ["chore"]
+type: Task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Spargen has two dependency graphs, and they are fixed differently:
+
+        - **Spargen's own graph** — what `spargen` and `spargen-macro` pull in at
+          build time, including the `cli` and `remote-fetch` features. Cargo
+          ignores a dependency's lockfile, so an advisory here is fixed by a
+          manifest floor plus a `deny.toml` ban, not by a lockfile bump alone.
+        - **The generated client's runtime graph** — the crates the emitted code
+          needs in *your* manifest: `reqwest`, `serde`, `serde_json`, `bytes`,
+          `secrecy` and `futures-core`, plus `quick-xml`,
+          `tokio` and `time` only when the compiled API uses them. That set is
+          deliberate and closed; *"can the generated code use X?" is answered by
+          naming the capability that needs it*, not by arguing that X is good.
+          Your own lockfile resolves these, so a patched release is usually
+          `cargo update` away; spargen's part is the floor `E023` audits.
+
+        A red `deny` on `master` is the maintainers' to fix the day it is seen.
+        An issue is still welcome when you hit an advisory before they do.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the open and closed issues and this is not a duplicate.
+          required: true
+        - label: I read the "Lockfiles and advisories" rules in `CLAUDE.md` and the runtime reference (`docs/book/src/runtime.md`).
+          required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Security advisory or yank (RUSTSEC, CVE, or crates.io)
+        - A runtime floor (`E023`, `spargen deps`) is too low or too high
+        - A pinned crate is behind and the gap matters
+        - Add a new dependency
+        - Remove or replace a dependency
+    validations:
+      required: true
+
+  - type: dropdown
+    id: graph
+    attributes:
+      label: Graph
+      options:
+        - spargen's published graph (build-time, any feature)
+        - The generated client's runtime graph
+        - Dev-dependency, support-runtime only, or an example lockfile
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: crate
+    attributes:
+      label: Crate
+      description: As it appears — or would appear — in `[workspace.dependencies]`.
+      placeholder: rustls
+    validations:
+      required: true
+
+  - type: input
+    id: current
+    attributes:
+      label: Today
+      description: >
+        The version `Cargo.lock` resolves, or for a runtime crate the floor
+        `spargen deps` prints. Write `none` for a new dependency.
+      placeholder: 0.23.31
+    validations:
+      required: true
+
+  - type: input
+    id: proposed
+    attributes:
+      label: Proposed
+      description: The version or replacement you propose. Write `none` for a removal.
+      placeholder: 0.23.32
+    validations:
+      required: true
+
+  - type: input
+    id: advisory
+    attributes:
+      label: Advisory or changelog
+      description: >
+        A link that justifies the change — the RUSTSEC advisory, the upstream
+        release notes, or the changelog entry. Without one there is nothing to
+        evaluate.
+      placeholder: https://rustsec.org/advisories/RUSTSEC-0000-0000
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Lockfile only; no manifest or code change
+        - Raises a floor in spargen's own manifest
+        - Raises a runtime floor, so consumers' manifests must follow (`E023`)
+        - Breaking upstream, and it changes generated code
+        - Raises the MSRV above 1.88
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: justification
+    attributes:
+      label: Justification
+      description: >
+        What this unlocks or fixes. For a new dependency, name the capability
+        that needs it, the feature it arrives behind, and — for a runtime crate —
+        why the emitted code cannot do without it. For an advisory with no
+        patched release, say why it does or does not reach this graph.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: >
+        If you tried it, what `mise run deny`, `mise run runtime-dependencies`
+        and `mise run msrv` reported against the proposed version.
+      render: text
