@@ -426,9 +426,9 @@ impl<T> EventStream<T> {
         let mut request = reconnect.request.try_clone()?;
         // An empty id resets replay state, so the header goes. So does an id `HeaderValue` refuses
         // (the framer drops an id holding NUL, and keeps every other control character but the
-        // line-ending LF and CR):the server's latest resume point cannot be sent, and replaying an
-        // older one would claim a position it has superseded, so the reconnect proceeds as a fresh
-        // subscription instead of ending.
+        // line-ending LF and CR): the server's latest resume point cannot be sent, and replaying
+        // an older one would claim a position it has superseded, so the reconnect proceeds as a
+        // fresh subscription instead of ending.
         if let Some(id) = self.last_event_id.as_deref() {
             match reqwest::header::HeaderValue::from_str(id) {
                 Ok(value) if !id.is_empty() => {
