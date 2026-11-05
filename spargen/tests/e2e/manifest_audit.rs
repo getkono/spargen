@@ -1070,7 +1070,7 @@ paths:
 /// than through a stubbed environment, and proves the run still generates: an un-audited build is
 /// degraded, not failed.
 #[test]
-fn w012_a_build_script_with_no_discoverable_manifest_warns_and_still_generates() {
+fn a_build_script_with_no_discoverable_manifest_warns_and_still_generates() {
     let temp = tempfile::tempdir().unwrap();
     let crate_dir = temp.path().join("consumer");
     std::fs::create_dir_all(crate_dir.join("src")).unwrap();

@@ -565,8 +565,10 @@ mod tests {
         );
     }
 
+    /// Literals match exactly, `*` within one segment, `**` across any depth, `?` one non-`/`
+    /// character, and a pattern with none of them is no glob.
     #[test]
-    fn glob_matcher_semantics() {
+    fn each_glob_metacharacter_matches_what_it_documents() {
         // Exact literals.
         assert!(glob_match("/pets", "/pets"));
         assert!(!glob_match("/pets", "/pet"));

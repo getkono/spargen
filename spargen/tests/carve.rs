@@ -542,7 +542,7 @@ fn carve_is_a_noop_on_a_spec_with_no_rejections() {
 
 #[cfg(feature = "cli")]
 #[test]
-fn check_command_supports_carve() {
+fn check_with_carve_reports_the_carved_construct_and_exits_zero() {
     // `spargen check --carve` audits the carved subset clean (it runs the full frontend), reporting
     // the carved construct via W009 and exiting 0.
     let temp = tempfile::tempdir().unwrap();
@@ -989,11 +989,11 @@ paths:
     assert!(!code.contains("get_kept_file"), "{code}");
 }
 
-/// `E019` is emitted from `compat`, and until now only its own module exercised it. An omit rule
-/// that names nothing is a mistake in the profile, not a property of the spec, so it fails the run
-/// rather than being ignored — for an exact rule and a glob alike.
+/// `E019`, emitted from `compat`, through the public API: an omit rule that names nothing is a
+/// mistake in the profile, not a property of the spec, so it fails the run rather than being
+/// ignored — for an exact rule and a glob alike.
 #[test]
-fn e019_an_omit_rule_that_matches_nothing_fails_the_run() {
+fn an_omit_rule_that_matches_nothing_fails_the_run() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let spec = write_spec(
