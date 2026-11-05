@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
-    ServerVariableSurface, Surface, TypeSurface,
+    ServerVariableSurface, Surface, TypeSurface, UrlArgSurface,
 };
 use crate::ir::{
     AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarRepr, ScalarValue,
@@ -24,6 +24,18 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
         let url_accessor_name = operation_names.url_accessor.as_str().to_owned();
 
         let mut params = BTreeMap::new();
+        // The accessor takes the method's required arguments that shape the URL, in the method's
+        // order, then the bundle when an optional parameter shapes it. Codegen's
+        // `OperationSig::url_args` reads the same two `ir` predicates.
+        let mut url_args: Vec<UrlArgSurface> = operation
+            .params
+            .iter()
+            .filter(|param| param.is_url_arg())
+            .map(|param| UrlArgSurface::Param((param.name.clone(), param.location.as_openapi_in())))
+            .collect();
+        if operation.url_takes_params() {
+            url_args.push(UrlArgSurface::Optional);
+        }
         for param in &operation.params {
             // A param that sends an explicit `null` is set through `Option<Option<T>>`, so the
             // same nullable type behind another serialization is a different surface.
@@ -53,6 +65,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             OpSurface {
                 method_name,
                 url_accessor_name,
+                url_args,
                 params,
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names),

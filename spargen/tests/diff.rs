@@ -213,15 +213,25 @@ fn removed_operation_is_major() {
 
 #[test]
 fn added_optional_param_is_minor() {
-    let report = diff(&base(), &spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, ""));
+    // A header leaves the URL accessor's arguments alone; an optional query parameter is the
+    // accessor's change too (`a_change_to_the_url_accessors_arguments_is_major`).
+    let header = PARAM_OPTIONAL_INT.replace("in: query", "in: header");
+    let report = diff(&base(), &spec(&header, "id", PET_PROPS, ""));
     assert_eq!(kinds(&report), vec![ChangeKind::OptionalParamAdded]);
     assert_eq!(report.bump, Impact::Minor);
 }
 
 #[test]
 fn added_required_param_is_major() {
+    // A required query parameter is a new positional argument of the URL accessor as well.
     let report = diff(&base(), &spec(PARAM_REQUIRED_INT, "id", PET_PROPS, ""));
-    assert_eq!(kinds(&report), vec![ChangeKind::RequiredParamAdded]);
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::UrlAccessorArgsChanged,
+            ChangeKind::RequiredParamAdded
+        ]
+    );
     assert_eq!(report.bump, Impact::Major);
 }
 
@@ -278,6 +288,7 @@ fn overall_bump_is_max_impact_across_mixed_changes() {
     assert_eq!(
         kinds(&report),
         vec![
+            ChangeKind::UrlAccessorArgsChanged,
             ChangeKind::FieldRemoved,
             ChangeKind::OperationAdded,
             ChangeKind::OptionalParamAdded,
@@ -578,7 +589,7 @@ fn a_mixed_report_summarizes_and_displays_every_change() {
     let only_id = "        id: { type: integer }\n";
     let report = diff(&base(), &spec(PARAM_REQUIRED_INT, "id", only_id, EXTRA_OP));
     assert_eq!(report.bump, Impact::Major);
-    assert_eq!(report.summary(), "major: 2 breaking, 1 additive change(s)");
+    assert_eq!(report.summary(), "major: 3 breaking, 1 additive change(s)");
 
     let rendered = report.to_string();
     let lines: Vec<&str> = rendered.lines().collect();

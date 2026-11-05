@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     Change, ChangeKind, DiffReport, HeadersSurface, Impact, MemberSurface, OpSurface,
     OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface, Surface, TypeSurface,
+    UrlArgSurface,
 };
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -78,6 +79,18 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     }
+    if old.url_args != new.url_args {
+        changes.push(Change::new(
+            ChangeKind::UrlAccessorArgsChanged,
+            key,
+            format!(
+                "URL accessor `{}` arguments [{}] -> [{}]",
+                new.url_accessor_name,
+                url_args_label(&old.url_args),
+                url_args_label(&new.url_args)
+            ),
+        ));
+    }
     diff_member(
         &BODY,
         key,
@@ -134,6 +147,14 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         }
     }
     diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
+}
+
+/// A URL accessor's arguments as a change's detail lists them, comma-separated.
+fn url_args_label(args: &[UrlArgSurface]) -> String {
+    args.iter()
+        .map(UrlArgSurface::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The changes between two operations' typed response-header structs. A struct that appears is a

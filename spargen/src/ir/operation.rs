@@ -107,6 +107,14 @@ impl Operation {
     pub(crate) fn has_optional_params(&self) -> bool {
         self.params.iter().any(|param| !param.required)
     }
+
+    /// Whether the optional-parameters bundle holds a parameter that shapes the URL, so the
+    /// operation's URL accessor takes the bundle after its [`Parameter::is_url_arg`] arguments.
+    pub(crate) fn url_takes_params(&self) -> bool {
+        self.params
+            .iter()
+            .any(|param| !param.required && param.location.shapes_url())
+    }
 }
 
 /// A single operation parameter (matrix: Parameters). Only S-class styles reach the IR;
@@ -140,6 +148,13 @@ pub(crate) struct Parameter {
 }
 
 impl Parameter {
+    /// Whether this parameter is a positional argument of the operation's URL accessor: a
+    /// required parameter in a location that shapes the URL. The accessor takes these in
+    /// declaration order, then the bundle where [`Operation::url_takes_params`] holds.
+    pub(crate) fn is_url_arg(&self) -> bool {
+        self.required && self.location.shapes_url()
+    }
+
     /// Whether this optional parameter's value can be an explicit `null` distinct from absence,
     /// so its `…Params` field is `Option<Option<T>>`: `None` omits it, `Some(None)` sends `null`.
     ///
@@ -175,6 +190,15 @@ impl ParamLoc {
             ParamLoc::Header => "header",
             ParamLoc::Cookie => "cookie",
         }
+    }
+
+    /// Whether a parameter here shapes the request URL: the path, the query, or the whole query
+    /// string.
+    pub(crate) fn shapes_url(self) -> bool {
+        matches!(
+            self,
+            ParamLoc::Path | ParamLoc::Query | ParamLoc::QueryString
+        )
     }
 }
 

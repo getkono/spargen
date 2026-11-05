@@ -802,21 +802,31 @@ fn api_error_body_loss_is_reported_where_the_error_signature_cannot_see_it() {
 
 #[test]
 fn removing_a_parameter_is_major() {
+    // The last optional query parameter takes the bundle out of the URL accessor's arguments.
     let report = diff(&spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, ""), &base());
-    assert_eq!(kinds(&report), vec![ChangeKind::ParamRemoved]);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::UrlAccessorArgsChanged, ChangeKind::ParamRemoved]
+    );
     assert_eq!(report.bump, Impact::Major);
 }
 
 #[test]
 fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
-    // Either direction changes the method signature: a required parameter is positional, an
-    // optional one is a `…Params` field.
+    // Either direction changes the method signature and its URL accessor's: a required parameter
+    // is positional, an optional one is a `…Params` field.
     let optional = spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, "");
     let required = spec(PARAM_REQUIRED_INT, "id", PET_PROPS, "");
 
     for (old, new) in [(&optional, &required), (&required, &optional)] {
         let report = diff(old, new);
-        assert_eq!(kinds(&report), vec![ChangeKind::ParamRequirednessChanged]);
+        assert_eq!(
+            kinds(&report),
+            vec![
+                ChangeKind::UrlAccessorArgsChanged,
+                ChangeKind::ParamRequirednessChanged
+            ]
+        );
         assert_eq!(report.bump, Impact::Major);
     }
 }
@@ -949,21 +959,29 @@ fn kinds_at(report: &DiffReport) -> Vec<(ChangeKind, &str)> {
 
 #[test]
 fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
-    // The generated argument is named from the wire name, so a move alone leaves the signature as
-    // it was: patch, not a removal plus an addition.
-    let old = optional_params(&[("limit", "query", "integer")]);
-    let report = diff(&old, &optional_params(&[("limit", "header", "integer")]));
+    // The generated argument is named from the wire name, so a move between two locations that
+    // leave the URL alone keeps the method and its URL accessor as they were: patch, not a removal
+    // plus an addition.
+    let report = diff(
+        &optional_params(&[("limit", "header", "integer")]),
+        &optional_params(&[("limit", "cookie", "integer")]),
+    );
     assert!(report.changes.is_empty(), "{:?}", report.changes);
     assert_eq!(report.bump, Impact::Patch);
 
-    // A move that also changes the type reports the type change once, naming both locations.
+    // A move that also changes the type reports the type change once, naming both locations. Out
+    // of the query, it also drops the bundle from the URL accessor's arguments.
+    let old = optional_params(&[("limit", "query", "integer")]);
     let report = diff(&old, &optional_params(&[("limit", "header", "string")]));
     assert_eq!(
         kinds_at(&report),
-        vec![(
-            ChangeKind::ParamTypeChanged,
-            "GET /pets param `limit` (query -> header)"
-        )],
+        vec![
+            (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
+            (
+                ChangeKind::ParamTypeChanged,
+                "GET /pets param `limit` (query -> header)"
+            ),
+        ],
         "{:?}",
         report.changes
     );
@@ -971,7 +989,7 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
 
     // A name declared in two locations on a side is ambiguous: its keys are not paired, so the
     // query `id` that became a header `id` beside an unchanged cookie `id` is a removal and an
-    // addition.
+    // addition, and the URL accessor no longer takes the bundle.
     let report = diff(
         &optional_params(&[("id", "cookie", "string"), ("id", "query", "string")]),
         &optional_params(&[("id", "cookie", "string"), ("id", "header", "string")]),
@@ -979,6 +997,7 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
     assert_eq!(
         kinds_at(&report),
         vec![
+            (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
             (ChangeKind::ParamRemoved, "GET /pets param `id` (query)"),
             (
                 ChangeKind::OptionalParamAdded,
@@ -989,6 +1008,93 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
         report.changes
     );
     assert_eq!(report.bump, Impact::Major);
+}
+
+/// `listPets` declaring one `integer` parameter per `(name, in, required)` triple.
+fn declared_params(params: &[(&str, &str, bool)]) -> String {
+    let mut lines = String::from("      parameters:\n");
+    for (name, location, required) in params {
+        lines.push_str(&format!(
+            "        - name: {name}\n          in: {location}\n          required: {required}\n          schema: {{ type: integer }}\n"
+        ));
+    }
+    spec(&lines, "id", PET_PROPS, "")
+}
+
+#[test]
+fn a_change_to_the_url_accessors_arguments_is_major() {
+    // `list_pets_url(params)` -> `list_pets_url()`: the only optional query parameter moved to a
+    // header, so the bundle no longer shapes the URL and every accessor call breaks, although the
+    // method itself is unchanged.
+    let report = diff(
+        &declared_params(&[("limit", "query", false)]),
+        &declared_params(&[("limit", "header", false)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![(ChangeKind::UrlAccessorArgsChanged, "GET /pets")],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(
+        report.changes[0].detail,
+        "URL accessor `list_pets_url` arguments [optional parameters] -> []"
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // The first optional query parameter added to a header-only bundle makes the accessor take
+    // the bundle: `list_pets_url()` -> `list_pets_url(params)`.
+    let report = diff(
+        &declared_params(&[("trace", "header", false)]),
+        &declared_params(&[("trace", "header", false), ("limit", "query", false)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![
+            (ChangeKind::UrlAccessorArgsChanged, "GET /pets"),
+            (
+                ChangeKind::OptionalParamAdded,
+                "GET /pets param `limit` (query)"
+            ),
+        ],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A required query parameter moved to a header stays a positional argument of the method but
+    // leaves the accessor's.
+    let report = diff(
+        &declared_params(&[("limit", "query", true)]),
+        &declared_params(&[("limit", "header", true)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![(ChangeKind::UrlAccessorArgsChanged, "GET /pets")],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(
+        report.changes[0].detail,
+        "URL accessor `list_pets_url` arguments [`limit` (query)] -> []"
+    );
+    assert_eq!(report.bump, Impact::Major);
+
+    // A second optional query parameter rides in a bundle the accessor already takes: additive.
+    let report = diff(
+        &declared_params(&[("limit", "query", false)]),
+        &declared_params(&[("limit", "query", false), ("offset", "query", false)]),
+    );
+    assert_eq!(
+        kinds_at(&report),
+        vec![(
+            ChangeKind::OptionalParamAdded,
+            "GET /pets param `offset` (query)"
+        )],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Minor);
 }
 
 /// A 3.2 spec whose one path, `/items`, declares each `(method, operationId)` pair as an

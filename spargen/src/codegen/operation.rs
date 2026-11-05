@@ -134,23 +134,6 @@ pub(super) fn emit_operation(
     }
 }
 
-/// Whether `location` shapes the request URL: the path, the query, or the whole query string.
-fn shapes_url(location: ParamLoc) -> bool {
-    matches!(
-        location,
-        ParamLoc::Path | ParamLoc::Query | ParamLoc::QueryString
-    )
-}
-
-/// Whether an operation's optional-parameters bundle holds a parameter that shapes its URL, so the
-/// URL accessor takes the bundle as well.
-fn url_takes_params(operation: &Operation) -> bool {
-    operation
-        .params
-        .iter()
-        .any(|param| !param.required && shapes_url(param.location))
-}
-
 /// Emit one operation's URL accessor on `Client`, built by the operation method's own
 /// `url_building` statements.
 fn emit_operation_url(
@@ -440,7 +423,7 @@ impl OperationSig {
                 decl,
                 forward: quote! { #ident },
                 normalize,
-                shapes_url: shapes_url(param.location),
+                shapes_url: param.is_url_arg(),
             });
         }
         if let Some(params_binding) = &bindings.params {
@@ -453,7 +436,7 @@ impl OperationSig {
                 normalize: Some(quote! {
                     let #params_binding: Option<#params_ident> = #params_binding.into();
                 }),
-                shapes_url: url_takes_params(operation),
+                shapes_url: operation.url_takes_params(),
             });
         }
         if let Some((body, ty)) = operation.typed_body() {

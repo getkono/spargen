@@ -2,5 +2,6 @@
 source: spargen/tests/diff.rs
 expression: "fingerprint(report).join(\"\\n\")"
 ---
+major|url-accessor-args-changed|GET /pets|URL accessor `list_pets_url` arguments [`limit` (query)] -> [optional parameters]
 major|param-requiredness-changed|GET /pets param `limit` (query)|parameter now optional
 bump=major

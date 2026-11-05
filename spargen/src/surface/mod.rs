@@ -98,6 +98,9 @@ struct OpSurface {
     /// The generated `{method}_url` accessor's identifier. It shares the method scope and yields
     /// to every operation method, so an added operation can rename it while `method_name` holds.
     url_accessor_name: String,
+    /// The `{method}_url` accessor's arguments, in declaration order. Their types are those of
+    /// `params`, compared there.
+    url_args: Vec<UrlArgSurface>,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
     params: BTreeMap<ParamKey, MemberSurface>,
@@ -113,6 +116,28 @@ struct OpSurface {
     /// The typed response-header structs, keyed by the status they document as the specification
     /// spells it (`200`, `4XX`, `default`). A status documenting no header has no entry.
     response_headers: BTreeMap<String, HeadersSurface>,
+}
+
+/// One argument of an operation's `{method}_url` accessor: a required path, query or querystring
+/// parameter, positional as on the method, or the optional-parameters bundle, which the accessor
+/// takes only when an optional parameter shapes the URL.
+#[derive(PartialEq, Eq)]
+enum UrlArgSurface {
+    /// A required parameter that shapes the URL, by its identity.
+    Param(ParamKey),
+    /// The optional-parameters bundle.
+    Optional,
+}
+
+impl std::fmt::Display for UrlArgSurface {
+    /// Writes the argument as a change's detail names it: `` `id` (path) ``, or `optional
+    /// parameters` for the bundle.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UrlArgSurface::Param((name, loc)) => write!(formatter, "`{name}` ({loc})"),
+            UrlArgSurface::Optional => formatter.write_str("optional parameters"),
+        }
+    }
 }
 
 /// One status's typed response-header struct: its generated name and its public fields, one per
@@ -235,6 +260,10 @@ pub enum ChangeKind {
     /// The generated method name for an endpoint changed, or its `{method}_url` accessor's alone
     /// did. **Major** — the callable renames.
     MethodRenamed,
+    /// An operation's `{method}_url` accessor takes other arguments: a required parameter moved
+    /// into or out of the URL, or the optional-parameters bundle started or stopped shaping it.
+    /// **Major** — every call of the accessor breaks, even where the method's signature holds.
+    UrlAccessorArgsChanged,
     /// A request body was added to an operation. **Major** — a new `&T` or `Option<&T>` argument.
     RequestBodyAdded,
     /// An operation's request body was removed. **Major** — an argument disappears.
@@ -345,6 +374,7 @@ impl ChangeKind {
             | ChangeKind::AdditionalPropertiesAdded => Impact::Minor,
             ChangeKind::OperationRemoved
             | ChangeKind::MethodRenamed
+            | ChangeKind::UrlAccessorArgsChanged
             | ChangeKind::RequestBodyAdded
             | ChangeKind::RequestBodyRemoved
             | ChangeKind::RequestBodyTypeChanged
@@ -384,6 +414,7 @@ impl ChangeKind {
             ChangeKind::OperationAdded => "operation-added",
             ChangeKind::OperationRemoved => "operation-removed",
             ChangeKind::MethodRenamed => "method-renamed",
+            ChangeKind::UrlAccessorArgsChanged => "url-accessor-args-changed",
             ChangeKind::RequestBodyAdded => "request-body-added",
             ChangeKind::RequestBodyRemoved => "request-body-removed",
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",
