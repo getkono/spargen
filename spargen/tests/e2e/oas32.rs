@@ -39,7 +39,14 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
     assert!(status.success());
 
     let status = fixture_cargo(&out)
-        .args(["clippy", "--", "-D", "warnings"])
+        .args([
+            "clippy",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
         .status()
         .unwrap();
     assert!(status.success());
