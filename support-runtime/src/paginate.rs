@@ -177,14 +177,6 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     }
 }
 
-impl ClientCore {
-    /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
-    /// See this module's docs for the full pattern and the authentication caveat.
-    pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
-        LinkPaginator::new(self.clone(), first)
-    }
-}
-
 /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or
 /// `None` when there is no usable next link. Pure and side-effect-free — the building block callers
 /// can reuse directly. A relative target is not resolved here (there is no base);

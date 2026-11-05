@@ -352,7 +352,7 @@ mod support {
         use std::convert::Infallible;
         use std::sync::Arc;
         use reqwest::Url;
-        use super::{Credential, Error, HttpBackend, ReqwestBackend};
+        use super::{Credential, Error, HttpBackend, LinkPaginator, ReqwestBackend};
         /// Client-wide configuration.
         #[derive(Debug, Clone)]
         pub struct ClientConfig {
@@ -490,6 +490,11 @@ mod support {
             /// Retrieve a registered credential by scheme name.
             pub fn credential(&self, scheme: &str) -> Option<&Credential> {
                 self.credentials.get(scheme)
+            }
+            /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
+            /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+            pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
+                LinkPaginator::new(self.clone(), first)
             }
         }
     }
@@ -2776,13 +2781,6 @@ mod support {
                     }
                     Err(error) => Some(Err(error)),
                 }
-            }
-        }
-        impl ClientCore {
-            /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
-            /// See this module's docs for the full pattern and the authentication caveat.
-            pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
-                LinkPaginator::new(self.clone(), first)
             }
         }
         /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or

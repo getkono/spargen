@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use reqwest::Url;
 
-use crate::{Credential, Error, HttpBackend, ReqwestBackend};
+use crate::{Credential, Error, HttpBackend, LinkPaginator, ReqwestBackend};
 
 /// Client-wide configuration.
 #[derive(Debug, Clone)]
@@ -153,6 +153,12 @@ impl ClientCore {
     /// Retrieve a registered credential by scheme name.
     pub fn credential(&self, scheme: &str) -> Option<&Credential> {
         self.credentials.get(scheme)
+    }
+
+    /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
+    /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+    pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
+        LinkPaginator::new(self.clone(), first)
     }
 }
 
