@@ -16,13 +16,14 @@ publish = false
 # off by default and gates one conditionally embedded module; the comment on that module's `mod`
 # in src/lib.rs says what it adds and when a generated client carries it.
 [features]
+stream = ["reqwest/stream", "dep:futures-core"]
 xml = ["dep:quick-xml"]
 blocking = ["dep:tokio"]
 time = ["dep:time"]
 
 [dependencies]
-reqwest = { workspace = true, features = ["stream"] }
-futures-core.workspace = true
+reqwest.workspace = true
+futures-core = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
@@ -42,6 +43,11 @@ time = { workspace = true, features = ["formatting", "parsing"], optional = true
 # stripped at embed time).
 [dev-dependencies]
 http = "1"
+# Test-only: the shared scripted response body (`Chunks` in src/lib.rs) is a `futures_core::Stream`
+# wrapped through reqwest's `stream` feature, and every module's tests read bodies through it, not
+# only the `stream` module's.
+futures-core.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 # The runtime itself needs only serde's runtime traits; the test module derives `Deserialize` on
 # throwaway payload structs, so the `derive` feature is pulled in for the test build only.
 serde = { workspace = true, features = ["derive"] }
