@@ -13,6 +13,43 @@ use super::{
 /// it.
 type ObjectParser<T> = fn(&SpannedValue, &JsonPointer, &mut Diagnostics) -> Option<T>;
 
+/// A Parameter, Request Body, Response or Header Object: how [`Audit::audit_ref_or`] parses a
+/// referenced one and audits it.
+trait AuditedObject: Sized {
+    /// The parser lowering reads a referenced target with.
+    const PARSE: ObjectParser<Self>;
+    /// Audit one object of this kind.
+    fn audit(audit: &mut Audit<'_, '_>, object: &Self);
+}
+
+impl AuditedObject for ParameterObject {
+    const PARSE: ObjectParser<Self> = super::deserialize::parse_parameter;
+    fn audit(audit: &mut Audit<'_, '_>, object: &Self) {
+        audit.audit_parameter(object);
+    }
+}
+
+impl AuditedObject for RequestBodyObject {
+    const PARSE: ObjectParser<Self> = super::deserialize::parse_request_body;
+    fn audit(audit: &mut Audit<'_, '_>, object: &Self) {
+        audit.audit_request_body(object);
+    }
+}
+
+impl AuditedObject for ResponseObject {
+    const PARSE: ObjectParser<Self> = super::deserialize::parse_response;
+    fn audit(audit: &mut Audit<'_, '_>, object: &Self) {
+        audit.audit_response(object);
+    }
+}
+
+impl AuditedObject for HeaderObject {
+    const PARSE: ObjectParser<Self> = super::deserialize::parse_header_object;
+    fn audit(audit: &mut Audit<'_, '_>, object: &Self) {
+        audit.audit_header(object);
+    }
+}
+
 type AnnotationKey = (Option<FileId>, JsonPointer);
 
 /// A schema node's `(file, pointer)` identity, with an unspanned node placed in the root document,
@@ -71,19 +108,19 @@ impl Audit<'_, '_> {
             self.audit_schema_ref_or(schema);
         }
         for parameter in document.components.parameters.values() {
-            self.audit_parameter_ref_or(parameter);
+            self.audit_ref_or(parameter);
         }
         for body in document.components.request_bodies.values() {
-            self.audit_request_body_ref_or(body);
+            self.audit_ref_or(body);
         }
         for response in document.components.responses.values() {
-            self.audit_response_ref_or(response);
+            self.audit_ref_or(response);
         }
         for media in document.components.media_types.values() {
             self.audit_media(media);
         }
         for header in document.components.headers.values() {
-            self.audit_header_ref_or(header);
+            self.audit_ref_or(header);
         }
 
         let root = self.resolver.root_id();
@@ -108,10 +145,10 @@ impl Audit<'_, '_> {
         }
         for operation in item.operations.values() {
             for parameter in item.parameters.iter().chain(operation.parameters.iter()) {
-                self.audit_parameter_ref_or(parameter);
+                self.audit_ref_or(parameter);
             }
             if let Some(body) = &operation.request_body {
-                self.audit_request_body_ref_or(body);
+                self.audit_ref_or(body);
             }
             for response in operation
                 .responses
@@ -119,7 +156,7 @@ impl Audit<'_, '_> {
                 .values()
                 .chain(operation.responses.default.as_ref())
             {
-                self.audit_response_ref_or(response);
+                self.audit_ref_or(response);
             }
         }
     }
@@ -150,59 +187,16 @@ impl Audit<'_, '_> {
         }
     }
 
-    /// A Parameter position: an inline object is audited, and a Reference Object is followed to
-    /// the object it ends at ([`Self::follow_object`]), which is audited in turn.
-    fn audit_parameter_ref_or(&mut self, parameter: &RefOr<ParameterObject>) {
-        match parameter {
-            RefOr::Item(parameter) => self.audit_parameter(parameter),
+    /// A Parameter, Request Body, Response or Header position: an inline object is audited, and a
+    /// Reference Object is followed to the object it ends at ([`Self::follow_object`]), which is
+    /// audited in turn. A Header position is a Response or Encoding Object's `headers` entry, or a
+    /// `components.headers` one (#715).
+    fn audit_ref_or<T: AuditedObject>(&mut self, position: &RefOr<T>) {
+        match position {
+            RefOr::Item(object) => T::audit(self, object),
             RefOr::Ref(reference) => {
-                if let Some(parameter) =
-                    self.follow_object(reference, super::deserialize::parse_parameter)
-                {
-                    self.audit_parameter(&parameter);
-                }
-            }
-        }
-    }
-
-    /// [`Self::audit_parameter_ref_or`] for a Request Body position.
-    fn audit_request_body_ref_or(&mut self, body: &RefOr<RequestBodyObject>) {
-        match body {
-            RefOr::Item(body) => self.audit_request_body(body),
-            RefOr::Ref(reference) => {
-                if let Some(body) =
-                    self.follow_object(reference, super::deserialize::parse_request_body)
-                {
-                    self.audit_request_body(&body);
-                }
-            }
-        }
-    }
-
-    /// [`Self::audit_parameter_ref_or`] for a Response position.
-    fn audit_response_ref_or(&mut self, response: &RefOr<ResponseObject>) {
-        match response {
-            RefOr::Item(response) => self.audit_response(response),
-            RefOr::Ref(reference) => {
-                if let Some(response) =
-                    self.follow_object(reference, super::deserialize::parse_response)
-                {
-                    self.audit_response(&response);
-                }
-            }
-        }
-    }
-
-    /// [`Self::audit_parameter_ref_or`] for a Header position: a Response or Encoding Object's
-    /// `headers` entry, or a `components.headers` one (#715).
-    fn audit_header_ref_or(&mut self, header: &RefOr<HeaderObject>) {
-        match header {
-            RefOr::Item(header) => self.audit_header(header),
-            RefOr::Ref(reference) => {
-                if let Some(header) =
-                    self.follow_object(reference, super::deserialize::parse_header_object)
-                {
-                    self.audit_header(&header);
+                if let Some(object) = self.follow_object(reference, T::PARSE) {
+                    T::audit(self, &object);
                 }
             }
         }
@@ -210,7 +204,7 @@ impl Audit<'_, '_> {
 
     fn audit_headers(&mut self, headers: &indexmap::IndexMap<String, RefOr<HeaderObject>>) {
         for header in headers.values() {
-            self.audit_header_ref_or(header);
+            self.audit_ref_or(header);
         }
     }
 
