@@ -78,6 +78,16 @@ debug = "line-tables-only"
 opt-level = 3
 debug = false
 
+# `cargo bench` builds under the `bench` profile, which inherits this table, so `mise run bench`
+# and the record `benchmarks.yml` keeps for each `spargen` release measure thin-LTO code; keeping
+# the table unchanged keeps that series comparable from one release to the next. It also governs a
+# `cargo build --release` or `cargo install --path spargen` run from this checkout, where `strip`
+# removes symbols and debug info from the binary. Cargo reads profiles only from the root manifest
+# of the workspace it builds, and `cargo package` writes each published crate's manifest without
+# this table, so `cargo install spargen` and every consumer build `spargen` and `spargen-macro`
+# under their own profiles (Cargo's default release profile has no LTO): the bench numbers describe
+# this workspace's build, not theirs. To measure that default, override one run rather than editing
+# this: `CARGO_PROFILE_BENCH_LTO=false cargo bench --bench generate`.
 [profile.release]
 strip = true
 lto = "thin"
