@@ -250,28 +250,116 @@ fn a_framed_payload_decodes_or_is_a_decode_error() {
     ));
 }
 
-/// A bare `\r` is not a line terminator to the SSE framer: only `\n` ends a line, and one `\r`
-/// before it is trimmed. So `\r` inside a line stays in the field value, and `\r\r` ends no
-/// event. This pins the framer's present behaviour, not the SSE specification's, which also
-/// accepts a bare `\r` as a line ending.
+/// The SSE specification ends a line at CRLF, LF, or a bare CR, so a bare `\r` ends a field line
+/// and `\r\r` ends an event, as `\n\n` does.
 #[test]
-fn a_bare_cr_does_not_terminate_an_sse_line() {
-    let mut buf = b"data: 1\rdata: 2\n\n".to_vec();
+fn a_bare_cr_terminates_an_sse_line() {
+    let mut buf = b"data: 1\rdata: 2\r\rdata: 3\n\n".to_vec();
     assert_eq!(
         next_frame(&mut buf, Framing::Sse, false),
         FramePoll::Item {
-            payload: b"1\rdata: 2".to_vec(),
+            payload: b"1\n2".to_vec(),
             metadata: SseMetadata::default(),
         }
     );
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"data: 3\n\n");
 
-    let mut buf = b"data: 1\r\r".to_vec();
+    // The blank line's CR is followed by the next event's first byte, so it ends that line alone.
+    let mut buf = b"id: 7\rdata: 1\r\rd".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::Sse, false),
+        FramePoll::Item {
+            payload: b"1".to_vec(),
+            metadata: SseMetadata {
+                id: Some("7".to_owned()),
+                retry: None,
+            },
+        }
+    );
+    assert_eq!(buf, b"d");
+
+    // At EOF a held final CR has no byte to wait for: the tail is flushed.
+    let mut buf = b"id: 7\rdata: 1\r\r".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Sse, true);
+    assert_eq!(items, vec!["1"]);
+    assert!(buf.is_empty());
+}
+
+/// Every mix of the three line endings frames the same events.
+#[test]
+fn sse_line_endings_mix_freely() {
+    let mut buf = b"data: 1\r\ndata: 2\r\n\rdata: 3\n\r\n".to_vec();
+    let (items, _) = drain(&mut buf, Framing::Sse, false);
+    assert_eq!(items, vec!["1\n2", "3"]);
+    assert!(buf.is_empty());
+}
+
+/// A CR that is the last buffered byte ends nothing yet: the byte after it decides whether it is
+/// a line ending alone or the first half of a CRLF, so a CRLF split across chunks is one line
+/// ending and not a line ending followed by a blank line.
+#[test]
+fn an_sse_cr_at_the_buffer_end_waits_for_the_next_byte() {
+    let mut buf = b"data: 1\r".to_vec();
     assert_eq!(
         next_frame(&mut buf, Framing::Sse, false),
         FramePoll::NeedMore
     );
-    assert_eq!(buf, b"data: 1\r\r");
+    assert_eq!(buf, b"data: 1\r");
+
+    // The LF completes a CRLF: one line ending, so no event is dispatched yet.
+    buf.extend_from_slice(b"\ndata: 2\r");
+    assert_eq!(
+        next_frame(&mut buf, Framing::Sse, false),
+        FramePoll::NeedMore
+    );
+
+    // A CR followed by anything else ended its line alone: here the blank line ends the event.
+    buf.extend_from_slice(b"\r\n");
+    let (items, _) = drain(&mut buf, Framing::Sse, false);
+    assert_eq!(items, vec!["1\n2"]);
+    assert!(buf.is_empty());
+}
+
+/// A body that opens with a UTF-8 byte order mark has it stripped, once, at the start only; the
+/// decision waits while the buffer is still a proper prefix of the mark.
+#[test]
+fn strip_leading_bom_removes_one_opening_mark() {
+    for (input, pending, rest) in [
+        (&b""[..], true, &b""[..]),
+        (b"\xEF", true, b"\xEF"),
+        (b"\xEF\xBB", true, b"\xEF\xBB"),
+        (b"\xEF\xBB\xBF", false, b""),
+        (b"\xEF\xBB\xBFdata: 1\n", false, b"data: 1\n"),
+        (b"\xEF\xBB\xBF\xEF\xBB\xBF", false, b"\xEF\xBB\xBF"),
+        (b"\xEFx", false, b"\xEFx"),
+        (b"data: 1\n", false, b"data: 1\n"),
+        (b"d\xEF\xBB\xBF", false, b"d\xEF\xBB\xBF"),
+    ] {
+        let mut buffer = input.to_vec();
+        assert_eq!(super::strip_leading_bom(&mut buffer), pending, "{input:?}");
+        assert_eq!(buffer, rest, "{input:?}");
+    }
+}
+
+/// Through the stream: a mark opening an SSE body is stripped however its bytes are split, so the
+/// first field name is read without it; ndjson bodies are left as they are.
+#[test]
+fn an_sse_body_opening_with_a_bom_reads_its_first_field() {
+    for framing in [Framing::Sse, Framing::SseEvent, Framing::SseJsonData] {
+        for split in 0..=3 {
+            let body = b"\xEF\xBB\xBFid: 7\ndata: 1\n\n";
+            let (items, last_event_id, _) = observe(
+                vec![body[..split].to_vec(), body[split..].to_vec()],
+                framing,
+            );
+            assert_eq!(items.len(), 1, "{framing:?} {split}");
+            assert!(items[0].is_ok(), "{framing:?} {split}");
+            assert_eq!(last_event_id.as_deref(), Some("7"), "{framing:?} {split}");
+        }
+    }
+
+    let (items, _, _) = observe(vec![b"\xEF\xBB\xBF1\n".to_vec()], Framing::Ndjson);
+    assert_eq!(items, vec![Err(b"\xEF\xBB\xBF1".to_vec())]);
 }
 
 // The tests below drive the async `next` await-loop with a noop waker and no async runtime,
@@ -395,6 +483,36 @@ fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
     assert_eq!(
         policy.seen.lock().unwrap().as_slice(),
         &[(0, "eof", Some(std::time::Duration::from_millis(750)))]
+    );
+}
+
+/// Each connection's body is its own SSE stream, so a byte order mark opening a reconnect's body
+/// is stripped as the first connection's was, and its first event still decodes.
+#[test]
+fn a_reconnected_body_opening_with_a_bom_has_it_stripped() {
+    let backend = SequenceBackend::new([Reply::status(200, "\u{FEFF}data: {\"seq\":2}\n\n")]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = reconnectable_stream(
+        "\u{FEFF}id: evt-1\ndata: {\"seq\":1}\n\n",
+        backend.clone(),
+        policy,
+    );
+
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    assert_eq!(stream.last_event_id(), Some("evt-1"));
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 2})
+    );
+    assert_eq!(
+        replay_headers(&backend),
+        &[(Some("evt-1".to_owned()), Some("session=secret".to_owned()))]
     );
 }
 
@@ -1199,7 +1317,7 @@ fn observe(chunks: Vec<Vec<u8>>, framing: Framing) -> Observed {
 }
 
 /// Body bytes assembled from the fragments every framing's grammar turns on — line endings,
-/// the record separator, SSE fields and comments, the `[DONE]` sentinel, JSON values valid and
+/// the record separator, a UTF-8 byte order mark, SSE fields and comments, the `[DONE]` sentinel, JSON values valid and
 /// not — plus arbitrary bytes, so a split can fall inside or between any of them.
 fn framed_body() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
     use proptest::strategy::Strategy;
@@ -1209,6 +1327,7 @@ fn framed_body() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
             b"\r\n",
             b"\r",
             b"\x1e",
+            b"\xEF\xBB\xBF",
             b"data: ",
             b"data:",
             b"id: 7",
