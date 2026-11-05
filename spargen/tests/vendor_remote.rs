@@ -6,8 +6,8 @@
 //! failure are all the real ones, reached through the public entry points.
 //!
 //! This suite speaks plain HTTP only, because the fetcher trusts the bundled web roots. A completed
-//! TLS handshake is driven by the in-module `tls` test in `src/source/vendor.rs`, which adds a
-//! self-signed root through `fetch_with`; `tests/tls_strictness.rs` drives the handshake up to
+//! TLS handshake is driven by the in-module `tls` test in `src/source/vendor/tests.rs`, which adds
+//! a self-signed root through `fetch_with`; `tests/tls_strictness.rs` drives the handshake up to
 //! the point it is refused, which needs no trust.
 
 #![cfg(feature = "remote-fetch")]
