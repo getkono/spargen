@@ -252,11 +252,9 @@ where
 }
 
 /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
-/// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
-/// picks the documented variant by status and decodes it (→ [`Error::Api`], or [`Error::Decode`] on
-/// parse failure); a status matching no documented selector becomes [`Error::UnexpectedStatus`].
-/// The `E` parameter only threads the taxonomy through a transport failure while reading.
-pub async fn read_error_body<E>(
+/// (capped) bytes, and whether they were truncated: the read step of [`classify_with`]. The `E`
+/// parameter only threads the taxonomy through a transport failure while reading.
+pub(crate) async fn read_error_body<E>(
     core: &ClientCore,
     mut response: Response,
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
@@ -325,41 +323,41 @@ where
     .await
 }
 
-/// The body every structured error classifier shares: read the body capped at `max_error_body`; a
-/// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
-/// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
+/// The body every error classifier shares: read the body capped at `max_error_body`; a status a
+/// `documented` selector matches runs `decode` over it ([`Error::Api`], or [`Error::Decode`]
+/// carrying the decoder's message as its `path` on failure); any other status is
 /// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
 /// a raw binary error body keeps it without a copy.
-pub(crate) async fn classify_with<E>(
+///
+/// Generated code for a multi-status error enum calls it from the arm whose selector matched, with
+/// that selector as `documented` and a `decode` that builds that arm's variant, as the success side
+/// calls [`decode_success_with`].
+pub async fn classify_with<E>(
     core: &ClientCore,
-    mut response: Response,
+    response: Response,
     documented: &[StatusSpec],
     decode: impl FnOnce(&Bytes) -> Result<E, String>,
 ) -> Error<E> {
-    let status = response.status();
-    let headers = std::mem::take(response.headers_mut());
-    match read_capped(core, response).await {
-        Ok((body, truncated)) => {
-            if documented.iter().any(|spec| spec.matches(status)) {
-                match decode(&body) {
-                    Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
-                    Err(path) => Error::Decode {
-                        status,
-                        headers,
-                        path,
-                        body,
-                        truncated,
-                    },
-                }
-            } else {
-                Error::UnexpectedStatus {
-                    status,
-                    headers,
-                    body,
-                }
-            }
-        }
-        Err(error) => error,
+    let (status, headers, body, truncated) = match read_error_body(core, response).await {
+        Ok(parts) => parts,
+        Err(error) => return error,
+    };
+    if !documented.iter().any(|spec| spec.matches(status)) {
+        return Error::UnexpectedStatus {
+            status,
+            headers,
+            body,
+        };
+    }
+    match decode(&body) {
+        Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
+        Err(path) => Error::Decode {
+            status,
+            headers,
+            path,
+            body,
+            truncated,
+        },
     }
 }
 

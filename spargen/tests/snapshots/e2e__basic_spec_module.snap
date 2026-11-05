@@ -749,11 +749,9 @@ mod support {
                 .map_err(|error| error.to_string())
         }
         /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
-        /// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
-        /// picks the documented variant by status and decodes it (→ [`Error::Api`], or [`Error::Decode`] on
-        /// parse failure); a status matching no documented selector becomes [`Error::UnexpectedStatus`].
-        /// The `E` parameter only threads the taxonomy through a transport failure while reading.
-        pub async fn read_error_body<E>(
+        /// (capped) bytes, and whether they were truncated: the read step of [`classify_with`]. The `E`
+        /// parameter only threads the taxonomy through a transport failure while reading.
+        pub(crate) async fn read_error_body<E>(
             core: &ClientCore,
             mut response: Response,
         ) -> Result<
@@ -831,45 +829,48 @@ mod support {
                 )
                 .await
         }
-        /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
-        /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
-        /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
+        /// The body every error classifier shares: read the body capped at `max_error_body`; a status a
+        /// `documented` selector matches runs `decode` over it ([`Error::Api`], or [`Error::Decode`]
+        /// carrying the decoder's message as its `path` on failure); any other status is
         /// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
         /// a raw binary error body keeps it without a copy.
-        pub(crate) async fn classify_with<E>(
+        ///
+        /// Generated code for a multi-status error enum calls it from the arm whose selector matched, with
+        /// that selector as `documented` and a `decode` that builds that arm's variant, as the success side
+        /// calls [`decode_success_with`].
+        pub async fn classify_with<E>(
             core: &ClientCore,
-            mut response: Response,
+            response: Response,
             documented: &[StatusSpec],
             decode: impl FnOnce(&Bytes) -> Result<E, String>,
         ) -> Error<E> {
-            let status = response.status();
-            let headers = std::mem::take(response.headers_mut());
-            match read_capped(core, response).await {
-                Ok((body, truncated)) => {
-                    if documented.iter().any(|spec| spec.matches(status)) {
-                        match decode(&body) {
-                            Ok(value) => {
-                                Error::Api(ResponseValue::new(status, headers, value))
-                            }
-                            Err(path) => {
-                                Error::Decode {
-                                    status,
-                                    headers,
-                                    path,
-                                    body,
-                                    truncated,
-                                }
-                            }
-                        }
-                    } else {
-                        Error::UnexpectedStatus {
-                            status,
-                            headers,
-                            body,
-                        }
+            let (status, headers, body, truncated) = match read_error_body(
+                    core,
+                    response,
+                )
+                .await
+            {
+                Ok(parts) => parts,
+                Err(error) => return error,
+            };
+            if !documented.iter().any(|spec| spec.matches(status)) {
+                return Error::UnexpectedStatus {
+                    status,
+                    headers,
+                    body,
+                };
+            }
+            match decode(&body) {
+                Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
+                Err(path) => {
+                    Error::Decode {
+                        status,
+                        headers,
+                        path,
+                        body,
+                        truncated,
                     }
                 }
-                Err(error) => error,
             }
         }
         /// Classify a documented raw-byte error body without passing it through a structured decoder.
@@ -4335,8 +4336,8 @@ mod support {
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
         build_url_on, build_url_with_query_string_on, classify_error,
-        classify_error_bytes, classify_error_text, decode_success, decode_success_bytes,
-        decode_success_text, decode_success_with, decode_text_body, read_error_body,
+        classify_error_bytes, classify_error_text, classify_with, decode_success,
+        decode_success_bytes, decode_success_text, decode_success_with, decode_text_body,
         send, unexpected_status, StatusSpec,
     };
     pub use error::{
@@ -8784,71 +8785,38 @@ Response `409`: Conflict*/
             }
             Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::NotFoundError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMultiError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::NotFoundError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMultiError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ConflictError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ConflictError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMultiError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         }
     }
     ///The URL `get_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -8885,82 +8853,49 @@ Response `409`: Conflict*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetSharedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(401u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetSharedError::Status401,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(401u16)],
+                            |_| Ok::<_, String>(GetSharedError::Status401),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetSharedError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetSharedError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetSharedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetSharedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetSharedError>(&self.core, response).await)
         }
     }
     ///The URL `get_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -8997,103 +8932,59 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetMaybeError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMaybeError>(&self.core, response).await)
         }
     }
     ///The URL `get_maybe` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9278,56 +9169,39 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessDefaultError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessDefaultError::Default,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |_| Ok::<_, String>(GetBodylessDefaultError::Default),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessDefaultError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9367,82 +9241,54 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessDefaultMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultMultiError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultMultiError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultMultiError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessDefaultMultiError::Default,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |_| Ok::<_, String>(GetBodylessDefaultMultiError::Default),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessDefaultMultiError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_default_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9477,56 +9323,39 @@ Response `404`: Not Found*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessSiblingError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(403u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessSiblingError::Status403,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(403u16)],
+                            |_| Ok::<_, String>(GetBodylessSiblingError::Status403),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessSiblingError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessSiblingError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessSiblingError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9561,54 +9390,38 @@ Response `404`: Not Found*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetXmlBodylessSiblingError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(403u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetXmlBodylessSiblingError::Status403,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(403u16)],
+                            |_| Ok::<_, String>(GetXmlBodylessSiblingError::Status403),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match support::decode_xml_body::<Box<types::XmlReceipt>>(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetXmlBodylessSiblingError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                support::decode_xml_body::<Box<types::XmlReceipt>>(body)
+                                    .map(GetXmlBodylessSiblingError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetXmlBodylessSiblingError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_xml_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9644,56 +9457,37 @@ Response `default`: Anything else*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetConditionalError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(304u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetConditionalError::Status304,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(304u16)],
+                            |_| Ok::<_, String>(GetConditionalError::Status304),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetConditionalError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetConditionalError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetConditionalError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_conditional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9766,71 +9560,41 @@ Response `409`: Conflict*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetAliasSharedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::PlainMessage>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetAliasSharedError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::PlainMessage>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetAliasSharedError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ResponseBody>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetAliasSharedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ResponseBody>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetAliasSharedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetAliasSharedError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_alias_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -10528,72 +10292,41 @@ Response `409`: binary error*/
                     .await,
             )
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetRawMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(400u16).matches(status) {
                 return Err(
-                    match support::decode_text_body::<
-                        Box<types::ResponseBody48bb7a8a>,
-                    >(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetRawMultiError::Status400(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(400u16)],
+                            |body| {
+                                support::decode_text_body::<
+                                    Box<types::ResponseBody48bb7a8a>,
+                                >(body)
+                                    .map(GetRawMultiError::Status400)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match Ok::<
-                        Box<types::ResponseBodyDbe5ca3a>,
-                        String,
-                    >(Box::new(body.clone())) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetRawMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| Ok::<
+                                _,
+                                String,
+                            >(GetRawMultiError::Status409(Box::new(body.clone()))),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_raw_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -11579,71 +11312,42 @@ Response `default`: Anything else*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetNoSuccessError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match support::decode_text_body::<
-                        Box<types::ResponseBody2a32723f>,
-                    >(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetNoSuccessError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                support::decode_text_body::<
+                                    Box<types::ResponseBody2a32723f>,
+                                >(body)
+                                    .map(GetNoSuccessError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::DeepFilter>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetNoSuccessError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<Box<types::DeepFilter>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetNoSuccessError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetNoSuccessError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_no_success` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -11867,71 +11571,41 @@ Response `409`: Conflict*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetErrorRangedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ConflictError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetErrorRangedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ConflictError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetErrorRangedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Range(4u8).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::NotFoundError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetErrorRangedError::Status4xx(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Range(4u8)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::NotFoundError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetErrorRangedError::Status4xx)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetErrorRangedError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_error_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.

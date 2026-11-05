@@ -353,8 +353,8 @@ fn status_spec_matches_exact_range_and_any() {
 use std::convert::Infallible;
 
 use super::{
-    classify_error_bytes, classify_error_text, decode_success_bytes, decode_success_text,
-    decode_success_with, decode_text_body, read_error_body, unexpected_status,
+    classify_error_bytes, classify_error_text, classify_with, decode_success_bytes,
+    decode_success_text, decode_success_with, decode_text_body, read_error_body, unexpected_status,
 };
 use crate::{Error, ResponseValue};
 
@@ -649,56 +649,40 @@ enum ApiError {
     Status4xx(ClientError),
 }
 
-/// A hand-written stand-in shaped like the generated per-status error classification: read
-/// capped, select by status (exact before range), decode → `Api`; a parse failure → `Decode`;
-/// an undocumented status → `UnexpectedStatus`. Like `dispatch_success`, it pins the runtime
-/// primitives (`read_error_body`, `StatusSpec::matches`), not the emitter; the emitted
-/// classification is driven over HTTP in `spargen/tests/e2e.rs`
-/// (`error_dispatch_takes_the_exact_arm_before_an_overlapping_range`).
+/// A hand-written stand-in shaped like the generated per-status error classification: select by
+/// status (exact before range), then classify against the matched selector, decoding → `Api`; a
+/// parse failure → `Decode`; an undocumented status → `UnexpectedStatus`. Like
+/// `dispatch_success`, it pins the runtime primitives (`classify_with`, `unexpected_status`,
+/// `StatusSpec::matches`), not the emitter; the emitted classification is driven over HTTP in
+/// `spargen/tests/e2e.rs` (`error_dispatch_takes_the_exact_arm_before_an_overlapping_range`).
 fn dispatch_error(response: reqwest::Response) -> Error<ApiError> {
     let core = core();
-    let (status, headers, body, truncated) =
-        match poll_ready(read_error_body::<ApiError>(&core, response)) {
-            Ok(parts) => parts,
-            Err(error) => return error,
-        };
+    let status = response.status();
     if StatusSpec::Exact(409).matches(status) {
-        return match serde_json::from_slice::<Conflict>(&body) {
-            Ok(value) => Error::Api(ResponseValue::new(
-                status,
-                headers,
-                ApiError::Status409(value),
-            )),
-            Err(error) => Error::Decode {
-                status,
-                headers,
-                path: error.to_string(),
-                body,
-                truncated,
+        return poll_ready(classify_with(
+            &core,
+            response,
+            &[StatusSpec::Exact(409)],
+            |body| {
+                serde_json::from_slice::<Conflict>(body)
+                    .map_err(|error| error.to_string())
+                    .map(ApiError::Status409)
             },
-        };
+        ));
     }
     if StatusSpec::Range(4).matches(status) {
-        return match serde_json::from_slice::<ClientError>(&body) {
-            Ok(value) => Error::Api(ResponseValue::new(
-                status,
-                headers,
-                ApiError::Status4xx(value),
-            )),
-            Err(error) => Error::Decode {
-                status,
-                headers,
-                path: error.to_string(),
-                body,
-                truncated,
+        return poll_ready(classify_with(
+            &core,
+            response,
+            &[StatusSpec::Range(4)],
+            |body| {
+                serde_json::from_slice::<ClientError>(body)
+                    .map_err(|error| error.to_string())
+                    .map(ApiError::Status4xx)
             },
-        };
+        ));
     }
-    Error::UnexpectedStatus {
-        status,
-        headers,
-        body,
-    }
+    poll_ready(unexpected_status(&core, response))
 }
 
 #[test]

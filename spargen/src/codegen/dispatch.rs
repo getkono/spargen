@@ -110,57 +110,43 @@ pub(super) fn error_branch_tokens(
             }
         }
         // Several documented error entries, at least one bodied (several bodies, or one beside a
-        // bodyless entry): read the capped body once, then dispatch by status in
-        // precedence order (exact before range before default) into the matching enum variant →
-        // `Error::Api`; a parse failure → `Error::Decode`; an undocumented status →
-        // `Error::UnexpectedStatus` (capped body preserved either way).
+        // bodyless entry): dispatch by status in precedence order (exact before range before
+        // default), and classify through `support::classify_with` against the matched selector
+        // into that enum variant → `Error::Api`; a parse failure → `Error::Decode`; an
+        // undocumented status → `Error::UnexpectedStatus` (capped body preserved either way).
         ErrorShape::Enum(entries) => {
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
-                let variant_ident = status_variant_ident(*spec);
-                match ty {
-                    // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
+                let variant = {
+                    let variant_ident = status_variant_ident(*spec);
+                    quote! { #error_ident::#variant_ident }
+                };
+                let decode = match ty {
+                    // Bodied status: decode into the variant's type.
                     Some(ty) => {
-                        let decode = variant_body_decode(operation, api, names, *spec, *ty, None);
-                        quote! {
-                            if #spec_tokens.matches(status) {
-                                return Err(match #decode {
-                                    Ok(value) => support::Error::Api(support::ResponseValue::new(
-                                        status,
-                                        headers,
-                                        #error_ident::#variant_ident(value),
-                                    )),
-                                    Err(path) => support::Error::Decode {
-                                        status,
-                                        headers,
-                                        path,
-                                        body,
-                                        truncated,
-                                    },
-                                });
-                            }
-                        }
+                        let decode =
+                            variant_body_decode(operation, api, names, *spec, *ty, variant);
+                        quote! { |body| #decode }
                     }
-                    // Documented bodyless error status: the unit variant → `Api`, no body parse.
-                    None => quote! {
-                        if #spec_tokens.matches(status) {
-                            return Err(support::Error::Api(support::ResponseValue::new(
-                                status,
-                                headers,
-                                #error_ident::#variant_ident,
-                            )));
-                        }
-                    },
+                    // Documented bodyless error status: the unit variant, no body parse.
+                    None => quote! { |_| Ok::<_, String>(#variant) },
+                };
+                quote! {
+                    if #spec_tokens.matches(status) {
+                        return Err(support::classify_with(
+                            &self.core,
+                            response,
+                            &[#spec_tokens],
+                            #decode,
+                        )
+                        .await);
+                    }
                 }
             });
             quote! {
-                let (status, headers, body, truncated) =
-                    match support::read_error_body::<#error_ident>(&self.core, response).await {
-                        Ok(parts) => parts,
-                        Err(error) => return Err(error),
-                    };
+                let status = response.status();
                 #(#arms)*
-                Err(support::Error::UnexpectedStatus { status, headers, body })
+                Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
             }
         }
     }
@@ -226,7 +212,7 @@ pub(super) fn success_decode_tokens(
                             names,
                             *spec,
                             *ty,
-                            Some(quote! { #enum_ident::#variant_ident }),
+                            quote! { #enum_ident::#variant_ident },
                         );
                         quote! {
                             if #spec_tokens.matches(status) {
@@ -296,15 +282,14 @@ pub(super) fn success_decode_tokens(
     (success_decode, reconnect_request_init)
 }
 
-/// The expression decoding a by-status variant's already-read `body` into its payload type, as a
+/// The expression decoding a by-status variant's already-read `body` into that variant, as a
 /// `Result<_, String>` whose error is the decode failure's path: the bytes themselves for a
 /// raw-bytes body, otherwise the codec of the media the status's response chose. The success and
 /// error dispatch both build their variants' decodes here, so the two sides cannot pick a codec
 /// differently.
 ///
-/// The error side binds `body` to the read `Bytes` and wraps the payload itself, and passes `None`.
-/// The success side decodes inside the closure it hands `support::decode_success_with`, where
-/// `body` is a `&Bytes`, and passes the variant constructor as `success_variant`, which the
+/// Each side evaluates it inside the closure it hands `support::decode_success_with` or
+/// `support::classify_with`, where `body` is a `&Bytes`; `variant` is the variant constructor the
 /// expression applies to the payload.
 fn variant_body_decode(
     operation: &Operation,
@@ -312,36 +297,22 @@ fn variant_body_decode(
     names: &Names,
     spec: crate::ir::StatusSpec,
     body_ty: Ty,
-    success_variant: Option<TokenStream>,
+    variant: TokenStream,
 ) -> TokenStream {
     let ty = boxed_ty_tokens(body_ty, names, true);
     let media = response_media_for_spec(&operation.responses, spec);
-    let bytes = if success_variant.is_some() {
-        quote! { body }
-    } else {
-        quote! { &body }
-    };
     let decode = match BodyCodec::of(api, body_ty, media) {
-        BodyCodec::Bytes => {
-            let payload = quote! { Box::new(body.clone()) };
-            return match success_variant {
-                Some(variant) => quote! { Ok::<_, String>(#variant(#payload)) },
-                None => quote! { Ok::<#ty, String>(#payload) },
-            };
-        }
-        BodyCodec::Text => quote! { support::decode_text_body::<#ty>(#bytes) },
+        BodyCodec::Bytes => return quote! { Ok::<_, String>(#variant(Box::new(body.clone()))) },
+        BodyCodec::Text => quote! { support::decode_text_body::<#ty>(body) },
         // Only as the lone body beside bodyless entries on its side: a second bodied response
         // beside an XML one is rejected (`xml_in_multi_status`).
-        BodyCodec::Xml => quote! { support::decode_xml_body::<#ty>(#bytes) },
+        BodyCodec::Xml => quote! { support::decode_xml_body::<#ty>(body) },
         BodyCodec::Json => quote! {
-            serde_json::from_slice::<#ty>(#bytes)
+            serde_json::from_slice::<#ty>(body)
                 .map_err(|error| error.to_string())
         },
     };
-    match success_variant {
-        Some(variant) => quote! { #decode.map(#variant) },
-        None => decode,
-    }
+    quote! { #decode.map(#variant) }
 }
 
 /// The codec a response body is decoded with, chosen once for the single-body success and error
