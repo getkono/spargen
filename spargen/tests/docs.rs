@@ -12,16 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-fn workspace_root() -> Utf8PathBuf {
-    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the crate directory has a parent")
-        .to_owned()
-}
+#[path = "shared/repo.rs"]
+mod repo;
 
-fn read(path: &Utf8Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path} must be readable: {error}"))
-}
+use repo::{read_file as read, workspace_root};
 
 /// Every file under `dir` whose extension is `extension`, skipping hidden directories (`.git`,
 /// and the worktrees a checkout may hold under `.claude/`) and `skip`, relative to `dir`.

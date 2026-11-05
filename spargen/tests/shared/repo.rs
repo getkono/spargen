@@ -1,7 +1,8 @@
 //! This repository's own gate configuration (`mise.toml` and `.github/workflows/`) through one set
 //! of readers, shared by `corpus_manifest.rs`, which holds the corpus-smoke gate to the manifest,
-//! and `repo_gates/`, which holds every other gate. Each integration test is its own crate, so
-//! each declares this file with `#[path]`.
+//! and `repo_gates/`, which holds every other gate. `docs.rs` and `layering/` take only the
+//! workspace root and the file readers. Each integration test is its own crate, so each declares
+//! this file with `#[path]`.
 
 // Each test crate that declares this module reads the parts its checks need.
 #![allow(dead_code)]
@@ -20,9 +21,14 @@ pub fn workspace_root() -> Utf8PathBuf {
 
 /// The file at `relative` to the workspace root, which must be readable.
 pub fn read(relative: &str) -> String {
-    let path = workspace_root().join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{path} must be readable: {error}"))
+    read_file(workspace_root().join(relative))
+}
+
+/// The file at `path`, which must be readable.
+pub fn read_file(path: impl AsRef<std::path::Path>) -> String {
+    let path = path.as_ref();
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
 }
 
 /// The keys a `mise.toml` task may carry. Every other key changes what the task executes or where:
@@ -180,4 +186,15 @@ pub fn workflow(file: &str) -> yaml_rust2::Yaml {
 /// `.github/workflows/ci.yml`, parsed.
 pub fn ci_workflow() -> yaml_rust2::Yaml {
     workflow("ci.yml")
+}
+
+/// The `run:` scripts of `ci.yml`'s `job`, in step order. The job must exist and carry steps, so
+/// a renamed job fails here rather than reading as one that runs nothing.
+pub fn ci_job_runs(job: &str) -> Vec<String> {
+    ci_workflow()["jobs"][job]["steps"]
+        .as_vec()
+        .unwrap_or_else(|| panic!("ci.yml carries a `{job}` job with steps"))
+        .iter()
+        .filter_map(|step| step["run"].as_str().map(str::to_owned))
+        .collect()
 }

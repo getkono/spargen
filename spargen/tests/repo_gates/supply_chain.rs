@@ -963,8 +963,8 @@ fn advisory_floors_are_manifest_requirements() {
 /// Whether `name` is a TLS crate, by the same rule the `example` gate applies to each example
 /// lockfile in `mise.toml` and `ci.yml`: it names `rustls`, `native-tls`, `openssl` or `webpki`,
 /// or ends in `-tls`. The two share a rule so that "no TLS crate" there and "a TLS crate" here
-/// mean the same set; `is_tls_crate_classifies_exactly_what_the_example_gate_greps` holds the two
-/// copies of the rule equal.
+/// mean the same set; `the_tls_crate_rule_classifies_exactly_what_the_example_gate_greps` holds
+/// the two copies of the rule equal.
 fn is_tls_crate(name: &str) -> bool {
     ["rustls", "native-tls", "openssl", "webpki"]
         .iter()
@@ -1003,7 +1003,7 @@ fn example_gate_tls_pattern(file: &str) -> String {
 /// rule turns on (a family inside a longer name, a `-tls` suffix, `tls` without the hyphen or not
 /// at the end). The set must carry names on both sides of the rule, or agreement proves nothing.
 #[test]
-fn is_tls_crate_classifies_exactly_what_the_example_gate_greps() {
+fn the_tls_crate_rule_classifies_exactly_what_the_example_gate_greps() {
     let mut names = BTreeSet::new();
     for lock in [
         "Cargo.lock",

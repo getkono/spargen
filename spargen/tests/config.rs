@@ -45,6 +45,26 @@ fn check(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
         .unwrap()
 }
 
+/// The pointer of every diagnostic in a successful `check --format json` run, each of which must
+/// be the `W009` an omit rule reports: [`SPEC`] lowers with no other diagnostic, so anything else
+/// is a run the rule did not explain.
+#[cfg(feature = "cli")]
+fn omitted_pointers(output: &Output) -> Vec<String> {
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("--format json must emit JSON: {error}: {output:?}"));
+    assert_eq!(report["outcome"], "clean", "{report}");
+    report["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a report carries its diagnostics: {report}"))
+        .iter()
+        .map(|diagnostic| {
+            assert_eq!(diagnostic["code"], "W009", "{report}");
+            diagnostic["pointer"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
 #[cfg(feature = "cli")]
 #[test]
 fn auto_discovered_config_applies_omit_rules() {
@@ -55,8 +75,7 @@ fn auto_discovered_config_applies_omit_rules() {
     )
     .unwrap();
     let output = check(temp.path(), &spec, &["--format", "json"]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
+    assert_eq!(omitted_pointers(&output), ["/paths/~1pets~1{id}"]);
 }
 
 #[cfg(feature = "cli")]
@@ -68,8 +87,7 @@ fn cli_omit_flags_apply_to_analysis() {
         &spec,
         &["--omit-operation", "get /pets", "--format", "json"],
     );
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
+    assert_eq!(omitted_pointers(&output), ["/paths/~1pets/get"]);
 }
 
 #[cfg(feature = "cli")]
@@ -84,8 +102,7 @@ fn explicit_config_path_is_used() {
         &spec,
         &["--config", config.to_str().unwrap(), "--format", "json"],
     );
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
+    assert_eq!(omitted_pointers(&output), ["/paths/~1pets~1{id}"]);
 }
 
 #[cfg(feature = "cli")]
@@ -562,9 +579,8 @@ fn open_narrowing_is_a_flag_and_a_config_key() {
 //
 // `spargen/src/cli/config.rs` states the contract: "defaults < `spargen.toml` < CLI flags", an
 // explicit `--config` replaces auto-discovery, and omit flags are *unioned* with the file's rules
-// rather than replacing them. Every test above uses a single config source, so none of that was
-// exercised — including `explicit_config_path_is_used`, which writes its config into a separate
-// directory with no competing `spargen.toml` for it to beat.
+// rather than replacing them. The tests below give each run two competing sources, which
+// `explicit_config_path_is_used`, with no `spargen.toml` beside its spec, does not.
 
 /// A JSON-pointer needle that matches the whole pointer value, so `/paths/~1pets` cannot be
 /// satisfied by an occurrence of `/paths/~1pets~1{id}`.
@@ -649,9 +665,8 @@ components:
 #[cfg(feature = "cli")]
 #[test]
 fn batch_cap_from_the_config_file_truncates_the_reported_batch() {
-    // `config_file_knobs_reach_the_library` sets four knobs and asserts only that the process
-    // exits zero, which a config file that was never read would also satisfy. `batch_cap` has an
-    // observable effect: the report says it truncated.
+    // `batch_cap` read from the file has an observable effect: the batch is cut at the cap, and
+    // the report says it truncated.
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
     std::fs::write(&spec, TWO_WARNINGS).unwrap();
@@ -734,6 +749,17 @@ fn deps_prints_a_pasteable_dependency_block() {
     let output = deps(temp.path(), &spec, &[]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // What `deps` prints is the block the library derives for the same spec, byte for byte, on
+    // one line ending of its own; the checks after this one pin what that block says.
+    let (requirements, _) = spargen::requirements(&spargen::Spec::new(
+        camino::Utf8PathBuf::from_path_buf(spec.clone()).unwrap(),
+    ))
+    .expect("the spec lowers");
+    assert_eq!(
+        stdout,
+        format!("{}\n", requirements.manifest_block().trim_end()),
+        "{stdout}"
+    );
     assert!(stdout.contains("[dependencies]"), "{stdout}");
     // reqwest's own defaults pull in a TLS stack the generated client does not choose, so
     // `default-features = false` is part of the contract the audit enforces.
@@ -817,10 +843,20 @@ fn deps_reports_a_rejection_instead_of_a_block() {
 // have no inline-spec fixture in `frontend/`. `W013` and `E024` are reachable from any plain
 // process; `W012` needs a real build script and lives in `e2e/manifest_audit.rs` for that reason.
 
+/// The code of every diagnostic `report` carries, in order.
+fn report_codes(report: &spargen::Report) -> Vec<spargen::Code> {
+    report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect()
+}
+
 /// Generating outside a build script emits no rebuild triggers and skips the dependency audit.
-/// Under `Auto` that is a degradation worth saying out loud, not a silent one.
+/// Under `Auto` that is a degradation worth saying out loud, not a silent one, and the only thing
+/// said about [`SPEC`], which lowers cleanly.
 #[test]
-fn w013_generating_outside_a_build_script_reports_the_degradation() {
+fn generating_outside_a_build_script_reports_the_degradation() {
     let temp = tempfile::tempdir().unwrap();
     let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
@@ -830,12 +866,10 @@ fn w013_generating_outside_a_build_script_reports_the_degradation() {
         .cargo(spargen::CargoIntegration::Auto);
     let report = spargen::generate(&build);
 
-    assert!(report.outcome().is_success(), "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == spargen::Code::CargoIntegrationDegraded),
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        report_codes(&report),
+        [spargen::Code::CargoIntegrationDegraded],
         "{report:#?}"
     );
 }
@@ -843,7 +877,7 @@ fn w013_generating_outside_a_build_script_reports_the_degradation() {
 /// `Required` turns that same degradation into a hard failure, so a build that depends on the
 /// audit cannot quietly run without it.
 #[test]
-fn e024_required_cargo_integration_outside_a_build_script_is_fatal() {
+fn required_cargo_integration_outside_a_build_script_is_fatal() {
     let temp = tempfile::tempdir().unwrap();
     let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
@@ -854,18 +888,17 @@ fn e024_required_cargo_integration_outside_a_build_script_is_fatal() {
     let report = spargen::generate(&build);
 
     assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == spargen::Code::CargoIntegrationRequired),
+    assert_eq!(
+        report_codes(&report),
+        [spargen::Code::CargoIntegrationRequired],
         "{report:#?}"
     );
     // The failure is announced before anything is written.
     assert!(!dir.join("client.rs").exists(), "{report:#?}");
 }
 
-/// `Off` opts out of the whole policy, so neither diagnostic fires.
+/// `Off` opts out of the whole policy, so neither diagnostic fires, and [`SPEC`] lowers with
+/// nothing else to say.
 #[test]
 fn cargo_integration_off_reports_neither_degradation_nor_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -877,14 +910,8 @@ fn cargo_integration_off_reports_neither_degradation_nor_failure() {
         .cargo(spargen::CargoIntegration::Off);
     let report = spargen::generate(&build);
 
-    assert!(report.outcome().is_success(), "{report:#?}");
-    assert!(
-        !report.diagnostics().iter().any(|d| matches!(
-            d.code,
-            spargen::Code::CargoIntegrationDegraded | spargen::Code::CargoIntegrationRequired
-        )),
-        "{report:#?}"
-    );
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+    assert!(report_codes(&report).is_empty(), "{report:#?}");
 }
 
 /// Each getter reads back the default `Spec::new` documents and `Build::new` picks.
