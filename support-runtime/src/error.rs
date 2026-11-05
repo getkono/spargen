@@ -27,7 +27,9 @@ pub enum Error<E> {
     Transport(TransportError),
     /// #3 — connect vs total-request timeout (as configured on the injected client).
     Timeout(TimeoutKind),
-    /// #4 — malformed HTTP or decompression failure.
+    /// #4 — malformed HTTP or decompression failure. On native targets, a response body the
+    /// connection cut short is not this class but [`Error::InterruptedBody`]; on `wasm32`, a
+    /// non-streamed one is this class, as [`Error::InterruptedBody`] describes.
     Protocol(ProtocolError),
     /// #5 — redirect-policy exhaustion (per the injected client's policy).
     Redirect(RedirectError),
@@ -66,7 +68,11 @@ pub enum Error<E> {
         /// Whether bytes were dropped from `body` to meet a cap: `false` means nothing was dropped.
         truncated: bool,
     },
-    /// #9 — the connection dropped mid-stream on a streamed response.
+    /// #9 — the connection dropped partway through a response body: mid-stream on a streamed
+    /// response, or, on native targets, while any other response body, success or error, was
+    /// being read. On `wasm32`, the `fetch` backend reports a non-streamed body that fails to
+    /// read as a JavaScript error, which carries no evidence that the connection gave out, so
+    /// that failure is [`Error::Protocol`] there.
     InterruptedBody(TransportError),
     /// #11 — a `LinkPaginator` page's `rel="next"` link named a URL the paginator had already
     /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
@@ -125,6 +131,29 @@ impl<E> Error<E> {
             ReqwestClass::Request => {
                 Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
             }
+        }
+    }
+
+    /// Classify a failure reading the body of a response that has already arrived, the same way
+    /// `EventStream` classifies one mid-stream: the connection giving out partway through the
+    /// body is [`Error::InterruptedBody`], and so transient.
+    ///
+    /// reqwest reports any failure while reading a body as a decode-kind error, so the cause
+    /// decides. The first [`std::io::Error`] in its source chain is the evidence: a reset,
+    /// aborted, broken, or unconnected connection, or one that ended before the body did, is an
+    /// interruption, including a compressed body that ends before its compressed stream does;
+    /// any other kind (corrupt compressed data, a malformed chunked encoding) is not. With no I/O
+    /// error in the chain, a body-kind reqwest error, the error itself or one in the chain, is an
+    /// interruption. A timeout is asked for first, and everything that is not an interruption is
+    /// classified as [`Error::from_reqwest`] classifies it, so a body that is malformed rather
+    /// than cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
+    /// failed read as a decode-kind error over a JavaScript error, with neither an I/O error nor
+    /// a body-kind error in its chain, so every such failure there is [`Error::Protocol`].
+    pub(crate) fn from_body_read(error: reqwest::Error) -> Self {
+        if !error.is_timeout() && is_interrupted_read(&error) {
+            Error::InterruptedBody(TransportError::new(error))
+        } else {
+            Self::from_reqwest(error)
         }
     }
 
@@ -628,6 +657,35 @@ impl ReqwestClass {
             ReqwestClass::Redirect | ReqwestClass::Protocol | ReqwestClass::Request => false,
         }
     }
+}
+
+/// The I/O error kinds that mean the connection gave out under a body being read, rather than
+/// that the bytes which did arrive were malformed.
+const CONNECTION_LOST: [std::io::ErrorKind; 5] = [
+    std::io::ErrorKind::ConnectionReset,
+    std::io::ErrorKind::ConnectionAborted,
+    std::io::ErrorKind::BrokenPipe,
+    std::io::ErrorKind::NotConnected,
+    std::io::ErrorKind::UnexpectedEof,
+];
+
+/// Whether a failed body read is an interruption, as [`Error::from_body_read`] describes.
+fn is_interrupted_read(error: &reqwest::Error) -> bool {
+    if !error.is_body() && !error.is_decode() {
+        return false;
+    }
+    let mut body_kind = error.is_body();
+    let mut cause = std::error::Error::source(error);
+    while let Some(current) = cause {
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            return CONNECTION_LOST.contains(&io.kind());
+        }
+        body_kind |= current
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_body);
+        cause = current.source();
+    }
+    body_kind
 }
 
 /// Which timeout elapsed (taxonomy #3).
