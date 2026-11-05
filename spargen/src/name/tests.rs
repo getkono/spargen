@@ -1,4 +1,3 @@
-
 use super::{allocate, Ident, Names};
 use crate::diag::{JsonPointer, Provenance};
 use crate::ir::{

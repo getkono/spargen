@@ -403,11 +403,7 @@ fn default_provider_ident(
     id: crate::ir::TypeId,
     field_ident: &crate::name::Ident,
 ) -> proc_macro2::Ident {
-    format_ident!(
-        "default_{}_{}",
-        id.0,
-        field_ident.unraw()
-    )
+    format_ident!("default_{}_{}", id.0, field_ident.unraw())
 }
 
 /// Emit a field's serde default-provider function, when its `default` is a representable scalar
