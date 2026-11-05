@@ -66,7 +66,7 @@ hooks {
       // it fetches the advisory database and reads the registry's yank state as they are now, so
       // unglobbed, a new advisory would block every push, including ones that change nothing it
       // audits. Such a red is the maintainers' to fix in a `fix(deps):` pull request of its own
-      // (CLAUDE.md, "Lockfiles and advisories"), and that pull request's push trips this step.
+      // (AGENTS.md, "Lockfiles and advisories"), and that pull request's push trips this step.
       // It needs the network, which a push has anyway, and it is slower than the gates above.
       // Like `mise run deny` anywhere, it rewrites an example lockfile's stale `spargen` stamp
       // after a release; that rewrite is not part of the push and is not committed with it.

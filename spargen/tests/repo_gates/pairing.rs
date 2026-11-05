@@ -277,10 +277,7 @@ const PAIRINGS: &[Pairing] = &[
             CHECKOUT,
             STABLE,
             CACHE,
-            CiOnly {
-                step: "name: Install mdBook\nrun: cargo install mdbook --version 0.5.4 --locked",
-                why: "installs the mdBook that `[tools]` in mise.toml provisions locally",
-            },
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: mdbook@0.5.4"),
         ],
         ..PAIR
     }),
@@ -329,10 +326,7 @@ const PAIRINGS: &[Pairing] = &[
         tasks: &["commit-range"],
         ci_only: &[
             provision("uses: actions/checkout@v4\nwith:\n  fetch-depth: 0"),
-            CiOnly {
-                step: "name: Install convco\nrun: cargo install convco --version 0.7.1 --locked",
-                why: "installs the convco that `[tools]` in mise.toml provisions locally",
-            },
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: convco@0.7.1"),
         ],
         job_if: Some("github.event_name == 'pull_request'"),
         rewrites: &[Rewrite {
