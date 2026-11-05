@@ -1,6 +1,7 @@
 //! Oracles over a run's report and emitted module that hold for every input, shared by the
-//! fixture suite (`frontend/`), the fuzz harness (`fuzz_frontend.rs`) and the lowering
-//! properties (`lowering_props.rs`), so each holds every run it makes to the same bar (#475):
+//! fixture suite (`frontend/`), the fuzz harness (`fuzz_frontend.rs`), the lowering
+//! properties (`lowering_props.rs`) and the libFuzzer target (`fuzz/fuzz_targets/frontend.rs`,
+//! by `#[path]`), so each holds every run it makes to the same bar (#475):
 //!
 //! * [`internal_failures`]: no run reports a spargen bug as an `E011`, an IR that fails its
 //!   invariants or codegen tokens that do not parse;
@@ -17,8 +18,13 @@
 //! Each oracle returns the defects it finds, one reason each; a caller fails on any of them.
 //! [`readers`] holds the readers over a report and a module that the suites share.
 //!
-//! Each test crate that declares this module uses the part of it its runs need, so an item one of
+//! Each crate that declares this module uses the part of it its runs need, so an item one of
 //! them leaves unused carries `#[allow(dead_code)]` of its own.
+//!
+//! The libFuzzer target compiles this module outside the workspace, and `fuzz/` is built only by
+//! hand (`cargo +nightly fuzz build frontend`): a change to [`run_violations`]'s signature, or a
+//! new crate this module or [`readers`] uses, changes `fuzz/fuzz_targets/frontend.rs` or
+//! `fuzz/Cargo.toml` with it, or that target breaks until its next manual run.
 
 pub mod readers;
 
