@@ -26,9 +26,9 @@ use crate::diag::Diagnostic;
 use crate::Code;
 
 use check::{check_dependency, DependencyCheck, WorkspaceOrigin};
-pub(crate) use integration::{
-    build_script_manifest, cargo_directives, cargo_environment, rerun_if_changed_lines,
-};
+#[cfg(test)]
+pub(crate) use integration::rerun_if_changed_lines;
+pub(crate) use integration::{build_script_manifest, cargo_environment, print_rerun};
 use requirements::requirement_table;
 pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};

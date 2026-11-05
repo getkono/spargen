@@ -115,10 +115,7 @@ pub fn check(spec: &Spec) -> Report {
     let mut report = result.report;
     let manifest = runtime_contract::build_script_manifest();
     if let (Some(manifest), Some(requirements)) = (manifest, result.requirements) {
-        // `check` rejects on any audit finding.
-        if pipeline::apply_audit(&mut report, &manifest, &requirements).found {
-            report.outcome = Outcome::Rejected;
-        }
+        pipeline::apply_audit(&mut report, &manifest, &requirements);
     }
     report
 }
@@ -144,7 +141,7 @@ pub fn diff(old: &Spec, new: &Spec) -> Result<(DiffReport, DiffSides), DiffRejec
 pub mod __private {
     use camino::{Utf8Path, Utf8PathBuf};
 
-    use super::{Outcome, Report, Spec};
+    use super::{cache, pipeline, Outcome, Report, Spec};
 
     #[doc(hidden)]
     pub struct MacroPreview {
@@ -164,38 +161,31 @@ pub mod __private {
     }
 
     fn preview_impl(spec: &Spec, manifest: Option<&Utf8Path>) -> MacroPreview {
-        let preview = super::pipeline::preview_inner(spec);
-        let contents = preview.contents;
+        let preview = pipeline::run_mode(spec, pipeline::PipelineMode::Preview);
+        let mut report = preview.report;
+        // Only a run that generated carries requirements to audit.
+        let manifests = match (manifest, preview.requirements.as_ref()) {
+            (Some(manifest), Some(requirements)) => {
+                pipeline::apply_audit(&mut report, manifest, requirements)
+            }
+            _ => Vec::new(),
+        };
         // The files a generation reads are the build cache's inputs: the root spec, every
         // relative-file `$ref` target and vendored remote copy, `spargen.lock`, and the applied
-        // config files, whose edit changes what was generated and so re-expands. An input set that
-        // does not load (a spec malformed mid-edit) leaves the root spec alone, so the macro still
-        // waits for it to be fixed.
-        let mut source_files = match super::cache::InputSnapshot::load(spec) {
-            Ok(snapshot) => snapshot.paths,
-            Err(_) => vec![spec.path.clone()],
-        };
-        source_files.push(spec.path.clone());
-        let mut report = preview.report;
+        // config files, whose edit changes what was generated and so re-expands, beside the
+        // manifests the audit read. A rejected run, or an input set that does not load (a spec
+        // malformed mid-edit), names the root spec alone, so the macro still waits for it to be
+        // fixed.
+        let mut source_files = vec![spec.path.clone()];
         if report.outcome == Outcome::Generated {
-            if let (Some(manifest), Some(requirements)) = (manifest, preview.requirements.as_ref())
-            {
-                let audited = super::pipeline::apply_audit(&mut report, manifest, requirements);
-                source_files.extend(audited.manifests);
-                // The macro rejects on any audit finding.
-                if audited.found {
-                    report.outcome = Outcome::Rejected;
-                }
-            }
-        }
-        source_files.sort();
-        source_files.dedup();
-        if report.outcome != Outcome::Generated {
-            source_files.retain(|path| path == &spec.path);
+            source_files.extend(cache::input_paths(spec).unwrap_or_default());
+            source_files.extend(manifests);
+            source_files.sort();
+            source_files.dedup();
         }
         MacroPreview {
             report,
-            contents,
+            contents: preview.plan.map(|plan| plan.contents),
             source_files,
         }
     }

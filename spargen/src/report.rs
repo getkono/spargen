@@ -81,10 +81,11 @@ impl Report {
     /// The report of a run that collected `diagnostics` and ended in `outcome`, truncated when
     /// the batch reached its cap.
     pub(crate) fn new(diagnostics: Diagnostics, outcome: Outcome) -> Self {
+        let (diagnostics, truncated) = diagnostics.into_parts();
         Self {
-            diagnostics: diagnostics.items().to_vec(),
+            diagnostics,
             outcome,
-            truncated: diagnostics.cap_reached(),
+            truncated,
         }
     }
 

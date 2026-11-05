@@ -82,7 +82,9 @@ impl Diagnostics {
         }
     }
 
-    /// Whether the cap was reached and diagnostics past it were dropped.
+    /// Whether the cap was reached and diagnostics past it were dropped. A run reads it through
+    /// [`Self::into_parts`]; this is the tests' view of a batch still being collected.
+    #[cfg(test)]
     pub(crate) fn cap_reached(&self) -> bool {
         self.cap_reached
     }
@@ -95,6 +97,12 @@ impl Diagnostics {
     /// The collected diagnostics, in emission order.
     pub(crate) fn items(&self) -> &[Diagnostic] {
         &self.items
+    }
+
+    /// The collected diagnostics, in emission order, and whether the cap was reached and
+    /// diagnostics past it were dropped.
+    pub(crate) fn into_parts(self) -> (Vec<Diagnostic>, bool) {
+        (self.items, self.cap_reached)
     }
 
     /// Collapse to `Ok(value)` when no errors were recorded, else `Err(`[`Aborted`]`)`.
@@ -270,8 +278,9 @@ mod tests {
         );
     }
 
-    /// Read through the `cap_reached` accessor, which is what `Report::truncated` reports, so the
-    /// assertions observe the method and not only the field it returns.
+    /// Read through the `cap_reached` accessor while the batch is collected, and at the end
+    /// through `into_parts`, which is what `Report::truncated` reports, so the assertions observe
+    /// the methods and not only the field they return.
     #[test]
     fn duplicate_at_capacity_does_not_report_truncation() {
         let mut diagnostics = Diagnostics::new(1);
@@ -281,10 +290,20 @@ mod tests {
         diagnostics.emit(diagnostic("invalid operation"));
 
         assert!(!diagnostics.cap_reached());
+        assert!(!diagnostics.clone().into_parts().1);
 
         diagnostics.emit(diagnostic("another failure"));
 
         assert!(diagnostics.cap_reached());
         assert_eq!(diagnostics.items().len(), 1);
+        let (items, truncated) = diagnostics.into_parts();
+        assert!(truncated);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            ["invalid operation"]
+        );
     }
 }

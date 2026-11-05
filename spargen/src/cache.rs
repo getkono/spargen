@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::output::atomic_write;
-use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
+use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
-use crate::{Build, Code, Spec};
+use crate::{Build, Code, Report, Spec};
 
 const CACHE_FORMAT: u32 = 5;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -23,37 +23,7 @@ impl InputSnapshot {
     /// The error carries the whole diagnostic batch, not just its items, so a caller can tell a
     /// complete failure list from one the `batch_cap` truncated.
     pub(crate) fn load(spec: &Spec) -> Result<Self, Diagnostics> {
-        let mut diagnostics = Diagnostics::new(spec.batch_cap);
-        let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
-            Ok(bundle) => bundle,
-            Err(_) => return Err(diagnostics),
-        };
-
-        let mut inputs = bundle
-            .source_inputs()
-            .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
-            .collect::<Vec<_>>();
-        let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
-        let lock = spec_dir.join(LOCK_FILE_NAME);
-        // The applied config files are read like `spargen.lock`: a file that existed when it was
-        // applied and cannot be read now fails the build rather than dropping out of the inputs.
-        let lock = lock.is_file().then_some(lock);
-        for path in lock.iter().chain(&spec.config_files) {
-            match std::fs::read(path) {
-                Ok(bytes) => inputs.push((path.clone(), bytes)),
-                Err(error) => {
-                    Diagnostic::at_root(
-                        Code::InvalidInput,
-                        format!("failed to read build input `{path}`: {error}"),
-                    )
-                    .emit(&mut diagnostics);
-                    return Err(diagnostics);
-                }
-            }
-        }
-        inputs.sort_by(|left, right| left.0.cmp(&right.0));
-        inputs.dedup_by(|left, right| left.0 == right.0);
-
+        let inputs = read_inputs(spec)?;
         let mut fingerprint = b"spargen-build-input-v1\0".to_vec();
         append(&mut fingerprint, env!("CARGO_PKG_VERSION").as_bytes());
         append(
@@ -85,16 +55,54 @@ impl InputSnapshot {
     }
 }
 
-pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) {
-    for directive in rerun_directives(build, snapshot) {
-        println!("{directive}");
-    }
+/// The paths [`InputSnapshot::load`] fingerprints, read without hashing them.
+pub(crate) fn input_paths(spec: &Spec) -> Result<Vec<Utf8PathBuf>, Diagnostics> {
+    Ok(read_inputs(spec)?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
 }
 
-/// One `cargo:rerun-if-changed` line per input the snapshot read (only the root spec when there is
-/// no snapshot), per applied config file, and for the output module, sorted and deduplicated. A
-/// path carrying a line break is left out, as [`rerun_if_changed_lines`] describes.
-fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
+/// Every build input `spec` reads, with its bytes, sorted and deduplicated by path: the bundle's
+/// files, `spargen.lock` beside the spec when there is one, and the applied config files.
+fn read_inputs(spec: &Spec) -> Result<Vec<(Utf8PathBuf, Vec<u8>)>, Diagnostics> {
+    let mut diagnostics = Diagnostics::new(spec.batch_cap);
+    let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
+        Ok(bundle) => bundle,
+        Err(_) => return Err(diagnostics),
+    };
+
+    let mut inputs = bundle
+        .source_inputs()
+        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
+        .collect::<Vec<_>>();
+    let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
+    let lock = spec_dir.join(LOCK_FILE_NAME);
+    // The applied config files are read like `spargen.lock`: a file that existed when it was
+    // applied and cannot be read now fails the build rather than dropping out of the inputs.
+    let lock = lock.is_file().then_some(lock);
+    for path in lock.iter().chain(&spec.config_files) {
+        match std::fs::read(path) {
+            Ok(bytes) => inputs.push((path.clone(), bytes)),
+            Err(error) => {
+                Diagnostic::at_root(
+                    Code::InvalidInput,
+                    format!("failed to read build input `{path}`: {error}"),
+                )
+                .emit(&mut diagnostics);
+                return Err(diagnostics);
+            }
+        }
+    }
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    inputs.dedup_by(|left, right| left.0 == right.0);
+    Ok(inputs)
+}
+
+/// The paths a build names to Cargo as `cargo:rerun-if-changed`: each input the snapshot read
+/// (only the root spec when there is no snapshot), each applied config file, and the output
+/// module, sorted and deduplicated.
+pub(crate) fn rerun_paths(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Utf8PathBuf> {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
         .unwrap_or_else(|| vec![build.spec.path.clone()]);
@@ -102,7 +110,7 @@ fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Stri
     paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
-    rerun_if_changed_lines(&paths)
+    paths
 }
 
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
@@ -182,20 +190,25 @@ pub(crate) fn read_cache(
     })
 }
 
+/// Record `report`, the run that generated the output, so a later cache hit replays its
+/// diagnostics and truncation.
 pub(crate) fn write_cache(
     path: &Utf8Path,
     input_digest: &str,
     content_digest: &str,
-    diagnostics: &[Diagnostic],
-    truncated: bool,
+    report: &Report,
     requirements: &RuntimeRequirements,
 ) -> Result<(), String> {
     let record = CacheRecord {
         format: CACHE_FORMAT,
         input_sha256: input_digest.to_owned(),
         content_sha256: content_digest.to_owned(),
-        diagnostics: diagnostics.iter().map(CachedDiagnostic::from).collect(),
-        truncated,
+        diagnostics: report
+            .diagnostics
+            .iter()
+            .map(CachedDiagnostic::from)
+            .collect(),
+        truncated: report.truncated,
         requirements: requirements.clone(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
@@ -321,11 +334,17 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_path, finalized, rerun_directives, verified_output, CachedDiagnostic, Diagnostic,
+        cache_path, finalized, rerun_paths, verified_output, CachedDiagnostic, Diagnostic,
         InputSnapshot, JsonPointer, OutcomeClaim,
     };
+    use crate::runtime_contract::rerun_if_changed_lines;
     use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
     use camino::Utf8PathBuf;
+
+    /// The `cargo:rerun-if-changed` lines a build prints for its inputs and output.
+    fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
+        rerun_if_changed_lines(&rerun_paths(build, snapshot))
+    }
 
     fn fixture() -> (tempfile::TempDir, Build) {
         let temp = tempfile::tempdir().unwrap();

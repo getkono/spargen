@@ -146,14 +146,15 @@ pub(super) fn manifest_from(
     })
 }
 
-pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
-    for directive in rerun_if_changed_lines(manifests) {
+/// Print [`rerun_if_changed_lines`] for `paths`: the one writer of `cargo:rerun-if-changed`
+/// directives, for the build's inputs and output and for the manifests the audit read alike.
+pub(crate) fn print_rerun(paths: &[Utf8PathBuf]) {
+    for directive in rerun_if_changed_lines(paths) {
         println!("{directive}");
     }
 }
 
-/// One `cargo:rerun-if-changed` line per path, in the order given — the audited manifests here,
-/// and the build's inputs and output in `cache`.
+/// One `cargo:rerun-if-changed` line per path, in the order given.
 ///
 /// Cargo reads build-script output line by line and has no escape for a line break, so a path
 /// carrying one cannot be named: written out, everything after the break would reach Cargo as a

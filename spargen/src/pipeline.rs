@@ -4,6 +4,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{self, Diagnostic};
+use crate::runtime_contract::RuntimeRequirements;
 use crate::{
     cache, codegen, compat, emit, ir, name, oas31, output, runtime_contract, source, Build, Code,
     Outcome, Report, Spec,
@@ -14,104 +15,93 @@ use crate::{
 pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Report {
     let spec = &build.spec;
     let cargo = runtime_contract::cargo_environment(build);
-    let mut cargo_diagnostics = cargo.diagnostics;
     if cargo.fatal {
-        return Report::rejected(cargo_diagnostics, false);
+        return Report::rejected(cargo.diagnostics, false);
     }
+    let cargo_diagnostics = cargo.diagnostics;
     let consumer_manifest = cargo.manifest;
     let emit_cargo_directives = cargo.directives;
+    // Audit against the consumer manifest when there is one. The manifests the audit read are
+    // named to Cargo once, however many runs below the input-change retry audits.
+    let mut name_manifests = emit_cargo_directives;
+    let mut audit = |report: &mut Report, requirements: &RuntimeRequirements| {
+        if let Some(manifest) = consumer_manifest.as_deref() {
+            let manifests = apply_audit(report, manifest, requirements);
+            if std::mem::take(&mut name_manifests) {
+                runtime_contract::print_rerun(&manifests);
+            }
+        }
+    };
+    let rerun_inputs = |snapshot: Option<&cache::InputSnapshot>| {
+        if emit_cargo_directives {
+            runtime_contract::print_rerun(&cache::rerun_paths(build, snapshot));
+        }
+    };
+
     let mut snapshot = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
         Ok(snapshot) => snapshot,
         Err(diagnostics) => {
-            if emit_cargo_directives {
-                cache::cargo_directives(build, None);
-            }
-            let truncated = diagnostics.cap_reached();
-            cargo_diagnostics.extend(diagnostics.items().to_vec());
-            return Report::rejected(cargo_diagnostics, truncated);
+            rerun_inputs(None);
+            return with_leading(
+                Report::new(diagnostics, Outcome::Rejected),
+                cargo_diagnostics,
+            );
         }
     };
-    if emit_cargo_directives {
-        cache::cargo_directives(build, Some(&snapshot));
-    }
+    rerun_inputs(Some(&snapshot));
 
     let cache_path = cache_dir.map(|dir| cache::cache_path(dir, &build.output));
-    if cache_dir.is_some() {
-        if let Some(content_digest) = cache::verified_output(&build.output, &snapshot.digest) {
-            let cached = cache_path
-                .as_deref()
-                .and_then(|path| cache::read_cache(path, &snapshot.digest, &content_digest));
-            if let Some(cached) = cached {
-                cargo_diagnostics.extend(cached.diagnostics);
-                // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
-                // `Generated` — `wrote_output` must stay true to what happened.
-                let mut report = Report {
-                    diagnostics: cargo_diagnostics,
-                    outcome: Outcome::Cached,
-                    truncated: cached.truncated,
-                };
-                if let Some(manifest) = consumer_manifest.as_deref() {
-                    let audited = apply_audit(&mut report, manifest, &cached.requirements);
-                    if emit_cargo_directives {
-                        runtime_contract::cargo_directives(&audited.manifests);
-                    }
-                }
-                // A replay rejects on any error-severity diagnostic, the audit's or the replayed
-                // run's.
-                if report.has_errors() {
-                    report.outcome = Outcome::Rejected;
-                }
-                return report;
-            }
+    if let Some(path) = &cache_path {
+        let cached = cache::verified_output(&build.output, &snapshot.digest)
+            .and_then(|content_digest| cache::read_cache(path, &snapshot.digest, &content_digest));
+        if let Some(cached) = cached {
+            // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
+            // `Generated` — `wrote_output` must stay true to what happened.
+            let mut report = Report {
+                diagnostics: cached.diagnostics,
+                outcome: Outcome::Cached,
+                truncated: cached.truncated,
+            };
+            audit(&mut report, &cached.requirements);
+            return with_leading(report, cargo_diagnostics);
         }
     }
 
     for _ in 0..3 {
-        let mut preview = preview_inner(spec);
+        let mut preview = run_mode(spec, PipelineMode::Preview);
         if preview.report.outcome != Outcome::Generated {
-            let mut report = preview.report;
-            prepend(&mut report.diagnostics, &cargo_diagnostics);
-            return report;
+            return with_leading(preview.report, cargo_diagnostics);
         }
-        let Some(rendered) = preview.contents.as_deref() else {
+        let Some(plan) = preview.plan.as_ref() else {
             return pipeline_error_report("generation produced no module".to_owned());
         };
         let Some(requirements) = preview.requirements.as_ref() else {
             return pipeline_error_report("generation produced no runtime requirements".to_owned());
         };
-        if let Some(manifest) = consumer_manifest.as_deref() {
-            let audited = apply_audit(&mut preview.report, manifest, requirements);
-            if emit_cargo_directives {
-                runtime_contract::cargo_directives(&audited.manifests);
-            }
-            // A fresh run rejects on any audit finding, before anything is written. The inner
-            // run's truncation carries: merging its diagnostics into a wider list does not make
-            // the dropped ones reappear.
-            if audited.found {
-                let mut report = preview.report;
-                report.outcome = Outcome::Rejected;
-                prepend(&mut report.diagnostics, &cargo_diagnostics);
-                return report;
-            }
+        // A fresh run rejects on any audit finding, before anything is written. The inner run's
+        // truncation carries: merging its diagnostics into a wider list does not make the dropped
+        // ones reappear.
+        audit(&mut preview.report, requirements);
+        if preview.report.outcome == Outcome::Rejected {
+            return with_leading(preview.report, cargo_diagnostics);
         }
 
         let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
             Ok(snapshot) => snapshot,
             Err(diagnostics) => {
-                let truncated = diagnostics.cap_reached();
-                cargo_diagnostics.extend(diagnostics.items().to_vec());
-                return Report::rejected(cargo_diagnostics, truncated);
+                return with_leading(
+                    Report::new(diagnostics, Outcome::Rejected),
+                    cargo_diagnostics,
+                );
             }
         };
         if snapshot.digest != after.digest {
             snapshot = after;
-            if emit_cargo_directives {
-                cache::cargo_directives(build, Some(&snapshot));
-            }
+            rerun_inputs(Some(&snapshot));
             continue;
         }
 
-        let (contents, content_digest) = cache::finalized(rendered, &snapshot.digest);
+        let (contents, content_digest) = cache::finalized(&plan.contents, &snapshot.digest);
         if let Err(message) = output::write_output(&build.output, &contents) {
             return pipeline_error_report(message);
         }
@@ -120,16 +110,13 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
                 path,
                 &snapshot.digest,
                 &content_digest,
-                &preview.report.diagnostics,
-                preview.report.truncated,
+                &preview.report,
                 requirements,
             ) {
                 return pipeline_error_report(message);
             }
         }
-        let mut report = preview.report;
-        prepend(&mut report.diagnostics, &cargo_diagnostics);
-        return report;
+        return with_leading(preview.report, cargo_diagnostics);
     }
 
     pipeline_error_report(
@@ -138,56 +125,28 @@ pub(crate) fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path
     )
 }
 
-/// Put the Cargo-integration diagnostics ahead of the pipeline's own, so a build log reads in the
-/// order things happened.
-fn prepend(diagnostics: &mut Vec<Diagnostic>, leading: &[Diagnostic]) {
-    if leading.is_empty() {
-        return;
-    }
-    let mut merged = leading.to_vec();
-    merged.append(diagnostics);
-    *diagnostics = merged;
+/// `report` with the Cargo-integration diagnostics put ahead of its own, so a build log reads in
+/// the order things happened.
+fn with_leading(mut report: Report, leading: Vec<Diagnostic>) -> Report {
+    report.diagnostics.splice(0..0, leading);
+    report
 }
 
-/// What [`apply_audit`] merged into a report.
-pub(crate) struct Audited {
-    /// Every manifest the audit read, for rebuild tracking.
-    pub(crate) manifests: Vec<Utf8PathBuf>,
-    /// Whether the audit reported anything.
-    pub(crate) found: bool,
-}
-
-/// Run the consumer-manifest dependency audit (`E023`) of `manifest` against `requirements`, and
-/// append its diagnostics to `report`'s, after the run's own. The outcome is left alone: each
-/// caller states its own reject rule beside the call.
+/// Run the consumer-manifest dependency audit (`E023`) of `manifest` against `requirements`,
+/// append its diagnostics to `report`'s, after the run's own, and reject the report when the
+/// audit reported anything: every caller rejects on any audit finding. Returns every manifest the
+/// audit read, for rebuild tracking.
 pub(crate) fn apply_audit(
     report: &mut Report,
     manifest: &Utf8Path,
-    requirements: &runtime_contract::RuntimeRequirements,
-) -> Audited {
+    requirements: &RuntimeRequirements,
+) -> Vec<Utf8PathBuf> {
     let audit = runtime_contract::audit(manifest, requirements);
-    let found = !audit.diagnostics.is_empty();
+    if !audit.diagnostics.is_empty() {
+        report.outcome = Outcome::Rejected;
+    }
     report.diagnostics.extend(audit.diagnostics);
-    Audited {
-        manifests: audit.manifests,
-        found,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PipelinePreview {
-    pub(crate) report: Report,
-    pub(crate) contents: Option<String>,
-    pub(crate) requirements: Option<runtime_contract::RuntimeRequirements>,
-}
-
-pub(crate) fn preview_inner(spec: &Spec) -> PipelinePreview {
-    let result = run_mode(spec, PipelineMode::Preview);
-    PipelinePreview {
-        report: result.report,
-        contents: result.plan.map(|plan| plan.contents),
-        requirements: result.requirements,
-    }
+    audit.manifests
 }
 
 /// The stack size for the dedicated frontend worker thread, room for the bounded peak recursion
@@ -236,8 +195,8 @@ pub(crate) enum PipelineMode {
 /// [`emit::EmitPlan`]. A [`PipelineMode::Requirements`] run and a rejection carry no plan.
 pub(crate) struct PipelineResult {
     pub(crate) report: Report,
-    plan: Option<emit::EmitPlan>,
-    pub(crate) requirements: Option<runtime_contract::RuntimeRequirements>,
+    pub(crate) plan: Option<emit::EmitPlan>,
+    pub(crate) requirements: Option<RuntimeRequirements>,
 }
 
 impl PipelineResult {
@@ -369,7 +328,7 @@ fn run_pipeline(spec: &Spec, mode: PipelineMode) -> PipelineResult {
         Ok(pair) => pair,
         Err(()) => return PipelineResult::bare(Report::new(diags, Outcome::Rejected)),
     };
-    let requirements = runtime_contract::RuntimeRequirements::for_api(&api, spec);
+    let requirements = RuntimeRequirements::for_api(&api, spec);
 
     match mode {
         // Requirements stops before codegen.
