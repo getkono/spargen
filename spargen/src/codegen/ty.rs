@@ -66,6 +66,9 @@ pub(super) fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
 }
 
 /// The `reqwest::Method` an operation's request is built with.
+///
+/// A token-built method applies `?` to its `from_bytes` result, so the expression is spliced only
+/// into a body returning `Result<_, support::Error<_>>`.
 pub(super) fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
     match method {
         crate::ir::Method::Get => quote! { reqwest::Method::GET },
@@ -77,17 +80,21 @@ pub(super) fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
         crate::ir::Method::Patch => quote! { reqwest::Method::PATCH },
         crate::ir::Method::Trace => quote! { reqwest::Method::TRACE },
         // reqwest has no `QUERY` constant (OpenAPI 3.2's new fixed method), so build it from the
-        // token bytes. `QUERY` is a valid HTTP method token, so `from_bytes` never fails here.
-        crate::ir::Method::Query => quote! {
-            reqwest::Method::from_bytes(b"QUERY").expect("QUERY is a valid HTTP method token")
-        },
+        // token bytes. `QUERY`, like a validated `additionalOperations` key, is a valid HTTP
+        // method token, so `from_bytes` never fails here; its error still maps to a
+        // request-construction error rather than an `expect`, so generated code passes
+        // `clippy::expect_used`.
+        crate::ir::Method::Query => from_token_bytes(&proc_macro2::Literal::byte_string(b"QUERY")),
         crate::ir::Method::Custom(method) => {
-            let bytes = proc_macro2::Literal::byte_string(method.as_bytes());
-            quote! {
-                reqwest::Method::from_bytes(#bytes)
-                    .expect("validated additionalOperations key is a valid HTTP method token")
-            }
+            from_token_bytes(&proc_macro2::Literal::byte_string(method.as_bytes()))
         }
+    }
+}
+
+/// A method built from its token bytes, an `InvalidMethod` mapped through `?`.
+fn from_token_bytes(bytes: &proc_macro2::Literal) -> TokenStream {
+    quote! {
+        reqwest::Method::from_bytes(#bytes).map_err(support::Error::request_construction)?
     }
 }
 
@@ -96,14 +103,17 @@ mod tests {
     use crate::ir::Method;
 
     /// Each fixed method maps to its `reqwest::Method` constant; `QUERY`, which has none, and an
-    /// `additionalOperations` token are built from their exact bytes.
+    /// `additionalOperations` token are built from their exact bytes, the error mapped through `?`
+    /// rather than an `expect` or `unwrap`.
     #[test]
     fn reqwest_method_follows_the_table() {
         let custom = |token: &str| Method::Custom(token.to_owned());
-        let from_bytes = |token: &str, reason: &str| {
-            format!("reqwest :: Method :: from_bytes (b\"{token}\") . expect (\"{reason}\")")
+        let from_bytes = |token: &str| {
+            format!(
+                "reqwest :: Method :: from_bytes (b\"{token}\") \
+                 . map_err (support :: Error :: request_construction) ?"
+            )
         };
-        let validated = "validated additionalOperations key is a valid HTTP method token";
         for (method, expected) in [
             (Method::Get, "reqwest :: Method :: GET".to_owned()),
             (Method::Put, "reqwest :: Method :: PUT".to_owned()),
@@ -113,12 +123,9 @@ mod tests {
             (Method::Head, "reqwest :: Method :: HEAD".to_owned()),
             (Method::Patch, "reqwest :: Method :: PATCH".to_owned()),
             (Method::Trace, "reqwest :: Method :: TRACE".to_owned()),
-            (
-                Method::Query,
-                from_bytes("QUERY", "QUERY is a valid HTTP method token"),
-            ),
-            (custom("PURGE"), from_bytes("PURGE", validated)),
-            (custom("copy"), from_bytes("copy", validated)),
+            (Method::Query, from_bytes("QUERY")),
+            (custom("PURGE"), from_bytes("PURGE")),
+            (custom("copy"), from_bytes("copy")),
         ] {
             assert_eq!(
                 super::reqwest_method(&method).to_string(),
