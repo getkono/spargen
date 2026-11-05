@@ -1,4 +1,6 @@
-use super::{Diagnostic, FileId};
+use std::collections::HashSet;
+
+use super::{Code, Diagnostic, FileId, JsonPointer, Span};
 
 /// A capped batch of diagnostics collected during one pipeline run.
 ///
@@ -14,6 +16,10 @@ use super::{Diagnostic, FileId};
 #[derive(Debug, Clone)]
 pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
+    /// The [`Identity`] of each diagnostic in `items`, so [`Self::emit`] finds a duplicate in
+    /// expected constant time rather than by comparing it with every diagnostic already held.
+    /// Only membership is read, never iteration order, so output stays deterministic.
+    identities: HashSet<Identity>,
     cap: usize,
     error_count: usize,
     cap_reached: bool,
@@ -32,6 +38,7 @@ impl Diagnostics {
     pub(crate) fn new(cap: usize) -> Self {
         Self {
             items: Vec::new(),
+            identities: HashSet::new(),
             cap,
             error_count: 0,
             cap_reached: false,
@@ -64,11 +71,8 @@ impl Diagnostics {
                 .span
                 .and_then(|span| self.files.get(span.file.0 as usize).cloned().flatten());
         }
-        if self
-            .items
-            .iter()
-            .any(|item| same_identity(item, &diagnostic))
-        {
+        let identity = Identity::of(&diagnostic);
+        if self.identities.contains(&identity) {
             return;
         }
 
@@ -76,6 +80,7 @@ impl Diagnostics {
             self.error_count += 1;
         }
         if self.items.len() < self.cap {
+            self.identities.insert(identity);
             self.items.push(diagnostic);
         } else {
             self.cap_reached = true;
@@ -115,12 +120,27 @@ impl Diagnostics {
     }
 }
 
-fn same_identity(left: &Diagnostic, right: &Diagnostic) -> bool {
-    left.code == right.code
-        && left.pointer == right.pointer
-        && left.span == right.span
-        && left.message == right.message
-        && left.remedy == right.remedy
+/// What makes two diagnostics the same one for [`Diagnostics::emit`]: the code, pointer, span,
+/// message, and remedy, each compared by its derived `Eq` and hashed by its derived `Hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Identity {
+    code: Code,
+    pointer: JsonPointer,
+    span: Option<Span>,
+    message: String,
+    remedy: Option<String>,
+}
+
+impl Identity {
+    fn of(diagnostic: &Diagnostic) -> Self {
+        Self {
+            code: diagnostic.code,
+            pointer: diagnostic.pointer.clone(),
+            span: diagnostic.span,
+            message: diagnostic.message.clone(),
+            remedy: diagnostic.remedy.clone(),
+        }
+    }
 }
 
 impl Default for Diagnostics {
@@ -276,6 +296,38 @@ mod tests {
                 None
             ]
         );
+    }
+
+    /// The identity index holds only what the batch retains: a diagnostic dropped past the cap is
+    /// not indexed, so the index grows no larger than the cap.
+    #[test]
+    fn a_diagnostic_dropped_past_the_cap_is_not_indexed() {
+        let mut diagnostics = Diagnostics::new(1);
+        diagnostics.emit(diagnostic("kept"));
+        diagnostics.emit(diagnostic("dropped"));
+        diagnostics.emit(diagnostic("dropped"));
+
+        assert_eq!(diagnostics.items().len(), 1);
+        assert_eq!(diagnostics.identities.len(), 1);
+        assert!(diagnostics.cap_reached());
+    }
+
+    /// A duplicate of any earlier diagnostic in a large batch is found, not only of the latest,
+    /// and the index stays the same size as the retained items.
+    #[test]
+    fn a_duplicate_anywhere_in_a_large_batch_is_retained_once() {
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..500 {
+            diagnostics.emit(diagnostic(&format!("failure {index}")));
+        }
+        for index in (0..500).rev() {
+            diagnostics.emit(diagnostic(&format!("failure {index}")));
+        }
+
+        assert_eq!(diagnostics.items().len(), 500);
+        assert_eq!(diagnostics.identities.len(), 500);
+        assert_eq!(diagnostics.items()[0].message, "failure 0");
+        assert_eq!(diagnostics.items()[499].message, "failure 499");
     }
 
     /// Read through the `cap_reached` accessor while the batch is collected, and at the end
