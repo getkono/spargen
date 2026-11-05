@@ -638,50 +638,43 @@ components:
         let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
 
+        // A corruption that moves one field of the record: a number up by one, a digest by an
+        // appended digit.
         let edit_field = |field: &str| {
-            let record = record.clone();
-            let field = field.to_owned();
-            move || {
-                let mut value: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-                let slot = value
-                    .get_mut(&field)
-                    .unwrap_or_else(|| panic!("the record has no `{field}` field"));
-                *slot = match slot.take() {
-                    serde_json::Value::Number(format) => {
-                        (format.as_u64().expect("the format is a u64") + 1).into()
-                    }
-                    serde_json::Value::String(digest) => format!("{digest}0").into(),
-                    other => panic!("`{field}` is neither a number nor a string: {other}"),
-                };
-                std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
-            }
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+            let slot = value
+                .get_mut(field)
+                .unwrap_or_else(|| panic!("the record has no `{field}` field"));
+            *slot = match slot.take() {
+                serde_json::Value::Number(format) => {
+                    (format.as_u64().expect("the format is a u64") + 1).into()
+                }
+                serde_json::Value::String(digest) => format!("{digest}0").into(),
+                other => panic!("`{field}` is neither a number nor a string: {other}"),
+            };
+            std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
         };
-        let corruptions: Vec<(&str, Box<dyn Fn()>)> = vec![
-            (
-                "absent",
-                Box::new(|| std::fs::remove_file(&record).unwrap()),
-            ),
-            (
-                "not JSON",
-                Box::new(|| std::fs::write(&record, b"not a cache record").unwrap()),
-            ),
-            ("another format", Box::new(edit_field("format"))),
-            ("another input digest", Box::new(edit_field("input_sha256"))),
-            (
-                "another content digest",
-                Box::new(edit_field("content_sha256")),
-            ),
+        let corruptions = [
+            ("absent", None),
+            ("not JSON", None),
+            ("another format", Some("format")),
+            ("another input digest", Some("input_sha256")),
+            ("another content digest", Some("content_sha256")),
         ];
 
-        for (corruption, corrupt) in corruptions {
+        for (corruption, field) in corruptions {
             let hit = crate::generate_with_cache_dir(&config, Some(&cache_dir));
             assert_eq!(
                 hit.outcome(),
                 Outcome::Cached,
                 "the record must hit before it is made {corruption}: {hit:#?}"
             );
-            corrupt();
+            match (corruption, field) {
+                (_, Some(field)) => edit_field(field),
+                ("absent", None) => std::fs::remove_file(&record).unwrap(),
+                (_, None) => std::fs::write(&record, b"not a cache record").unwrap(),
+            }
             let rerun = crate::generate_with_cache_dir(&config, Some(&cache_dir));
             assert_eq!(
                 rerun.outcome(),
