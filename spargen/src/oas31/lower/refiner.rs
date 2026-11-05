@@ -320,10 +320,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let collapsed = self.collapse_met_target_union(schema, met, mark, hint);
         let kind = self.graph.get(collapsed.id)?.kind.clone();
         // The meet carries the target's nullability, or what the merge settled of it, but for a
-        // meet that left only `null`: that is the exact null type, whose one value is `null`
-        // already, so it is not wrapped in an `Option` as the `allOf` and inline spellings of the
-        // same union are not (#450).
-        let nullable = collapsed.nullable && !matches!(kind, TypeKind::Null);
+        // meet that left only `null`: that is the exact null type, which is the null type as
+        // `type: 'null'` lowers on its own, an `Option` of `()`, as the `allOf` and inline
+        // spellings of the same union are (#450, #1184).
+        let nullable = collapsed.nullable || matches!(kind, TypeKind::Null);
         let met = collapsed;
         // The met union is re-emitted under this schema's name, so its own def
         // (`…ReferenceIntersection`) is unused; the branches it met stay where `kind` reaches

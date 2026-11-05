@@ -430,7 +430,7 @@ fn an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type(
 /// untyped `items` branch as array-only (#614, and the `E013` of the non-null `allOf` spelling in
 /// [`an_allof_scalar_meeting_an_untyped_items_union_only_at_null_is_the_null_type`]), so the scalar
 /// meets each branch in `null` alone and both spellings are the null type, with a required field
-/// of it `pub pick: Pick`. The sibling spelling was an enum of `()` variants beside a `String`
+/// of it `pub pick: Option<Pick>`, as of `type: 'null'` (#1184). The sibling spelling was an enum of `()` variants beside a `String`
 /// constraint.
 #[test]
 fn a_nullable_scalar_type_beside_an_untyped_union_lowers_as_its_allof_spelling() {
@@ -474,7 +474,7 @@ fn a_nullable_scalar_type_beside_an_untyped_union_lowers_as_its_allof_spelling()
             let types = types_module(&code);
             let pick = field_type(&types, "pub pick")
                 .unwrap_or_else(|| panic!("{site}: no `pick` field: {types}"));
-            if !types.contains("pub type Pick = ();") || pick != "Pick" {
+            if !types.contains("pub type Pick = ();") || pick != "Option<Pick>" {
                 mismatches.push(format!(
                     "{site}: `pick` is `{pick}`, and `Pick` is not the null type, but only `null` \
                      satisfies it: {types}"

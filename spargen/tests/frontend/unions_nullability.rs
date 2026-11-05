@@ -452,7 +452,7 @@ fn flattened_own_keywords_excluding_null_withhold_it_from_a_ref_union_member() {
 /// intersection, and `const: null` or `enum: [null]` meets an untyped branch in `null` as
 /// `type: 'null'` does, where it excluded every branch with `E007` instead. With one branch excluded
 /// (`W011`) and one met in `null`, `null` matches that branch alone, and both spellings stay the
-/// null type, as an `anyOf` met in `null` is.
+/// null type, as an `anyOf` met in `null` is: an `Option` of `()`, as `type: 'null'` is (#1184).
 #[test]
 fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spelling() {
     let mut mismatches = Vec::new();
@@ -540,7 +540,7 @@ fn a_nullable_scalar_type_beside_an_untyped_oneof_is_rejected_as_its_allof_spell
                 let pick = field_type(&types, "pub pick");
                 if report.outcome() == Outcome::Rejected
                     || !types.contains("pub type Pick = ();")
-                    || pick.as_deref() != Some("Pick")
+                    || pick.as_deref() != Some("Option<Pick>")
                 {
                     mismatches.push(format!(
                         "{site}: only `null` satisfies it, but it is not the null type: \

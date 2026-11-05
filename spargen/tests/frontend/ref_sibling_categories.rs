@@ -377,12 +377,13 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
         // Both sides accept null and nothing else is shared. `intersect_types` returns the exact
         // JSON null type — `null` genuinely is the only satisfying value — so this must NOT reject.
         // The decision record lists "collapse to Null when nullable" as rejected; the code does it,
-        // and this fixture is why the record now says the code is right.
+        // and this fixture is why the record now says the code is right. That null type is the
+        // one `type: 'null'` lowers to on its own, an `Option` of `()` (#1184).
         (
             "a nullable-only intersection",
             "type: [integer, 'null']",
             "{ type: [string, 'null'] }",
-            "()",
+            "Option<()>",
         ),
     ];
 
@@ -406,15 +407,22 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
         // are true of every generated client — `pub fn url(&self) -> String` and `Server0::new()`
         // are always emitted — so the column could not distinguish any behaviour at all.
         let types = types_module(&code);
+        let (signature, aliased) = match expected
+            .strip_prefix("Option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+        {
+            Some(inner) => ("ResponseValue<Option<types::", inner),
+            None => ("ResponseValue<types::", *expected),
+        };
         let body = code
-            .split("ResponseValue<types::")
+            .split(signature)
             .nth(1)
             .and_then(|rest| rest.split('>').next())
-            .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+            .unwrap_or_else(|| panic!("`{what}` emitted no `{signature}` response: {code}"))
             .trim()
             .to_owned();
         assert!(
-            types.contains(&format!("pub type {body} = {expected};")),
+            types.contains(&format!("pub type {body} = {aliased};")),
             "`{what}` must lower its response body to `{expected}`, but `{body}` is not: {types}"
         );
     }
@@ -900,7 +908,8 @@ fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
 
     // The third symptom of the same root, and the sharpest: a document whose ONLY valid instance is
     // `null` was REJECTED, with a message asserting an empty intersection when the intersection is
-    // `{null}`. The one-non-null-type spelling of the same instance set already generated `()`.
+    // `{null}`. The one-non-null-type spelling of the same instance set already generated `()`,
+    // which is the null type `type: 'null'` lowers to on its own: an `Option` of `()` (#1184).
     let only_null = format!(
         "{HEAD}{}",
         PATH.replace(
@@ -917,15 +926,15 @@ fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
     );
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let body = code
-        .split("ResponseValue<types::")
+        .split("ResponseValue<Option<types::")
         .nth(1)
         .and_then(|rest| rest.split('>').next())
-        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .unwrap_or_else(|| panic!("no nullable typed response: {code}"))
         .trim()
         .to_owned();
     assert!(
         code.contains(&format!("pub type {body} = ();")),
-        "the intersection is `{{null}}`, so the exact JSON null type is the answer, not a \
-         dropped body and not `Option<()>`: {code}"
+        "the intersection is `{{null}}`, so the exact JSON null type is the answer, an `Option` \
+         of `()` as `type: 'null'` is, and not a dropped body: {code}"
     );
 }

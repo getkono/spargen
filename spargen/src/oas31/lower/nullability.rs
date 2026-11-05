@@ -184,7 +184,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// exactly where the schema states it. A schema with no composition (`allOf`, `oneOf`,
     /// `anyOf`, a `$ref` with shape-bearing siblings) and no `enum` or `const` decides by its own
     /// `type`, which its lowering already read; a bare `$ref` is its target's type, which the
-    /// target's own lowering settled; and the exact null type `()` is `null` itself.
+    /// target's own lowering settled; and the exact null type `()` is `null` itself, which, where
+    /// the schema does not deny `null`, is the null type `type: 'null'` lowers to on its own: an
+    /// `Option` of `()`, whichever composition produced it.
     ///
     /// The answer is applied, not re-derived from the lowered shape:
     ///
@@ -240,8 +242,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if admission == NullAdmission::Denies {
                 return self.reject_null_admission_denied(schema);
             }
-            // `null` is its one value, so it is no `Option`.
-            ty.nullable = false;
+            // The null type as `type: 'null'` lowers on its own, nullability included, so an
+            // optional field of any spelling decodes a present `null` alike (#1184), as the meet
+            // leaves it (#1154).
+            ty.nullable = true;
             return Some(ty);
         }
         match admission {
