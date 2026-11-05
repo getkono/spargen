@@ -108,22 +108,34 @@ pub fn parse_header<T: DeserializeOwned>(
     for value in values {
         parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
     }
-    // `Set-Cookie` is decoded per occurrence and never joined; see [`HeaderShape::SetCookie`].
-    if shape == HeaderShape::SetCookie {
-        return text_then_json(name, |scalars| {
+    let raw = || parts.join(",");
+    match shape {
+        // `Set-Cookie` is decoded per occurrence and never joined; see [`HeaderShape::SetCookie`].
+        HeaderShape::SetCookie => text_then_json(name, |scalars| {
             Value::Array(parts.iter().map(|part| scalar(part, scalars)).collect())
-        })
-        .map(Some);
+        }),
+        // A `content`-typed header is JSON text, with no `simple` ambiguity to resolve: it is
+        // parsed once, and text that is not JSON reports the syntax error rather than reading as
+        // `null`.
+        HeaderShape::Json => {
+            serde_json::from_str(&raw()).map_err(|error| parse_error(name, &error))
+        }
+        HeaderShape::Scalar => {
+            let raw = raw();
+            text_then_json(name, |scalars| scalar(&raw, scalars))
+        }
+        HeaderShape::Array => {
+            let raw = raw();
+            text_then_json(name, |scalars| {
+                Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
+            })
+        }
+        HeaderShape::Object => {
+            let raw = raw();
+            text_then_json(name, |scalars| object(&raw, explode, scalars))
+        }
     }
-    let raw = parts.join(",");
-    // A `content`-typed header is JSON text, with no `simple` ambiguity to resolve: it is parsed
-    // once, and text that is not JSON reports the syntax error rather than reading as `null`.
-    if shape == HeaderShape::Json {
-        return serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|error| parse_error(name, &error));
-    }
-    text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars)).map(Some)
+    .map(Some)
 }
 
 /// Deserialize the value `build` rebuilds from header text, reading every token as text first.
@@ -169,35 +181,25 @@ pub fn require_header<T: DeserializeOwned>(
     parse_header(headers, name, shape, explode)?.ok_or(HeaderError::Missing { name })
 }
 
-/// Rebuild a JSON value from `simple`-style header text.
-fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
-    match shape {
-        HeaderShape::Scalar => scalar(raw, scalars),
-        // `SetCookie` is handled before any joining happens, and `Json` before any reconstruction,
-        // both in `parse_header`.
-        HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
-        HeaderShape::Array => {
-            Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
-        }
-        HeaderShape::Object => {
-            let mut members = serde_json::Map::new();
-            if explode {
-                for pair in raw.split(',') {
-                    if let Some((key, value)) = pair.split_once('=') {
-                        members.insert(key.to_owned(), scalar(value, scalars));
-                    }
-                }
-            } else {
-                let parts: Vec<&str> = raw.split(',').collect();
-                for pair in parts.chunks(2) {
-                    if let [key, value] = pair {
-                        members.insert((*key).to_owned(), scalar(value, scalars));
-                    }
-                }
+/// Rebuild a JSON object from `simple`-style header text: `key=value` members when `explode` is
+/// set, alternating `key,value` tokens otherwise.
+fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
+    let mut members = serde_json::Map::new();
+    if explode {
+        for pair in raw.split(',') {
+            if let Some((key, value)) = pair.split_once('=') {
+                members.insert(key.to_owned(), scalar(value, scalars));
             }
-            Value::Object(members)
+        }
+    } else {
+        let parts: Vec<&str> = raw.split(',').collect();
+        for pair in parts.chunks(2) {
+            if let [key, value] = pair {
+                members.insert((*key).to_owned(), scalar(value, scalars));
+            }
         }
     }
+    Value::Object(members)
 }
 
 /// Interpret one header token.

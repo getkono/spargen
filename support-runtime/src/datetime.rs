@@ -19,10 +19,11 @@
 //! both directions — so anything `time` can do with the inner value is one `.0` or one deref away.
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 
-use serde::de::{Deserialize, Deserializer, Error as _};
+use serde::de::{Deserialize, Deserializer, Unexpected, Visitor};
 use serde::ser::{Serialize, Serializer};
 use time::format_description::well_known::Rfc3339;
 
@@ -53,38 +54,76 @@ impl fmt::Display for DateParseError {
 
 impl std::error::Error for DateParseError {}
 
-// --- DateTime ----------------------------------------------------------------------------------
+/// What both newtypes implement alike over their wrapped `time` value: `into_inner`, `Deref` and
+/// `DerefMut`, `From` in both directions, and a `Deserialize` that parses the string through the
+/// type's `FromStr`.
+macro_rules! transparent_newtype {
+    ($name:ident, $inner:ty) => {
+        impl $name {
+            /// The wrapped `time` value.
+            pub fn into_inner(self) -> $inner {
+                self.0
+            }
+        }
 
-impl DateTime {
-    /// The wrapped `time` value.
-    pub fn into_inner(self) -> time::OffsetDateTime {
-        self.0
-    }
+        impl Deref for $name {
+            type Target = $inner;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+
+        impl From<$inner> for $name {
+            fn from(value: $inner) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for $inner {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                deserializer.deserialize_str(ParseVisitor(PhantomData))
+            }
+        }
+    };
 }
 
-impl Deref for DateTime {
-    type Target = time::OffsetDateTime;
+transparent_newtype!(DateTime, time::OffsetDateTime);
+transparent_newtype!(Date, time::Date);
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+/// Parses a string through `T`'s `FromStr`, reading it in place: a borrowed or transient string is
+/// never copied into an owned one first. It accepts what `String` does (a string, or UTF-8 bytes)
+/// and names the same expectation, so a value of the wrong type is refused with the same message.
+struct ParseVisitor<T>(PhantomData<T>);
+
+impl<T: FromStr<Err = DateParseError>> Visitor<'_> for ParseVisitor<T> {
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a string")
     }
-}
 
-impl DerefMut for DateTime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<T, E> {
+        text.parse().map_err(E::custom)
     }
-}
 
-impl From<time::OffsetDateTime> for DateTime {
-    fn from(value: time::OffsetDateTime) -> Self {
-        Self(value)
-    }
-}
-
-impl From<DateTime> for time::OffsetDateTime {
-    fn from(value: DateTime) -> Self {
-        value.0
+    fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<T, E> {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => self.visit_str(text),
+            Err(_) => Err(E::invalid_value(Unexpected::Bytes(bytes), &self)),
+        }
     }
 }
 
@@ -126,48 +165,6 @@ impl Serialize for DateTime {
             serde::ser::Error::custom(format!("date-time is not RFC 3339: {error}"))
         })?;
         serializer.serialize_str(&text)
-    }
-}
-
-impl<'de> Deserialize<'de> for DateTime {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        text.parse().map_err(D::Error::custom)
-    }
-}
-
-// --- Date --------------------------------------------------------------------------------------
-
-impl Date {
-    /// The wrapped `time` value.
-    pub fn into_inner(self) -> time::Date {
-        self.0
-    }
-}
-
-impl Deref for Date {
-    type Target = time::Date;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Date {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl From<time::Date> for Date {
-    fn from(value: time::Date) -> Self {
-        Self(value)
-    }
-}
-
-impl From<Date> for time::Date {
-    fn from(value: Date) -> Self {
-        value.0
     }
 }
 
@@ -230,13 +227,6 @@ impl Serialize for Date {
             ))
         })?;
         serializer.serialize_str(&text)
-    }
-}
-
-impl<'de> Deserialize<'de> for Date {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        text.parse().map_err(D::Error::custom)
     }
 }
 
