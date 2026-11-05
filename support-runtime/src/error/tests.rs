@@ -414,10 +414,10 @@ fn from_reqwest_classifies_a_refused_request_as_request_construction() {
 }
 
 /// `TransportError::is_transient` is what `RetryOutcome::is_transient` answers for a transport
-/// failure, and it is decided on a borrow, apart from the variant `from_reqwest` builds. Pair
-/// every class with that variant so the two cannot disagree: reqwest exposes no constructor
-/// for the other kinds, so the variant is built around a stand-in source, which neither the
-/// class nor `Error::is_transient` reads.
+/// failure of an idempotent request, and it is decided on a borrow, apart from the variant
+/// `from_reqwest` builds. Pair every class with that variant so the two cannot disagree: reqwest
+/// exposes no constructor for the other kinds, so the variant is built around a stand-in source,
+/// which neither the class nor `Error::is_transient` reads.
 #[test]
 fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
     for class in [
@@ -470,7 +470,7 @@ fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() 
     assert_eq!(ReqwestClass::of(&source), ReqwestClass::Transport);
     let transport = TransportError::new(source);
     assert!(transport.is_transient());
-    assert!(crate::RetryOutcome::Transport(&transport).is_transient());
+    assert!(crate::RetryOutcome::new(&crate::tests::request(), Err(&transport)).is_transient());
     let error = Error::<ApiBody>::from_reqwest(status_error());
     assert!(matches!(error, Error::Transport(_)), "{error}");
     assert!(error.is_transient());
@@ -499,7 +499,7 @@ fn a_refused_connection_is_a_transient_transport_error() {
         ))
         .expect_err("nothing listens on a released port");
     assert!(failure.is_transient(), "{failure}");
-    assert!(crate::RetryOutcome::Transport(&failure).is_transient());
+    assert!(crate::RetryOutcome::new(&request(), Err(&failure)).is_transient());
 
     let error = runtime
         .block_on(crate::send(&core, request()))
