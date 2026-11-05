@@ -866,6 +866,44 @@ paths:
     );
 }
 
+/// A document whose `openapi` field is present but not a string (YAML reads `3.1` as a number) is
+/// validated against the 3.1 schema too, and the message names the field as present, beside the
+/// `E011` its type gets, rather than claiming the document declares no version.
+#[test]
+fn e011_a_path_item_with_query_in_a_document_with_a_numeric_version_names_the_field() {
+    let spec = r##"
+openapi: 3.1
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    query:
+      operationId: searchItems
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let errors = invalid_input_at(&report);
+    assert!(
+        errors.iter().any(|(pointer, _)| *pointer == "/openapi"),
+        "{report:#?}"
+    );
+    let path_item: Vec<_> = errors
+        .into_iter()
+        .filter(|(pointer, _)| *pointer == "/paths/~1search")
+        .collect();
+    assert_eq!(
+        path_item,
+        [(
+            "/paths/~1search",
+            "OpenAPI structure violation: Unevaluated properties are not allowed ('query' was \
+             unexpected); `query` is an OpenAPI 3.2 Path Item field, and this document's \
+             `openapi` field is not a string, so it is validated as 3.1"
+        )],
+        "{report:#?}"
+    );
+}
+
 /// A Path Item in another file is held to the root's 3.1 schema, and is told the same.
 #[test]
 fn e011_an_oas31_path_item_reached_by_ref_with_both_oas32_fields_names_both() {

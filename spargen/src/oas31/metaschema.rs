@@ -73,15 +73,18 @@ impl MetaSchemaValidator {
             Some(version) if !version_supported(version) => return,
             Some(version) if version.starts_with("3.2.") => &self.oas32,
             Some(_) => &self.oas31,
-            // Select 3.1 only to report the shared required `openapi` field as E011.
+            // Select 3.1 only to report the shared required `openapi` field, absent or not a
+            // string, as E011.
             None => &self.oas31,
         };
 
         // What the reader is told about the version a Path Item is held to (see `describe`).
-        let declared = if root.get("openapi").and_then(SpannedValue::as_str).is_some() {
-            "this document declares 3.1"
-        } else {
-            "this document declares no `openapi` version, so it is validated as 3.1"
+        // A present `openapi` that is not a string is its own E011 at `/openapi`, so it is named
+        // as present rather than as absent.
+        let declared = match root.get("openapi") {
+            Some(value) if value.as_str().is_some() => "this document declares 3.1",
+            Some(_) => "this document's `openapi` field is not a string, so it is validated as 3.1",
+            None => "this document declares no `openapi` version, so it is validated as 3.1",
         };
 
         let root_id = bundle.root_id();
@@ -188,7 +191,8 @@ const PATH_ITEM_UNEVALUATED: &str = "/$defs/path-item/unevaluatedProperties";
 /// `location` is the vendored-schema location the failing validator was compiled at, which the
 /// error's schema path is relative to: the root for the whole document, a `$ref` target's
 /// location otherwise. `declared` states the version the document is held to: the one it
-/// declares, or, with no `openapi` field, the 3.1 schema selected in its absence.
+/// declares, or, with no `openapi` field or one that is not a string, the 3.1 schema selected
+/// in its place.
 fn describe(
     error: &jsonschema::ValidationError<'_>,
     version: &str,
