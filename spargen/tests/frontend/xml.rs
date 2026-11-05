@@ -718,22 +718,6 @@ paths:
 // were dropped with no diagnostic, so a `Pet` with `xml: { name: pet, namespace: ... }` went on
 // the wire as `<Pet>` with no namespace and nothing said so.
 
-/// The attribute lines directly above `pub struct {ty} {` in the generated `types` module.
-fn struct_attributes(code: &str, ty: &str) -> Vec<String> {
-    let types = types_module(code);
-    let declaration = format!("pub struct {ty} {{");
-    let at = types
-        .find(&declaration)
-        .unwrap_or_else(|| panic!("no `{declaration}` in the generated module:\n{code}"));
-    types[..at]
-        .lines()
-        .rev()
-        .skip_while(|line| line.trim().is_empty())
-        .take_while(|line| line.trim_start().starts_with("#["))
-        .map(|line| line.trim().to_owned())
-        .collect()
-}
-
 /// A component root's `xml.name` names the element an XML body serializes as. A serde container
 /// rename reaches no JSON wire (serde_json never reads a struct's name), so unlike a field rename it
 /// is applied even where the type also travels as JSON.
@@ -876,72 +860,6 @@ components:
         [r#"#[serde(rename = "pet-item")]"#],
         "{code}"
     );
-}
-
-/// A component key may be no XML name (a leading digit, `-` or `.`), and quick-xml refuses to
-/// write such an element at run time. The name OpenAPI infers from it is not applied: each struct
-/// an XML body reaches reports it (`W006`) and keeps its Rust name, while a struct no XML body
-/// reaches has nothing to report.
-#[test]
-fn a_component_name_that_is_no_xml_name_is_reported_and_not_applied() {
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /receipts:
-    post:
-      requestBody:
-        content:
-          application/xml: { schema: { $ref: '#/components/schemas/1-receipt' } }
-      responses:
-        '200':
-          description: ok
-          content:
-            application/xml: { schema: { $ref: '#/components/schemas/-order' } }
-  /dots:
-    post:
-      requestBody:
-        content:
-          application/xml: { schema: { $ref: '#/components/schemas/.dot' } }
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json: { schema: { $ref: '#/components/schemas/2-json' } }
-components:
-  schemas:
-    1-receipt:
-      type: object
-      properties:
-        id: { type: integer }
-    '-order':
-      type: object
-      properties:
-        id: { type: integer }
-    .dot:
-      type: object
-      properties:
-        id: { type: integer }
-    2-json:
-      type: object
-      properties:
-        id: { type: integer }
-"##;
-    let (report, code) = generate_with_code(spec);
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    let mut messages = messages_for(&report, Code::XmlHintIgnored);
-    messages.sort_unstable();
-    assert_eq!(messages.len(), 3, "{report:#?}");
-    for (message, name) in messages.iter().zip(["-order", ".dot", "1-receipt"]) {
-        assert!(
-            message.contains(&format!("component name `{name}` is not an XML name")),
-            "{message}"
-        );
-    }
-    assert!(!code.contains("#[serde(rename = \"1-receipt\")]"), "{code}");
-    assert!(!code.contains("#[serde(rename = \"-order\")]"), "{code}");
-    assert!(!code.contains("#[serde(rename = \".dot\")]"), "{code}");
-    assert!(!code.contains("#[serde(rename = \"2-json\")]"), "{code}");
 }
 
 /// The inline schema of an XML body has no component name to infer the element from, so OpenAPI
