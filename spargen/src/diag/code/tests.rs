@@ -1159,88 +1159,21 @@ fn every_enumerated_case_has_a_frontend_fixture() {
     for path in &files {
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
-        let lines: Vec<&str> = text.lines().collect();
         let shown = path
             .strip_prefix(&tests)
             .unwrap_or(path)
             .display()
             .to_string();
-        let functions: Vec<(&str, String)> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(at, line)| declared_fn(line).map(|name| (name, fn_source(&lines, at))))
-            .collect();
-
-        for (at, line) in lines.iter().enumerate() {
-            let Some((code, tags)) = case_marker(line) else {
-                continue;
-            };
-            let place = format!("tests/{shown}:{}", at + 1);
-            let Some((declared, cases)) = ENUMERATED_CASES
-                .iter()
-                .find(|(declared, _)| declared.as_str() == code)
-            else {
-                failures.push(format!("{place}: {code} is not in ENUMERATED_CASES"));
-                continue;
-            };
-            let owning = owner(*declared);
-            if path != &owning && path.parent() != Some(owning.as_path()) {
-                failures.push(format!(
-                    "{place}: a {code} fixture belongs in {}",
-                    owning.strip_prefix(&tests).unwrap_or(&owning).display()
-                ));
-            }
-            let attributes: Vec<&str> = lines[at + 1..]
-                .iter()
-                .copied()
-                .take_while(|below| below.starts_with("#[") || case_marker(below).is_some())
-                .collect();
-            let fn_at = at + 1 + attributes.len();
-            let Some(name) = lines.get(fn_at).and_then(|line| declared_fn(line)) else {
-                failures.push(format!("{place}: a {code} marker that sits above no `fn`"));
-                continue;
-            };
-            if !attributes.contains(&"#[test]") {
-                failures.push(format!(
-                    "{place}: `{name}` carries a {code} marker but no #[test]"
-                ));
-            }
-            let own = fn_source(&lines, fn_at);
-            let mut fixture = own.clone();
-            for (callee, source) in &functions {
-                let call = format!("{callee}(");
-                let calls = own.match_indices(&call).any(|(at, _)| {
-                    own[..at]
-                        .chars()
-                        .next_back()
-                        .is_none_or(|before| !before.is_alphanumeric() && before != '_')
-                });
-                if *callee != name && calls {
-                    fixture.push('\n');
-                    fixture.push_str(source);
-                }
-            }
-            if !asserts_variant(&fixture, variant_name(*declared)) {
-                failures.push(format!(
-                    "{place}: `{name}` is marked as a {code} fixture but never asserts \
-                     `Code::{}`",
-                    variant_name(*declared)
-                ));
-            }
-            for tag in &tags {
-                let Some(case) = cases.iter().find(|case| case.tag == *tag) else {
-                    failures.push(format!("{place}: {code} has no case `{tag}`"));
-                    continue;
-                };
-                if let Some(wording) = case.reserved_wording.filter(|w| !fixture.contains(w)) {
-                    failures.push(format!(
-                        "{place}: `{name}` is marked as {code} case `{tag}` but never mentions \
-                         {wording:?}, the wording reserved to that case"
-                    ));
-                }
-                fixtures.insert((declared.as_str(), case.tag));
-            }
-        }
+        let misplaced = |code: Code| {
+            let owning = owner(code);
+            (path != &owning && path.parent() != Some(owning.as_path())).then(|| {
+                let shown = owning.strip_prefix(&tests).unwrap_or(&owning);
+                shown.display().to_string()
+            })
+        };
+        let (found, marked) = scan_case_markers(&text, &shown, misplaced);
+        failures.extend(found);
+        fixtures.extend(marked);
     }
 
     for (code, cases) in ENUMERATED_CASES {
@@ -1256,6 +1189,226 @@ fn every_enumerated_case_has_a_frontend_fixture() {
     }
 
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Does `source` call `callee` by its own name? A `callee(` that ends a longer identifier does
+/// not count, so a helper `spec` is no callee of a fixture calling `single_component_spec(`.
+fn calls_by_name(source: &str, callee: &str) -> bool {
+    let call = format!("{callee}(");
+    source.match_indices(&call).any(|(at, _)| {
+        source[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric() && before != '_')
+    })
+}
+
+/// The failures the case markers in one file of a fixture suite raise, and the `(code, tag)`
+/// pairs it holds a fixture for (see [`every_enumerated_case_has_a_frontend_fixture`]). `shown`
+/// names the file under `spargen/tests/`; `misplaced` gives, for a code this file does not own,
+/// the suite that does.
+fn scan_case_markers(
+    text: &str,
+    shown: &str,
+    misplaced: impl Fn(Code) -> Option<String>,
+) -> (Vec<String>, Vec<(&'static str, &'static str)>) {
+    let mut failures = Vec::new();
+    let mut fixtures = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let functions: Vec<(&str, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| declared_fn(line).map(|name| (name, fn_source(&lines, at))))
+        .collect();
+
+    for (at, line) in lines.iter().enumerate() {
+        let Some((code, tags)) = case_marker(line) else {
+            continue;
+        };
+        let place = format!("tests/{shown}:{}", at + 1);
+        let Some((declared, cases)) = ENUMERATED_CASES
+            .iter()
+            .find(|(declared, _)| declared.as_str() == code)
+        else {
+            failures.push(format!("{place}: {code} is not in ENUMERATED_CASES"));
+            continue;
+        };
+        if let Some(owning) = misplaced(*declared) {
+            failures.push(format!("{place}: a {code} fixture belongs in {owning}"));
+        }
+        let attributes: Vec<&str> = lines[at + 1..]
+            .iter()
+            .copied()
+            .take_while(|below| below.starts_with("#[") || case_marker(below).is_some())
+            .collect();
+        let fn_at = at + 1 + attributes.len();
+        let Some(name) = lines.get(fn_at).and_then(|line| declared_fn(line)) else {
+            failures.push(format!("{place}: a {code} marker that sits above no `fn`"));
+            continue;
+        };
+        if !attributes.contains(&"#[test]") {
+            failures.push(format!(
+                "{place}: `{name}` carries a {code} marker but no #[test]"
+            ));
+        }
+        let own = fn_source(&lines, fn_at);
+        let mut fixture = own.clone();
+        for (callee, source) in &functions {
+            if *callee != name && calls_by_name(&own, callee) {
+                fixture.push('\n');
+                fixture.push_str(source);
+            }
+        }
+        if !asserts_variant(&fixture, variant_name(*declared)) {
+            failures.push(format!(
+                "{place}: `{name}` is marked as a {code} fixture but never asserts \
+                     `Code::{}`",
+                variant_name(*declared)
+            ));
+        }
+        for tag in &tags {
+            let Some(case) = cases.iter().find(|case| case.tag == *tag) else {
+                failures.push(format!("{place}: {code} has no case `{tag}`"));
+                continue;
+            };
+            if let Some(wording) = case.reserved_wording.filter(|w| !fixture.contains(w)) {
+                failures.push(format!(
+                    "{place}: `{name}` is marked as {code} case `{tag}` but never mentions \
+                         {wording:?}, the wording reserved to that case"
+                ));
+            }
+            fixtures.push((declared.as_str(), case.tag));
+        }
+    }
+    (failures, fixtures)
+}
+
+/// A callee is read into a fixture only where the fixture calls it by its own name.
+#[test]
+fn a_callee_ending_a_longer_identifier_is_not_called_by_name() {
+    for (source, callee, calls) in [
+        ("let s = spec(x);", "spec", true),
+        ("check(&spec(x))", "spec", true),
+        ("spec(x)", "spec", true),
+        ("let s = single_component_spec(x);", "spec", false),
+        ("let s = respec(x);", "spec", false),
+        ("let s = spec;", "spec", false),
+        ("single_component_spec(x); spec(y)", "spec", true),
+    ] {
+        assert_eq!(calls_by_name(source, callee), calls, "{callee} in {source}");
+    }
+}
+
+/// [`scan_case_markers`] accepts a marked `#[test]` that asserts its code, itself or through a
+/// helper it calls by name, and refuses each way a marker can fail to name a fixture.
+#[test]
+fn a_case_marker_counts_only_on_a_test_that_asserts_its_code_in_its_owning_suite() {
+    let (code, cases) = ENUMERATED_CASES
+        .iter()
+        .find(|(_, cases)| cases.iter().any(|case| case.reserved_wording.is_some()))
+        .expect("a case reserves a wording");
+    let (variant, id) = (variant_name(*code), code.as_str());
+    let case = cases
+        .iter()
+        .find(|case| case.reserved_wording.is_some())
+        .unwrap();
+    let (tag, wording) = (case.tag, case.reserved_wording.unwrap());
+    let unenumerated = Code::all()
+        .iter()
+        .find(|code| ENUMERATED_CASES.iter().all(|(listed, _)| listed != *code))
+        .expect("a code with no enumerated cases")
+        .as_str();
+    let asserting = format!("    assert!(has_code(&r, Code::{variant})); // {wording}");
+    let fixture = |marker: &str, attribute: &str, body: &str| {
+        format!("{marker}\n{attribute}\nfn fixture() {{\n{body}\n}}\n")
+    };
+    let marker = format!("// {id} case: {tag}");
+    let owned = |_: Code| None;
+
+    for (name, text) in [
+        ("direct", fixture(&marker, "#[test]", &asserting)),
+        (
+            "through a helper",
+            format!(
+                "{}fn helper() {{\n{asserting}\n}}\n",
+                fixture(&marker, "#[test]\n#[ignore]", "    helper();")
+            ),
+        ),
+    ] {
+        let (failures, fixtures) = scan_case_markers(&text, "suite.rs", owned);
+        assert!(failures.is_empty(), "{name}: {failures:?}");
+        assert_eq!(fixtures, [(id, tag)], "{name}");
+    }
+
+    let helper_spec = format!("fn spec() {{\n{asserting}\n}}\n");
+    for (text, refusal) in [
+        (fixture(&marker, "#[ignore]", &asserting), "but no #[test]"),
+        (
+            format!("{marker}\nconst X: u8 = 0;\n"),
+            "sits above no `fn`",
+        ),
+        (
+            fixture(
+                &marker,
+                "#[test]",
+                &format!("    // Code::{variant} {wording}"),
+            ),
+            "never asserts",
+        ),
+        (
+            format!(
+                "{}{helper_spec}",
+                fixture(
+                    &marker,
+                    "#[test]",
+                    &format!("    single_component_spec(); // {wording}")
+                )
+            ),
+            "never asserts",
+        ),
+        (
+            fixture(
+                &format!("// {id} case: no-such-case"),
+                "#[test]",
+                &asserting,
+            ),
+            "has no case `no-such-case`",
+        ),
+        (
+            fixture(
+                &marker,
+                "#[test]",
+                &format!("    assert!(has_code(&r, Code::{variant}));"),
+            ),
+            "the wording reserved to that case",
+        ),
+        (
+            fixture(
+                &format!("// {unenumerated} case: {tag}"),
+                "#[test]",
+                &asserting,
+            ),
+            "is not in ENUMERATED_CASES",
+        ),
+    ] {
+        let (failures, _) = scan_case_markers(&text, "suite.rs", owned);
+        assert!(
+            failures.iter().any(|failure| failure.contains(refusal)),
+            "expected `{refusal}` for:\n{text}\ngot {failures:?}"
+        );
+    }
+
+    let (failures, _) = scan_case_markers(
+        &fixture(&marker, "#[test]", &asserting),
+        "frontend/x.rs",
+        |_| Some("carve.rs".to_owned()),
+    );
+    assert_eq!(
+        failures,
+        [format!(
+            "tests/frontend/x.rs:1: a {id} fixture belongs in carve.rs"
+        )]
+    );
 }
 
 /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
