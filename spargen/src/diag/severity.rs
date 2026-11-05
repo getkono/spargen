@@ -17,7 +17,7 @@ use serde::Serialize;
 ///
 /// assert_eq!(cargo_directive(Severity::Warning), "cargo::warning=");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Generation fails.

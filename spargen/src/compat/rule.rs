@@ -85,6 +85,24 @@ pub struct UnknownOmitToken {
     accepted: &'static [&'static str],
 }
 
+impl UnknownOmitToken {
+    /// The string that named no known value, as it was given.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// What the token was parsed as: `"component kind"` or `"HTTP method"`.
+    pub fn noun(&self) -> &'static str {
+        self.noun
+    }
+
+    /// One canonical spelling of every value the parser accepts, in the order the message lists
+    /// them.
+    pub fn accepted(&self) -> &'static [&'static str] {
+        self.accepted
+    }
+}
+
 impl std::fmt::Display for UnknownOmitToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -657,6 +675,20 @@ mod tests {
             "unknown HTTP method: `nope`; \
              expected one of get/put/post/delete/options/head/patch/trace/query"
         );
+    }
+
+    /// The accessors read back the parts the message is built from.
+    #[test]
+    fn an_unknown_omit_token_exposes_its_token_noun_and_accepted_list() {
+        let kind = "nope".parse::<ComponentKind>().unwrap_err();
+        assert_eq!(kind.token(), "nope");
+        assert_eq!(kind.noun(), "component kind");
+        assert_eq!(kind.accepted(), ComponentKind::CANONICAL);
+
+        let method = "FETCH".parse::<OmitMethod>().unwrap_err();
+        assert_eq!(method.token(), "FETCH");
+        assert_eq!(method.noun(), "HTTP method");
+        assert_eq!(method.accepted(), OmitMethod::CANONICAL);
     }
 
     #[test]
