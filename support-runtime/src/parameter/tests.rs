@@ -224,13 +224,12 @@ fn deep_object_rejects_non_objects() {
     ));
 }
 
-/// Empty composites and composites holding `null`. An empty composite renders as an empty value,
-/// kept under the parameter name where the unexploded style carries one and dropped where the
-/// exploded style names each member instead. A `null` member renders as an empty scalar in its
-/// place. This pins the serializers' present behaviour, not the specification's: RFC 6570
-/// §2.3 counts an empty list or map as undefined, and the 3.2 table's `undefined` column gives
-/// `;color` for both `matrix` rows and `color=` for exploded `form`, where these render `;c=`,
-/// nothing, and nothing (#1143).
+/// Empty composites and composites holding `null`. RFC 6570 §2.3 counts an empty list or map as
+/// undefined, so an empty composite renders as the 3.2 table's `undefined` column: `;c` for both
+/// `matrix` rows, `c=` for both `form` rows, `.` for `label` and an empty value for `simple`.
+/// `spaceDelimited`, `pipeDelimited` and `deepObject` are `n/a` there, and keep an empty value
+/// under the name and no fragment respectively. A `null` member renders as an empty scalar in its
+/// place.
 #[test]
 fn empty_and_null_bearing_composites_render_per_style_and_explode() {
     let empty_array = serde_json::json!([]);
@@ -243,10 +242,18 @@ fn empty_and_null_bearing_composites_render_per_style_and_explode() {
             assert_eq!(serialize_simple(empty, explode, U).unwrap(), "", "{empty}");
             assert_eq!(serialize_label(empty, explode, U).unwrap(), ".", "{empty}");
         }
-        assert_eq!(serialize_matrix("c", empty, false, U).unwrap(), ";c=");
-        assert_eq!(serialize_matrix("c", empty, true, U).unwrap(), "");
-        assert_eq!(serialize_form("c", empty, false, F).unwrap(), ["c="]);
-        assert!(serialize_form("c", empty, true, F).unwrap().is_empty());
+        for explode in [false, true] {
+            assert_eq!(
+                serialize_matrix("c", empty, explode, U).unwrap(),
+                ";c",
+                "{empty}"
+            );
+            assert_eq!(
+                serialize_form("c", empty, explode, F).unwrap(),
+                ["c="],
+                "{empty}"
+            );
+        }
         for delimiter in [Delimiter::Space, Delimiter::Pipe] {
             assert_eq!(
                 serialize_delimited("c", empty, delimiter, F).unwrap(),
@@ -669,6 +676,32 @@ fn form_body_omits_null_properties() {
     assert_eq!(
         serialize_form_body(&body, &properties, None).unwrap(),
         "a=x"
+    );
+}
+
+/// A style-mode property holding an empty array is undefined, as in a query, and keeps its name
+/// with an empty value under either `explode`, where a `null` property is omitted.
+#[test]
+fn form_body_sends_an_empty_style_property_as_undefined() {
+    let body = serde_json::json!({ "a": [], "b": [] });
+    let style = |explode| FormMode::Style {
+        style: FormStyle::Form,
+        explode,
+        encoding: PercentEncoding::Form,
+    };
+    let properties = [
+        FormProperty {
+            name: "a",
+            mode: style(true),
+        },
+        FormProperty {
+            name: "b",
+            mode: style(false),
+        },
+    ];
+    assert_eq!(
+        serialize_form_body(&body, &properties, None).unwrap(),
+        "a=&b="
     );
 }
 
