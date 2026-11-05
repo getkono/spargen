@@ -1,5 +1,5 @@
-//! Recursion, second part: nullable recursive references, nullable aliases under mutual
-//! recursion, back-edge nullability, and which unions are recognised as aliases.
+//! Recursion: nullable recursive references, nullable aliases under mutual recursion, back-edge
+//! nullability, and which unions are recognised as aliases.
 
 use super::*;
 

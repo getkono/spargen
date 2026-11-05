@@ -1,6 +1,6 @@
-//! Request and response bodies, first part: OAS 3.2 media-type components, streaming media
-//! (`itemSchema`, `contentSchema`, SSE, NDJSON and JSON sequences), the basic `E009` media
-//! rejections, and the single-success-body position a stream must hold.
+//! Streaming bodies: OAS 3.2 media-type components, streaming media (`itemSchema`,
+//! `contentSchema`, SSE, NDJSON and JSON sequences), and the single-success-body position a stream
+//! must hold.
 
 use super::*;
 
@@ -60,12 +60,13 @@ components:
       properties:
         seq: { type: integer }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
+    assert!(code.contains("EventStream<types::Event>"), "{code}");
 }
 
 #[test]
@@ -403,109 +404,6 @@ components:
 }
 
 #[test]
-fn e009_unsupported_media_type() {
-    // A genuinely unsupported media (`application/pdf`) still rejects with E009 — the narrowing only
-    // added JSON-adjacent/XML/streaming media, not arbitrary binary content types.
-    let report = generate(
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    post:
-      requestBody:
-        content:
-          application/pdf:
-            schema: { type: string, format: binary }
-      responses:
-        "204": { description: No Content }
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType));
-}
-
-#[test]
-fn textual_vendor_and_structured_json_media_generate() {
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /html:
-    get:
-      responses:
-        "200":
-          description: OK
-          content:
-            text/html:
-              schema: { type: string }
-  /octocat:
-    get:
-      responses:
-        "200":
-          description: OK
-          content:
-            application/octocat-stream:
-              schema: { type: string }
-  /problem:
-    get:
-      responses:
-        "200":
-          description: OK
-          content:
-            application/problem+json:
-              schema:
-                type: object
-                properties: { detail: { type: string } }
-"##;
-    let generated = generate(spec);
-    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
-    assert!(!has_code(&generated, Code::UnsupportedMediaType));
-}
-
-#[test]
-fn e009_raw_media_requires_a_compatible_schema() {
-    let report = generate(
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    get:
-      responses:
-        "200":
-          description: not representable as raw text
-          content:
-            text/html:
-              schema: { type: object, properties: { value: { type: string } } }
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType));
-}
-
-#[test]
-fn e009_request_only_media_is_rejected_in_responses() {
-    let report = generate(
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /x:
-    get:
-      responses:
-        "200":
-          description: unsupported response codec
-          content:
-            application/x-www-form-urlencoded:
-              schema: { type: object }
-"##,
-    );
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType));
-}
-
-#[test]
 fn a_lone_xml_or_streaming_body_beside_a_bodyless_success_still_generates() {
     // Issue #121 makes a single body beside a documented bodyless `204` a success enum. That enum
     // still decodes only one body, so neither the XML nor the streaming multi-status rejection
@@ -538,12 +436,21 @@ paths:
 }
 
 #[test]
-fn sse_response_body_generates() {
-    // a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
-    // generates without the code firing, and check/generate stay in parity.
-    let spec = r##"
+fn a_lone_sse_or_ndjson_success_body_generates_a_stream() {
+    // A `text/event-stream` (SSE) or `application/x-ndjson` success response that is the
+    // operation's only status is a typed stream, not `E009`. The multi-status control below holds
+    // the same media beside a bodyless second status; this is the stream with no sibling at all.
+    for (media, schema) in [
+        (
+            "text/event-stream",
+            "{ type: object, required: [seq], properties: { seq: { type: integer } } }",
+        ),
+        ("application/x-ndjson", "{ type: string }"),
+    ] {
+        let spec = format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /events:
     get:
@@ -551,39 +458,18 @@ paths:
         "200":
           description: OK
           content:
-            text/event-stream:
-              schema: { type: object, required: [seq], properties: { seq: { type: integer } } }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
-}
-
-#[test]
-fn ndjson_response_body_generates() {
-    // an `application/x-ndjson` success response is a typed stream, not `E009`.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-paths:
-  /lines:
-    get:
-      responses:
-        "200":
-          description: OK
-          content:
-            application/x-ndjson:
-              schema: { type: string }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
+            {media}:
+              schema: {schema}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        assert!(code.contains("EventStream<"), "{media}: {code}");
+    }
 }
 
 #[test]
