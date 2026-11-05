@@ -892,7 +892,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // boxed so the cycle has a finite size, with no def of its own. Where this union is
             // itself the body of a reserved root, the caller lifts the last insert into that
             // root, so a foreign id cannot be handed back, and the shape is refused as that path
-            // refuses it.
+            // refuses it. A body whose members are bare `$ref`s to that one open target never
+            // gets here: it is a nullable alias ([`Self::nullable_alias_back_edge`], #1176). What
+            // does is a member that reaches it through a component alias of the target.
             if self.is_reservation(inner.id) {
                 if self.reservation_at(&schema.provenance).is_some() {
                     return self.reject_self_referential_union(
@@ -1228,10 +1230,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if groups.len() == variants.len() {
             return groups.into_iter().map(|(_, members)| members).collect();
         }
+        let merged: Vec<&[usize]> = groups
+            .iter()
+            .map(|(_, members)| members.as_slice())
+            .collect();
+        self.warn_indistinguishable_branches(&schema.provenance, &merged);
+        let kept: HashSet<usize> = groups.iter().map(|(kept, _)| *kept).collect();
+        retain_variants(variants, ref_names, variant_members, |index, _| {
+            kept.contains(&index)
+        });
+        groups.into_iter().map(|(_, members)| members).collect()
+    }
+
+    /// Report, as `W001` at the `oneOf` written at `at`, that its real members merged into the
+    /// `groups` given: each group the real-member positions one kept variant stands for, in
+    /// variant order, with at least one group of more than one. Shared by the merge in
+    /// [`Self::merge_indistinguishable_variants`] and the nullable alias that repeats its one
+    /// `$ref` ([`Self::nullable_alias_back_edge`]), which answers before any merge is made, so
+    /// the two spellings of one merge report it in one wording.
+    pub(super) fn warn_indistinguishable_branches(&mut self, at: &Provenance, groups: &[&[usize]]) {
         let merged: Vec<String> = groups
             .iter()
-            .filter(|(_, members)| members.len() > 1)
-            .map(|(_, members)| {
+            .filter(|members| members.len() > 1)
+            .map(|members| {
                 let members: Vec<String> = members.iter().map(usize::to_string).collect();
                 format!("members {}", members.join(", "))
             })
@@ -1242,7 +1263,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "each such set is one variant of the generated enum"
         };
         // W001 case: indistinguishable-branches
-        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+        Diagnostic::warning(Code::ValidationKeywordIgnored, at.clone())
             .message(format!(
                 "this `oneOf`'s {} lower to the same generated type or to identically structured \
                  ones, differing at most in keywords it does not carry, so a value matching one \
@@ -1252,11 +1273,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ))
             .remedy("keep producer-side validation for the union's branch constraints")
             .emit(self.diags);
-        let kept: HashSet<usize> = groups.iter().map(|(kept, _)| *kept).collect();
-        retain_variants(variants, ref_names, variant_members, |index, _| {
-            kept.contains(&index)
-        });
-        groups.into_iter().map(|(_, members)| members).collect()
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
