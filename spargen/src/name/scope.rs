@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{fnv1a64, JsonPointer};
@@ -105,7 +106,7 @@ impl Scope {
     /// The first free pointer-seeded spelling of `base`, which is already taken.
     fn disambiguate(&mut self, base: &Ident, role: IdentRole, provenance: &JsonPointer) -> Ident {
         let raw_base = base.unraw();
-        let suffix = stable_suffix(provenance.as_str());
+        let suffix = stable_suffix(&suffix_seed(provenance));
         let mut candidate = super::escape(&format!("{raw_base}_{suffix}"), role);
         let mut counter = 2usize;
         while !self.used.insert(candidate.as_str().to_owned()) {
@@ -118,6 +119,34 @@ impl Scope {
 
 fn stable_suffix(input: &str) -> String {
     format!("{:08x}", fnv1a64(input.as_bytes()) as u32)
+}
+
+/// The text [`stable_suffix`] hashes for `provenance`: the pointer with the type and subtype of
+/// every media key it passes through ASCII-lowercased.
+///
+/// Media types are case-insensitive (RFC 9110 § 8.3.1), so a media key in any letter case is the
+/// key its lowercase spelling is, and the suffix it seeds must not move with the spelling (#1153).
+/// A media key is the reference token after a `content` token that holds an escaped `/` (`~1`);
+/// the parameters after its first `;` are hashed as written, since a parameter value may be
+/// case-sensitive. Folding happens on the escaped tokens, where `~0` and `~1` lowercase to
+/// themselves, and a pointer naming no media key is hashed exactly as it reads.
+fn suffix_seed(provenance: &JsonPointer) -> Cow<'_, str> {
+    let pointer = provenance.as_str();
+    let mut previous: Option<&str> = None;
+    let mut folded: Option<String> = None;
+    let mut offset = 0;
+    for token in pointer.split('/') {
+        if previous == Some("content") && token.contains("~1") {
+            let essence = token.split(';').next().unwrap_or(token);
+            if essence.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                let seed = folded.get_or_insert_with(|| pointer.to_owned());
+                seed[offset..offset + essence.len()].make_ascii_lowercase();
+            }
+        }
+        previous = Some(token);
+        offset += token.len() + 1;
+    }
+    folded.map_or(Cow::Borrowed(pointer), Cow::Owned)
 }
 
 #[cfg(test)]
@@ -193,6 +222,43 @@ mod tests {
         assert_eq!(super::stable_suffix("a"), "8601ec8c");
         assert_eq!(super::stable_suffix("foobar"), "f73967e8");
         assert_eq!(super::stable_suffix("/components/schemas/Pet"), "58d74607");
+    }
+
+    #[test]
+    fn media_keys_differing_only_in_letter_case_seed_the_same_suffix() {
+        // Media types are case-insensitive, so respelling a key's letter case renames no
+        // disambiguated type (#1153): both spellings get the suffix the lowercase pointer seeds.
+        let lowercase = JsonPointer::from("/paths/~1note/get/responses/200/content/text~1*");
+        let respelled = JsonPointer::from("/paths/~1note/get/responses/200/content/tExt~1*");
+        let allocate = |pointer: &JsonPointer| {
+            let mut scope = Scope::default();
+            scope.reserve("ResponseBody", IdentRole::Type);
+            scope.alloc("ResponseBody", IdentRole::Type, pointer)
+        };
+
+        assert_ne!(allocate(&lowercase).as_str(), "ResponseBody");
+        assert_eq!(allocate(&respelled), allocate(&lowercase));
+    }
+
+    #[test]
+    fn the_suffix_seed_folds_only_a_media_keys_type_and_subtype() {
+        let seed = |pointer: &str| super::suffix_seed(&JsonPointer::from(pointer)).into_owned();
+        // Every media key a pointer passes through is folded, an encoding's nested one included.
+        assert_eq!(
+            seed("/paths/~1A/post/requestBody/content/Multipart~1Form-Data/encoding/Pet/headers/X/content/Application~1JSON"),
+            "/paths/~1A/post/requestBody/content/multipart~1form-data/encoding/Pet/headers/X/content/application~1json",
+        );
+        // A parameter value may be case-sensitive, so only the essence before `;` is folded.
+        assert_eq!(
+            seed("/paths/~1a/get/responses/200/content/Text~1Plain;Charset=UTF-8"),
+            "/paths/~1a/get/responses/200/content/text~1plain;Charset=UTF-8",
+        );
+        // A `content` token followed by no media key (a property named `content`) folds nothing.
+        assert_eq!(
+            seed("/components/schemas/Pet/properties/content/properties/Name"),
+            "/components/schemas/Pet/properties/content/properties/Name",
+        );
+        assert_eq!(seed("/components/schemas/Pet"), "/components/schemas/Pet");
     }
 
     #[test]

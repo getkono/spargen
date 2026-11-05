@@ -833,9 +833,10 @@ const MEDIA_KEYS: [&str; 9] = [
     "text/*",
 ];
 
-/// One document holding a media key at every position [`MEDIA_KEYS`] lists. Every body but the
-/// event stream's names a component, so no two anonymous bodies contest one name: the contested
-/// name is disambiguated by a hash of its pointer, which spells the media key verbatim (#1153).
+/// One document holding a media key at every position [`MEDIA_KEYS`] lists. The event stream's,
+/// the octet-stream's and the text range's response bodies are anonymous, so they contest one
+/// name, and the losers are disambiguated by a hash of their pointers, each of which passes
+/// through its media key: the law holds that hash to the key's lowercase spelling (#1153).
 const MEDIA_KEY_DOCUMENT: &str = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -898,7 +899,7 @@ paths:
         '200':
           description: ok
           content:
-            "@7@": { schema: { $ref: '#/components/schemas/Blob' } }
+            "@7@": { schema: { type: string, format: binary } }
   /note:
     get:
       operationId: getNote
@@ -906,16 +907,14 @@ paths:
         '200':
           description: ok
           content:
-            "@8@": { schema: { $ref: '#/components/schemas/Note' } }
+            "@8@": { schema: { type: string } }
 components:
   schemas:
-    Blob: { type: string, format: binary }
     Form:
       type: object
       properties:
         count: { type: integer }
         tags: { type: array, items: { type: string } }
-    Note: { type: string }
     Upload:
       type: object
       properties:
@@ -967,6 +966,13 @@ proptest! {
         let lowercase: Vec<String> = MEDIA_KEYS.iter().map(|key| (*key).to_owned()).collect();
         let (lower_report, lower_code) = generate_with_code(&media_key_document(&lowercase));
         prop_assert_eq!(lower_report.outcome(), Outcome::Generated, "{:#?}", lower_report);
+        // The anonymous bodies really contest one name, so the law covers a suffixed name.
+        let suffixed: std::collections::BTreeSet<&str> = lower_code
+            .match_indices("ResponseBody")
+            .filter_map(|(at, name)| lower_code.get(at..at + name.len() + 8))
+            .filter(|name| name["ResponseBody".len()..].bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect();
+        prop_assert!(suffixed.len() >= 2, "{:?}\n{}", suffixed, lower_code);
         let document = media_key_document(&spellings);
         let (report, code) = generate_with_code(&document);
         prop_assert_eq!(codes(&report), codes(&lower_report), "{:#?}\n{}", report, document);

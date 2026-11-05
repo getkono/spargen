@@ -146,7 +146,9 @@ the version it emits, and the idioms spargen handles.
   renames a model. Likewise, a server builder or server-variable enum in the generated `servers`
   module whose name would spell one of the three names that module uses (`Default`, `Into`,
   `String`) takes a disambiguated name; all three are reserved whether or not the module writes
-  them, so adding a free-form server variable never renames a server.
+  them, so adding a free-form server variable never renames a server. A disambiguated name's
+  suffix is a hash of the item's JSON Pointer with the type and subtype of each media key on it
+  lowercased, so respelling a media key's letter case renames nothing.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees
