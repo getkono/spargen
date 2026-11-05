@@ -324,12 +324,9 @@ fn split(target: &str, lib: &str) -> (Report, Report, String) {
 }
 
 /// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
-/// hoisted so [`PARITY_FIXTURES`] can drive it through `check` as well as `generate`.
-///
-/// That fixture reads emitted source, so it can only call `generate`; `PARITY_FIXTURES` is where a
-/// spec is held to reporting the same thing through both entry points, and it is a hand-maintained
-/// list, so an omission costs nothing and warns nobody. The fixture asserts this constant equals
-/// what its own builder produces, so the two cannot drift apart.
+/// hoisted so [`PARITY_FIXTURES`] keeps a clean run on the nullable-alias lowering path among its
+/// labelled ones and moves its schemas into a referenced file. The fixture asserts this constant
+/// equals what its own builder produces, so the two cannot drift apart.
 const NULLABLE_ALIAS_CARRY_SPEC: &str = "openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 servers: [{ url: 'https://e.com' }]
