@@ -231,7 +231,8 @@ mod tests {
                 .config_file(dir.join("spargen.toml"))
                 .unwrap()
         };
-        let rows: [(&str, &Utf8PathBuf, fn(Spec) -> Spec); 8] = [
+        type Moved = fn(Spec) -> Spec;
+        let rows: [(&str, &Utf8PathBuf, Moved); 8] = [
             ("--no-carve", &on, |spec| spec.carve(false)),
             ("--no-uuid", &on, |spec| spec.uuid(false)),
             ("--no-time", &on, |spec| spec.time(false)),
