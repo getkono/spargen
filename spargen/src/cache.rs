@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::output::atomic_write;
 use crate::runtime_contract::RuntimeRequirements;
-use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
+use crate::source::{sha256_hex, InputBundle, Sha256, LOCK_FILE_NAME};
 use crate::{Build, Code, Report, Spec};
 
 const CACHE_FORMAT: u32 = 5;
@@ -24,58 +24,89 @@ impl InputSnapshot {
     /// complete failure list from one the `batch_cap` truncated.
     pub(crate) fn load(spec: &Spec) -> Result<Self, Diagnostics> {
         let inputs = read_inputs(spec)?;
-        let mut fingerprint = b"spargen-build-input-v1\0".to_vec();
-        append(&mut fingerprint, env!("CARGO_PKG_VERSION").as_bytes());
-        append(
-            &mut fingerprint,
-            env!("SPARGEN_BUILD_FINGERPRINT").as_bytes(),
-        );
-        append(&mut fingerprint, spec.path.as_str().as_bytes());
-        append(&mut fingerprint, &[u8::from(spec.uuid)]);
-        append(&mut fingerprint, &[u8::from(spec.time)]);
-        append(
-            &mut fingerprint,
-            &(spec.error_body_cap as u64).to_be_bytes(),
-        );
-        append(&mut fingerprint, &(spec.batch_cap as u64).to_be_bytes());
-        append(&mut fingerprint, &[u8::from(spec.carve)]);
-        append(&mut fingerprint, &[u8::from(spec.open_narrowing)]);
-        // The omit profile's one canonical encoding, the same bytes its provenance-header
-        // fingerprint hashes, so the two cannot drift apart.
-        append(&mut fingerprint, &spec.omit.canonical_encoding());
-        for (path, bytes) in &inputs {
-            append(&mut fingerprint, path.as_str().as_bytes());
-            append(&mut fingerprint, bytes);
-        }
-
+        let inputs = inputs.sorted();
         Ok(Self {
-            digest: sha256_hex(&fingerprint),
-            paths: inputs.into_iter().map(|(path, _)| path).collect(),
+            digest: fingerprint(
+                spec,
+                env!("CARGO_PKG_VERSION"),
+                env!("SPARGEN_BUILD_FINGERPRINT"),
+                &inputs,
+            ),
+            paths: inputs.iter().map(|(path, _)| path.to_path_buf()).collect(),
         })
     }
+}
+
+/// The input digest of a build of `spec` by spargen `version` (`build` being its build
+/// fingerprint) over `inputs`: every field framed by [`append`] and hashed as it is framed, so the
+/// input bytes are read in place rather than gathered into one buffer first.
+fn fingerprint(spec: &Spec, version: &str, build: &str, inputs: &[(&Utf8Path, &[u8])]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"spargen-build-input-v1\0");
+    append(&mut hasher, version.as_bytes());
+    append(&mut hasher, build.as_bytes());
+    append(&mut hasher, spec.path.as_str().as_bytes());
+    append(&mut hasher, &[u8::from(spec.uuid)]);
+    append(&mut hasher, &[u8::from(spec.time)]);
+    append(&mut hasher, &(spec.error_body_cap as u64).to_be_bytes());
+    append(&mut hasher, &(spec.batch_cap as u64).to_be_bytes());
+    append(&mut hasher, &[u8::from(spec.carve)]);
+    append(&mut hasher, &[u8::from(spec.open_narrowing)]);
+    // The omit profile's one canonical encoding, the same bytes its provenance-header
+    // fingerprint hashes, so the two cannot drift apart.
+    append(&mut hasher, &spec.omit.canonical_encoding());
+    for (path, bytes) in inputs {
+        append(&mut hasher, path.as_str().as_bytes());
+        append(&mut hasher, bytes);
+    }
+    hasher.finalize()
 }
 
 /// The paths [`InputSnapshot::load`] fingerprints, read without hashing them.
 pub(crate) fn input_paths(spec: &Spec) -> Result<Vec<Utf8PathBuf>, Diagnostics> {
     Ok(read_inputs(spec)?
+        .sorted()
         .into_iter()
-        .map(|(path, _)| path)
+        .map(|(path, _)| path.to_path_buf())
         .collect())
 }
 
-/// Every build input `spec` reads, with its bytes, sorted and deduplicated by path: the bundle's
-/// files, `spargen.lock` beside the spec when there is one, and the applied config files.
-fn read_inputs(spec: &Spec) -> Result<Vec<(Utf8PathBuf, Vec<u8>)>, Diagnostics> {
+/// The build inputs [`read_inputs`] read: the loaded bundle, whose files' bytes are borrowed
+/// rather than copied, and the other files it read.
+struct Inputs {
+    bundle: InputBundle,
+    files: Vec<(Utf8PathBuf, Vec<u8>)>,
+}
+
+impl Inputs {
+    /// Every input with its bytes, sorted and deduplicated by path. A path both the bundle and
+    /// another read name keeps the bundle's bytes.
+    fn sorted(&self) -> Vec<(&Utf8Path, &[u8])> {
+        let mut inputs = self
+            .bundle
+            .source_inputs()
+            .chain(
+                self.files
+                    .iter()
+                    .map(|(path, bytes)| (path.as_path(), bytes.as_slice())),
+            )
+            .collect::<Vec<_>>();
+        inputs.sort_by(|left, right| left.0.cmp(right.0));
+        inputs.dedup_by(|left, right| left.0 == right.0);
+        inputs
+    }
+}
+
+/// Every build input `spec` reads: the bundle's files, `spargen.lock` beside the spec when there
+/// is one, and the applied config files.
+fn read_inputs(spec: &Spec) -> Result<Inputs, Diagnostics> {
     let mut diagnostics = Diagnostics::new(spec.batch_cap);
     let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
         Ok(bundle) => bundle,
         Err(_) => return Err(diagnostics),
     };
 
-    let mut inputs = bundle
-        .source_inputs()
-        .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
     let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
     let lock = spec_dir.join(LOCK_FILE_NAME);
     // The applied config files are read like `spargen.lock`: a file that existed when it was
@@ -83,7 +114,7 @@ fn read_inputs(spec: &Spec) -> Result<Vec<(Utf8PathBuf, Vec<u8>)>, Diagnostics> 
     let lock = lock.is_file().then_some(lock);
     for path in lock.iter().chain(&spec.config_files) {
         match std::fs::read(path) {
-            Ok(bytes) => inputs.push((path.clone(), bytes)),
+            Ok(bytes) => files.push((path.clone(), bytes)),
             Err(error) => {
                 Diagnostic::at_root(
                     Code::InvalidInput,
@@ -94,9 +125,7 @@ fn read_inputs(spec: &Spec) -> Result<Vec<(Utf8PathBuf, Vec<u8>)>, Diagnostics> 
             }
         }
     }
-    inputs.sort_by(|left, right| left.0.cmp(&right.0));
-    inputs.dedup_by(|left, right| left.0 == right.0);
-    Ok(inputs)
+    Ok(Inputs { bundle, files })
 }
 
 /// The paths a build names to Cargo as `cargo:rerun-if-changed`: each input the snapshot read
@@ -215,9 +244,9 @@ pub(crate) fn write_cache(
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
 }
 
-fn append(output: &mut Vec<u8>, bytes: &[u8]) {
-    output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
-    output.extend_from_slice(bytes);
+fn append(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 #[derive(Serialize, Deserialize)]
@@ -364,12 +393,12 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{
-        append, cache_path, finalized, rerun_paths, verified_output, CachedDiagnostic, Diagnostic,
-        InputSnapshot, JsonPointer, OutcomeClaim,
+        append, cache_path, finalized, fingerprint, rerun_paths, sha256_hex, verified_output,
+        CachedDiagnostic, Diagnostic, InputSnapshot, JsonPointer, OutcomeClaim, Sha256,
     };
     use crate::runtime_contract::rerun_if_changed_lines;
     use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
-    use camino::Utf8PathBuf;
+    use camino::{Utf8Path, Utf8PathBuf};
 
     /// The `cargo:rerun-if-changed` lines a build prints for its inputs and output.
     fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
@@ -699,11 +728,11 @@ components:
     #[test]
     fn the_fingerprint_frames_each_input_so_adjacent_fields_cannot_merge() {
         let framed = |fields: &[&[u8]]| {
-            let mut output = Vec::new();
+            let mut hasher = Sha256::new();
             for field in fields {
-                append(&mut output, field);
+                append(&mut hasher, field);
             }
-            output
+            hasher.finalize()
         };
         assert_ne!(
             framed(&[b"/spec/a.yaml", b"type: string\n"]),
@@ -712,7 +741,64 @@ components:
         assert_ne!(framed(&[b"ab", b""]), framed(&[b"", b"ab"]));
         assert_ne!(framed(&[b"ab"]), framed(&[b"a", b"b"]));
         // The frame is the field's length as eight big-endian bytes, then the field.
-        assert_eq!(framed(&[b"ab"]), [0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b']);
+        assert_eq!(
+            framed(&[b"ab"]),
+            sha256_hex(&[0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b'])
+        );
+    }
+
+    /// The input digest is hashed field by field, and stays the digest of the one framed buffer
+    /// the cache format defines: the literal pins it, so an existing cache record and generated
+    /// module stay valid, and the buffer spelled out below states the format it is the hash of.
+    #[test]
+    fn the_input_fingerprint_is_the_digest_of_the_framed_input_buffer() {
+        let spec = Spec {
+            path: Utf8PathBuf::from("/work/openapi.yaml"),
+            uuid: true,
+            time: false,
+            omit: crate::Omit::default(),
+            error_body_cap: 4096,
+            batch_cap: 64,
+            carve: true,
+            open_narrowing: false,
+            config_files: Vec::new(),
+        };
+        // A file over a block long, so its bytes cross a block boundary of the hash.
+        let schema = "type: string\n".repeat(20);
+        let inputs: [(&Utf8Path, &[u8]); 2] = [
+            (
+                Utf8Path::new("/work/openapi.yaml"),
+                b"openapi: 3.1.0\npaths: {}\n",
+            ),
+            (Utf8Path::new("/work/schema.yaml"), schema.as_bytes()),
+        ];
+
+        let mut buffer = b"spargen-build-input-v1\0".to_vec();
+        let mut frame = |field: &[u8]| {
+            buffer.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            buffer.extend_from_slice(field);
+        };
+        frame(b"1.2.3");
+        frame(b"build");
+        frame(b"/work/openapi.yaml");
+        frame(&[1]);
+        frame(&[0]);
+        frame(&4096u64.to_be_bytes());
+        frame(&64u64.to_be_bytes());
+        frame(&[1]);
+        frame(&[0]);
+        frame(&spec.omit.canonical_encoding());
+        for (path, bytes) in inputs {
+            frame(path.as_str().as_bytes());
+            frame(bytes);
+        }
+
+        let digest = fingerprint(&spec, "1.2.3", "build", &inputs);
+        assert_eq!(digest, sha256_hex(&buffer));
+        assert_eq!(
+            digest,
+            "1b39694287a86792f1849150b1ea60dc443039472f06e88d40a0ad6c3623cf81"
+        );
     }
 
     #[test]

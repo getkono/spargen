@@ -44,7 +44,7 @@ pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, 
 pub(crate) use remote::is_absolute_ref as is_remote_ref;
 pub(crate) use remote::rewrite_refs_to_absolute as rewrite_refs_absolute;
 pub(crate) use remote::security_requirement_key_reference;
-pub(crate) use sha256::sha256_hex;
+pub(crate) use sha256::{sha256_hex, Sha256};
 
 #[cfg(feature = "remote-fetch")]
 pub(crate) use vendor::{vendor, ReqwestFetcher};
