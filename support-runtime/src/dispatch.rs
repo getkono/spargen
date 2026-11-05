@@ -13,7 +13,7 @@ use bytes::Bytes;
 use reqwest::{Request, Response, Url};
 use serde::de::DeserializeOwned;
 
-use crate::{ClientCore, Error, ResponseValue};
+use crate::{ClientCore, Error, HttpBackend, ResponseValue};
 
 /// Build a request URL from the base URL, or an optional per-operation server override, and a
 /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
@@ -150,7 +150,16 @@ pub fn build_url_with_query_string_on(
 /// through [`Error::from_reqwest`] here, so classification is identical to executing directly on the
 /// reqwest client. Non-generic.
 pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error<Infallible>> {
-    core.backend()
+    send_on(core.backend().as_ref(), request).await
+}
+
+/// [`send`] through the backend alone, for a caller that holds the backend rather than the whole
+/// [`ClientCore`]: a streaming response's reconnect.
+pub(crate) async fn send_on(
+    backend: &dyn HttpBackend,
+    request: Request,
+) -> Result<Response, Error<Infallible>> {
+    backend
         .execute(request)
         .await
         .map_err(|error| Error::from_reqwest(error.into_source()))
@@ -256,11 +265,20 @@ where
 /// parameter only threads the taxonomy through a transport failure while reading.
 pub(crate) async fn read_error_body<E>(
     core: &ClientCore,
+    response: Response,
+) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
+    read_error_body_capped(core.config().max_error_body, response).await
+}
+
+/// [`read_error_body`] under an explicit `max_error_body` cap, for a caller that holds the cap
+/// rather than the whole [`ClientCore`].
+async fn read_error_body_capped<E>(
+    max_error_body: usize,
     mut response: Response,
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
     let status = response.status();
     let headers = std::mem::take(response.headers_mut());
-    let (body, truncated) = read_capped(core, response).await?;
+    let (body, truncated) = read_capped(max_error_body, response).await?;
     Ok((status, headers, body, truncated))
 }
 
@@ -376,8 +394,24 @@ pub async fn classify_error_bytes<E: From<Bytes>>(
 /// Wrap a non-success response as [`Error::UnexpectedStatus`] (#7) for operations that document no
 /// error body at all, retaining at most `max_error_body` bytes.
 pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Error<E> {
-    // No selector is documented, so the decoder is never run.
-    classify_with(core, response, &[], |_| Err(String::new())).await
+    unexpected_status_capped(core.config().max_error_body, response).await
+}
+
+/// [`unexpected_status`] under an explicit `max_error_body` cap, for a caller that holds the cap
+/// rather than the whole [`ClientCore`]: a streaming response's reconnect. With no selector
+/// documented, [`classify_with`] would answer every status this way.
+pub(crate) async fn unexpected_status_capped<E>(
+    max_error_body: usize,
+    response: Response,
+) -> Error<E> {
+    match read_error_body_capped(max_error_body, response).await {
+        Ok((status, headers, body, _truncated)) => Error::UnexpectedStatus {
+            status,
+            headers,
+            body,
+        },
+        Err(error) => error,
+    }
 }
 
 /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
@@ -405,11 +439,7 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// Uses `Response::chunk`, which, unlike `bytes_stream`, is not behind reqwest's `stream` feature,
 /// which generated clients enable only for APIs with sequential responses.
 #[cfg(not(target_arch = "wasm32"))]
-async fn read_capped<E>(
-    core: &ClientCore,
-    mut response: Response,
-) -> Result<(Bytes, bool), Error<E>> {
-    let cap = core.config().max_error_body;
+async fn read_capped<E>(cap: usize, mut response: Response) -> Result<(Bytes, bool), Error<E>> {
     // Pre-size to the cap, but do not honour an enormous configured cap up front — the point is to
     // avoid large speculative allocations.
     let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
@@ -432,8 +462,7 @@ async fn read_capped<E>(
 // native test binary holds the native `read_capped` above in its place and no native test can
 // reach the mutated code; on `wasm32` the runtime is compile-checked, not tested.
 #[cfg(target_arch = "wasm32")]
-async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
-    let cap = core.config().max_error_body;
+async fn read_capped<E>(cap: usize, response: Response) -> Result<(Bytes, bool), Error<E>> {
     // `fetch` reports a failed read as a JavaScript error, so `from_body_read` gives `Protocol`
     // here even for a connection that gave out, as `Error::InterruptedBody` documents.
     let bytes = response.bytes().await.map_err(Error::from_body_read)?;
