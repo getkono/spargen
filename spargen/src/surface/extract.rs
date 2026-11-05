@@ -25,18 +25,15 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
 
         let mut params = BTreeMap::new();
         // The accessor takes the method's required arguments that shape the URL, in the method's
-        // order, then the bundle when an optional parameter shapes it (`OperationSig::url_args`).
+        // order, then the bundle when an optional parameter shapes it. Codegen's
+        // `OperationSig::url_args` reads the same two `ir` predicates.
         let mut url_args: Vec<UrlArgSurface> = operation
             .params
             .iter()
-            .filter(|param| param.required && param.location.shapes_url())
+            .filter(|param| param.is_url_arg())
             .map(|param| UrlArgSurface::Param((param.name.clone(), param.location.as_openapi_in())))
             .collect();
-        if operation
-            .params
-            .iter()
-            .any(|param| !param.required && param.location.shapes_url())
-        {
+        if operation.url_takes_params() {
             url_args.push(UrlArgSurface::Optional);
         }
         for param in &operation.params {
