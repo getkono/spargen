@@ -101,8 +101,10 @@ struct GateWorkflow {
 const GATE_WORKFLOWS: [GateWorkflow; 4] = [
     GateWorkflow {
         file: "ci.yml",
-        on: "push:\n  branches: [master]\npull_request:",
-        concurrency: Some("group: ci-${{ github.ref }}\ncancel-in-progress: true"),
+        on: "push:\n  branches: [master]\npull_request:\nworkflow_dispatch:",
+        concurrency: Some(
+            "group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}\ncancel-in-progress: true",
+        ),
         permissions: None,
     },
     // `ci.yml`'s triggers plus a daily schedule on `master` (and a manual one): the audit is
@@ -147,6 +149,14 @@ const NON_GATE_WORKFLOWS: [(&str, &str); 1] = [(
 /// of every `run:` step without appearing on any of them) is rejected.
 const WORKFLOW_KEYS: [&str; 6] = ["name", "on", "env", "concurrency", "permissions", "jobs"];
 
+/// The `if:` of every slow gate in `ci.yml`: msrv, powerset, corpus-smoke, github-api, example and
+/// bench-build. Each runs on every push to `master`, on `workflow_dispatch` (`gh workflow run ci.yml
+/// --ref <branch>` runs the full suite on a branch before it merges), and on release-plz's release
+/// pull request; any other pull request skips them, so its wall-clock is the `test` job's rather
+/// than the generated GitHub client's. Locally each task runs whenever it is asked for.
+const SLOW_GATE_IF: &str =
+    "github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')";
+
 const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
         job: "fmt",
@@ -165,8 +175,15 @@ const PAIRINGS: &[Pairing] = &[
     }),
     Pairing::Identical(Pair {
         job: "test",
-        tasks: &["test", "bench-build"],
+        tasks: &["test"],
         ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY_WASM, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        job: "bench-build",
+        tasks: &["bench-build"],
+        ci_only: &[CHECKOUT, STABLE, CACHE],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
@@ -183,6 +200,7 @@ const PAIRINGS: &[Pairing] = &[
             provision("uses: dtolnay/rust-toolchain@1.88.0"),
             CACHE,
         ],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
@@ -194,6 +212,7 @@ const PAIRINGS: &[Pairing] = &[
             CACHE,
             provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-hack@0.6.39"),
         ],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
@@ -226,12 +245,14 @@ const PAIRINGS: &[Pairing] = &[
         job: "corpus-smoke",
         tasks: &["corpus-smoke"],
         ci_only: &[CHECKOUT_LFS, STABLE, CACHE],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
         job: "github-api",
         tasks: &["github-api"],
         ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY_WASM, CACHE],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
@@ -244,6 +265,7 @@ const PAIRINGS: &[Pairing] = &[
                 "uses: Swatinem/rust-cache@v2\nwith:\n  workspaces: |\n    examples/petstore\n    examples/petstore-macro",
             ),
         ],
+        job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
     Pairing::Identical(Pair {
