@@ -712,6 +712,83 @@ components:
     }
 }
 
+/// The same merge beside a third branch that the union's multi-category `type` array, which the
+/// cycle-closing members meet in themselves, leaves no variant: at `a` the sibling excludes a
+/// string enum (`W011`), whose own lowering inserted `S2aVariant2`; at `b` the meet narrows a
+/// nullable string enum to `null`, inserting `S2bVariant2Constrained`. Each position is the boxed
+/// component, as with no third branch, and neither type is emitted. The types are inserted, so
+/// the reservation branch's elision has something to elide; the output alone does not pin those
+/// calls, since the pass that withholds every unreached type once lowering ends removes them too
+/// (#1190).
+#[test]
+fn a_one_of_repeating_a_cycle_closing_ref_drops_the_branches_its_sibling_excludes() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      properties:
+        a:
+          type: [object, array]
+          oneOf:
+            - { $ref: '#/components/schemas/S2' }
+            - { $ref: '#/components/schemas/S2' }
+            - { type: string, enum: [x, y] }
+        b:
+          type: [object, array, 'null']
+          oneOf:
+            - { $ref: '#/components/schemas/S2' }
+            - { $ref: '#/components/schemas/S2' }
+            - { type: [string, 'null'], enum: [x, null] }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{entry}: the merged self-reference must raise no error: {report:#?}"
+        );
+        for property in ["a", "b"] {
+            let pointer = format!("/components/schemas/S2/properties/{property}");
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == pointer
+                        && d.message.contains("same generated type")
+                }),
+                "{entry}: `{property}`'s repeated member must be reported as `W001`: {report:#?}"
+            );
+        }
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::DeclarationHasNoEffect
+                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                    && d.message.contains("union member 2 cannot satisfy")
+            }),
+            "{entry}: the excluded string branch must be reported as `W011`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    for property in ["a", "b"] {
+        assert!(
+            types.contains(&format!("pub {property}: Option<Box<S2>>")),
+            "`S2.{property}` must be the boxed component itself: {types}"
+        );
+    }
+    for dropped in ["S2a", "S2b", "Variant"] {
+        assert!(
+            !types.contains(dropped),
+            "no type may be emitted for a merged union or its dropped branch (`{dropped}`): {types}"
+        );
+    }
+}
+
 /// The same merge where the union is a component's whole body and its one member closes a cycle
 /// through another component (`A = B | B`, `B.x -> A`) is a nullable alias for `B`, as the
 /// one-member spelling `A = B` is: the reference to `A` taken while `B` is open is `B` itself,
