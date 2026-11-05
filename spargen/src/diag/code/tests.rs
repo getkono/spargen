@@ -1208,7 +1208,14 @@ fn every_enumerated_case_has_a_frontend_fixture() {
             let own = fn_source(&lines, fn_at);
             let mut fixture = own.clone();
             for (callee, source) in &functions {
-                if *callee != name && own.contains(&format!("{callee}(")) {
+                let call = format!("{callee}(");
+                let calls = own.match_indices(&call).any(|(at, _)| {
+                    own[..at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|before| !before.is_alphanumeric() && before != '_')
+                });
+                if *callee != name && calls {
                     fixture.push('\n');
                     fixture.push_str(source);
                 }
