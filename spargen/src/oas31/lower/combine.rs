@@ -535,7 +535,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // words. Whether the target is still being lowered here can depend on the order the
             // document declares the two in, so the refusal is recorded for the next pass to
             // lower this body first (`record_open_member`).
-            if let Some(&(target, _)) = self.in_progress.get(name) {
+            if let Some(target) = self.open_component_root(name) {
                 self.record_open_member(target);
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
@@ -1075,7 +1075,7 @@ impl LowerCtx<'_, '_> {
                 // is one whose body is already being expanded as a union member, which reserves
                 // nothing: the gather lowers it through its reservation, where a recursion stops.
                 let name = reference.strip_prefix("#/components/schemas/")?;
-                if self.in_progress.contains_key(name)
+                if self.open_component_root(name).is_some()
                     || self.union_member_stack.iter().any(|open| open == name)
                 {
                     return None;

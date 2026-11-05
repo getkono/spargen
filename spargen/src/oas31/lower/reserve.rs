@@ -1,10 +1,9 @@
 //! Component, remote and bundle-target reservations: typing a `$ref` target once, and the
 //! back-edges and multi-pass nullability settlement a recursive reference needs.
 
-use std::collections::HashMap;
-
 use crate::diag::{Code, Diagnostic, Provenance};
 use crate::ir::{Ty, TypeId, TypeKind};
+use crate::oas31::deserialize::warn_ref_default_dropped;
 use crate::oas31::{RefOr, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
@@ -13,9 +12,6 @@ use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
 use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
 use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
-
-/// One of a reservation frame's two memos: a key to its root id and nullability.
-type ReservationMemo = HashMap<String, (TypeId, bool)>;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower the schema `$ref` `reference`, written at `at`, to its shared, cycle-safe type through
@@ -89,7 +85,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// reservation and returns a boxed back-edge rather than descending again. Every cycle closes in
     /// one step, every target is lowered once, and only genuinely new targets consume depth. The two
     /// memos do not compete for one target: a resolved reference that lands on a root component
-    /// comes straight back here by name, so `components` stays the single identity for those.
+    /// comes straight back here by name, so the component's name stays the single identity for
+    /// those.
     pub(super) fn ensure_component(
         &mut self,
         name: &str,
@@ -155,12 +152,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // already reject.
             return self.reject_component_alias(at, "schema", &reference);
         };
-        let RefOr::Item(schema) = component else {
-            let reference = match component {
-                RefOr::Ref(reference) => reference.clone(),
-                RefOr::Item(_) => return None,
-            };
-            return self.chain_component_alias(name, &reference.reference, &reference.provenance);
+        let schema = match component {
+            RefOr::Ref(alias) => {
+                return self.chain_component_alias(name, &alias.reference, &alias.provenance);
+            }
+            RefOr::Item(schema) => schema,
         };
         // A `$ref` whose siblings bear no shape — `description`, `title`, a validation keyword such
         // as `maxLength` — is the same alias spelled with annotations beside it: the parser keeps any
@@ -180,24 +176,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
                 self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
-                    let at = crate::diag::Provenance::new(
+                    let at = Provenance::new(
                         schema.provenance.pointer.push("default"),
                         Some(default.span),
                     );
-                    Diagnostic::warning(Code::SchemaDefaultNotApplied, at)
-                        .message(
-                            "a schema `default` declared alongside `$ref` is dropped when the \
-                             reference resolves and is not applied",
-                        )
-                        .remedy(
-                            "move the default onto the referenced schema, or set the value \
-                             explicitly",
-                        )
-                        .emit(self.diags);
+                    warn_ref_default_dropped(at, self.diags);
                 }
-                let reference = reference.to_owned();
-                let provenance = schema.provenance.clone();
-                let alias = self.chain_component_alias(name, &reference, &provenance)?;
+                let alias = self.chain_component_alias(name, reference, &schema.provenance)?;
                 self.record_ref_xml(schema, alias.id);
                 return Some(alias);
             }
@@ -220,32 +205,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.lower_into_reservation(Reservation::Component(name.to_owned()), None, schema, name)
     }
 
-    /// The two memos `reservation`'s frame keeps, each keyed by [`Reservation::key`]: the types it
-    /// has finished, and the reserved ids (with their provisional nullability) of the bodies it is
-    /// still lowering.
-    fn reservation_memos(
-        &mut self,
-        reservation: &Reservation,
-    ) -> (&mut ReservationMemo, &mut ReservationMemo) {
-        match reservation {
-            Reservation::Component(_) => (&mut self.components, &mut self.in_progress),
-            Reservation::Remote(_) => (&mut self.remote_components, &mut self.remote_in_progress),
-            Reservation::Resolved(_) => (
-                &mut self.resolved_components,
-                &mut self.resolved_in_progress,
-            ),
-        }
-    }
-
     /// The reserved id and provisional nullability of `reservation` when its body is being
     /// lowered right now, recording that the provisional value was read: a body that then decides
     /// otherwise makes this pass stale ([`Self::settle_reservation`]).
     fn read_open_reservation(&mut self, reservation: Reservation) -> Option<(TypeId, bool)> {
-        let entry = self
-            .reservation_memos(&reservation)
-            .1
-            .get(reservation.key())
-            .copied();
+        let entry = self.in_progress.get(&reservation).copied();
         if entry.is_some() {
             self.guessed.insert(reservation);
         }
@@ -259,11 +223,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// finishes, and its nullability is provisional, so the read is recorded for the body to check
     /// when it finishes. `None` for a reservation never opened.
     fn reserved_type(&mut self, reservation: Reservation) -> Option<Ty> {
-        if let Some(&(id, nullable)) = self
-            .reservation_memos(&reservation)
-            .0
-            .get(reservation.key())
-        {
+        if let Some(&(id, nullable)) = self.finished.get(&reservation) {
             return Some(Ty {
                 id,
                 nullable,
@@ -280,7 +240,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower `schema`, the body `reservation` names, once: reserve its root id, lower the body
     /// against that reservation, lift the root def into the reserved slot, and record the finished
-    /// type in the frame's memo. The one lifecycle a root component, a remote target and a bundle
+    /// type in [`Self::finished`]. The one lifecycle a root component, a remote target and a bundle
     /// target share; `hint` names the root def, and `via` is how a bundle target was opened
     /// ([`Opening`]).
     fn lower_into_reservation(
@@ -304,19 +264,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
-        self.reservation_memos(&reservation).1.insert(
-            reservation.key().to_owned(),
-            (root_id, provisional_nullable),
-        );
+        self.in_progress
+            .insert(reservation.clone(), (root_id, provisional_nullable));
         self.open_reservations.push(Opening {
             reservation: reservation.clone(),
             via,
         });
         let lowered = self.lower_reserved_body(schema, hint);
         self.open_reservations.pop();
-        self.reservation_memos(&reservation)
-            .1
-            .remove(reservation.key());
+        self.in_progress.remove(&reservation);
         self.settle_reservation(
             reservation.clone(),
             provisional_nullable,
@@ -355,10 +311,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // cannot see, and naming a schema must not change what it means. Cached
         // under the same value, so a direct return and a later cache hit still yield an identical
         // `Ty`.
-        let key = reservation.key().to_owned();
-        self.reservation_memos(&reservation)
-            .0
-            .insert(key, (root_id, ty.nullable));
+        self.finished.insert(reservation, (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -399,7 +352,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: &str,
         at: &crate::diag::Provenance,
     ) -> Option<Ty> {
-        if !self.component_alias_stack.insert(name.to_owned()) {
+        let alias = Reservation::Component(name.to_owned());
+        if !self.alias_stack.insert(alias.clone()) {
             // E004 case: cycle
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
@@ -409,10 +363,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         }
         let ty = self.ensure_reference(reference, at, name);
-        self.component_alias_stack.remove(name);
+        self.alias_stack.remove(&alias);
         if let Some(ty) = ty {
-            self.components
-                .insert(name.to_owned(), (ty.id, ty.nullable));
+            self.finished.insert(alias, (ty.id, ty.nullable));
         }
         ty
     }
@@ -481,7 +434,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare `$ref` plus any
     /// number of null-only members, carrying no shape, discriminator, sibling `$ref` or `default`
     /// of its own — and only when that reference resolves to a target whose body is currently being
-    /// lowered, in any of the three frames. The question is asked of the resolved *target*, not of
+    /// lowered, whichever kind of [`Reservation`] it is. The question is asked of the resolved *target*, not of
     /// the reference's spelling: see [`Self::open_reservation_for_ref`].
     ///
     /// Both halves of that narrowness are load-bearing. Recognising an alias whose target is
@@ -489,7 +442,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// ordinary path re-emits the target's kind under this component's own name, and that named
     /// type is part of the published API, so deleting it is a breaking change to output with
     /// nothing wrong with it. And the answer is only true while the target is open, which is why
-    /// nothing is written to [`Self::components`]: a cached hit returns `boxed: false`, and a second
+    /// nothing is written to [`Self::finished`]: a cached hit returns `boxed: false`, and a second
     /// reference taken during the same cycle would then emit an infinitely sized type. Each
     /// reference re-derives it; the memo stays the target's own name.
     fn nullable_alias_back_edge(&mut self, schema: &Schema) -> Option<Ty> {
@@ -543,9 +496,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The still-open reservation `reference`, written at `at`, refers to — under any spelling.
     ///
     /// A `$ref` is identified by the target it resolves to, not by the characters used to write it.
-    /// The three in-progress maps are each keyed by a different spelling of that identity, so this
+    /// Each kind of [`Reservation`] is keyed by a different spelling of that identity, so this
     /// mirrors [`Self::lower_schema`]'s own `$ref` dispatch exactly: whichever `ensure_*` the
-    /// reference would be lowered through is the map consulted for it. Keying on the literal
+    /// reference would be lowered through is the kind of reservation looked up for it. Keying on the literal
     /// `#/components/schemas/` prefix would make a target's identity depend on the reference
     /// site's spelling, and one schema could then be both an alias and an unrepresentable shape in
     /// the same document.
@@ -631,7 +584,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // root for. Chain to its target under a cycle guard (so an alias loop terminates) rather
         // than through the reserve/pop machinery, which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
-            if !self.remote_alias_stack.insert(reference.to_owned()) {
+            let alias = Reservation::Remote(reference.to_owned());
+            if !self.alias_stack.insert(alias.clone()) {
                 // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!("remote $ref `{reference}` forms an alias cycle"))
@@ -639,7 +593,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
             let ty = self.lower_schema(&schema, reference);
-            self.remote_alias_stack.remove(reference);
+            self.alias_stack.remove(&alias);
             return ty;
         }
         // The union spelling of that same alias: a body that is `oneOf`/`anyOf` over one `$ref`
@@ -686,7 +640,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// on the same key — self-recursion, mutual recursion, or a diamond — finds it and returns a
     /// boxed back-edge instead of descending again. Every cycle therefore closes in one step. A
     /// chain of bare-`$ref` aliases has no body to reserve against and is guarded separately by
-    /// [`Self::resolved_alias_stack`], exactly as `remote_alias_stack` guards the remote one. Only
+    /// [`Self::alias_stack`], exactly as the remote one is. Only
     /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
     /// nothing repeated can accumulate against it.
     ///
@@ -740,11 +694,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Chain to its target under a cycle guard rather than through the reserve/pop machinery,
         // which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
-            if !self.resolved_alias_stack.insert(key.clone()) {
+            let alias = Reservation::Resolved(key);
+            if !self.alias_stack.insert(alias.clone()) {
                 return self.reject_schema_alias_cycle(at.clone(), reference);
             }
             let ty = self.lower_schema(&schema, &hint);
-            self.resolved_alias_stack.remove(&key);
+            self.alias_stack.remove(&alias);
             return ty;
         }
         // The union spelling of that same alias — see the matching arm in [`Self::ensure_remote`].
@@ -767,25 +722,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.reservation_roots().any(|root| root == id)
     }
 
-    /// The root id of every reservation, finished or still being lowered, across every
-    /// [`Reservation`] frame: both memos [`Self::reservation_memos`] hands out for each.
+    /// The root id of every reservation, finished or still being lowered.
     pub(super) fn reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
-        self.components
+        self.finished
             .values()
-            .chain(self.remote_components.values())
-            .chain(self.resolved_components.values())
             .map(|&(root, _)| root)
             .chain(self.open_reservation_roots())
     }
 
-    /// The root id of every reservation whose body is still being lowered: the in-progress memo
-    /// of each [`Reservation`] frame.
+    /// The root id of every reservation whose body is still being lowered.
     fn open_reservation_roots(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.in_progress.values().map(|&(root, _)| root)
+    }
+
+    /// The reserved root id of the root component `name` while its body is being lowered.
+    pub(super) fn open_component_root(&self, name: &str) -> Option<TypeId> {
         self.in_progress
-            .values()
-            .chain(self.remote_in_progress.values())
-            .chain(self.resolved_in_progress.values())
-            .map(|&(root, _)| root)
+            .get(&Reservation::Component(name.to_owned()))
+            .map(|&(id, _)| id)
     }
 
     /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
@@ -794,8 +748,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
     /// `graph.get(id).kind`. That kind is [`TypeKind::Reserved`], which `push_ref_member` names in
     /// its own `match` and refuses, so the refusal lives in the function rather than in each
-    /// caller. Every id in the three in-progress maps is such a placeholder, and the
-    /// only safe thing to do with one is refuse to read it.
+    /// caller. Every id in [`Self::in_progress`] is such a placeholder, and the only safe thing to
+    /// do with one is refuse to read it.
     ///
     /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
     /// belonging to the schema at *this* provenance" wants [`Self::reservation_at`] instead; the two
@@ -810,8 +764,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether the graph currently holds `id` as a [`TypeKind::Reserved`] placeholder.
     ///
     /// A third question, narrower than [`Self::is_in_progress_root`] in one way and wider in
-    /// another: it asks what the graph *holds* rather than which maps are open, so it answers for a
-    /// reservation taken by any of the three in-progress maps without having to name them, and it
+    /// another: it asks what the graph *holds* rather than which reservations are open, and it
     /// answers `false` for an id whose body has since been filled. It exists so a caller can refuse
     /// to **clone** a placeholder's kind: a clone inserts a second reservation that nothing will
     /// ever `fill`, and `Api::check_invariants` reports that as `E011` against a document that is
@@ -834,20 +787,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// reference is nested inside a property rather than being the component itself.
     pub(super) fn reservation_at(&self, provenance: &Provenance) -> Option<TypeId> {
         if let Some(key) = resolved_identity(provenance) {
-            if let Some(&(id, _)) = self.resolved_in_progress.get(&key) {
+            if let Some(&(id, _)) = self.in_progress.get(&Reservation::Resolved(key.clone())) {
                 return Some(id);
             }
-            // A remote frame keys on the URL it was reached by rather than on its target's
+            // A remote reservation keys on the URL it was reached by rather than on its target's
             // `file#pointer`, so a string comparison against this provenance can never match one.
-            // Canonicalise its keys to the same identity instead of reconstructing a URL from a
+            // Canonicalise its key to the same identity instead of reconstructing a URL from a
             // file id: a URL is only one of the spellings that reaches a vendored document, and
-            // the map holds at most one entry per open recursion frame. Without it, a remote body
-            // whose union collapses onto an open remote reservation passes the guard below and
-            // reaches `TypeGraph::fill` with an id it never reserved, instead of being reported
-            // here. Only a vendored document whose whole body is
-            // the union matches here, which
-            // `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` pins.
-            for (reference, &(id, _)) in &self.remote_in_progress {
+            // there is at most one open remote reservation per recursion frame. Without it, a
+            // remote body whose union collapses onto an open remote reservation passes the guard
+            // below and reaches `TypeGraph::fill` with an id it never reserved, instead of being
+            // reported here. Only a vendored document whose whole body is the union matches here,
+            // which `refs_remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected`
+            // pins.
+            for (reservation, &(id, _)) in &self.in_progress {
+                let Reservation::Remote(reference) = reservation else {
+                    continue;
+                };
                 let matches = self
                     .resolver
                     .reference_identity(reference, &self.document.provenance)
@@ -863,7 +819,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         provenance
             .span
             .and_then(|span| self.root_component_at(span.file, &provenance.pointer))
-            .and_then(|name| self.in_progress.get(name))
-            .map(|&(id, _)| id)
+            .and_then(|name| self.open_component_root(name))
     }
 }

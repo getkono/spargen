@@ -108,8 +108,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         reference
             .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.in_progress.get(name))
-            .is_some_and(|&(id, _)| id == own)
+            .and_then(|name| self.open_component_root(name))
+            .is_some_and(|id| id == own)
     }
 }
 
@@ -125,12 +125,8 @@ impl LowerCtx<'_, '_> {
             return;
         };
         let opened = self.open_reservations.iter().find(|open| {
-            let memo = match &open.reservation {
-                Reservation::Component(_) => &self.in_progress,
-                Reservation::Remote(_) => &self.remote_in_progress,
-                Reservation::Resolved(_) => &self.resolved_in_progress,
-            };
-            memo.get(open.reservation.key())
+            self.in_progress
+                .get(&open.reservation)
                 .is_some_and(|&(id, _)| id == target)
         });
         let Some(target) = opened else {

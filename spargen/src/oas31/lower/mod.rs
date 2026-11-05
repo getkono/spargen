@@ -181,8 +181,9 @@ pub(crate) fn lower(
     }
 }
 
-/// One reservation's identity, in whichever of the three memos holds it: a root component by name,
-/// a remote target by absolute `url#fragment`, a bundle target by resolved `file#pointer`.
+/// One reservation's identity, the key [`LowerCtx::finished`], [`LowerCtx::in_progress`] and
+/// [`LowerCtx::alias_stack`] hold it under: a root component by name, a remote target by absolute
+/// `url#fragment`, a bundle target by resolved `file#pointer`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Reservation {
     Component(String),
@@ -191,7 +192,8 @@ enum Reservation {
 }
 
 impl Reservation {
-    /// The key both of its frame's memos hold it under: the name, the URL, or the `file#pointer`.
+    /// What identifies it among reservations of its kind: the name, the URL, or the
+    /// `file#pointer`.
     fn key(&self) -> &str {
         match self {
             Self::Component(key) | Self::Remote(key) | Self::Resolved(key) => key,
@@ -241,15 +243,9 @@ fn lower_pass(
         resolver,
         diags,
         graph: TypeGraph::default(),
-        components: HashMap::new(),
+        finished: HashMap::new(),
         in_progress: HashMap::new(),
-        component_alias_stack: HashSet::new(),
-        remote_components: HashMap::new(),
-        remote_in_progress: HashMap::new(),
-        remote_alias_stack: HashSet::new(),
-        resolved_components: HashMap::new(),
-        resolved_in_progress: HashMap::new(),
-        resolved_alias_stack: HashSet::new(),
+        alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
         union_member_stack: Vec::new(),
@@ -842,49 +838,30 @@ struct LowerCtx<'a, 'doc> {
     resolver: &'a Resolver<'doc>,
     diags: &'a mut Diagnostics,
     graph: TypeGraph,
-    /// Lowered components, mapped to their root id and nullability. Nullability is carried so a
-    /// `$ref` consumer wraps the type in `Option` when the component itself is nullable (a
-    /// `"null"` in its type array, or a `null` enum/const member) — otherwise a null-mixed enum
-    /// used via `$ref` would emit a non-`Option` field that rejects a conforming `null` payload.
-    components: HashMap<String, (TypeId, bool)>,
-    /// Components currently being lowered, mapped to the id reserved for their root and their
-    /// provisional nullability (an earlier pass's settled answer, else a reserve-time guess from
-    /// the schema). A `$ref` that re-enters a name still in this map is a cycle-closing back-edge
-    /// and is boxed against the reserved id; a guess it read that the body contradicts is recorded
-    /// in [`Self::revisions`], and [`lower`] lowers again until each back-edge carries the same
-    /// nullability a completed lowering does.
-    in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards chains of component aliases (`A -> B -> A`) that do not have a concrete schema body
-    /// to enter the normal reserve/box recursion path.
-    component_alias_stack: HashSet<String>,
-    /// The remote-`$ref` analogue of [`Self::components`], keyed by the absolute `url#fragment`. A
-    /// remote ref resolves to a fresh owned schema each call, so — unlike local components — it has
-    /// no `document`-level identity; this map gives it one, so repeated remote uses share one
-    /// generated type and, together with [`Self::remote_in_progress`], recursion terminates.
-    remote_components: HashMap<String, (TypeId, bool)>,
-    /// Remote refs currently being lowered (same role as [`Self::in_progress`] for components): a
-    /// re-entered `url#fragment` is a cycle-closing back-edge and is boxed against its reserved id.
-    remote_in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
-    /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
-    remote_alias_stack: HashSet<String>,
-    /// The bundle-`$ref` analogue of [`Self::components`], keyed by the resolved target's own
-    /// `file#pointer` (see [`resolved_identity`]). `Resolver::resolve` parses a fresh owned schema
-    /// on every call, so — exactly as for a remote ref — a relative-file reference and a sub-file's
-    /// own `#/components/schemas/<name>` have no `document`-level identity of their own. This map
-    /// gives them one, so repeated uses of one target share one generated type instead of producing
-    /// a fresh type per reference site.
-    resolved_components: HashMap<String, (TypeId, bool)>,
-    /// Bundle refs currently being lowered (same role as [`Self::in_progress`]): a re-entered
-    /// `file#pointer` is a cycle-closing back-edge and is boxed against its reserved id, so a
-    /// recursive sub-file schema terminates and generates rather than walking to
-    /// [`MAX_SCHEMA_DEPTH`] and rejecting.
-    resolved_in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
-    /// against; the counterpart of [`Self::remote_alias_stack`].
-    resolved_alias_stack: HashSet<String>,
+    /// Every reservation lowered so far, mapped to its root id and nullability, keyed by
+    /// [`Reservation`]: a root component by name, a remote target by absolute `url#fragment`, a
+    /// bundle target by resolved `file#pointer` ([`resolved_identity`]). Every use of one target
+    /// shares the one type recorded here. A remote ref or a bundle ref resolves to a fresh owned
+    /// schema each call, so it has no `document`-level identity of its own, and this key gives it
+    /// one. Nullability is carried so a `$ref` consumer wraps the type in `Option` when the target
+    /// itself is nullable (a `"null"` in its type array, or a `null` enum/const member); otherwise a
+    /// null-mixed enum used via `$ref` would emit a non-`Option` field that rejects a conforming
+    /// `null` payload.
+    finished: HashMap<Reservation, (TypeId, bool)>,
+    /// Reservations whose bodies are being lowered right now, mapped to the id reserved for their
+    /// root and their provisional nullability (an earlier pass's settled answer, else a
+    /// reserve-time guess from the schema). A `$ref` that re-enters one is a cycle-closing
+    /// back-edge and is boxed against the reserved id, so a recursive schema terminates rather
+    /// than walking to [`MAX_SCHEMA_DEPTH`] and rejecting; a guess it read that the body
+    /// contradicts is recorded in [`Self::revisions`], and [`lower`] lowers again until each
+    /// back-edge carries the same nullability a completed lowering does.
+    in_progress: HashMap<Reservation, (TypeId, bool)>,
+    /// The bare-`$ref` aliases being resolved right now (a component, remote document or bundle
+    /// target whose whole body is a `$ref`), which have no body to reserve a root against: a chain
+    /// of them that loops back is found here and rejected as `E004` instead of recursing forever.
+    alias_stack: HashSet<Reservation>,
     /// What a bundle-`$ref` `allOf` member contributes, keyed by the resolved target's own
-    /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
+    /// `file#pointer` (see [`resolved_identity`]): the [`Self::finished`] analogue for the
     /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
     /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
     /// referencing a shared type, and re-expanding the target at every use would cost a branching

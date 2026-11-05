@@ -14,8 +14,8 @@ use super::{
 mod keywords;
 mod schema;
 
-pub(super) use schema::parse_schema;
 use schema::parse_schema_ref_or;
+pub(super) use schema::{parse_schema, warn_ref_default_dropped};
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 

@@ -221,7 +221,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let admission = self.null_admission(schema);
         // A union of this lowering's own whose every variant is the exact null type accepts `null`
         // alone: it is the null type, as the sibling spelling collapses such an `anyOf` (#625).
-        if ty.id.0 >= mark && !self.is_component_def(ty.id) {
+        if ty.id.0 >= mark && !self.is_component_root(ty.id) {
             if let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) {
                 if union
                     .variants
@@ -286,7 +286,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Nested unions of this lowering's own are cleared alike. A union left with one variant
     /// becomes that variant's kind in place; one left with none is [`Settled::Emptied`] and kept.
     fn clear_variant_nulls(&mut self, id: TypeId, mark: u32, drop_exact_nulls: bool) -> Settled {
-        if id.0 < mark || self.is_component_def(id) {
+        if id.0 < mark || self.is_component_root(id) {
             return Settled::Kept;
         }
         let Some(TypeKind::Union(union)) = self.graph.get(id).map(|def| def.kind.clone()) else {
@@ -363,17 +363,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         settled
     }
 
-    /// Whether `id` is the type of a component, a remote or a resolved target, finished or still
-    /// being lowered: a type other uses share, which one use's lowering does not change.
-    fn is_component_def(&self, id: TypeId) -> bool {
-        self.reservation_roots().any(|component| component == id)
-    }
-
     /// Whether `ty` is an `anyOf` union this lowering inserted (at or above `mark`), no component,
     /// with a variant that accepts `null` ([`Self::carries_null`]).
     fn any_of_variant_carries_null(&self, ty: Ty, mark: u32) -> bool {
         ty.id.0 >= mark
-            && !self.is_component_def(ty.id)
+            && !self.is_component_root(ty.id)
             && matches!(
                 self.graph.get(ty.id).map(|def| &def.kind),
                 Some(TypeKind::Union(Union {
