@@ -738,6 +738,61 @@ fn lock_reports_what_it_wrote_and_exits_zero() {
     assert!(lock.is_file(), "the lock file is written under JSON too");
 }
 
+/// A spec flag `lock` does not read is named in a warning on stderr, in each format, and the lock
+/// still runs: stdout carries the same one report.
+#[test]
+fn lock_warns_on_the_spec_flags_it_ignores() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = spec_arg(temp.path(), "openapi.yaml", ONE_OPERATION);
+    let lock = temp.path().join("spargen.lock");
+    let ignored = ["--carve", "--uuid", "--omit-path", "/pets"];
+
+    let args: Vec<&str> = ["lock", spec.as_str()].into_iter().chain(ignored).collect();
+    let (status, stdout, stderr) = spargen(temp.path(), &args);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert_eq!(
+        stderr,
+        "warning: `spargen lock` ignores --carve, --uuid, --omit-path: it reads only --config \
+         and --batch-cap, and fetches every remote $ref the spec reaches\n"
+    );
+    assert!(stdout.contains(lock.to_str().unwrap()), "{stdout}");
+    assert!(lock.is_file(), "the warning does not stop the lock");
+
+    std::fs::remove_file(&lock).unwrap();
+    let args: Vec<&str> = ["lock", spec.as_str(), "--format", "json"]
+        .into_iter()
+        .chain(ignored)
+        .collect();
+    let (status, stdout, stderr) = spargen(temp.path(), &args);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    let warning = json(&stderr);
+    assert_eq!(
+        warning["ignored"],
+        serde_json::json!(["--carve", "--uuid", "--omit-path"]),
+        "{stderr}"
+    );
+    assert!(warning["warning"].is_string(), "{stderr}");
+    assert_eq!(
+        json(&stdout)["lock_path"],
+        lock.to_str().unwrap(),
+        "{stdout}"
+    );
+
+    // The two flags it reads warn about nothing.
+    let (status, stdout, stderr) = spargen(
+        temp.path(),
+        &["lock", &spec, "--batch-cap", "5", "--config", "none.toml"],
+    );
+    assert_eq!(status, Some(3), "stdout {stdout} stderr {stderr}");
+    assert!(
+        !stderr.contains("warning"),
+        "`--config` and `--batch-cap` are read: {stderr}"
+    );
+    let (status, stdout, stderr) = spargen(temp.path(), &["lock", &spec, "--batch-cap", "5"]);
+    assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
 #[test]
 fn lock_exits_one_on_a_spec_it_cannot_read() {
     // No network: an unreadable root fails before anything is fetched. The refused-fetch arm is

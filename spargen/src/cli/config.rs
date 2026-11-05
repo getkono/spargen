@@ -251,6 +251,61 @@ mod tests {
         }
     }
 
+    /// `lock` names every spec flag but `--config` and `--batch-cap` as ignored, each once
+    /// however often it is repeated, and names none when only those two are given.
+    #[test]
+    fn lock_names_exactly_the_spec_flags_it_ignores() {
+        let ignored = |flags: &[&str]| {
+            let cli = Cli::try_parse_from(
+                ["spargen", "lock", "openapi.yaml"]
+                    .into_iter()
+                    .chain(flags.iter().copied()),
+            )
+            .unwrap_or_else(|error| panic!("{flags:?} did not parse: {error}"));
+            let Command::Lock(args) = cli.command else {
+                unreachable!("parsed as `lock`")
+            };
+            args.options.flags_lock_ignores()
+        };
+        assert!(ignored(&[]).is_empty());
+        assert!(ignored(&["--config", "spargen.toml", "--batch-cap", "5"]).is_empty());
+        for flag in [
+            "--carve",
+            "--no-carve",
+            "--uuid",
+            "--no-uuid",
+            "--time",
+            "--no-time",
+            "--open-narrowing",
+            "--no-open-narrowing",
+        ] {
+            assert_eq!(ignored(&[flag]), [flag]);
+        }
+        for (flag, value) in [
+            ("--error-body-cap", "10"),
+            ("--omit-path", "/pets"),
+            ("--omit-operation", "get /pets"),
+            ("--omit-component", "schema:Pet"),
+            ("--omit-pointer", "/paths"),
+        ] {
+            assert_eq!(ignored(&[flag, value]), [flag]);
+        }
+        assert_eq!(
+            ignored(&[
+                "--omit-path",
+                "/a",
+                "--uuid",
+                "--batch-cap",
+                "5",
+                "--omit-path",
+                "/b",
+                "--carve",
+            ]),
+            ["--carve", "--uuid", "--omit-path"],
+            "declaration order, each flag once"
+        );
+    }
+
     #[test]
     fn both_flags_of_a_switch_pair_are_a_usage_error() {
         for (on, off) in [

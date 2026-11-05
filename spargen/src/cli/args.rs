@@ -24,7 +24,8 @@ pub(crate) enum Command {
     /// Fetch, vendor, and hash-pin remote `$ref`s into `spargen.lock` (the only networked step).
     ///
     /// It accepts every spec flag, as `check` does, but of them reads only `--config` and
-    /// `--batch-cap`: every remote `$ref` the spec reaches is fetched whatever the rest say.
+    /// `--batch-cap`: every remote `$ref` the spec reaches is fetched whatever the rest say, and
+    /// each other spec flag given is named in a warning on stderr.
     Lock(LockArgs),
     /// Show extended documentation for a diagnostic code.
     Explain(ExplainArgs),
@@ -90,6 +91,52 @@ pub(crate) struct SpecArgs {
     /// Omit an RFC 6901 pointer (repeatable), e.g. `--omit-pointer "[file#]/pointer"`.
     #[arg(long = "omit-pointer", value_name = "[file#]/pointer")]
     pub(crate) omit_pointer: Vec<String>,
+}
+
+impl SpecArgs {
+    /// The flags given that `spargen lock` does not read, each named once in declaration order.
+    ///
+    /// `lock` reads `--config` (whose file can set `batch_cap`) and `--batch-cap`; every other
+    /// flag here shapes what is generated, and `vendor` fetches every remote `$ref` the spec
+    /// reaches whatever they say. The destructuring is exhaustive, so a flag added to this struct
+    /// does not compile until it is classified here.
+    pub(crate) fn flags_lock_ignores(&self) -> Vec<&'static str> {
+        let Self {
+            config: _,
+            batch_cap: _,
+            carve,
+            no_carve,
+            uuid,
+            no_uuid,
+            time,
+            no_time,
+            error_body_cap,
+            open_narrowing,
+            no_open_narrowing,
+            omit_path,
+            omit_operation,
+            omit_component,
+            omit_pointer,
+        } = self;
+        [
+            (*carve, "--carve"),
+            (*no_carve, "--no-carve"),
+            (*uuid, "--uuid"),
+            (*no_uuid, "--no-uuid"),
+            (*time, "--time"),
+            (*no_time, "--no-time"),
+            (error_body_cap.is_some(), "--error-body-cap"),
+            (*open_narrowing, "--open-narrowing"),
+            (*no_open_narrowing, "--no-open-narrowing"),
+            (!omit_path.is_empty(), "--omit-path"),
+            (!omit_operation.is_empty(), "--omit-operation"),
+            (!omit_component.is_empty(), "--omit-component"),
+            (!omit_pointer.is_empty(), "--omit-pointer"),
+        ]
+        .into_iter()
+        .filter_map(|(given, flag)| given.then_some(flag))
+        .collect()
+    }
 }
 
 /// Arguments for `spargen check`.
