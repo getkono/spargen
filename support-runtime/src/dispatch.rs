@@ -204,7 +204,7 @@ pub async fn decode_success_with<T>(
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let status = response.status();
     let headers = std::mem::take(response.headers_mut());
-    let body = response.bytes().await.map_err(Error::from_reqwest)?;
+    let body = response.bytes().await.map_err(Error::from_body_read)?;
     match decode(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
         Err(path) => {
@@ -415,7 +415,7 @@ async fn read_capped<E>(
     let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
     while buffered.len() <= cap {
         // One byte past the cap is enough to know the remainder is being dropped.
-        match response.chunk().await.map_err(Error::from_reqwest)? {
+        match response.chunk().await.map_err(Error::from_body_read)? {
             Some(chunk) => buffered.extend_from_slice(&chunk),
             None => break,
         }
@@ -434,7 +434,7 @@ async fn read_capped<E>(
 #[cfg(target_arch = "wasm32")]
 async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
     let cap = core.config().max_error_body;
-    let bytes = response.bytes().await.map_err(Error::from_reqwest)?;
+    let bytes = response.bytes().await.map_err(Error::from_body_read)?;
     Ok(cap_body(bytes, cap))
 }
 

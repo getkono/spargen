@@ -451,6 +451,77 @@ fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
     );
 }
 
+/// A body stream that answers its first poll with `error`.
+struct FailingBody(Option<std::io::Error>);
+
+impl futures_core::Stream for FailingBody {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.0.take().map(Err))
+    }
+}
+
+/// The error reqwest reports when reading a body fails with an I/O error of `kind`.
+fn failed_body_read(kind: std::io::ErrorKind) -> reqwest::Error {
+    let body = reqwest::Body::wrap_stream(FailingBody(Some(std::io::Error::new(
+        kind,
+        "body read failed",
+    ))));
+    crate::tests::poll_ready(crate::tests::response(200, body).bytes())
+        .expect_err("the body fails to read")
+}
+
+/// `from_body_read` reads the I/O error under a failed body read: a connection that gave out is
+/// a transient `InterruptedBody`, and corrupt or malformed bytes (what a decompressor or a
+/// chunked decoder reports) stay the permanent `Protocol` that `from_reqwest` gives every
+/// decode-kind error, which it still does for each of them.
+#[test]
+fn a_failed_body_read_is_interrupted_exactly_when_the_connection_gave_out() {
+    use std::io::ErrorKind;
+    for (kind, interrupted) in [
+        (ErrorKind::ConnectionReset, true),
+        (ErrorKind::ConnectionAborted, true),
+        (ErrorKind::BrokenPipe, true),
+        (ErrorKind::NotConnected, true),
+        (ErrorKind::UnexpectedEof, true),
+        (ErrorKind::InvalidData, false),
+        (ErrorKind::InvalidInput, false),
+        (ErrorKind::Other, false),
+    ] {
+        let source = failed_body_read(kind);
+        assert!(
+            source.is_decode() && !source.is_timeout(),
+            "{kind:?}: {source:?}"
+        );
+        let error = Error::<ApiBody>::from_body_read(source);
+        if interrupted {
+            assert!(
+                matches!(error, Error::InterruptedBody(_)),
+                "{kind:?}: {error:?}"
+            );
+        } else {
+            assert!(matches!(error, Error::Protocol(_)), "{kind:?}: {error:?}");
+        }
+        assert_eq!(error.is_transient(), interrupted, "{kind:?}");
+        let classified = Error::<ApiBody>::from_reqwest(failed_body_read(kind));
+        assert!(matches!(classified, Error::Protocol(_)), "{kind:?}");
+    }
+}
+
+/// An error that is neither body- nor decode-kind is classified as `from_reqwest` classifies it.
+#[test]
+fn from_body_read_defers_any_other_kind_to_from_reqwest() {
+    let error = Error::<ApiBody>::from_body_read(reqwest_error());
+    assert!(
+        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+        "{error:?}"
+    );
+}
+
 /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
 /// above is the one permanent class, so a transient source is needed beside it. A connect
 /// failure needs a socket and a reactor, which only the `blocking` feature's test below runs;

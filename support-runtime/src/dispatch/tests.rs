@@ -868,28 +868,27 @@ fn interrupted(status: u16) -> reqwest::Response {
     Chunks::new([Chunk::data("{\"partial\":"), Chunk::Fail]).into_response(status)
 }
 
-/// Assert `error` is what `Error::from_reqwest` makes of a failed body read, carrying no status,
-/// rather than a response class built from the bytes that did arrive. reqwest reports a body
-/// that fails while `bytes` or `chunk` reads it as a decode-kind error, which `from_reqwest`
-/// classifies as `Protocol`, and so as not transient, where the stream reports the same failure
-/// as a transient `InterruptedBody` (#1141).
+/// Assert `error` is an interrupted body carrying no status, rather than a response class built
+/// from the bytes that did arrive. reqwest reports a body that fails while `bytes` or `chunk`
+/// reads it as a decode-kind error; the connection dropping under it is the transient
+/// `InterruptedBody` the stream reports for the same failure (#1141), not `Protocol`.
 fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
-    let Error::Protocol(protocol) = error else {
+    let Error::InterruptedBody(transport) = error else {
         panic!("{reader}: {error:?}");
     };
-    let source = std::error::Error::source(protocol)
+    let source = std::error::Error::source(transport)
         .and_then(|source| source.downcast_ref::<reqwest::Error>())
-        .unwrap_or_else(|| panic!("{reader}: a protocol error wraps its reqwest error"));
+        .unwrap_or_else(|| panic!("{reader}: an interrupted body wraps its reqwest error"));
     assert!(source.is_decode(), "{reader}: {source:?}");
-    assert!(!error.is_transient(), "{reader}");
+    assert!(error.is_transient(), "{reader}");
     assert_eq!(error.status(), None, "{reader}");
 }
 
-/// An error response whose body fails mid-read is classified by `Error::from_reqwest`, the
-/// same as a failure before the response: whether its status is documented or not, it never
-/// becomes `Api`, `UnexpectedStatus` or `Decode` over the bytes that did arrive.
+/// An error response whose body fails mid-read is an interrupted body, the same as on a stream:
+/// whether its status is documented or not, it never becomes `Api`, `UnexpectedStatus` or
+/// `Decode` over the bytes that did arrive.
 #[test]
-fn an_error_body_that_fails_mid_read_classifies_through_from_reqwest() {
+fn an_error_body_that_fails_mid_read_is_an_interrupted_body() {
     let core = core();
     let documented = [StatusSpec::Exact(503)];
     match poll_ready(read_error_body::<Infallible>(&core, interrupted(503))) {
@@ -918,11 +917,11 @@ fn an_error_body_that_fails_mid_read_classifies_through_from_reqwest() {
     );
 }
 
-/// A success response whose body fails mid-read is a failed read, not `Decode`: the bytes never
-/// all arrived, so no value failed to decode, and the error carries neither the status nor the
-/// partial body a `Decode` would.
+/// A success response whose body fails mid-read is an interrupted body, not `Decode`: the bytes
+/// never all arrived, so no value failed to decode, and the error carries neither the status nor
+/// the partial body a `Decode` would.
 #[test]
-fn a_success_body_that_fails_mid_read_is_not_a_decode_error() {
+fn a_success_body_that_fails_mid_read_is_an_interrupted_body() {
     let core = core();
     assert_failed_read(
         &poll_ready(super::decode_success::<Created>(&core, interrupted(200))).unwrap_err(),
