@@ -5,12 +5,14 @@
 //!
 //! * JSON-category unions always lower to a typed enum, including overlapping numeric variants,
 //!   with repeated categories — which lower to one generated type, so a `oneOf` could decode none
-//!   of their values — merged into one variant and reported (`W001`);
+//!   of their values — merged into one variant and reported (`W001`), and a `null` branch admitting
+//!   `null` exactly when it is written once;
 //! * closed-object unions always lower to a typed enum, whether required keys prove a fast-path
 //!   dispatch or overlapping shapes require typed trial matching;
 //! * `allOf` merge reconciles exactly — a property declared with two different types is `E013`, and
 //!   an otherwise-consistent merge keeps the union of every member's fields (no field loss) with the
-//!   union of every member's `required`;
+//!   union of every member's `required` — and recursively, into the objects its members nest
+//!   ([`nested_merge`]);
 //! * the intersection laws (#474), read through the `syn`-based [`shape`] oracle: one conjunction
 //!   lowers alike in each of its spellings, an `allOf`'s member order changes nothing, an object
 //!   meet admits `null` exactly when its members do (and a nullable union refined to nothing but
@@ -42,6 +44,8 @@ use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 
 #[path = "lowering_props/declaration_order.rs"]
 mod declaration_order;
+#[path = "lowering_props/nested_merge.rs"]
+mod nested_merge;
 #[path = "lowering_props/null_parity.rs"]
 mod null_parity;
 mod oracles;
@@ -140,18 +144,25 @@ impl Category {
             Category::Number => "        - type: number",
             Category::Boolean => "        - type: boolean",
             Category::Array => "        - { type: array, items: { type: string } }",
+            Category::Object => {
+                "        - { type: object, required: [o], properties: { o: { type: object, required: [p], properties: { p: { type: string } } } } }"
+            }
+            Category::Null => "        - type: 'null'",
         }
     }
 
-    /// The [`shape`] of the Rust type the variant's schema lowers to.
-    fn shape(self) -> &'static str {
-        match self {
+    /// The [`shape`] of the Rust type the variant's schema lowers to; `None` for the `null` branch,
+    /// which makes a reference to the union `Option`al rather than adding a variant.
+    fn shape(self) -> Option<&'static str> {
+        Some(match self {
             Category::String => "String",
             Category::Integer => "i64",
             Category::Number => "f64",
             Category::Boolean => "bool",
             Category::Array => "Vec<String>",
-        }
+            Category::Object => "struct { o: struct { p: String [] [] } [] [] }",
+            Category::Null => return None,
+        })
     }
 }
 
@@ -169,9 +180,13 @@ fn union_shape(variants: BTreeSet<String>) -> String {
     format!("enum {{ {} }}", payloads.join(", "))
 }
 
+/// The union `U` of `variants`, and `Holder.p`, a required property referring to it, whose type
+/// says whether `U` admits `null`.
 fn category_union_spec(variants: &[Category]) -> String {
     let mut spec = String::from(
-        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    U:\n      oneOf:\n",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    \
+         Holder: { type: object, required: [p], properties: { p: { $ref: '#/components/schemas/U' } } }\n    \
+         U:\n      oneOf:\n",
     );
     for variant in variants {
         spec.push_str(variant.schema_line());
@@ -295,25 +310,35 @@ proptest! {
     /// Every JSON-category combination lowers to a typed enum. Pairwise-disjoint variants can use a
     /// direct dispatch fast path; `integer | number` uses typed trial matching. A repeated category
     /// lowers to the same generated type twice, which no value can tell apart, so it is one variant
-    /// and the merge is reported; a union of one repeated category is that type, not an enum.
+    /// and the merge is reported; a union of one repeated category is that type, not an enum. The
+    /// `null` branch is no variant: written once, it makes `Holder.p`, which refers to the union,
+    /// `Option`al; written twice, `null` matches both and fails the exactly-one rule, so the union
+    /// admits no `null`, and a union of nothing but `null` branches admits no value at all (`E013`).
     #[test]
     fn json_category_unions_generate_typed(
         variants in proptest::collection::vec(category_strategy(), 2..=5)
     ) {
         let spec = category_union_spec(&variants);
+        let typed: Vec<Category> = variants.iter().copied().filter(|c| *c != Category::Null).collect();
+        if typed.is_empty() {
+            let report = check(&spec);
+            prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}", report);
+            prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
+            return assert_relocation_changes_nothing(&spec, None);
+        }
         let generated = generate_module(&spec);
         let (report, source) = &generated;
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(report, Code::NonDisjointUnion), "{:#?}", report);
-        let distinct: BTreeSet<Category> = variants.iter().copied().collect();
+        let distinct: BTreeSet<Category> = typed.iter().copied().collect();
         prop_assert_eq!(
             has_code(report, Code::ValidationKeywordIgnored),
-            distinct.len() < variants.len(),
+            distinct.len() < typed.len(),
             "{:#?}",
             report
         );
         prop_assert_eq!(
-            source.contains("pub enum U"),
+            source.contains("pub enum U "),
             distinct.len() > 1,
             "union of {:?} emitted as the wrong shape:\n{}",
             variants,
@@ -322,9 +347,19 @@ proptest! {
         // One variant per distinct category, each its category's type.
         prop_assert_eq!(
             shape::named(source, "U"),
-            union_shape(distinct.iter().map(|c| c.shape().to_owned()).collect()),
+            union_shape(distinct.iter().filter_map(|c| c.shape()).map(str::to_owned).collect()),
             "union of {:?} lowers to the wrong variants:\n{}",
             variants,
+            source
+        );
+        let nullable = variants.len() - typed.len() == 1;
+        let holder = holder_p_shape(source)?;
+        prop_assert_eq!(
+            holder.starts_with("Option<"),
+            nullable,
+            "union of {:?}: `Holder.p` is `{}`:\n{}",
+            variants,
+            holder,
             source
         );
         assert_relocation_changes_nothing(&spec, Some(&generated))?;
