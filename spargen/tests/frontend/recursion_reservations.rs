@@ -588,6 +588,54 @@ components:
     );
 }
 
+/// A `oneOf` that lists the same cycle-closing `$ref` twice merges its two members under `W001`
+/// like any repeated member, and the one variant left is the component's own open reservation.
+/// That variant's kind could not be read: re-emitting it cloned a `TypeKind::Reserved` into a
+/// second reservation nothing filled, and `check_invariants` refused the document with `E011`
+/// (#1152). The position is the component itself, boxed, as the direct `$ref` spelling is.
+#[test]
+fn a_one_of_repeating_a_cycle_closing_ref_merges_to_the_boxed_component() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      properties:
+        a: { oneOf: [{ $ref: '#/components/schemas/S2' }, { $ref: '#/components/schemas/S2' }] }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{entry}: the merged self-reference must raise no error: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                    && d.message.contains("same generated type")
+            }),
+            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("Option<Box<S2>>"),
+        "`S2.a` must be the boxed component itself: {types}"
+    );
+    assert!(
+        !types.contains("S2a"),
+        "the merged union must not be re-emitted as a type of its own: {types}"
+    );
+}
+
 /// Mutually-recursive components (`A -> B -> A`) must also generate, directly and through an
 /// array. Directly, exactly one back-edge in the cycle is boxed; through an array, the array's
 /// `Vec` already puts the cycle behind a pointer, so neither edge is.
