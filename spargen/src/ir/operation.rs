@@ -175,6 +175,15 @@ impl ParamLoc {
             ParamLoc::Cookie => "cookie",
         }
     }
+
+    /// Whether a parameter here shapes the request URL: the path, the query, or the whole query
+    /// string.
+    pub(crate) fn shapes_url(self) -> bool {
+        matches!(
+            self,
+            ParamLoc::Path | ParamLoc::Query | ParamLoc::QueryString
+        )
+    }
 }
 
 /// The serialization style of a parameter (matrix: Parameters → S).

@@ -2,8 +2,9 @@
 source: spargen/tests/diff.rs
 expression: rendered
 ---
+major [url-accessor-args-changed] GET /pets: URL accessor `list_pets_url` arguments [] -> [`limit` (query)]
 major [required-param-added] GET /pets param `limit` (query): required parameter added: `i64`
 major [field-removed] Pet.name: field removed (was `String`)
 minor [operation-added] GET /owners: new operation
-major: 2 breaking, 1 additive change(s)
+major: 3 breaking, 1 additive change(s)
 recommended bump: major
