@@ -1,13 +1,11 @@
-//! Content-addressed build-script caching: the input fingerprint, the cache record, the
-//! `cargo:rerun-if-changed` directives over those inputs, and the atomic write of the generated
-//! output.
-
-use std::io::Write as _;
+//! Content-addressed build-script caching: the input fingerprint, the cache record, and the
+//! `cargo:rerun-if-changed` directives over those inputs.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
+use crate::output::atomic_write;
 use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
 use crate::source::{sha256_hex, InputBundle, LOCK_FILE_NAME};
 use crate::{Build, Code, Spec};
@@ -202,57 +200,6 @@ pub(crate) fn write_cache(
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
-}
-
-/// Write the rendered module to `path`, leaving the file untouched when it already holds exactly
-/// `contents`, so an [`Outcome::Generated`](crate::Outcome::Generated) run rewrites the output
-/// only when its bytes change.
-pub(crate) fn write_output(path: &Utf8Path, contents: &str) -> Result<(), String> {
-    if std::fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
-        return Ok(());
-    }
-    atomic_write(path, contents.as_bytes())
-        .map_err(|error| format!("failed to write generated module `{path}`: {error}"))
-}
-
-fn atomic_write(path: &Utf8Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let name = path.file_name().unwrap_or("spargen-output");
-    let mut attempt = 0u32;
-    let temporary = loop {
-        let candidate = parent.join(format!(
-            ".{name}.spargen-{}-{attempt}.tmp",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&candidate)
-        {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-                    let _ = std::fs::remove_file(&candidate);
-                    return Err(error);
-                }
-                break candidate;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                attempt = attempt.saturating_add(1);
-            }
-            Err(error) => return Err(error),
-        }
-    };
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        #[cfg(windows)]
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            std::fs::remove_file(path)?;
-            return std::fs::rename(&temporary, path);
-        }
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
 }
 
 fn append(output: &mut Vec<u8>, bytes: &[u8]) {
@@ -555,14 +502,14 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let original = std::fs::read_to_string(&config.output).unwrap();
         let record = cache_path(&cache_dir, &config.output);
         assert!(record.is_file(), "generation must seed the target cache");
 
         std::fs::remove_file(&record).unwrap();
-        let seeded = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let seeded = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(seeded.outcome(), Outcome::Generated, "{seeded:#?}");
         assert!(
             record.is_file(),
@@ -571,12 +518,12 @@ components:
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::write(&config.output, format!("{original}// manual edit\n")).unwrap();
-        let repaired = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let repaired = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(repaired.outcome(), Outcome::Generated, "{repaired:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::remove_file(&config.output).unwrap();
-        let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let restored = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(restored.outcome(), Outcome::Generated, "{restored:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
     }
@@ -589,7 +536,7 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let generated = std::fs::read_to_string(&config.output).unwrap();
         let written_at = std::fs::metadata(&config.output)
@@ -597,7 +544,7 @@ components:
             .modified()
             .unwrap();
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(
             second.outcome(),
             Outcome::Cached,
@@ -643,7 +590,7 @@ components:
             .cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let mut seeded: Vec<(&str, Option<&str>)> = first
             .diagnostics()
@@ -663,7 +610,7 @@ components:
             "the seeding run must name the referenced file the warning lies in: {seeded:?}"
         );
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
         let mut replayed: Vec<(&str, Option<&str>)> = second
             .diagnostics()
@@ -701,14 +648,14 @@ components:
             .cargo(CargoIntegration::Off);
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         assert!(
             first.truncated(),
             "the fixture must warn past batch_cap: {first:#?}"
         );
 
-        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        let second = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
         assert!(
             second.truncated(),

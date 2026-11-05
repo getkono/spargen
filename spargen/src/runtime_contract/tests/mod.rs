@@ -3,7 +3,7 @@
 //! workspace-root walk), `explain` (the `E023` explain text) and `deps_block` (the block
 //! `spargen deps` prints). This file holds what they share — the sandbox every audit runs in, the
 //! helpers, and the list of test sources the self-reading tests scan, with the tests over those —
-//! and the tests of the driver in `runtime_contract/mod.rs`: the build-script manifest path, the
+//! and the tests of `runtime_contract/integration.rs`: the build-script manifest path, the
 //! directive guard, and the Cargo-integration policy and its messages.
 
 mod deps_block;
@@ -17,9 +17,11 @@ use cfg_expr::Expression;
 use semver::Version;
 
 use super::check::*;
+use super::integration::*;
 use super::requirements::*;
 use super::target::*;
 use super::*;
+use crate::CargoIntegration;
 
 /// Every file of this test module with its source, for the tests that read the fixtures' text:
 /// the `E023` explain test, which checks each fixture it cites is a `#[test]` here, and
