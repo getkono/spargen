@@ -108,6 +108,91 @@ fn attaches_provider_token_under_every_api_key_kind() {
     assert!(cookie.headers()[reqwest::header::COOKIE].is_sensitive());
 }
 
+/// RFC 6265 §5.4: a user agent sends at most one `Cookie` header. Two cookie apiKeys in one
+/// alternative therefore share it, joined by `; ` in the alternative's order, rather than each
+/// appending a header of its own.
+#[test]
+fn two_cookie_api_keys_in_one_alternative_share_one_cookie_header() {
+    let mut core = core();
+    core.set_credential("session", Credential::ApiKey(SecretString::from("s3ss")));
+    core.set_credential("csrf", Credential::ApiKey(SecretString::from("t0k")));
+    let request = poll_ready(attach_auth(
+        &core,
+        get(&core),
+        &[&[
+            AuthScheme {
+                name: "session",
+                kind: AuthKind::ApiKeyCookie("SESSION"),
+            },
+            AuthScheme {
+                name: "csrf",
+                kind: AuthKind::ApiKeyCookie("CSRF"),
+            },
+        ]],
+    ))
+    .unwrap()
+    .build()
+    .unwrap();
+    let cookies: Vec<_> = request
+        .headers()
+        .get_all(reqwest::header::COOKIE)
+        .iter()
+        .collect();
+    assert_eq!(cookies, ["SESSION=s3ss; CSRF=t0k"]);
+    assert!(cookies[0].is_sensitive());
+}
+
+/// A generated operation sets its cookie parameters' `Cookie` header before it attaches
+/// credentials, so a cookie apiKey joins that header after the parameters instead of sending a
+/// second one, and the merged header, which now carries the secret, is marked sensitive.
+#[test]
+fn a_cookie_api_key_joins_the_cookie_header_the_request_already_carries() {
+    let mut core = core();
+    core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
+    let request = get(&core).header(reqwest::header::COOKIE, "theme=dark; lang=en");
+    let request = poll_ready(attach_auth(
+        &core,
+        request,
+        &[&[AuthScheme {
+            name: "key",
+            kind: AuthKind::ApiKeyCookie("SESSION"),
+        }]],
+    ))
+    .unwrap()
+    .build()
+    .unwrap();
+    let cookies: Vec<_> = request
+        .headers()
+        .get_all(reqwest::header::COOKIE)
+        .iter()
+        .collect();
+    assert_eq!(cookies, ["theme=dark; lang=en; SESSION=k3y"]);
+    assert!(cookies[0].is_sensitive());
+}
+
+/// A request builder that already failed carries its error to the caller as the
+/// request-construction error `build` would have raised, rather than losing it while the cookie
+/// is merged.
+#[test]
+fn a_cookie_api_key_on_a_failed_builder_reports_request_construction() {
+    let mut core = core();
+    core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
+    let request = core.http().request(reqwest::Method::GET, "not a url");
+    let error = poll_ready(attach_auth(
+        &core,
+        request,
+        &[&[AuthScheme {
+            name: "key",
+            kind: AuthKind::ApiKeyCookie("SESSION"),
+        }]],
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn attaches_api_key_query_from_first_satisfiable_alternative() {
     let mut core = core();
