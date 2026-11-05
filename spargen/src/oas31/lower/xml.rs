@@ -35,6 +35,24 @@ pub(super) struct RootXml {
     holder: Option<XmlSite>,
 }
 
+/// The XML hints lowering records as it goes, for [`gate_xml_field_renames`] to settle once the
+/// graph is final.
+#[derive(Default)]
+pub(super) struct XmlRecords {
+    /// The `xml` object of every schema a definition was lowered from, read as that schema's root
+    /// ([`LowerCtx::record_root_xml`]), by the site it was written at. The definitions keep the
+    /// site, so the gate finds each one from the types it produced once ids are final.
+    root: HashMap<XmlSite, RootXml>,
+    /// The sites of the `xml` objects a field reads instead ([`LowerCtx::claim_field_xml`]): a
+    /// property's own and its array items'. Their [`Self::root`] entries are skipped.
+    field_sites: HashSet<XmlSite>,
+    /// For each type a `$ref` member contributed to an `allOf` composition, or a `$ref` target was
+    /// intersected with its shape-bearing siblings as ([`LowerCtx::record_ref_sibling_merger`]),
+    /// the sites of the compositions that merged it ([`LowerCtx::record_xml_merger`]), that `$ref`
+    /// schema itself counting as one: a member merged into that type is merged into theirs too.
+    mergers: HashMap<TypeId, Vec<XmlSite>>,
+}
+
 /// The position an `xml` object is read in, which decides what its node type may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum XmlNode {
@@ -54,10 +72,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let (name, unsupported) = read_hints(schema, hints, XmlNode::Root);
         let site = self.xml_site(&schema.provenance);
         let holder = self
-            .root_xml
+            .xml
+            .root
             .get(&site)
             .and_then(|root| root.holder.clone());
-        self.root_xml.insert(
+        self.xml.root.insert(
             site,
             RootXml {
                 name,
@@ -86,7 +105,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let site = self.xml_site(&schema.provenance);
         let holder = self.xml_holders.last().cloned();
-        self.root_xml.entry(site).or_insert(RootXml {
+        self.xml.root.entry(site).or_insert(RootXml {
             name,
             unsupported,
             target: None,
@@ -115,7 +134,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(holder) = self.xml_holders.last().cloned() else {
             return;
         };
-        let mergers = self.xml_mergers.entry(ty).or_default();
+        let mergers = self.xml.mergers.entry(ty).or_default();
         if !mergers.contains(&holder) {
             mergers.push(holder);
         }
@@ -141,7 +160,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             unsupported.push("name".to_owned());
         }
         let site = self.xml_site(&schema.provenance);
-        self.root_xml.insert(
+        self.xml.root.insert(
             site,
             RootXml {
                 name: None,
@@ -163,7 +182,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for schema in std::iter::once(schema.as_ref()).chain(field_items(schema)) {
             if schema.xml.is_some() {
                 let site = self.xml_site(&schema.provenance);
-                self.field_xml_sites.insert(site);
+                self.xml.field_sites.insert(site);
             }
         }
     }
@@ -402,7 +421,8 @@ fn enclosing_emitted(
 /// hint (restoring the property's normal wire name so JSON stays correct) and emits one `W006` — so
 /// the ignored hint is never silent. XML-dedicated types keep their hints.
 ///
-/// It also settles each schema's root `xml` object (`root_xml`, less the sites a field reads): a
+/// It also settles each schema's root `xml` object ([`XmlRecords::root`], less the sites a field
+/// reads): a
 /// root `xml.name` on a struct that names its own element becomes the struct's XML root name,
 /// whoever else uses the type, and the field name of an array property whose items are that struct
 /// (unless the items name their elements themselves); a component struct an XML body reaches with
@@ -413,17 +433,19 @@ fn enclosing_emitted(
 /// ([`LowerCtx::record_ref_xml`]), or any on a composition member the merge consumed
 /// ([`LowerCtx::record_member_xml`], judged by the type the merge produced) — is `E009` on a type
 /// an XML body reaches and `W006` elsewhere.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
     meet_locations: &HashMap<TypeId, Provenance>,
-    root_xml: &HashMap<XmlSite, RootXml>,
-    field_xml_sites: &HashSet<XmlSite>,
-    xml_mergers: &HashMap<TypeId, Vec<XmlSite>>,
+    records: &XmlRecords,
     is_oas32: bool,
     diags: &mut Diagnostics,
 ) {
+    let XmlRecords {
+        root: root_xml,
+        field_sites: field_xml_sites,
+        mergers: xml_mergers,
+    } = records;
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
     // Only an emitted type's hint is reported or suppressed: an elided meet intermediate is no
     // type of the output, so a hint it copied from a member has nothing to apply to.

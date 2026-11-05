@@ -12,7 +12,8 @@ use super::combine::{objects_met_as_their_unions, take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
 use super::shape::schema_has_union;
-use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
+use super::union::HeldUntypedWarning;
+use super::{LowerCtx, MetUnion, Refiner};
 
 /// A union an `allOf` meet met with its other members, for
 /// [`LowerCtx::warn_excluded_union_member_branches`].
@@ -193,10 +194,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let mut warning = held.remove(index);
                 warning.untyped.retain(|(hint, _)| {
                     carries(hint).flatten().is_some_and(|variant| {
-                        matches!(
-                            self.graph.get(variant.ty.id).map(|def| &def.kind),
-                            Some(TypeKind::Any)
-                        )
+                        matches!(self.kind_of(variant.ty.id), Some(TypeKind::Any))
                     })
                 });
                 self.report_untyped_one_of(warning);
@@ -278,10 +276,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
                     return false;
                 };
-                let lowered_union = matches!(
-                    self.graph.get(ty.id).map(|def| &def.kind),
-                    Some(TypeKind::Union(_))
-                );
+                let lowered_union = matches!(self.kind_of(ty.id), Some(TypeKind::Union(_)));
                 lowered_union
                     && (schema_has_union(member)
                         || member.reference.as_deref().is_some_and(|reference| {
@@ -377,7 +372,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(members) = self.union_variant_members.get(&union).cloned() else {
                 continue;
             };
-            let exact_null: Vec<bool> = match self.graph.get(union).map(|def| &def.kind) {
+            let exact_null: Vec<bool> = match self.kind_of(union) {
                 Some(TypeKind::Union(lowered)) => lowered
                     .variants
                     .iter()
@@ -423,16 +418,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             excluded.sort_unstable();
             for member in excluded {
-                // W011 case: excluded-union-branch
-                crate::diag::Diagnostic::warning(
-                    crate::diag::Code::DeclarationHasNoEffect,
-                    schema.provenance.clone(),
-                )
-                .message(format!(
-                    "union member {member} cannot satisfy the enclosing schema's own \
-                     constraints, so it is not a variant of the generated enum"
-                ))
-                .emit(self.diags);
+                self.warn_excluded_union_branch(&schema.provenance, member);
             }
         }
     }
@@ -499,7 +485,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if real_branches < 2 || target.discriminator.is_some() {
             return None;
         }
-        let merged = match self.graph.get(ty.id).map(|def| &def.kind) {
+        let merged = match self.kind_of(ty.id) {
             Some(TypeKind::Union(_)) => self
                 .union_variant_members
                 .get(&ty.id)
@@ -529,7 +515,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// where a union member meets another union, its variants sit one level down, under the
     /// other's branches, whichever member is written first. `None` where `met` is no union.
     fn met_union_variants(&self, met: Ty) -> Option<Vec<UnionVariant>> {
-        let Some(TypeKind::Union(_)) = self.graph.get(met.id).map(|def| &def.kind) else {
+        let Some(TypeKind::Union(_)) = self.kind_of(met.id) else {
             return None;
         };
         let mut seen = HashSet::new();
@@ -539,7 +525,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !seen.insert(id) {
                 continue;
             }
-            if let Some(TypeKind::Union(union)) = self.graph.get(id).map(|def| &def.kind) {
+            if let Some(TypeKind::Union(union)) = self.kind_of(id) {
                 for variant in &union.variants {
                     pending.push(variant.ty.id);
                     variants.push(variant.clone());
@@ -642,7 +628,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else if member.reference.is_none()
                 && out.len() == slot + 1
                 && matches!(out[slot], Contribution::Scalar(ty) if matches!(
-                    self.graph.get(ty.id).map(|def| &def.kind),
+                    self.kind_of(ty.id),
                     Some(TypeKind::Union(_))
                 ))
             {
@@ -730,10 +716,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // takes it: an untyped object member admits `null` and decides nothing, so a
             // composition no member decides leaves `null` to the union.
             let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
-            let has_object = contributions
-                .iter()
-                .any(|contribution| matches!(contribution, Contribution::Object { .. }));
-            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
+            Some(self.composition_takes_union_null(composed, &contributions, schema))
         };
         let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
@@ -1021,7 +1004,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     matches!(
                         contributions.get(slot),
                         Some(Contribution::Scalar(ty)) if matches!(
-                            self.graph.get(ty.id).map(|def| &def.kind),
+                            self.kind_of(ty.id),
                             Some(TypeKind::Struct(_))
                         )
                     )
@@ -1049,7 +1032,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 composed = met;
             }
-            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
+            Some(self.composition_takes_union_null(composed, &contributions, schema))
         };
         let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
@@ -1084,8 +1067,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let SchemaOr::Schema(member) = member else {
                 continue;
             };
-            let scoped =
-                self.lower_scoped_refiners(member, true, None, &format!("{hint}Member{index}"))?;
+            let scoped = self.lower_untyped_refiners(member, &format!("{hint}Member{index}"))?;
             refiners.push((member.as_ref(), Refiner::Scoped(scoped)));
         }
         Some(refiners)
@@ -1154,7 +1136,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let keywords_hint = format!("{hint}Constraint");
         let keywords_mark = self.graph_mark();
         let (composed, refiners) = if implied_applicator_category(keywords).is_some() {
-            let scoped = self.lower_scoped_refiners(keywords, true, None, &keywords_hint)?;
+            let scoped = self.lower_untyped_refiners(keywords, &keywords_hint)?;
             (referenced, vec![(keywords, Refiner::Scoped(scoped))])
         } else {
             let keywords_schema = keywords;

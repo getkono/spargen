@@ -8,7 +8,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::diag::Provenance;
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
-use crate::oas31::{JsonType, Schema, SchemaOr};
+use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
 use super::all_of::real_union;
@@ -19,8 +19,8 @@ use super::shape::{
     schema_has_shape_constraint, schema_has_union, schema_imposes_scalar, schema_is_object_like,
 };
 use super::{
-    all_of_entry_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
-    ScopedRefiners, MAX_SCHEMA_DEPTH,
+    resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach, ScopedRefiners,
+    MAX_SCHEMA_DEPTH,
 };
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -209,13 +209,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if unlowered {
                         // The value's target can be open only because of the order lowering
                         // reached it in, as an `allOf` member's can (`record_open_member`).
-                        for policy in [&additional, member_additional] {
-                            if let AdditionalProps::Typed(ty) = policy {
-                                self.record_open_member(ty.id);
-                            }
-                        }
-                        return self.reject_all_of_cycle(
-                            schema.provenance.clone(),
+                        let values =
+                            [&additional, member_additional]
+                                .into_iter()
+                                .filter_map(|policy| match policy {
+                                    AdditionalProps::Typed(ty) => Some(ty.id),
+                                    AdditionalProps::Allow | AdditionalProps::Deny => None,
+                                });
+                        return self.refuse_open_meet(
+                            schema,
+                            values,
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
                              that closes a reference cycle back to the schema being lowered, whose \
                              body is not yet known, so the merged overflow map has no computable \
@@ -250,16 +253,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 if self.is_reservation(existing.ty.id)
                                     || self.is_reservation(field.ty.id) =>
                             {
-                                self.record_open_member(existing.ty.id);
-                                self.record_open_member(field.ty.id);
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members is typed by a \
                                      `$ref` that closes a reference cycle back to the schema \
                                      being lowered, so its intersection cannot be computed",
                                     field.name.wire
                                 );
-                                return self
-                                    .reject_all_of_cycle(schema.provenance.clone(), &message);
+                                let types = [existing.ty.id, field.ty.id];
+                                return self.refuse_open_meet(schema, types, &message);
                             }
                             // The same rule `intersect_structs` applies to a `$ref` and its
                             // siblings, so the four equivalent spellings of one conjunction agree:
@@ -331,10 +332,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if self.is_reservation(field.ty.id)
                             || matches!(member_additional, AdditionalProps::Typed(value) if self.is_reservation(value.id)) =>
                     {
-                        self.record_open_member(field.ty.id);
-                        if let AdditionalProps::Typed(value) = member_additional {
-                            self.record_open_member(value.id);
-                        }
+                        let value = match member_additional {
+                            AdditionalProps::Typed(value) => Some(value.id),
+                            AdditionalProps::Allow | AdditionalProps::Deny => None,
+                        };
+                        let types = std::iter::once(field.ty.id).chain(value);
                         let message = format!(
                             "required property `{}`, which no `allOf` member declares, is typed by \
                              an `additionalProperties` value schema that is a `$ref` closing a \
@@ -342,7 +344,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                              intersection cannot be computed",
                             field.name.wire
                         );
-                        return self.reject_all_of_cycle(schema.provenance.clone(), &message);
+                        return self.refuse_open_meet(schema, types, &message);
                     }
                     // The field is required, so a value no type admits empties the object meet:
                     // only `null` can be left (see `null_only_all_of`).
@@ -535,7 +537,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // words. Whether the target is still being lowered here can depend on the order the
             // document declares the two in, so the refusal is recorded for the next pass to
             // lower this body first (`record_open_member`).
-            if let Some(&(target, _)) = self.in_progress.get(name) {
+            if let Some(target) = self.open_component_root(name) {
                 self.record_open_member(target);
                 return self
                     .reject_all_of_cycle(schema.provenance.clone(), RECURSIVE_COMPONENT_MEMBER);
@@ -802,7 +804,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
         // arm is the whole guard against reading one. Recorded first, as the root-component
         // pre-check records it (`record_open_member`).
-        match self.graph.get(ty.id).map(|def| &def.kind) {
+        match self.kind_of(ty.id) {
             Some(TypeKind::Reserved) => {
                 self.record_open_member(ty.id);
                 return self.reject_all_of_cycle(provenance.clone(), recursive);
@@ -827,8 +829,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     out.push(Contribution::Scalar(ty));
                     return Some(());
                 };
-                let scoped = self
-                    .closed_narrowing(|ctx| ctx.lower_scoped_refiners(&target, true, None, hint))?;
+                let scoped =
+                    self.closed_narrowing(|ctx| ctx.lower_untyped_refiners(&target, hint))?;
                 out.push(Contribution::Refiner {
                     scoped,
                     member: Box::new(target),
@@ -905,7 +907,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // diagnostic (#607). In 2020-12 they constrain only arrays, so they refine the merge's
             // array members and
             // leave the rest, as the same member does beside a union.
-            let scoped = self.lower_scoped_refiners(schema, true, None, hint)?;
+            let scoped = self.lower_untyped_refiners(schema, hint)?;
             out.push(Contribution::Refiner {
                 scoped,
                 member: Box::new(schema.clone()),
@@ -1075,7 +1077,7 @@ impl LowerCtx<'_, '_> {
                 // is one whose body is already being expanded as a union member, which reserves
                 // nothing: the gather lowers it through its reservation, where a recursion stops.
                 let name = reference.strip_prefix("#/components/schemas/")?;
-                if self.in_progress.contains_key(name)
+                if self.open_component_root(name).is_some()
                     || self.union_member_stack.iter().any(|open| open == name)
                 {
                     return None;
@@ -1140,4 +1142,19 @@ struct RefMember<'r> {
     provenance: &'r Provenance,
     /// The `E013` wording for a target still being lowered.
     recursive: &'r str,
+}
+
+/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
+/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
+/// is written in, with the span of the node written there when the file holds one.
+fn all_of_entry_provenance(
+    resolver: &Resolver<'_>,
+    holder: &Provenance,
+    index: usize,
+) -> Provenance {
+    let pointer = holder.pointer.push("allOf").index(index);
+    let span = resolver
+        .node_at(resolver.written_in(holder), &pointer)
+        .map(|node| node.span);
+    Provenance::new(pointer, span)
 }

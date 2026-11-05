@@ -6,7 +6,7 @@ use crate::ir::{AdditionalProps, Operation, Ty, TypeDef, TypeGraph, TypeId, Type
 use crate::oas31::Schema;
 
 use super::combine::Contribution;
-use super::LowerCtx;
+use super::{LowerCtx, Reservation};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [Elide](TypeGraph::elide) every type in `lowered` that nothing can name any more. `lowered`
@@ -152,7 +152,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// operation reaches it. Eliding keeps each id and name, so no type the output carries is
     /// renamed or reordered.
     pub(super) fn elide_unreachable(&mut self, operations: &[Operation]) {
-        let mut roots: Vec<TypeId> = self.components.values().map(|&(id, _)| id).collect();
+        let mut roots: Vec<TypeId> = self
+            .finished
+            .iter()
+            .filter(|(reservation, _)| matches!(reservation, Reservation::Component(_)))
+            .map(|(_, &(id, _))| id)
+            .collect();
         for operation in operations {
             roots.extend(operation.params.iter().map(|parameter| parameter.ty.id));
             roots.extend(

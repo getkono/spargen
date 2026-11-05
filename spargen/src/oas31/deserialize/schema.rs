@@ -14,7 +14,7 @@ use super::super::{
 use super::keywords::{parse_required, parse_type_set, parse_validation, SUBSCHEMA_KEYWORDS};
 use super::{
     expect_array, expect_bool, expect_string, is_oas_dialect, object, provenance, reference_object,
-    required,
+    require_object, required,
 };
 
 /// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
@@ -43,18 +43,21 @@ pub(super) fn parse_schema_ref_or(
         return parse_schema(value, pointer, diags).map(RefOr::Item);
     }
     if let Some(default) = value.get("default") {
-        Diagnostic::warning(
-            Code::SchemaDefaultNotApplied,
-            provenance(&pointer.push("default"), default),
-        )
+        warn_ref_default_dropped(provenance(&pointer.push("default"), default), diags);
+    }
+    Some(RefOr::Ref(reference))
+}
+
+/// Report, as `W005` at `at`, a schema `default` written beside a `$ref` that names no shape of
+/// its own: the reference resolves to its target, and the `default` is not applied.
+pub(in crate::oas31) fn warn_ref_default_dropped(at: Provenance, diags: &mut Diagnostics) {
+    Diagnostic::warning(Code::SchemaDefaultNotApplied, at)
         .message(
             "a schema `default` declared alongside `$ref` is dropped when the reference \
              resolves and is not applied",
         )
         .remedy("move the default onto the referenced schema, or set the value explicitly")
         .emit(diags);
-    }
-    Some(RefOr::Ref(reference))
 }
 
 pub(in crate::oas31) fn parse_schema(
@@ -223,7 +226,7 @@ fn parse_discriminator(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
-    let _ = object(value, pointer, diags)?;
+    require_object(value, pointer, diags)?;
     let mut malformed = false;
     let property_name = required(value, "propertyName", pointer, diags).and_then(|name| {
         let name = expect_string(name, &pointer.push("propertyName"), diags);

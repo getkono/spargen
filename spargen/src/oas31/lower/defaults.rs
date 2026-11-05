@@ -27,7 +27,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let raw = schema.default.as_ref()?;
         let classified = classify_default(raw);
-        let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        let kind = self.kind_of(ty.id);
         let provenance = Provenance::new(schema.provenance.pointer.push("default"), Some(raw.span));
         match representable_default(&classified, kind) {
             Some(value) => {
@@ -76,7 +76,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return None;
         };
         let raw = schema.default.as_ref()?;
-        let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        let kind = self.kind_of(ty.id);
         Some(default_display_for(raw, kind))
     }
 

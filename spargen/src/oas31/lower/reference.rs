@@ -1,18 +1,21 @@
-//! Following a `$ref` to a non-schema component (parameter, request body, response, header,
-//! media type, path item) and the rejections an unfollowable one gets.
+//! Following a `$ref`: to a non-schema component (parameter, request body, response, header,
+//! media type, path item), with the rejections an unfollowable one gets, and to the body of a
+//! schema target read without lowering it.
 
 use std::collections::HashSet;
 
-use crate::diag::{Code, Diagnostic, Diagnostics};
+use crate::diag::{Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::MediaType;
 use crate::oas31::media::{classify_media, media_essence};
 use crate::oas31::resolve::reject_undeclared_component;
 use crate::oas31::{
     ParameterObject, PathItem, RefOr, Reference, RequestBodyObject, Resolver, ResponseObject,
+    Schema,
 };
-use crate::source::SpannedValue;
+use crate::source::{is_remote_ref, SpannedValue};
 
-use super::LowerCtx;
+use super::shape::ref_siblings_bear_shape;
+use super::{LowerCtx, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Resolve a Header Object that may be a `$ref` into `#/components/headers/`.
@@ -393,6 +396,57 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.note_inert_encoding(&current, media_name);
         }
         Some(current)
+    }
+
+    /// The body of the schema the `$ref` written at `at` names, shared by the lowering steps that
+    /// read a reference's target: a root component first, then a remote document
+    /// from the root, and otherwise the referring file's target, with a bare alias (a `$ref` with
+    /// no shape-bearing sibling) followed to the schema it names. `None` where the chain cannot be
+    /// read, which reports nothing a second time.
+    pub(super) fn ref_target_body(
+        &self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<std::borrow::Cow<'_, Schema>> {
+        let mut reference = reference.to_owned();
+        let mut at = at.clone();
+        // Lowering the chain already refused an alias cycle; the bound only keeps this total.
+        for _ in 0..MAX_SCHEMA_DEPTH {
+            let component = reference
+                .strip_prefix("#/components/schemas/")
+                .and_then(|name| self.document.components.schemas.get(name));
+            let target = match component {
+                Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
+                Some(RefOr::Ref(alias)) => {
+                    reference.clone_from(&alias.reference);
+                    at = alias.provenance.clone();
+                    continue;
+                }
+                None => {
+                    let from = if is_remote_ref(&reference) {
+                        &self.document.provenance
+                    } else {
+                        &at
+                    };
+                    let Ok(resolved) =
+                        self.resolver
+                            .resolve(&reference, from, &mut Diagnostics::new(0))
+                    else {
+                        return None;
+                    };
+                    resolved.schema
+                }
+            };
+            let Some(next) = &target.reference else {
+                return Some(target);
+            };
+            if ref_siblings_bear_shape(&target) {
+                return Some(target);
+            }
+            reference.clone_from(next);
+            at = target.provenance.clone();
+        }
+        None
     }
 }
 

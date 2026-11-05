@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::diag::Provenance;
 use crate::ir::{Ty, TypeId};
-use crate::oas31::{Document, SchemaOr};
+use crate::oas31::{Document, Schema, SchemaOr};
 use crate::source::SpannedValue;
 
 use super::{LowerCtx, Reservation};
@@ -108,8 +108,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         reference
             .strip_prefix("#/components/schemas/")
-            .and_then(|name| self.in_progress.get(name))
-            .is_some_and(|&(id, _)| id == own)
+            .and_then(|name| self.open_component_root(name))
+            .is_some_and(|id| id == own)
     }
 }
 
@@ -125,12 +125,8 @@ impl LowerCtx<'_, '_> {
             return;
         };
         let opened = self.open_reservations.iter().find(|open| {
-            let memo = match &open.reservation {
-                Reservation::Component(_) => &self.in_progress,
-                Reservation::Remote(_) => &self.remote_in_progress,
-                Reservation::Resolved(_) => &self.resolved_in_progress,
-            };
-            memo.get(open.reservation.key())
+            self.in_progress
+                .get(&open.reservation)
                 .is_some_and(|&(id, _)| id == target)
         });
         let Some(target) = opened else {
@@ -144,6 +140,21 @@ impl LowerCtx<'_, '_> {
             target: target.reservation.clone(),
         };
         self.member_orders.push(order);
+    }
+
+    /// Refuse the `allOf` meet `schema` makes as `E013` with `message`, because a type it needs
+    /// (each of `types` that is an open reservation's root) has a body not known yet; each is
+    /// recorded for the next pass ([`Self::record_open_member`]).
+    pub(super) fn refuse_open_meet<T>(
+        &mut self,
+        schema: &Schema,
+        types: impl IntoIterator<Item = TypeId>,
+        message: &str,
+    ) -> Option<T> {
+        for id in types {
+            self.record_open_member(id);
+        }
+        self.reject_all_of_cycle(schema.provenance.clone(), message)
     }
 
     /// Open `opening` from the top level of a pass, as the `$ref` that first reached it did.

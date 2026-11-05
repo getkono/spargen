@@ -12,7 +12,7 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
-use super::{DiscriminatorMembers, LowerCtx};
+use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Resolve every schema a union's Discriminator Object names — each `mapping` value, then
@@ -152,10 +152,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
         for ((variant, ref_name), member) in variants.iter().zip(ref_names).zip(variant_members) {
-            if !matches!(
-                self.graph.get(variant.ty.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            ) {
+            if !matches!(self.kind_of(variant.ty.id), Some(TypeKind::Struct(_))) {
                 let category = self.json_category(variant.ty)?;
                 if category == JsonCategory::Object || categories.contains(&Some(category)) {
                     return None;
@@ -254,8 +251,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// of one). `None` for any other variant, including one whose field admits several values,
     /// whose tag the dispatch could not write back without overwriting the one the payload held.
     fn pinned_tag(&self, variant: &UnionVariant, tag_field: &str) -> Option<String> {
-        let Some(TypeKind::Struct(object)) = self.graph.get(variant.ty.id).map(|def| &def.kind)
-        else {
+        let Some(TypeKind::Struct(object)) = self.kind_of(variant.ty.id) else {
             return None;
         };
         let field = object
@@ -265,7 +261,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !field.required || field.ty.nullable {
             return None;
         }
-        let Some(TypeKind::Enum(set)) = self.graph.get(field.ty.id).map(|def| &def.kind) else {
+        let Some(TypeKind::Enum(set)) = self.kind_of(field.ty.id) else {
             return None;
         };
         match set.variants.as_slice() {
@@ -280,8 +276,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// every other declaration (a plain `string`, an open set, a `$ref` to anything else) is
     /// taken to admit it, so a doubt keeps the pinned value claimed rather than tagged.
     fn admits_tag(&self, variant: &UnionVariant, tag_field: &str, value: &str) -> bool {
-        let Some(TypeKind::Struct(object)) = self.graph.get(variant.ty.id).map(|def| &def.kind)
-        else {
+        let Some(TypeKind::Struct(object)) = self.kind_of(variant.ty.id) else {
             return true;
         };
         let Some(field) = object
@@ -291,7 +286,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         else {
             return !matches!(object.additional, AdditionalProps::Deny);
         };
-        if let Some(TypeKind::Enum(set)) = self.graph.get(field.ty.id).map(|def| &def.kind) {
+        if let Some(TypeKind::Enum(set)) = self.kind_of(field.ty.id) {
             set.is_open()
                 || set
                     .variants
@@ -437,4 +432,14 @@ pub(super) fn member_component_name<'m>(
         .as_deref()?
         .strip_prefix("#/components/schemas/")
         .filter(|name| in_sub_file || !name.contains('/'))
+}
+
+/// A union's Discriminator Object resolved against the union's own members: every `mapping`
+/// entry's tag with the index (into the union's real, non-null members) of the member it names, in
+/// document order, and the member `defaultMapping` names. Built by
+/// [`LowerCtx::discriminator_members`], which rejects any entry naming a schema that does not
+/// exist or is not a member, so every index here is a member.
+pub(super) struct DiscriminatorMembers {
+    pub(super) mapping: Vec<(String, usize)>,
+    pub(super) default: Option<usize>,
 }

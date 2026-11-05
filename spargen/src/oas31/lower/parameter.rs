@@ -26,10 +26,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// lowering inserted and nothing else reaches, so it is not emitted as a public type nothing
     /// refers to (#927); a component the parameter `$ref`s stays, since its memo holds it.
     fn remap_binary_param(&mut self, ty: Ty, hint: &str, mark: u32) -> Ty {
-        if matches!(
-            self.graph.get(ty.id).map(|def| &def.kind),
-            Some(TypeKind::Bytes)
-        ) {
+        if matches!(self.kind_of(ty.id), Some(TypeKind::Bytes)) {
             let lowered = mark..self.graph_mark();
             self.elide_unused_union_lowering(lowered);
             let mut remapped = self.insert_type(

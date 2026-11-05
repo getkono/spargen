@@ -9,6 +9,7 @@ use crate::oas31::discriminator::is_schema_component_name;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
+use super::discriminator::DiscriminatorMembers;
 use super::meet::NoMeet;
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
@@ -16,9 +17,7 @@ use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
 use super::shape::ref_siblings_bear_shape;
-use super::{
-    DiscriminatorMembers, HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, UnionSibling,
-};
+use super::{LowerCtx, Refiner, ScopeReach, UnionSibling};
 
 /// A union's members, sorted before any is lowered: what [`LowerCtx::lower_union_with_sibling`]
 /// hands the sole-member collapse and the variant path alike.
@@ -657,16 +656,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
                     Err(NoMeet::Empty) => {
-                        // W011 case: excluded-union-branch
-                        Diagnostic::warning(
-                            Code::DeclarationHasNoEffect,
-                            schema.provenance.clone(),
-                        )
-                        .message(format!(
-                            "union member {index} cannot satisfy the enclosing schema's own \
-                             constraints, so it is not a variant of the generated enum"
-                        ))
-                        .emit(self.diags);
+                        self.warn_excluded_union_branch(&schema.provenance, index);
                         continue;
                     }
                     // Object and array applicators together beside a branch that states no
@@ -1112,14 +1102,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .variants
             .iter()
             .zip(labels)
-            .filter(|(variant, _)| {
-                matches!(
-                    self.graph.get(variant.ty.id).map(|def| &def.kind),
-                    Some(TypeKind::Any)
-                )
-            })
+            .filter(|(variant, _)| matches!(self.kind_of(variant.ty.id), Some(TypeKind::Any)))
             .map(|(variant, label)| (variant.name_hint.clone(), *label))
             .collect()
+    }
+
+    /// Report, as `W011` at `at`, that the union's real member `member` cannot satisfy the
+    /// enclosing schema's own constraints and so is no variant of the generated enum.
+    pub(super) fn warn_excluded_union_branch(&mut self, at: &Provenance, member: usize) {
+        // W011 case: excluded-union-branch
+        Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+            .message(format!(
+                "union member {member} cannot satisfy the enclosing schema's own constraints, so \
+                 it is not a variant of the generated enum"
+            ))
+            .emit(self.diags);
     }
 
     /// Report `warning`, an inline `oneOf`'s `W001` for its `serde_json::Value` variants, or hold
@@ -1285,4 +1282,19 @@ fn retain_variants(
     retain(variants, &kept);
     retain(ref_names, &kept);
     retain(variant_members, &kept);
+}
+
+/// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
+/// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
+/// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
+/// replaces, the warning names only the variants the meet carries as `Value` (#660, #675). It is
+/// reported as raised where the gathering or the meet fails, where the meet does not replace the
+/// union (its lowering is still named, or the meet is a reservation), and for every warning a
+/// union other than such a member raised.
+#[derive(Clone, Debug)]
+pub(super) struct HeldUntypedWarning {
+    /// The union the warning is raised at.
+    pub(super) provenance: Provenance,
+    /// Each `Value` variant's hint, beside its member position for the message.
+    pub(super) untyped: Vec<(String, usize)>,
 }

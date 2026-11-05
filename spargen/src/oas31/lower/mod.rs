@@ -18,6 +18,7 @@ mod meet;
 mod narrowing;
 mod nullability;
 mod object;
+mod operation;
 mod parameter;
 mod prune;
 mod reference;
@@ -36,29 +37,21 @@ mod xml;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use crate::diag::{Aborted, Diagnostics, Provenance};
+use crate::ir::{Api, Info, Ty, TypeGraph, TypeId, TypeKind};
 
-use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
-use crate::ir::{
-    Api, Docs, Info, JsonCategory, Method, Operation, OperationId, ParamLoc, PathSegment, SchemeId,
-    SecuritySchemeDef, Ty, TypeGraph, TypeId,
-};
-use crate::name::synth_operation_id;
-
-use super::{
-    Document, JsonType, OperationObject, ParameterObject, PathItem, Resolver, ResponseObject,
-    Schema,
-};
+use super::{Document, Resolver, Schema};
 
 use combine::{Gathering, RecordedContribution};
 use cycle::{MemberOrder, MemberOrders, Opening};
 use defaults::retype_field_defaults;
+use operation::lower_operation;
 use reference::resolve_path_item;
-use security::{
-    lower_security_requirement, lower_security_schemes, resolve_external_security_schemes,
-};
-use server::{lower_server, lower_server_override, parse_path_template};
-use xml::{gate_xml_field_renames, RootXml, XmlSite};
+use refiner::CategoryMask;
+use security::{lower_security_schemes, resolve_external_security_schemes};
+use server::lower_server;
+use union::HeldUntypedWarning;
+use xml::{gate_xml_field_renames, XmlRecords, XmlSite};
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
 /// `allOf`/`oneOf`/`anyOf` member, and resolved `$ref` target descends one level through
@@ -181,8 +174,9 @@ pub(crate) fn lower(
     }
 }
 
-/// One reservation's identity, in whichever of the three memos holds it: a root component by name,
-/// a remote target by absolute `url#fragment`, a bundle target by resolved `file#pointer`.
+/// One reservation's identity, the key [`LowerCtx::finished`], [`LowerCtx::in_progress`] and
+/// [`LowerCtx::alias_stack`] hold it under: a root component by name, a remote target by absolute
+/// `url#fragment`, a bundle target by resolved `file#pointer`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Reservation {
     Component(String),
@@ -191,7 +185,8 @@ enum Reservation {
 }
 
 impl Reservation {
-    /// The key both of its frame's memos hold it under: the name, the URL, or the `file#pointer`.
+    /// What identifies it among reservations of its kind: the name, the URL, or the
+    /// `file#pointer`.
     fn key(&self) -> &str {
         match self {
             Self::Component(key) | Self::Remote(key) | Self::Resolved(key) => key,
@@ -241,15 +236,9 @@ fn lower_pass(
         resolver,
         diags,
         graph: TypeGraph::default(),
-        components: HashMap::new(),
+        finished: HashMap::new(),
         in_progress: HashMap::new(),
-        component_alias_stack: HashSet::new(),
-        remote_components: HashMap::new(),
-        remote_in_progress: HashMap::new(),
-        remote_alias_stack: HashSet::new(),
-        resolved_components: HashMap::new(),
-        resolved_in_progress: HashMap::new(),
-        resolved_alias_stack: HashSet::new(),
+        alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
         resolved_member_stack: Vec::new(),
         union_member_stack: Vec::new(),
@@ -266,10 +255,8 @@ fn lower_pass(
         narrowing_opens: false,
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
-        root_xml: HashMap::new(),
-        field_xml_sites: HashSet::new(),
+        xml: XmlRecords::default(),
         xml_holders: Vec::new(),
-        xml_mergers: HashMap::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
         held_untyped_warnings: None,
@@ -329,9 +316,7 @@ fn lower_pass(
         &mut ctx.graph,
         &operations,
         &ctx.meet_locations,
-        &ctx.root_xml,
-        &ctx.field_xml_sites,
-        &ctx.xml_mergers,
+        &ctx.xml,
         document.is_oas32,
         ctx.diags,
     );
@@ -357,236 +342,6 @@ fn lower_pass(
         security_schemes,
     };
     (ctx.diags.result(api), stale)
-}
-
-/// Lower the `operation` declared under `method` on the path item `item` of the template `path`:
-/// its merged parameters, request body, responses, security requirements, documentation and
-/// server override. Its id joins `operation_ids`, and a duplicate, a malformed parameter set, a
-/// response it cannot decode where it stands, or a security requirement naming no lowered scheme
-/// in `security_schemes` is reported; the operation is returned regardless, and the pass's
-/// result carries the rejection.
-fn lower_operation(
-    ctx: &mut LowerCtx<'_, '_>,
-    path: &str,
-    item: &PathItem,
-    method: &Method,
-    operation: &OperationObject,
-    security_schemes: &IndexMap<SchemeId, SecuritySchemeDef>,
-    operation_ids: &mut HashSet<String>,
-) -> Operation {
-    let path_template = parse_path_template(path);
-    let id = operation
-        .operation_id
-        .clone()
-        .unwrap_or_else(|| synth_operation_id(method, &path_template));
-    if !operation_ids.insert(id.clone()) {
-        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-            .message(format!(
-                "operationId `{id}` is not unique within the API description"
-            ))
-            .emit(ctx.diags);
-    }
-
-    let mut params = Vec::new();
-    let mut merged_parameters: IndexMap<(String, String), ParameterObject> = IndexMap::new();
-    for parameter in &item.parameters {
-        if let Some(parameter) = ctx.resolve_parameter(parameter) {
-            let key = (parameter.location.clone(), parameter.name.clone());
-            if merged_parameters.insert(key, parameter).is_some() {
-                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                    .message("path-item parameters contain a duplicate name/location pair")
-                    .emit(ctx.diags);
-            }
-        }
-    }
-    let mut operation_parameter_keys = HashSet::new();
-    for parameter in &operation.parameters {
-        if let Some(parameter) = ctx.resolve_parameter(parameter) {
-            let key = (parameter.location.clone(), parameter.name.clone());
-            if !operation_parameter_keys.insert(key.clone()) {
-                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-                    .message("operation parameters contain a duplicate name/location pair")
-                    .emit(ctx.diags);
-            }
-            // Operation-level parameters override the matching path-item parameter.
-            merged_parameters.insert(key, parameter);
-        }
-    }
-    for parameter in merged_parameters.values() {
-        if let Some(parameter) = ctx.lower_parameter(parameter) {
-            params.push(parameter);
-        }
-    }
-    let placeholders: HashSet<&str> = path_template
-        .segments
-        .iter()
-        .filter_map(|segment| match segment {
-            PathSegment::Param(name) => Some(name.as_str()),
-            PathSegment::Literal(_) => None,
-        })
-        .collect();
-    let path_parameters: HashSet<&str> = params
-        .iter()
-        .filter(|parameter| parameter.location == ParamLoc::Path)
-        .map(|parameter| parameter.name.as_str())
-        .collect();
-    if placeholders != path_parameters {
-        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-            .message(format!(
-                "path template parameters {placeholders:?} do not match declared path \
-                         parameters {path_parameters:?}"
-            ))
-            .emit(ctx.diags);
-    }
-    let querystrings = params
-        .iter()
-        .filter(|parameter| parameter.location == ParamLoc::QueryString)
-        .count();
-    let named_queries = params
-        .iter()
-        .any(|parameter| parameter.location == ParamLoc::Query);
-    if querystrings > 1 || (querystrings == 1 && named_queries) {
-        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
-            .message(
-                "an operation may declare at most one `in: querystring` parameter and may \
-                         not combine it with `in: query` parameters",
-            )
-            .emit(ctx.diags);
-    }
-
-    let request_body = operation
-        .request_body
-        .as_ref()
-        .and_then(|body| ctx.resolve_request_body(body))
-        .and_then(|body| ctx.lower_request_body(&body));
-
-    let responses = ctx.lower_responses(&operation.responses);
-    // XML decode is scoped to the single-body success/error paths. An XML body beside a
-    // second bodied status on the same side — a response enum that decodes two or more
-    // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
-    // A lone XML success body beside a bodyless status is still that one body.
-    if responses.xml_in_multi_status() {
-        // E009 case: xml-multi-body
-        Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
-            .message(
-                "an application/xml (or text/xml) response body is only supported as an \
-                         operation's single bodied success or single bodied error response \
-                         (bodyless statuses beside it are fine); it cannot share a response enum \
-                         with a second bodied success or error status",
-            )
-            .remedy(
-                "give the operation a single XML-bodied success/error response, use JSON \
-                         for the other bodied responses, or omit this API segment with \
-                         spargen::omit!",
-            )
-            .emit(ctx.diags);
-    }
-    // Streaming decode is scoped to the single bodied success (`EventStream<T>`). A stream
-    // anywhere else — an error status, a `default` (which is always offered to the error
-    // side), or a success enum beside a second bodied success — would be decoded as one
-    // whole JSON body, so it is rejected (narrowed `E009`) rather than misread on the wire.
-    if responses.stream_outside_single_success() {
-        // E009 case: streaming-response-position
-        Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
-                    .message(
-                        "a streaming (text/event-stream, application/x-ndjson, or JSON Text \
-                         Sequence) response body is only supported as an operation's single success body; on an error \
-                         status, on a `default` response (which also documents error statuses), \
-                         or beside a second bodied success status it would be decoded as one \
-                         whole body",
-                    )
-                    .remedy(
-                        "declare the stream under an explicit 2xx status as the operation's only \
-                         bodied success, document error bodies with a whole-body media type, or \
-                         omit this API segment with spargen::omit!",
-                    )
-                    .emit(ctx.diags);
-    }
-
-    let security: Vec<crate::ir::SecurityRequirement> = operation
-        .security
-        .as_ref()
-        .unwrap_or(&ctx.document.security)
-        .iter()
-        .map(lower_security_requirement)
-        .collect();
-    // Codegen builds per-operation credential tables from the scheme map, so every
-    // referenced scheme must have lowered; an undeclared or unsupported scheme would
-    // otherwise silently generate an unauthenticated call.
-    for requirement in &security {
-        for scheme in &requirement.0 {
-            if !security_schemes.contains_key(scheme) {
-                Diagnostic::error(Code::UnknownSecurityScheme, operation.provenance.clone())
-                    .message(format!(
-                        "security requirement references undeclared or unsupported \
-                             scheme `{}`",
-                        scheme.0
-                    ))
-                    .remedy(
-                        "declare the scheme under components.securitySchemes as http \
-                             bearer/basic, apiKey, oauth2, openIdConnect, or mutualTLS",
-                    )
-                    .emit(ctx.diags);
-            }
-        }
-    }
-
-    let mut operation_description = operation.description.clone();
-    // A Path Item's `summary`/`description` apply to every operation on the path. They are
-    // additional context rather than a replacement, so the operation's own documentation
-    // stays first and these follow it.
-    for text in [item.summary.as_ref(), item.description.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        append_text(&mut operation_description, text.clone());
-    }
-    if !operation.tags.is_empty() {
-        append_text(
-            &mut operation_description,
-            format!("Tags: {}.", operation.tags.join(", ")),
-        );
-    }
-    for (status, response) in &operation.responses.by_status {
-        if let Some(response) = ctx.resolve_response(response) {
-            append_response_docs(&mut operation_description, status, &response);
-        }
-    }
-    if let Some(response) = operation
-        .responses
-        .default
-        .as_ref()
-        .and_then(|response| ctx.resolve_response(response))
-    {
-        append_response_docs(&mut operation_description, "default", &response);
-    }
-
-    // Operation `servers` override the path item's, which override the document's. The
-    // document's is the client's base URL, so "no override" is the common case.
-    let server = if operation.servers.is_empty() {
-        lower_server_override(&item.servers, ctx.diags)
-    } else {
-        lower_server_override(&operation.servers, ctx.diags)
-    };
-
-    Operation {
-        id: OperationId(id),
-        method: method.clone(),
-        path: path_template,
-        params,
-        request_body,
-        responses,
-        security,
-        deprecated: operation.deprecated,
-        docs: Docs {
-            title: None,
-            summary: operation.summary.clone(),
-            description: operation_description,
-            deprecated: operation.deprecated,
-        },
-        server,
-        provenance: operation.provenance.clone(),
-    }
 }
 
 /// The API's own documentation: `info`'s summary and description, its contact, license and
@@ -645,16 +400,6 @@ fn append_text(target: &mut Option<String>, text: String) {
     }
 }
 
-fn append_response_docs(target: &mut Option<String>, status: &str, response: &ResponseObject) {
-    let mut docs = response.summary.clone();
-    if let Some(description) = &response.description {
-        append_text(&mut docs, description.clone());
-    }
-    if let Some(docs) = docs {
-        append_text(target, format!("Response `{status}`: {docs}"));
-    }
-}
-
 /// A union's shape-bearing sibling: what each branch is met with, plus whether the sibling's own
 /// keywords say anything about `null`.
 ///
@@ -704,50 +449,6 @@ struct ScopedRefiners {
     allowed: Option<CategoryMask>,
 }
 
-/// A set of JSON categories, the non-null members of a `type` array. `integer` and `number` both
-/// admit [`JsonCategory::Number`], the category a lowered numeric branch reports.
-#[derive(Clone, Copy)]
-struct CategoryMask(u8);
-
-impl CategoryMask {
-    fn of(types: &[JsonType]) -> Self {
-        Self(types.iter().fold(0, |mask, kind| {
-            mask | match kind {
-                JsonType::Null => 0,
-                JsonType::Boolean => Self::bit(JsonCategory::Boolean),
-                JsonType::Object => Self::bit(JsonCategory::Object),
-                JsonType::Array => Self::bit(JsonCategory::Array),
-                JsonType::Number | JsonType::Integer => Self::bit(JsonCategory::Number),
-                JsonType::String => Self::bit(JsonCategory::String),
-            }
-        }))
-    }
-
-    fn bit(category: JsonCategory) -> u8 {
-        match category {
-            JsonCategory::String => 1,
-            JsonCategory::Number => 2,
-            JsonCategory::Boolean => 4,
-            JsonCategory::Array => 8,
-            JsonCategory::Object => 16,
-        }
-    }
-
-    fn admits(self, category: JsonCategory) -> bool {
-        self.0 & Self::bit(category) != 0
-    }
-
-    /// Whether the set admits a category other than `category`.
-    fn admits_besides(self, category: JsonCategory) -> bool {
-        self.0 & !Self::bit(category) != 0
-    }
-
-    /// Whether the set names a category, and only categories `outer` admits too.
-    fn is_within(self, outer: Self) -> bool {
-        self.0 != 0 && self.0 & !outer.0 == 0
-    }
-}
-
 /// What a [`Refiner::Scoped`] meeting found across the branches it visited: which halves reached
 /// a branch of their category, and whether both halves met a branch that states no category, which
 /// leaves no single category to establish for it.
@@ -756,21 +457,6 @@ struct ScopeReach {
     object: bool,
     array: bool,
     uncategorised: bool,
-}
-
-/// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
-/// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
-/// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
-/// replaces, the warning names only the variants the meet carries as `Value` (#660, #675). It is
-/// reported as raised where the gathering or the meet fails, where the meet does not replace the
-/// union (its lowering is still named, or the meet is a reservation), and for every warning a
-/// union other than such a member raised.
-#[derive(Clone, Debug)]
-struct HeldUntypedWarning {
-    /// The union the warning is raised at.
-    provenance: Provenance,
-    /// Each `Value` variant's hint, beside its member position for the message.
-    untyped: Vec<(String, usize)>,
 }
 
 /// The four spellings of one conjunction a `oneOf`/`anyOf` takes part in, each met with the
@@ -827,64 +513,35 @@ impl MetUnion {
     }
 }
 
-/// A union's Discriminator Object resolved against the union's own members: every `mapping`
-/// entry's tag with the index (into the union's real, non-null members) of the member it names, in
-/// document order, and the member `defaultMapping` names. Built by
-/// [`LowerCtx::discriminator_members`], which rejects any entry naming a schema that does not
-/// exist or is not a member, so every index here is a member.
-struct DiscriminatorMembers {
-    mapping: Vec<(String, usize)>,
-    default: Option<usize>,
-}
-
 struct LowerCtx<'a, 'doc> {
     document: &'doc Document,
     resolver: &'a Resolver<'doc>,
     diags: &'a mut Diagnostics,
     graph: TypeGraph,
-    /// Lowered components, mapped to their root id and nullability. Nullability is carried so a
-    /// `$ref` consumer wraps the type in `Option` when the component itself is nullable (a
-    /// `"null"` in its type array, or a `null` enum/const member) — otherwise a null-mixed enum
-    /// used via `$ref` would emit a non-`Option` field that rejects a conforming `null` payload.
-    components: HashMap<String, (TypeId, bool)>,
-    /// Components currently being lowered, mapped to the id reserved for their root and their
-    /// provisional nullability (an earlier pass's settled answer, else a reserve-time guess from
-    /// the schema). A `$ref` that re-enters a name still in this map is a cycle-closing back-edge
-    /// and is boxed against the reserved id; a guess it read that the body contradicts is recorded
-    /// in [`Self::revisions`], and [`lower`] lowers again until each back-edge carries the same
-    /// nullability a completed lowering does.
-    in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards chains of component aliases (`A -> B -> A`) that do not have a concrete schema body
-    /// to enter the normal reserve/box recursion path.
-    component_alias_stack: HashSet<String>,
-    /// The remote-`$ref` analogue of [`Self::components`], keyed by the absolute `url#fragment`. A
-    /// remote ref resolves to a fresh owned schema each call, so — unlike local components — it has
-    /// no `document`-level identity; this map gives it one, so repeated remote uses share one
-    /// generated type and, together with [`Self::remote_in_progress`], recursion terminates.
-    remote_components: HashMap<String, (TypeId, bool)>,
-    /// Remote refs currently being lowered (same role as [`Self::in_progress`] for components): a
-    /// re-entered `url#fragment` is a cycle-closing back-edge and is boxed against its reserved id.
-    remote_in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
-    /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
-    remote_alias_stack: HashSet<String>,
-    /// The bundle-`$ref` analogue of [`Self::components`], keyed by the resolved target's own
-    /// `file#pointer` (see [`resolved_identity`]). `Resolver::resolve` parses a fresh owned schema
-    /// on every call, so — exactly as for a remote ref — a relative-file reference and a sub-file's
-    /// own `#/components/schemas/<name>` have no `document`-level identity of their own. This map
-    /// gives them one, so repeated uses of one target share one generated type instead of producing
-    /// a fresh type per reference site.
-    resolved_components: HashMap<String, (TypeId, bool)>,
-    /// Bundle refs currently being lowered (same role as [`Self::in_progress`]): a re-entered
-    /// `file#pointer` is a cycle-closing back-edge and is boxed against its reserved id, so a
-    /// recursive sub-file schema terminates and generates rather than walking to
-    /// [`MAX_SCHEMA_DEPTH`] and rejecting.
-    resolved_in_progress: HashMap<String, (TypeId, bool)>,
-    /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
-    /// against; the counterpart of [`Self::remote_alias_stack`].
-    resolved_alias_stack: HashSet<String>,
+    /// Every reservation lowered so far, mapped to its root id and nullability, keyed by
+    /// [`Reservation`]: a root component by name, a remote target by absolute `url#fragment`, a
+    /// bundle target by resolved `file#pointer` ([`resolved_identity`]). Every use of one target
+    /// shares the one type recorded here. A remote ref or a bundle ref resolves to a fresh owned
+    /// schema each call, so it has no `document`-level identity of its own, and this key gives it
+    /// one. Nullability is carried so a `$ref` consumer wraps the type in `Option` when the target
+    /// itself is nullable (a `"null"` in its type array, or a `null` enum/const member);
+    /// otherwise a null-mixed enum used via `$ref` would emit a non-`Option` field that rejects a
+    /// conforming `null` payload.
+    finished: HashMap<Reservation, (TypeId, bool)>,
+    /// Reservations whose bodies are being lowered right now, mapped to the id reserved for their
+    /// root and their provisional nullability (an earlier pass's settled answer, else a
+    /// reserve-time guess from the schema). A `$ref` that re-enters one is a cycle-closing
+    /// back-edge and is boxed against the reserved id, so a recursive schema terminates rather
+    /// than walking to [`MAX_SCHEMA_DEPTH`] and rejecting; a guess it read that the body
+    /// contradicts is recorded in [`Self::revisions`], and [`lower`] lowers again until each
+    /// back-edge carries the same nullability a completed lowering does.
+    in_progress: HashMap<Reservation, (TypeId, bool)>,
+    /// The bare-`$ref` aliases being resolved right now (a component, remote document or bundle
+    /// target whose whole body is a `$ref`), which have no body to reserve a root against: a chain
+    /// of them that loops back is found here and rejected as `E004` instead of recursing forever.
+    alias_stack: HashSet<Reservation>,
     /// What a bundle-`$ref` `allOf` member contributes, keyed by the resolved target's own
-    /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
+    /// `file#pointer` (see [`resolved_identity`]): the [`Self::finished`] analogue for the
     /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
     /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
     /// referencing a shared type, and re-expanding the target at every use would cost a branching
@@ -975,22 +632,12 @@ struct LowerCtx<'a, 'doc> {
     /// provenance, which ranks it after every declared schema when type names collide; this is
     /// where `W005` and `W006` raised against it point instead of that root (#454).
     meet_locations: HashMap<TypeId, Provenance>,
-    /// The `xml` object of every schema a definition was lowered from, read as that schema's root
-    /// ([`Self::record_root_xml`]), by the site it was written at. The definitions keep the site,
-    /// so [`gate_xml_field_renames`] finds each one from the types it produced once ids are final.
-    root_xml: HashMap<XmlSite, RootXml>,
-    /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
-    /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
-    field_xml_sites: HashSet<XmlSite>,
+    /// The XML hints recorded for [`gate_xml_field_renames`] to settle once ids are final.
+    xml: XmlRecords,
     /// The sites of the compositions being gathered, innermost last
     /// ([`Self::with_xml_holder`]): a member [`Self::record_member_xml`] reads is attributed to
     /// the last.
     xml_holders: Vec<XmlSite>,
-    /// For each type a `$ref` member contributed to an `allOf` composition, or a `$ref` target was
-    /// intersected with its shape-bearing siblings as ([`Self::record_ref_sibling_merger`]), the
-    /// sites of the compositions that merged it ([`Self::record_xml_merger`]), that `$ref` schema
-    /// itself counting as one: a member merged into that type is merged into theirs too.
-    xml_mergers: HashMap<TypeId, Vec<XmlSite>>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the
@@ -1040,31 +687,16 @@ struct LowerCtx<'a, 'doc> {
     deferred_map_values: Vec<(Provenance, Vec<Ty>)>,
 }
 
+impl LowerCtx<'_, '_> {
+    /// The kind of the definition `id` names, while the graph holds one.
+    fn kind_of(&self, id: TypeId) -> Option<&TypeKind> {
+        self.graph.get(id).map(|def| &def.kind)
+    }
+}
+
 /// The options that change what lowering produces.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LowerOptions {
     /// `Spec::open_narrowing`: lower a response body's own string narrowings as open sets.
     pub(crate) open_narrowing: bool,
-}
-
-/// Append a note as a trailing rustdoc paragraph on a type's [`Docs`], used to surface a
-/// component-root `default` on the generated named type. An empty description counts as absent,
-/// as in [`append_text`].
-fn append_doc_note(docs: &mut Docs, note: String) {
-    append_text(&mut docs.description, note);
-}
-
-/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
-/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
-/// is written in, with the span of the node written there when the file holds one.
-fn all_of_entry_provenance(
-    resolver: &Resolver<'_>,
-    holder: &Provenance,
-    index: usize,
-) -> Provenance {
-    let pointer = holder.pointer.push("allOf").index(index);
-    let span = resolver
-        .node_at(resolver.written_in(holder), &pointer)
-        .map(|node| node.span);
-    Provenance::new(pointer, span)
 }

@@ -186,10 +186,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // there: what an untyped target means beside another category is not an object meet,
         // and keeps its verdict.
         let referenced = if schema.types.types.contains(&JsonType::Object)
-            && matches!(
-                self.graph.get(referenced.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            )
+            && matches!(self.kind_of(referenced.id), Some(TypeKind::Struct(_)))
             && !self.ref_target_decides_null(reference, &schema.provenance)
         {
             Ty {
@@ -208,10 +205,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let referenced = if has_union_sibling
             && schema.types.types.is_empty()
             && !referenced.nullable
-            && matches!(
-                self.graph.get(referenced.id).map(|def| &def.kind),
-                Some(TypeKind::Struct(_))
-            )
+            && matches!(self.kind_of(referenced.id), Some(TypeKind::Struct(_)))
             && !self.ref_target_decides_null(reference, &schema.provenance)
             && union_branch_admits_null(schema)
         {

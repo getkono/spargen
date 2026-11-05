@@ -2,7 +2,7 @@
 //! a met union keeps or drops.
 
 use crate::diag::{Code, Diagnostic};
-use crate::ir::{Docs, Ty, TypeKind, Union, UnionMode, UnionStrategy};
+use crate::ir::{Docs, Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
 use crate::oas31::Schema;
 
 use super::meet::same_ty;
@@ -11,6 +11,14 @@ use super::strategy::retain_strategy;
 use super::{LowerCtx, MetUnion};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// The name hint of the definition `id` names, empty where the graph holds none.
+    fn name_hint_of(&self, id: TypeId) -> String {
+        self.graph
+            .get(id)
+            .map(|def| def.name_hint.clone())
+            .unwrap_or_default()
+    }
+
     /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
     /// are all the same type once each one's own `null` is set aside. No non-null value can tell
     /// such variants apart, so the union adds nothing to its common type — and a `oneOf` of them
@@ -21,7 +29,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `null`: after the meet each variant keeps its own nullability, such as a branch that states
     /// nothing and takes the conjunct's `null`, so variants of one type need not agree on it.
     fn indistinguishable_union_variant(&self, ty: Ty, structural: bool) -> Option<(Ty, usize)> {
-        let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
+        let Some(TypeKind::Union(union)) = self.kind_of(ty.id) else {
             return None;
         };
         let structural =
@@ -181,7 +189,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(TypeKind::Union(Union {
             strategy: UnionStrategy::Trial { mode, .. },
             ..
-        })) = self.graph.get(met.id).map(|def| &def.kind)
+        })) = self.kind_of(met.id)
         else {
             return met;
         };
@@ -219,7 +227,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ctx.collapse_met_one_ofs(schema, variant, mark)
         });
         let one_of = matches!(
-            self.graph.get(ty.id).map(|def| &def.kind),
+            self.kind_of(ty.id),
             Some(TypeKind::Union(Union {
                 strategy: UnionStrategy::Trial {
                     mode: UnionMode::OneOf,
@@ -248,7 +256,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         mark: u32,
         mut collapse: impl FnMut(&mut Self, Ty) -> Ty,
     ) -> Ty {
-        let Some(TypeKind::Union(union)) = self.graph.get(met.id).map(|def| &def.kind) else {
+        let Some(TypeKind::Union(union)) = self.kind_of(met.id) else {
             return met;
         };
         let mut union = union.clone();
@@ -269,11 +277,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             return met;
         }
-        let hint = self
-            .graph
-            .get(met.id)
-            .map(|def| def.name_hint.clone())
-            .unwrap_or_default();
+        let hint = self.name_hint_of(met.id);
         let mut ty = self.insert_type(&hint, TypeKind::Union(union), Docs::default(), None);
         ty.nullable = met.nullable;
         ty.boxed = met.boxed;
@@ -293,11 +297,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         mark: u32,
         spelling: MetUnion,
     ) -> Ty {
-        let hint = self
-            .graph
-            .get(met.id)
-            .map(|def| def.name_hint.clone())
-            .unwrap_or_default();
+        let hint = self.name_hint_of(met.id);
         let inserted_from = self.graph_mark();
         let (collapsed, _) = self.collapse_met_union(schema, met, one_of, &hint, spelling);
         if met.id.0 < mark
