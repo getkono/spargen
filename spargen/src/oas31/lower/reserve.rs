@@ -432,9 +432,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// body is still being lowered.
     ///
     /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare `$ref` plus any
-    /// number of null-only members, carrying no shape, discriminator, sibling `$ref` or `default`
-    /// of its own — and only when that reference resolves to a target whose body is currently being
-    /// lowered, whichever kind of [`Reservation`] it is. The question is asked of the resolved
+    /// number of null-only members (or a `oneOf` repeating bare `$ref`s that all resolve to one
+    /// target, which reports the repetition as `W001` as the merge it bypasses does), carrying no
+    /// shape, discriminator, sibling `$ref` or `default` of its own — and only when that reference
+    /// resolves to a target whose body is currently being lowered, whichever kind of [`Reservation`] it is. The question is asked of the resolved
     /// *target*, not of the reference's spelling: see [`Self::open_reservation_for_ref`].
     ///
     /// Both halves of that narrowness are load-bearing. Recognising an alias whose target is
@@ -464,20 +465,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema_has_shape_constraint(&without_union) {
             return None;
         }
-        let mut real = members.iter().filter(|member| !member_is_null_only(member));
-        let SchemaOr::Schema(only) = real.next()? else {
-            return None;
-        };
-        if real.next().is_some() {
+        // Each real member is a bare reference and nothing else: a member carrying its own
+        // keywords is a `$ref` with siblings, which is an intersection and not an alias.
+        let mut real = Vec::new();
+        for member in members.iter().filter(|member| !member_is_null_only(member)) {
+            let SchemaOr::Schema(member) = member else {
+                return None;
+            };
+            let target = member.reference.as_deref()?;
+            if ref_siblings_bear_shape(member) {
+                return None;
+            }
+            real.push((target, &member.provenance));
+        }
+        // A `oneOf` may repeat its one reference: the repeated members decode the same values, so
+        // they merge into one variant under `W001`, and the union is that reference all the same
+        // (#1176). An `anyOf` merges nothing, so it is an alias with exactly one real member.
+        if real.is_empty() || (real.len() > 1 && schema.one_of.is_empty()) {
             return None;
         }
-        let target = only.reference.as_deref()?;
-        // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
-        // siblings, which is an intersection and not an alias.
-        if ref_siblings_bear_shape(only) {
-            return None;
+        // Every member must resolve to the one open target, however each is spelled; the identity
+        // is the reservation's id, which is what the ordinary merge compares as well.
+        let mut answer: Option<(TypeId, bool)> = None;
+        for (target, at) in &real {
+            let entry = self.open_reservation_for_ref(target, at)?;
+            if answer.is_some_and(|(id, _)| id != entry.0) {
+                return None;
+            }
+            answer = Some(entry);
         }
-        let (id, target_nullable) = self.open_reservation_for_ref(target, &only.provenance)?;
+        let (id, target_nullable) = answer?;
+        if real.len() > 1 {
+            // Answering here is answering instead of the merge in `lower_union_variants`, which is
+            // where the repeated members are otherwise reported.
+            let merged: Vec<usize> = (0..real.len()).collect();
+            self.warn_indistinguishable_branches(&schema.provenance, &[merged.as_slice()]);
+        }
         Some(Ty {
             id,
             // The target's *own* nullability is as much a fact about this alias as a `"null"`

@@ -713,11 +713,71 @@ components:
 }
 
 /// The same merge where the union is a component's whole body and its one member closes a cycle
-/// through another component (`A = B | B`, `B.x -> A`) has no def to hand back as `A`'s root, so
-/// it is refused as `E007` with its own wording rather than failing the IR invariant as `E011`
-/// (#1152).
+/// through another component (`A = B | B`, `B.x -> A`) is a nullable alias for `B`, as the
+/// one-member spelling `A = B` is: the reference to `A` taken while `B` is open is `B` itself,
+/// boxed, and the repeated member is still reported as `W001` at `A`. It once failed the IR
+/// invariant as `E011` (#1152), then was refused as `E007` (#1176). The repeated `$ref`s are
+/// spelled two ways, a root pointer and the root file's own path, which resolve to one target.
 #[test]
-fn a_component_body_repeating_a_cycle_closing_ref_is_refused_not_an_invariant_failure() {
+fn a_component_body_repeating_a_cycle_closing_ref_generates_as_an_alias() {
+    for second in [
+        "#/components/schemas/B",
+        "./openapi.yaml#/components/schemas/B",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths: {{}}
+components:
+  schemas:
+    B:
+      type: object
+      properties:
+        x: {{ $ref: '#/components/schemas/A' }}
+    A:
+      oneOf: [{{ $ref: '#/components/schemas/B' }}, {{ $ref: '{second}' }}]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{second} {entry}: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .all(|d| d.severity != spargen::Severity::Error),
+                "{second} {entry}: the repeated alias must raise no error: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/A"
+                        && d.message
+                            .contains("members 0, 1 lower to the same generated type")
+                }),
+                "{second} {entry}: the repeated member must still be reported as `W001`: \
+                 {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub x: Option<Box<B>>"),
+            "{second}: `B.x` must be `B` itself, boxed where it closes the cycle: {types}"
+        );
+    }
+}
+
+/// The same merge where one member reaches the open target through a component alias of it
+/// (`A = B | C`, `C = B`, `B.x -> A`) is not that nullable alias, as `A = C` alone is not: the
+/// merged union has no def to hand back as `A`'s root, so it is refused as `E007` with its own
+/// wording rather than failing the IR invariant as `E011` (#1152).
+#[test]
+fn a_component_body_merging_a_cycle_closing_ref_through_an_alias_is_refused_as_e007() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -729,7 +789,9 @@ components:
       properties:
         x: { $ref: '#/components/schemas/A' }
     A:
-      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/B' }]
+      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/C' }]
+    C:
+      $ref: '#/components/schemas/B'
 "##;
     for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
