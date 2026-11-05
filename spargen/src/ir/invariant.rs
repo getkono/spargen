@@ -323,7 +323,8 @@ mod tests {
             xml: XmlField::default(),
             undeclared: false,
         };
-        let rows: Vec<(&str, Box<dyn Fn(&mut Api)>)> = vec![
+        type Dangle<'a> = Box<dyn Fn(&mut Api) + 'a>;
+        let rows: Vec<(&str, Dangle<'_>)> = vec![
             (
                 "petId",
                 Box::new(|api| {
