@@ -77,6 +77,29 @@ fn w009_count(report: &Report) -> usize {
         .count()
 }
 
+/// The operation methods of the generated `impl Client`, sorted: its `async` methods, since the
+/// fixed methods and the `{op}_url` accessors (which `contains("fn op")` also matches) are not.
+fn operation_methods(generated: &str) -> Vec<String> {
+    let file = syn::parse_file(generated).expect("the generated module parses");
+    let mut methods: Vec<String> = (file.items.iter())
+        .filter_map(|item| match item {
+            syn::Item::Impl(block) if block.trait_.is_none() => Some(block),
+            _ => None,
+        })
+        .filter(
+            |block| matches!(&*block.self_ty, syn::Type::Path(ty) if ty.path.is_ident("Client")),
+        )
+        .flat_map(|block| &block.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method) if method.sig.asyncness.is_some() => Some(method),
+            _ => None,
+        })
+        .map(|method| method.sig.ident.to_string())
+        .collect();
+    methods.sort();
+    methods
+}
+
 // --- (a) Glob / bulk omit -----------------------------------------------------------------------
 
 const ADMIN_SPEC: &str = r#"
@@ -108,12 +131,8 @@ fn glob_omit_path_removes_all_matching_operations() {
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        !generated.contains("fn list_users"),
-        "admin op removed: {generated}"
-    );
-    assert!(!generated.contains("fn delete_user"), "admin op removed");
-    assert!(generated.contains("fn health"), "public op survives");
+    // Both admin ops removed, the public one survives.
+    assert_eq!(operation_methods(&generated), ["health"]);
 
     assert_eq!(
         w009_count(&report),
@@ -133,11 +152,8 @@ fn exact_omit_path_still_removes_exactly_one() {
     let report = spargen::generate(&config);
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(!generated.contains("fn list_users"), "exact path removed");
-    assert!(
-        generated.contains("fn delete_user"),
-        "sibling path survives: {generated}"
-    );
+    // The exact path removed, its sibling survives.
+    assert_eq!(operation_methods(&generated), ["delete_user", "health"]);
 
     assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
@@ -168,11 +184,7 @@ paths:
     let report = spargen::generate(&omitting(&spec, &out, omit));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        !generated.contains("fn post_upload"),
-        "omitted: {generated}"
-    );
-    assert!(generated.contains("fn get_health"), "kept: {generated}");
+    assert_eq!(operation_methods(&generated), ["get_health"]);
     assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
 
@@ -252,14 +264,8 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     );
 
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the rest is generated: {generated}"
-    );
-    assert!(
-        !generated.contains("fn get_bad"),
-        "the rejecting op is absent"
-    );
+    // The rest is generated, and the rejecting op is absent.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
 
 #[test]
@@ -397,18 +403,9 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     );
 
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the healthy op is generated: {generated}"
-    );
-    assert!(
-        !generated.contains("fn get_dynamic"),
-        "the dynamic-ref op is absent"
-    );
-    assert!(
-        !generated.contains("fn get_uses_bad"),
-        "the op that referenced the carved component is absent: {generated}"
-    );
+    // The healthy op is generated; the dynamic-ref op and the one that referenced the carved
+    // component are absent.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
 
 // --- (c2) The `$ref`-sibling flavour of E013 carves like the allOf one ---------------------------
@@ -479,14 +476,8 @@ fn carve_removes_a_ref_whose_siblings_cannot_be_intersected() {
         "no residual E013 leaks: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the healthy op is generated: {generated}"
-    );
-    assert!(
-        !generated.contains("fn get_uses_bad"),
-        "the carved op is absent: {generated}"
-    );
+    // The healthy op is generated, the carved op absent.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
 
 // --- (d) Carve is a no-op on a clean spec -------------------------------------------------------
@@ -615,14 +606,8 @@ fn carve_targets_a_query_operation_without_taking_its_path() {
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn list_items"),
-        "the supported sibling must survive: {generated}"
-    );
-    assert!(
-        !generated.contains("fn search_items"),
-        "the unsupported `query` operation must be carved: {generated}"
-    );
+    // The supported sibling survives; the unsupported `query` operation is carved.
+    assert_eq!(operation_methods(&generated), ["list_items"]);
     assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
 }
 
@@ -650,14 +635,8 @@ fn carve_targets_an_additional_operation_without_taking_its_path() {
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn list_items"),
-        "the supported sibling must survive: {generated}"
-    );
-    assert!(
-        !generated.contains("fn purge_items"),
-        "the unsupported `additionalOperations` method must be carved: {generated}"
-    );
+    // The supported sibling survives; the unsupported `additionalOperations` method is carved.
+    assert_eq!(operation_methods(&generated), ["list_items"]);
     assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
 }
 
@@ -769,10 +748,8 @@ components:
         "the omitted component takes its dangling ref with it: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the healthy operation survives: {generated}"
-    );
+    // The healthy operation survives.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 
     // Auto-carve reaches the same place without the consumer naming the component.
     let report = spargen::generate(&carving(&spec, &out));
@@ -1109,14 +1086,8 @@ fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
          alone by a rejection that no longer fires: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the healthy op is generated: {generated}"
-    );
-    assert!(
-        !generated.contains("fn get_uses_node"),
-        "the carved op is absent: {generated}"
-    );
+    // The healthy op is generated, the carved op absent.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
 
 /// The sole-member union collapse reports `E007`, and its pointer is load-bearing for exactly the
@@ -1186,14 +1157,8 @@ fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
         "no residual E007 leaks, so the pointer resolved to an omittable construct: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(
-        generated.contains("fn get_good"),
-        "the healthy op survives the carve: {generated}"
-    );
-    assert!(
-        !generated.contains("fn get_uses_bad"),
-        "the carved op is absent: {generated}"
-    );
+    // The healthy op survives the carve, the carved op is absent.
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
 
 /// The W009 messages of a report, which name the rule that removed each construct.
@@ -1256,12 +1221,11 @@ fn carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file() {
         "exactly the sub-file component and its one referrer are carved: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(generated.contains("fn get_good"), "{generated}");
-    assert!(
-        generated.contains("fn get_uses_healthy"),
-        "the same-named component in `xlib.yaml` is not the one carved: {generated}"
+    // The same-named component in `xlib.yaml` is not the one carved.
+    assert_eq!(
+        operation_methods(&generated),
+        ["get_good", "get_uses_healthy"]
     );
-    assert!(!generated.contains("fn get_uses_node"), "{generated}");
 
     // The derived rule names the sub-file relative to the root document, so the omit fingerprint
     // stamped into the header does not depend on where the description lives.
@@ -1429,9 +1393,7 @@ properties:
         "only the root operation that reaches the bad file is carved: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(generated.contains("fn get_good"), "{generated}");
-    assert!(generated.contains("fn get_also_good"), "{generated}");
-    assert!(!generated.contains("fn get_uses_wrapper"), "{generated}");
+    assert_eq!(operation_methods(&generated), ["get_also_good", "get_good"]);
 }
 
 /// A sub-file that declares `paths` of its own is carved at the same three depths the root is: a
@@ -1511,12 +1473,11 @@ paths:
         "each sub-file rejection is carved at its own depth: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    for survivor in ["fn get_good", "fn post_x", "fn get_y"] {
-        assert!(generated.contains(survivor), "{survivor}: {generated}");
-    }
-    for carved in ["fn get_x", "fn purge_y", "fn get_z"] {
-        assert!(!generated.contains(carved), "{carved}: {generated}");
-    }
+    // `get_x`, `purge_y` and `get_z` are carved.
+    assert_eq!(
+        operation_methods(&generated),
+        ["get_good", "get_y", "post_x"]
+    );
 }
 
 /// A bare path item file has no `paths` of its own, but each method in it is still an operation
@@ -1586,13 +1547,8 @@ get:
         "the bad operation alone is carved from the path item file: {report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(generated.contains("fn get_good"), "{generated}");
-    assert!(
-        generated.contains("fn post_z"),
-        "the healthy sibling survives: {generated}"
-    );
-    assert!(!generated.contains("fn get_z"), "{generated}");
-    assert!(!generated.contains("fn get_w"), "{generated}");
+    // The healthy sibling `post_z` survives; `get_z` and `get_w` are carved.
+    assert_eq!(operation_methods(&generated), ["get_good", "post_z"]);
 }
 
 /// A sub-file the description names by an absolute path lies outside the root document's
@@ -1655,6 +1611,5 @@ paths:
         "{report:#?}"
     );
     let generated = std::fs::read_to_string(&out).unwrap();
-    assert!(generated.contains("fn get_good"), "{generated}");
-    assert!(!generated.contains("fn get_uses_node"), "{generated}");
+    assert_eq!(operation_methods(&generated), ["get_good"]);
 }
