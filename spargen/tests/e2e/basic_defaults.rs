@@ -218,9 +218,10 @@ fn all_of_compatible_constraints_keep_the_narrow_typed_intersection() {
     });
     let refined: basic_client::types::Refined = serde_json::from_value(json.clone()).unwrap();
 
-    // `number & integer` is emitted as an integer, and exact JSON null is Rust unit.
+    // `number & integer` is emitted as an integer, and the exact JSON null left by
+    // `[string, null] & null` is the null type as `type: 'null'` declares it: `Option<()>` (#1154).
     assert_eq!(refined.run_id, 7_i64);
-    assert_eq!(refined.marker, ());
+    assert_eq!(refined.marker, None);
     assert_eq!(serde_json::to_value(refined).unwrap(), json);
 
     let invalid = serde_json::json!({

@@ -152,8 +152,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // Only an EMPTY non-null meet leaves exactly `null`. An unrepresentable one still holds
             // the non-null values the two sides share, and `()` would refuse every one of them.
+            // The `null` left is the null type as `type: 'null'` lowers on its own, nullability
+            // included, so an optional field of either spelling decodes a present `null` alike
+            // (#1154).
             Err(NoMeet::Empty) if accepts_null => {
-                Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+                let mut ty = self.insert_type(hint, TypeKind::Null, Docs::default(), None);
+                ty.nullable = true;
+                Ok(ty)
             }
             Err(no_meet) => Err(no_meet),
         }

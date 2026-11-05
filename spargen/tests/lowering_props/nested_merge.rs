@@ -10,6 +10,7 @@ impl Nested {
     fn schema(&self) -> String {
         match self {
             Nested::Scalar(ty) => ty.schema().to_owned(),
+            Nested::Null => NULL_SCHEMA.to_owned(),
             Nested::Object(props) => object_schema(
                 props
                     .iter()
@@ -18,6 +19,9 @@ impl Nested {
         }
     }
 }
+
+/// The `null` type as a YAML flow mapping.
+const NULL_SCHEMA: &str = "{ type: 'null' }";
 
 /// An object schema as a YAML flow mapping, from its properties: (index into [`KEYS`], schema,
 /// required).
@@ -59,11 +63,14 @@ fn nested_all_of_spec(members: &[NestedMember]) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Met {
     Scalar(PropType),
+    /// The `null` type every declaring member writes: their meet is the `null` type declared
+    /// outright, nullability included (#1154).
+    Null,
     /// An object property every declaring member writes as an object: their meet, property by
     /// property, with `required` the union of theirs.
     Object(BTreeMap<usize, (Met, bool)>),
-    /// No value is of every member's type: two different scalars, a scalar beside an object, or
-    /// objects whose meet some required property leaves empty.
+    /// No value is of every member's type: two different scalars, `null` beside a scalar, a
+    /// scalar or `null` beside an object, or objects whose meet some required property leaves empty.
     Empty,
 }
 
@@ -90,7 +97,7 @@ impl Met {
             .iter()
             .filter_map(|ty| match ty {
                 Nested::Object(props) => Some(props),
-                Nested::Scalar(_) => None,
+                Nested::Scalar(_) | Nested::Null => None,
             })
             .collect();
         if objects.len() == types.len() {
@@ -100,9 +107,14 @@ impl Met {
             }
             return Met::Object(props);
         }
+        if types.iter().any(|other| *other != types[0]) {
+            return Met::Empty;
+        }
         match types[0] {
-            Nested::Scalar(ty) if types.iter().all(|other| *other == types[0]) => Met::Scalar(*ty),
-            _ => Met::Empty,
+            Nested::Scalar(ty) => Met::Scalar(*ty),
+            Nested::Null => Met::Null,
+            // Every type equal and one of them an object is the all-objects case above.
+            Nested::Object(_) => Met::Empty,
         }
     }
 
@@ -118,6 +130,7 @@ impl Met {
     fn schema(&self) -> String {
         match self {
             Met::Scalar(ty) => ty.schema().to_owned(),
+            Met::Null => NULL_SCHEMA.to_owned(),
             Met::Object(props) => object_schema(
                 props
                     .iter()
@@ -128,11 +141,83 @@ impl Met {
     }
 }
 
+/// `Merged`, the `allOf` of `members`, has the shape of the object [`Met`] declares outright, or is
+/// rejected as `E013` where their meet requires a property no value is of.
+fn assert_merges_as_met(members: &[NestedMember]) -> Result<(), TestCaseError> {
+    let spec = nested_all_of_spec(members);
+    let met = Met::of_objects(&members.iter().collect::<Vec<_>>());
+    if Met::irreconcilable(&met) {
+        let report = check(&spec);
+        prop_assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{:#?}\n{}",
+            report,
+            spec
+        );
+        prop_assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{:#?}\n{}",
+            report,
+            spec
+        );
+        return assert_relocation_changes_nothing(&spec, None);
+    }
+
+    let generated = generate_module(&spec);
+    assert_relocation_changes_nothing(&spec, Some(&generated))?;
+    let (report, source) = generated;
+    prop_assert_eq!(
+        report.outcome(),
+        Outcome::Generated,
+        "{:#?}\n{}",
+        report,
+        spec
+    );
+
+    let outright = format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Merged: {}\n",
+        Met::Object(met).schema()
+    );
+    let (control, control_source) = generate_module(&outright);
+    prop_assert_eq!(
+        control.outcome(),
+        Outcome::Generated,
+        "{:#?}\n{}",
+        control,
+        outright
+    );
+    prop_assert_eq!(
+        shape::named(&source, "Merged"),
+        shape::named(&control_source, "Merged"),
+        "the merge of\n{}\nis not the object declared outright as\n{}",
+        spec,
+        outright
+    );
+    Ok(())
+}
+
+/// The meet of two `null` types is the `null` type, nullability included (#1154): an optional
+/// property every member declares `null`, at the top level and one object down, generates the
+/// field `type: 'null'` declared once generates, so a present `null` decodes alike. It was a
+/// non-nullable `()` whose field decoded `{"a": null}` as `Some(())` where the outright field
+/// decodes `None`.
+#[test]
+fn the_meet_of_two_null_types_is_the_null_type() {
+    let nested = NestedMember::from([(0, (Nested::Null, false))]);
+    for member in [
+        nested.clone(),
+        NestedMember::from([(0, (Nested::Object(nested), false))]),
+    ] {
+        assert_merges_as_met(&[member.clone(), member]).unwrap();
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
-    /// An `allOf` of objects whose properties nest objects and scalars merges recursively, as
-    /// [`Met`] says: `Merged` has the shape of the object declared outright with the members'
+    /// An `allOf` of objects whose properties nest objects, scalars and `null` merges recursively,
+    /// as [`Met`] says: `Merged` has the shape of the object declared outright with the members'
     /// meet, an object property every member writes as an object being their meet in turn, and a
     /// property no value can fill uninhabited where it is optional. Where such a property is
     /// required, at the top level, no object satisfies the members (`E013`); one level down, the
@@ -141,32 +226,6 @@ proptest! {
     fn an_all_of_of_nested_objects_merges_recursively(
         members in proptest::collection::vec(nested_member_strategy(), 2..=3)
     ) {
-        let spec = nested_all_of_spec(&members);
-        let met = Met::of_objects(&members.iter().collect::<Vec<_>>());
-        if Met::irreconcilable(&met) {
-            let report = check(&spec);
-            prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}\n{}", report, spec);
-            prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:#?}\n{}", report, spec);
-            return assert_relocation_changes_nothing(&spec, None);
-        }
-
-        let generated = generate_module(&spec);
-        assert_relocation_changes_nothing(&spec, Some(&generated))?;
-        let (report, source) = generated;
-        prop_assert_eq!(report.outcome(), Outcome::Generated, "{:#?}\n{}", report, spec);
-
-        let outright = format!(
-            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Merged: {}\n",
-            Met::Object(met).schema()
-        );
-        let (control, control_source) = generate_module(&outright);
-        prop_assert_eq!(control.outcome(), Outcome::Generated, "{:#?}\n{}", control, outright);
-        prop_assert_eq!(
-            shape::named(&source, "Merged"),
-            shape::named(&control_source, "Merged"),
-            "the merge of\n{}\nis not the object declared outright as\n{}",
-            spec,
-            outright
-        );
+        assert_merges_as_met(&members)?;
     }
 }
