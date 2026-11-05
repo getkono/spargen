@@ -31,3 +31,21 @@ impl std::fmt::Display for InterpId {
         write!(f, "INT-{:03}", self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use crate::Code;
+
+    /// [`super::InterpId::get`] is the bare number its `INT-###` rendering pads, for each id
+    /// [`super::InterpId`]'s documentation assigns.
+    #[test]
+    fn an_interpretation_id_gets_the_number_it_renders() {
+        for (code, number) in [("E001", 1), ("W001", 2), ("E007", 3)] {
+            let id = Code::from_str(code).unwrap().interpretation().unwrap();
+            assert_eq!(id.get(), number, "{code}");
+            assert_eq!(id.to_string(), format!("INT-{number:03}"), "{code}");
+        }
+    }
+}

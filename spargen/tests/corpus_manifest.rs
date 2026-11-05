@@ -31,7 +31,7 @@ use corpus::{manifest, Case};
 #[path = "shared/repo.rs"]
 mod repo;
 
-use repo::{ci_workflow, mise_commands, mise_tasks, read, workspace_root};
+use repo::{mise_commands, mise_tasks, read, workspace_root};
 
 #[test]
 fn every_declared_expectation_is_a_shape_the_suite_understands() {
@@ -163,32 +163,40 @@ fn names_case(haystack: &str, id: &str) -> bool {
 #[test]
 fn the_corpus_smoke_gate_covers_every_manifest_case() {
     // CLAUDE.md points at `mise run corpus-smoke` for the corpus row, so a manifest case the task
-    // never runs is a case that gate does not actually check. The task and the CI job restate the
-    // same list, so both are held to the manifest: each is read as its own commands, not as the
-    // whole file a path might appear anywhere in, and each case's command must state the
-    // manifest's expectation.
+    // never runs is a case that gate does not actually check, and a corpus file the task checks
+    // that the manifest does not declare is one no expectation governs. The task is read as its
+    // own commands, not as the whole file a path might appear anywhere in, and each case's command
+    // must state the manifest's expectation. `every_mise_task_runs_exactly_what_its_ci_job_runs`
+    // (in `repo_gates/`) holds the CI job to the same commands.
     assert_smoke_expectation_reads_the_commands_a_case_needs();
     let mise = mise_commands(&mise_tasks(), "corpus-smoke");
-    let workflow = ci_workflow();
-    let ci: Vec<String> = workflow["jobs"]["corpus-smoke"]["steps"]
-        .as_vec()
-        .expect("ci.yml carries a `corpus-smoke` job with steps")
-        .iter()
-        .filter_map(|step| step["run"].as_str().map(str::to_owned))
-        .collect();
+    let cases = manifest().cases;
 
-    for case in manifest().cases {
-        for (gate, commands) in [
-            ("`mise run corpus-smoke`", &mise),
-            ("the CI corpus-smoke job", &ci),
-        ] {
-            if let Err(problem) = smoke_expectation(commands, &case) {
-                panic!(
-                    "`{}` is declared `{}`, but {gate} {problem}",
-                    case.id, case.expect
-                );
-            }
+    for case in &cases {
+        if let Err(problem) = smoke_expectation(&mise, case) {
+            panic!(
+                "`{}` is declared `{}`, but `mise run corpus-smoke` {problem}",
+                case.id, case.expect
+            );
         }
+    }
+
+    let checks: Vec<&String> = mise
+        .iter()
+        .filter(|command| command.contains(" check corpus/"))
+        .collect();
+    assert!(
+        !checks.is_empty(),
+        "`mise run corpus-smoke` runs no `check corpus/…`; the scan has stopped reading it"
+    );
+    for command in checks {
+        assert!(
+            cases
+                .iter()
+                .any(|case| names_case(command, &format!("corpus/{}", case.path))),
+            "`mise run corpus-smoke` runs `{command}`, which checks no case \
+             `corpus/manifest.toml` declares"
+        );
     }
 }
 

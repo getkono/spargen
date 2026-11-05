@@ -1,6 +1,7 @@
-//! Each CI job held to the mise tasks it pairs with, every workflow classified, and what the
-//! paired tasks and workflows may and may not do: write under a fixed `/tmp/` path, smudge LFS
-//! content in the release preview, or miss a release's benchmarks.
+//! Each CI job held to the mise tasks it pairs with, every workflow classified, each git hook step
+//! held to the mise task it delegates to, and what the paired tasks and workflows may and may not
+//! do: write under a fixed `/tmp/` path, smudge LFS content in the release preview, or miss a
+//! release's benchmarks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -693,47 +694,40 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
 }
 
 #[test]
-fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
+fn no_gate_writes_a_fixed_tmp_path() {
     // A fixed name under the shared /tmp is owned by whoever ran the gate first; on a sticky
     // /tmp every later user's redirect fails with `Permission denied` before spargen runs
-    // (#93). Both copies of the gate write under the gitignored `target/corpus-smoke/`: every
-    // redirect either copy makes targets a path there, and neither file names `/tmp/` at all.
+    // (#93). No gate needs one, so neither file that defines the gates names `/tmp/` at all.
     for file in ["mise.toml", ".github/workflows/ci.yml"] {
         let text = read(file);
         assert!(
             !text.contains("/tmp/"),
-            "`{file}` writes to a fixed `/tmp/` path; corpus-smoke outputs belong under `target/corpus-smoke/`"
+            "`{file}` names a fixed `/tmp/` path; a gate's outputs belong under `target/`"
         );
     }
-    let ci: Vec<String> = workflow("ci.yml")["jobs"]["corpus-smoke"]["steps"]
-        .as_vec()
-        .expect("ci.yml carries a `corpus-smoke` job with steps")
+}
+
+#[test]
+fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
+    // The gate writes under the gitignored `target/corpus-smoke/`: every redirect it makes
+    // targets a path there. The task is read; `every_mise_task_runs_exactly_what_its_ci_job_runs`
+    // holds the CI job to the same commands.
+    let commands = mise_commands(&mise_tasks(), "corpus-smoke");
+    let targets: Vec<&str> = commands
         .iter()
-        .filter_map(|step| step["run"].as_str().map(str::to_owned))
+        .flat_map(|command| redirect_targets(command))
         .collect();
-    for (gate, commands) in [
-        (
-            "`mise run corpus-smoke`",
-            mise_commands(&mise_tasks(), "corpus-smoke"),
-        ),
-        ("the CI corpus-smoke job", ci),
-    ] {
-        let targets: Vec<&str> = commands
-            .iter()
-            .flat_map(|command| redirect_targets(command))
-            .collect();
+    assert!(
+        !targets.is_empty(),
+        "`mise run corpus-smoke` redirects no output; the scan has stopped reading its commands"
+    );
+    for target in targets {
         assert!(
-            !targets.is_empty(),
-            "{gate} redirects no output; the scan has stopped reading its commands"
+            target.starts_with("target/corpus-smoke/")
+                && !target.split('/').any(|segment| segment == ".."),
+            "`mise run corpus-smoke` redirects into `{target}`; corpus-smoke outputs belong under \
+             `target/corpus-smoke/`"
         );
-        for target in targets {
-            assert!(
-                target.starts_with("target/corpus-smoke/")
-                    && !target.split('/').any(|segment| segment == ".."),
-                "{gate} redirects into `{target}`; corpus-smoke outputs belong under \
-                 `target/corpus-smoke/`"
-            );
-        }
     }
     assert_eq!(
         redirect_targets("a > target/x.json 2>&1 || b >>/tmp/y 2> z"),
@@ -761,8 +755,57 @@ fn redirect_targets(command: &str) -> Vec<&str> {
     targets
 }
 
+/// A workflow's `on:` as each event it names, mapped to that event's configuration (`Null` where
+/// it has none). GitHub accepts three spellings: one event as a scalar (`on: release`), a list of
+/// events (`on: [push, release]`), and a map from event to configuration. Indexing the first two
+/// by event name reads as "no such trigger", so every check of a trigger goes through this.
+fn workflow_triggers(on: &yaml_rust2::Yaml, file: &str) -> BTreeMap<String, yaml_rust2::Yaml> {
+    let event = |name: &yaml_rust2::Yaml| {
+        name.as_str()
+            .unwrap_or_else(|| panic!("`{file}`'s `on:` names an event that is not a string"))
+            .to_owned()
+    };
+    match on {
+        yaml_rust2::Yaml::String(name) => BTreeMap::from([(name.clone(), yaml_rust2::Yaml::Null)]),
+        yaml_rust2::Yaml::Array(names) => names
+            .iter()
+            .map(|name| (event(name), yaml_rust2::Yaml::Null))
+            .collect(),
+        yaml_rust2::Yaml::Hash(events) => events
+            .iter()
+            .map(|(name, config)| (event(name), config.clone()))
+            .collect(),
+        other => panic!("`{file}`'s `on:` is neither an event, a list, nor a map: {other:?}"),
+    }
+}
+
 #[test]
 fn benchmarks_are_recorded_once_for_each_spargen_release() {
+    // `on:`'s three spellings each name their events, so a scalar or list trigger cannot slip
+    // past the checks below as one that names none.
+    for (on, events) in [
+        ("on: release", &["release"][..]),
+        ("on: [push, create]", &["create", "push"]),
+        (
+            "on:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:",
+            &["push", "workflow_dispatch"],
+        ),
+    ] {
+        let parsed = workflow_triggers(&yaml_document(on, "a fixture `on:`")["on"], "fixture");
+        assert_eq!(
+            parsed.keys().map(String::as_str).collect::<Vec<_>>(),
+            events,
+            "{on}"
+        );
+        if let Some(push) = parsed.get("push") {
+            assert_eq!(
+                push["tags"] != yaml_rust2::Yaml::BadValue,
+                on.contains("tags"),
+                "a push trigger keeps its filters: {on}"
+            );
+        }
+    }
+
     // `benchmarks.yml` once filtered on `push: tags: ["v*"]`, which matched none of release-plz's
     // `spargen-v*` / `spargen-macro-v*` tags, so it never ran on a release (#685). Fixing the glob
     // would not have been enough: release-plz pushes its tags with `GITHUB_TOKEN`, and GitHub
@@ -820,16 +863,17 @@ fn benchmarks_are_recorded_once_for_each_spargen_release() {
     // row, and this holds that row to the dispatch rather than to a filter that can never fire.
     let benchmarks = workflow("benchmarks.yml");
     assert!(
-        benchmarks["on"]["workflow_dispatch"] != yaml_rust2::Yaml::BadValue,
+        workflow_triggers(&benchmarks["on"], "benchmarks.yml").contains_key("workflow_dispatch"),
         "`benchmarks.yml` must accept the `workflow_dispatch` `release-plz.yml` sends"
     );
     // Every tag in this repository is release-plz's, pushed with `GITHUB_TOKEN`, so a tag or
     // release trigger on any workflow is one that never fires.
     for file in workflow_files() {
-        let on = &workflow(&file)["on"];
+        let on = workflow_triggers(&workflow(&file)["on"], &file);
         for (event, filter) in [("push", "tags"), ("push", "tags-ignore")] {
             assert!(
-                on[event][filter] == yaml_rust2::Yaml::BadValue,
+                on.get(event)
+                    .is_none_or(|config| config[filter] == yaml_rust2::Yaml::BadValue),
                 "`{file}` triggers on `{event}: {filter}:`; release-plz pushes every tag here with \
                  `GITHUB_TOKEN`, which starts no workflow, so dispatch the run from \
                  `release-plz.yml` as its `benchmarks` job does"
@@ -837,7 +881,7 @@ fn benchmarks_are_recorded_once_for_each_spargen_release() {
         }
         for event in ["create", "release"] {
             assert!(
-                on[event] == yaml_rust2::Yaml::BadValue,
+                !on.contains_key(event),
                 "`{file}` triggers on `{event}:`; release-plz creates every tag and release here \
                  with `GITHUB_TOKEN`, which starts no workflow, so dispatch the run from \
                  `release-plz.yml` as its `benchmarks` job does"
@@ -890,4 +934,113 @@ fn the_release_preview_never_smudges_lfs_content() {
             .all(|program| checked.iter().any(|seen| seen == program)),
         "the release preview no longer clones and runs release-plz ({checked:?}); revisit this test"
     );
+}
+
+/// One step of an `hk.pkl` hook: the hook it belongs to, its name, and every command string it
+/// runs (`check`, and `fix` where that is a command rather than a switch).
+#[derive(Debug, PartialEq)]
+struct HookStep {
+    hook: String,
+    step: String,
+    commands: Vec<String>,
+}
+
+/// The steps of every hook `hk.pkl` declares, read off its block structure: a step is a block
+/// opened inside a `steps { … }` block, inside the hook block that encloses that. Comments are
+/// dropped first, and only a line that ends a block opener or is a lone `}` moves the nesting, so
+/// a brace inside a quoted command (`{{commit_msg_file}}`) does not.
+fn hook_steps(pkl: &str) -> Vec<HookStep> {
+    let mut stack: Vec<String> = Vec::new();
+    let mut steps: Vec<HookStep> = Vec::new();
+    for line in pkl.lines() {
+        let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        if let Some(opener) = line.strip_suffix('{') {
+            let name = opener
+                .trim()
+                .trim_start_matches("[\"")
+                .trim_end_matches("\"]");
+            if stack.last().map(String::as_str) == Some("steps") && stack.len() >= 2 {
+                steps.push(HookStep {
+                    hook: stack[stack.len() - 2].clone(),
+                    step: name.to_owned(),
+                    commands: Vec::new(),
+                });
+            }
+            stack.push(name.to_owned());
+        } else if line == "}" {
+            stack
+                .pop()
+                .expect("`hk.pkl` closes no more blocks than it opens");
+        } else if let Some((key, value)) = line.split_once('=') {
+            let in_step = stack.len() >= 2 && stack[stack.len() - 2] == "steps";
+            if in_step && ["check", "fix"].contains(&key.trim()) {
+                if let Some(command) = value
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                {
+                    let step = steps.last_mut().expect("a step is open");
+                    step.commands.push(command.replace("\\\"", "\""));
+                }
+            }
+        }
+    }
+    assert!(stack.is_empty(), "`hk.pkl` leaves {stack:?} open");
+    steps
+}
+
+/// `hk.pkl` says every step delegates to a `mise.toml` task, so the hooks and `mise run …` cannot
+/// drift apart: each step must run at least one command, and each command must be `mise run`
+/// naming a task that exists. Each of the three hooks must declare a step, so a reader that
+/// stopped finding them fails rather than passing over an empty list.
+#[test]
+fn every_hook_step_runs_a_mise_task_that_exists() {
+    assert_eq!(
+        hook_steps(
+            "// a comment {\nhooks {\n  [\"pre-push\"] {\n    fix = true\n    steps {\n      \
+             [\"msg\"] {\n        glob = List(\"*.rs\")\n        check = \"mise run --quiet \
+             a < \\\"{{file}}\\\"\"\n        fix = \"mise run b\"\n      }\n    }\n  }\n}\n"
+        ),
+        [HookStep {
+            hook: "pre-push".to_owned(),
+            step: "msg".to_owned(),
+            commands: vec![
+                "mise run --quiet a < \"{{file}}\"".to_owned(),
+                "mise run b".to_owned()
+            ],
+        }],
+        "`hook_steps` reads a step's hook, name and command strings, and nothing else"
+    );
+
+    let tasks = mise_tasks();
+    let steps = hook_steps(&read("hk.pkl"));
+    for hook in ["pre-commit", "commit-msg", "pre-push"] {
+        assert!(
+            steps.iter().any(|step| step.hook == hook),
+            "`hk.pkl` declares no `{hook}` step; the reader has stopped finding them: {steps:#?}"
+        );
+    }
+    for step in &steps {
+        assert!(
+            !step.commands.is_empty(),
+            "`hk.pkl`'s `{}` `{}` step runs no command",
+            step.hook,
+            step.step
+        );
+        for command in &step.commands {
+            let task = command
+                .strip_prefix("mise run ")
+                .and_then(|rest| rest.split_whitespace().find(|word| !word.starts_with('-')));
+            assert!(
+                task.is_some_and(|task| tasks.contains_key(task)),
+                "`hk.pkl`'s `{}` `{}` step runs `{command}`, which is not `mise run` of a task \
+                 `mise.toml` declares; a hook step that is not a task is a second copy of a gate",
+                step.hook,
+                step.step
+            );
+        }
+    }
 }

@@ -53,7 +53,7 @@ mod tests {
     use super::FileId;
 
     #[test]
-    fn get_returns_the_index_the_id_was_built_from() {
+    fn a_file_id_reads_back_the_index_it_wraps() {
         for index in [0, 1, 2, 7, u32::MAX] {
             assert_eq!(FileId(index).get(), index);
         }

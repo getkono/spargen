@@ -334,7 +334,7 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_path, finalized, rerun_paths, verified_output, CachedDiagnostic, Diagnostic,
+        append, cache_path, finalized, rerun_paths, verified_output, CachedDiagnostic, Diagnostic,
         InputSnapshot, JsonPointer, OutcomeClaim,
     };
     use crate::runtime_contract::rerun_if_changed_lines;
@@ -495,7 +495,7 @@ components:
 
     #[test]
     fn output_fingerprints_detect_missing_stale_and_edited_modules() {
-        let (temp, config) = fixture();
+        let (_temp, config) = fixture();
         assert_eq!(verified_output(&config.output, "input-a"), None);
 
         let (contents, content_digest) = finalized("pub struct Api;\n", "input-a");
@@ -512,8 +512,6 @@ components:
         )
         .unwrap();
         assert_eq!(verified_output(&config.output, "input-a"), None);
-
-        drop(temp);
     }
 
     #[test]
@@ -526,6 +524,10 @@ components:
         let original = std::fs::read_to_string(&config.output).unwrap();
         let record = cache_path(&cache_dir, &config.output);
         assert!(record.is_file(), "generation must seed the target cache");
+        let written_at = std::fs::metadata(&config.output)
+            .unwrap()
+            .modified()
+            .unwrap();
 
         std::fs::remove_file(&record).unwrap();
         let seeded = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
@@ -535,6 +537,16 @@ components:
             "verified committed output must reseed cache"
         );
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
+        // The rerun rendered the bytes already on disk, and `write_output` leaves such a file
+        // alone, so the reseed does not touch the module.
+        assert_eq!(
+            std::fs::metadata(&config.output)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            written_at,
+            "a rerun that renders identical bytes must not rewrite the output"
+        );
 
         std::fs::write(&config.output, format!("{original}// manual edit\n")).unwrap();
         let repaired = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
@@ -578,6 +590,88 @@ components:
             written_at,
             "a cache hit must not rewrite the output"
         );
+    }
+
+    /// `read_cache` gives up, and the build reruns the pipeline, on each record it cannot trust: an
+    /// absent one, one that does not parse, and one whose format, input digest or content digest
+    /// is not the current one. Before each corruption the record is shown to be a hit, so the
+    /// rerun is the corruption's doing; after it the rerun has written a record that hits again.
+    #[test]
+    fn a_corrupt_or_stale_cache_record_reruns_the_pipeline() {
+        let (temp, config) = fixture();
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+        let record = cache_path(&cache_dir, &config.output);
+        let first = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+
+        // A corruption that moves one field of the record: a number up by one, a digest by an
+        // appended digit.
+        let edit_field = |field: &str| {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+            let slot = value
+                .get_mut(field)
+                .unwrap_or_else(|| panic!("the record has no `{field}` field"));
+            *slot = match slot.take() {
+                serde_json::Value::Number(format) => {
+                    (format.as_u64().expect("the format is a u64") + 1).into()
+                }
+                serde_json::Value::String(digest) => format!("{digest}0").into(),
+                other => panic!("`{field}` is neither a number nor a string: {other}"),
+            };
+            std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+        };
+        let corruptions = [
+            ("absent", None),
+            ("not JSON", None),
+            ("another format", Some("format")),
+            ("another input digest", Some("input_sha256")),
+            ("another content digest", Some("content_sha256")),
+        ];
+
+        for (corruption, field) in corruptions {
+            let hit = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
+            assert_eq!(
+                hit.outcome(),
+                Outcome::Cached,
+                "the record must hit before it is made {corruption}: {hit:#?}"
+            );
+            match (corruption, field) {
+                (_, Some(field)) => edit_field(field),
+                ("absent", None) => std::fs::remove_file(&record).unwrap(),
+                (_, None) => std::fs::write(&record, b"not a cache record").unwrap(),
+            }
+            let rerun = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
+            assert_eq!(
+                rerun.outcome(),
+                Outcome::Generated,
+                "a record made {corruption} must rerun the pipeline: {rerun:#?}"
+            );
+        }
+        let last = crate::pipeline::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(last.outcome(), Outcome::Cached, "{last:#?}");
+    }
+
+    /// Every fingerprint field is written with its length in front, so two fields whose
+    /// concatenations agree, such as a path and its file's bytes split at another point, never
+    /// frame to the same bytes and so never share a digest.
+    #[test]
+    fn the_fingerprint_frames_each_input_so_adjacent_fields_cannot_merge() {
+        let framed = |fields: &[&[u8]]| {
+            let mut output = Vec::new();
+            for field in fields {
+                append(&mut output, field);
+            }
+            output
+        };
+        assert_ne!(
+            framed(&[b"/spec/a.yaml", b"type: string\n"]),
+            framed(&[b"/spec/a.yamltype", b": string\n"])
+        );
+        assert_ne!(framed(&[b"ab", b""]), framed(&[b"", b"ab"]));
+        assert_ne!(framed(&[b"ab"]), framed(&[b"a", b"b"]));
+        // The frame is the field's length as eight big-endian bytes, then the field.
+        assert_eq!(framed(&[b"ab"]), [0, 0, 0, 0, 0, 0, 0, 2, b'a', b'b']);
     }
 
     #[test]

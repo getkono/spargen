@@ -775,3 +775,110 @@ fn lock_exits_one_on_a_spec_it_cannot_read() {
         "a failed lock writes no lock file"
     );
 }
+
+/// Every subcommand that takes a spec resolves its configuration before it reads the spec, and a
+/// configuration it cannot read or apply is a usage error: exit 3, nothing on stdout, and the
+/// error on stderr. `diff` resolves each side's discovered `spargen.toml` on its own, so a
+/// malformed one beside either spec fails the same way.
+#[test]
+fn every_spec_subcommand_exits_three_on_an_unreadable_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = spec_arg(temp.path(), "openapi.yaml", ONE_OPERATION);
+    let assert_usage = |args: &[&str], names: &str| {
+        let (status, stdout, stderr) = spargen(temp.path(), args);
+        assert_eq!(status, Some(3), "{args:?}: stdout {stdout} stderr {stderr}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        assert!(
+            stderr.starts_with("error: ") && stderr.contains(names),
+            "{args:?}: the error names {names}: {stderr}"
+        );
+    };
+
+    for subcommand in ["check", "deps", "lock"] {
+        assert_usage(
+            &[subcommand, &spec, "--config", "missing.toml"],
+            "missing.toml",
+        );
+    }
+    assert_usage(
+        &["diff", &spec, &spec, "--config", "missing.toml"],
+        "missing.toml",
+    );
+
+    for side in ["old", "new"] {
+        let dir = temp.path().join(side);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("spargen.toml"), "uuid = not_a_bool\n").unwrap();
+        let configured = spec_arg(&dir, "openapi.yaml", ONE_OPERATION);
+        let args = if side == "old" {
+            ["diff", &configured, &spec]
+        } else {
+            ["diff", &spec, &configured]
+        };
+        assert_usage(&args, &format!("{side}/spargen.toml"));
+    }
+    assert!(
+        !temp.path().join("spargen.lock").exists(),
+        "a lock that failed on its config wrote nothing"
+    );
+}
+
+/// A command line clap itself rejects, here one missing a required argument, exits with clap's
+/// own status 2 rather than spargen's usage status 3, and prints nothing on stdout.
+#[test]
+fn a_missing_required_argument_exits_two() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = spec_arg(temp.path(), "openapi.yaml", ONE_OPERATION);
+    for args in [
+        &["check"][..],
+        &["deps"],
+        &["lock"],
+        &["diff", &spec],
+        &["explain"],
+    ] {
+        let (status, stdout, stderr) = spargen(temp.path(), args);
+        assert_eq!(status, Some(2), "{args:?}: stdout {stdout} stderr {stderr}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        assert!(
+            stderr.contains("required"),
+            "{args:?}: clap names the missing argument: {stderr}"
+        );
+    }
+}
+
+/// `check`'s human report is its only output and goes to stderr whatever the outcome, so stdout
+/// stays empty for a clean, a warned and a rejected spec alike.
+#[test]
+fn check_prints_its_human_report_only_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    for (contents, status, first_line, code) in [
+        (ONE_OPERATION, 0, "spargen: clean", None),
+        (WARNED, 0, "spargen: clean", Some("warning[W001]")),
+        (REJECTED, 1, "spargen: rejected", Some("E001")),
+    ] {
+        let spec = spec_arg(temp.path(), "openapi.yaml", contents);
+        let (actual, stdout, stderr) = spargen(temp.path(), &["check", &spec]);
+        assert_eq!(actual, Some(status), "stdout {stdout} stderr {stderr}");
+        assert!(stdout.is_empty(), "check's report goes to stderr: {stdout}");
+        assert_eq!(stderr.lines().next(), Some(first_line), "{stderr}");
+        if let Some(code) = code {
+            assert!(stderr.contains(code), "{stderr}");
+        }
+    }
+}
+
+/// A `deps` the spec rejects prints no dependency block: its human rejection goes to stderr alone.
+#[test]
+fn deps_prints_a_human_rejection_only_on_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let rejected = spec_arg(temp.path(), "rejected.yaml", REJECTED);
+
+    let (status, stdout, stderr) = spargen(temp.path(), &["deps", &rejected]);
+    assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
+    assert!(
+        stdout.is_empty(),
+        "a rejection prints no dependency block: {stdout}"
+    );
+    assert_eq!(stderr.lines().next(), Some("spargen: rejected"), "{stderr}");
+    assert!(stderr.contains("E001"), "{stderr}");
+}

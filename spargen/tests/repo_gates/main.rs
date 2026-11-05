@@ -1,8 +1,9 @@
 //! This repository's assertions over its own gate configuration: `mise.toml`,
-//! `.github/workflows/`, `rust-toolchain.toml`, `deny.toml`, and CLAUDE.md. Each module holds one
-//! kind of gate: `supply_chain` the advisory audits, `pairing` each CI job against its mise tasks,
-//! `toolchain` the Rust toolchain and tool pins, and `claude_md` CLAUDE.md's Quality list and
-//! testing-strategy table. This file holds the workflow readers more than one of them uses, and
+//! `.github/workflows/`, `hk.pkl`, `rust-toolchain.toml`, `deny.toml`, and CLAUDE.md. Each module
+//! holds one kind of gate: `supply_chain` the advisory audits, `pairing` each CI job and each git
+//! hook against its mise tasks, `toolchain` the Rust toolchain and tool pins, and `claude_md`
+//! CLAUDE.md's Quality list and testing-strategy table. This file holds the workflow readers more
+//! than one of them uses, and
 //! `shared/repo.rs` the `mise.toml` and file readers this suite shares with `corpus_manifest.rs`.
 //!
 //! CLAUDE.md's "repository gates" row names this suite and every test in it

@@ -599,17 +599,41 @@ mod tests {
     #[test]
     fn the_removed_features_table_gets_a_targeted_error() {
         let error = apply("[features]\ncarve = true\n").unwrap_err().to_string();
-        assert!(
-            error.contains("move its keys"),
-            "expected migration guidance, got: {error}"
+        assert_eq!(
+            error,
+            "invalid config file `spargen.toml`: the `[features]` table was removed; move its \
+             keys (`carve`, `batch_cap`, …) to the top level of the file",
+            "expected migration guidance"
         );
     }
 
+    /// A malformed `[[omit]]` entry is rejected with an error naming the rule and what it lacks:
+    /// the `name` a component needs, the key that would select a kind, or the kind a stray key
+    /// does not belong to.
     #[test]
-    fn ambiguous_or_empty_omit_entry_errors() {
-        assert!(apply("[[omit]]\ncomponent = \"schema\"\n").is_err());
-        assert!(apply("[[omit]]\n").is_err());
-        assert!(apply("[[omit]]\npointer = \"/x\"\npath = \"/y\"\n").is_err());
+    fn each_malformed_omit_entry_names_what_it_lacks() {
+        for (entry, expected) in [
+            (
+                "[[omit]]\ncomponent = \"schema\"\n",
+                "omit rule #1: `component` requires a `name`",
+            ),
+            (
+                "[[omit]]\n",
+                "omit rule #1: must specify one of `path`, `component` (+`name`), or `pointer`",
+            ),
+            (
+                "[[omit]]\npointer = \"/x\"\npath = \"/y\"\n",
+                "omit rule #1: `path` does not apply to a pointer rule, which takes only \
+                 `pointer` and `file`",
+            ),
+        ] {
+            let error = apply(entry).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!("invalid config file `spargen.toml`: {expected}"),
+                "{entry}"
+            );
+        }
     }
 
     #[test]
@@ -653,8 +677,15 @@ mod tests {
         );
     }
 
+    /// An unknown key is rejected with an error that names the file and the key. The rest of the
+    /// message is the TOML parser's, so only those two are pinned.
     #[test]
-    fn unknown_keys_are_rejected() {
-        assert!(apply("frobnicate = true\n").is_err());
+    fn an_unknown_key_is_named_in_the_error() {
+        let error = apply("frobnicate = true\n").unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid config file `spargen.toml`: ")
+                && error.contains("unknown field `frobnicate`"),
+            "{error}"
+        );
     }
 }

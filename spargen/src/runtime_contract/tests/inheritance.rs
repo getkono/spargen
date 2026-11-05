@@ -45,7 +45,7 @@ enum RootDefaults {
 }
 
 #[test]
-fn the_manifests_reported_in_issue_71_pass_as_written() {
+fn a_member_inheriting_plain_and_table_dependencies_with_an_added_feature_passes() {
     // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
     // and `uuid` as a table with its own features; the member inherits both beside the five
     // core crates. The report said both came back as "generated client requires …". The

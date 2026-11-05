@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::repo::{ci_workflow, mise_commands, mise_tasks, read, workflow};
+use crate::repo::{ci_job_runs, ci_workflow, mise_commands, mise_tasks, read, workflow};
 use crate::{workflow_files, workflow_jobs};
 
 /// The workspace `rust-version`, spelled as the rustup toolchain that installs it.
@@ -54,14 +54,9 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
         );
     }
 
-    let job = &ci_workflow()["jobs"]["msrv"];
-    let steps = job["steps"].as_vec().expect("the `msrv` job carries steps");
-    let runs: Vec<&str> = steps
-        .iter()
-        .filter_map(|step| step["run"].as_str())
-        .collect();
+    let runs = ci_job_runs("msrv");
     assert!(!runs.is_empty(), "CI's `msrv` job runs nothing");
-    for run in runs {
+    for run in &runs {
         assert!(
             pinned(run),
             "CI's `msrv` job runs `{run}`, which is not a single `{prefix}…` invocation (one \
@@ -69,7 +64,10 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
              `rust-toolchain.toml` selects its pinned release, not `rust-version`"
         );
     }
-    let toolchains: Vec<&str> = steps
+    let workflow = ci_workflow();
+    let toolchains: Vec<&str> = workflow["jobs"]["msrv"]["steps"]
+        .as_vec()
+        .expect("the `msrv` job carries steps")
         .iter()
         .filter_map(|step| step["uses"].as_str())
         .filter_map(|uses| uses.strip_prefix("dtolnay/rust-toolchain@"))
@@ -342,6 +340,58 @@ fn tools_run(line: &str, pins: &BTreeMap<String, String>) -> BTreeSet<String> {
     tools
 }
 
+/// The readers `ci_installs_exactly_the_tool_versions_mise_pins` judges CI by, pinned on fixture
+/// lines rather than on whatever the workflows say today: a reader that stopped splitting a line,
+/// finding a version, or seeing a run would otherwise leave that test passing over nothing.
+#[test]
+fn the_tool_reader_reads_installs_and_runs_from_shell_lines() {
+    assert_eq!(
+        shell_commands(
+            "FOO=1 cargo +1.88.0 install x && if ! convco check; then exit 1; fi | tee y"
+        ),
+        [
+            &["cargo", "+1.88.0", "install", "x"][..],
+            &["convco", "check"],
+            &["exit", "1"],
+            &["fi"],
+            &["tee", "y"],
+        ],
+        "commands split at every separator, a glued `;` included, with leading assignments and \
+         keywords dropped"
+    );
+
+    assert_eq!(
+        cargo_installs(
+            "cargo install --locked cargo-hack@0.6.37 && cargo +nightly install \
+             --version=0.19.9 cargo-deny cargo-audit --root /opt && cargo binstall mdbook"
+        ),
+        [
+            ("cargo-hack".to_owned(), Some("0.6.37".to_owned())),
+            ("cargo-deny".to_owned(), Some("0.19.9".to_owned())),
+            ("cargo-audit".to_owned(), Some("0.19.9".to_owned())),
+            ("mdbook".to_owned(), None),
+        ],
+        "an `@` version, a `--version=` for every crate of its command, a valued flag's value \
+         skipped, and an unversioned install read as `None`"
+    );
+    assert!(cargo_installs("cargo deny check && mdbook build").is_empty());
+
+    let pins: BTreeMap<String, String> = ["cargo-deny", "cargo-hack", "mdbook", "convco"]
+        .into_iter()
+        .map(|tool| (tool.to_owned(), "1.0.0".to_owned()))
+        .collect();
+    assert_eq!(
+        tools_run(
+            "cargo +1.88.0 hack check && mdbook build docs && cargo install cargo-deny@1.0.0 \
+             && ./bin/convco check | grep unpinned",
+            &pins
+        ),
+        BTreeSet::from(["cargo-hack", "mdbook", "convco"].map(str::to_owned)),
+        "a cargo subcommand runs its `cargo-<sub>`, a pinned name runs under any path, and an \
+         install runs nothing"
+    );
+}
+
 #[test]
 fn ci_installs_exactly_the_tool_versions_mise_pins() {
     // The pairing test holds each CI job's commands identical to its mise task's, but a command
@@ -361,6 +411,10 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
     }
     let pins = mise_tool_pins();
     let mut installed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Every run of a pinned tool the scan saw. CI runs several (`cargo deny`, `mdbook`,
+    // `convco`), so a scan that saw none has stopped reading the steps, and every install check
+    // above it would hold vacuously.
+    let mut runs_seen = 0usize;
     for file in workflow_files() {
         let workflow = workflow(&file);
         for (job, steps) in workflow_jobs(&file, &workflow) {
@@ -422,6 +476,7 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                     let (tool, version) = match event {
                         Event::Install(install) => install,
                         Event::Run(tool) => {
+                            runs_seen += 1;
                             assert!(
                                 in_job.contains(&tool),
                                 "`{file}`'s `{job}` job runs `{tool}` without installing it \
@@ -456,6 +511,10 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
         }
     }
 
+    assert!(
+        runs_seen > 0,
+        "no workflow step runs a `[tools]`-pinned tool; the scan has stopped reading `run:` lines"
+    );
     for (tool, why) in LOCAL_ONLY_TOOLS {
         assert!(!why.is_empty(), "a local-only tool must say why");
         assert!(

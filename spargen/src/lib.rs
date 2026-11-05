@@ -223,6 +223,10 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
 /// This step fetches each remote document over HTTP(S) through `reqwest`; `generate` and `check`
 /// resolve remote refs purely from the vendored, pinned copies it produces, so builds stay
 /// hermetic. Gated behind the `remote-fetch` feature (implied by `cli`).
+///
+/// Every diagnostic this step emits is an error, so a run that succeeds has nothing to report
+/// beside its [`VendorReport`], and a failed one returns its errors, up to the spec's
+/// `batch_cap`, in its [`Report`].
 #[cfg(feature = "remote-fetch")]
 pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
@@ -230,5 +234,52 @@ pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     match source::vendor(&spec.path, &fetcher, &mut diags) {
         Ok(vendored) if !diags.has_errors() => Ok(vendored),
         _ => Err(Report::new(diags, Outcome::Rejected)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// [`vendor`](super::vendor) returns no report beside a [`VendorReport`](super::VendorReport),
+    /// so a warning its run emitted would be dropped with the run. The `source` subsystem it runs
+    /// is the only code that can emit one there (`source` depends on `diag` alone), so every
+    /// diagnostic its production code builds must be an error: built with `Diagnostic::error`,
+    /// never `Diagnostic::warning`, `Diagnostic::at_root` (which takes the code's own severity) or
+    /// a literal `severity`.
+    #[test]
+    fn vendor_emits_no_warning_severity_diagnostics() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/source");
+        let files = crate::test_support::rust_sources(&dir);
+        let mut scanned = 0;
+        let mut errors = 0;
+        for file in &files {
+            let name = file.file_name().and_then(|name| name.to_str()).unwrap();
+            if name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).unwrap();
+            // The test module, inline or declared, is the last item of a file that has one.
+            let production = text.split("#[cfg(test)]").next().unwrap();
+            scanned += 1;
+            errors += production.matches("Diagnostic::error(").count();
+            for builder in [
+                "Diagnostic::warning(",
+                "at_root(",
+                "Severity::Warning",
+                "severity:",
+            ] {
+                assert!(
+                    !production.contains(builder),
+                    "{} builds a diagnostic with `{builder}`, which can be a warning; `vendor` \
+                     returns no report on success, so a warning would be dropped",
+                    file.display()
+                );
+            }
+        }
+        assert!(
+            scanned >= 5 && errors > 0,
+            "the scan read {scanned} files under {} and found {errors} `Diagnostic::error` \
+             calls; it has stopped reading the subsystem",
+            dir.display()
+        );
     }
 }
