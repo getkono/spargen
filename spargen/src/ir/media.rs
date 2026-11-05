@@ -123,3 +123,27 @@ pub(crate) enum EncodingMode {
         allow_reserved: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Framing, MediaType};
+
+    /// Each sequential media maps to its own framing, and every other media to none.
+    #[test]
+    fn only_the_sequential_media_have_a_stream_framing() {
+        let cases = [
+            (MediaType::Json, None),
+            (MediaType::FormUrlEncoded, None),
+            (MediaType::Xml, None),
+            (MediaType::OctetStream, None),
+            (MediaType::Text, None),
+            (MediaType::Multipart, None),
+            (MediaType::EventStream, Some(Framing::Sse)),
+            (MediaType::Ndjson, Some(Framing::Ndjson)),
+            (MediaType::JsonSequence, Some(Framing::JsonSequence)),
+        ];
+        for (media, framing) in cases {
+            assert_eq!(media.stream_framing(), framing, "{media:?}");
+        }
+    }
+}

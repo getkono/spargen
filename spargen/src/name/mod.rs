@@ -970,12 +970,66 @@ mod tests {
             assert_eq!(method("getItem"), "get_item");
             assert_eq!(method("getItemUrl"), "get_item_url");
             assert_eq!(accessor("getItemUrl"), "get_item_url_url");
-            assert_ne!(accessor("getItem"), "get_item_url");
-            assert!(
-                accessor("getItem").starts_with("get_item_url_"),
-                "the accessor keeps its stem: {}",
-                accessor("getItem")
-            );
+            // The stem plus the suffix seeded from `getItem`'s own pointer.
+            assert_eq!(accessor("getItem"), "get_item_url_17dbc4cb");
+        }
+    }
+
+    /// A keyword operation's method is raw (`r#type`); its accessor is spelled from the bare
+    /// keyword, which `_url` makes an ordinary identifier.
+    #[test]
+    fn a_keyword_operations_url_accessor_drops_the_raw_prefix() {
+        let mut api = api(Vec::new(), false);
+        api.operations[0].id = OperationId("type".to_owned());
+        let names = allocate(&api);
+        let id = OperationId("type".to_owned());
+        assert_eq!(names.operations[&id].as_str(), "r#type");
+        assert_eq!(names.operation_urls[&id].as_str(), "type_url");
+    }
+
+    /// Two operations contending for one error type name: the plain `{Method}Error` form beats a
+    /// form widened past a root re-export (`request` widens to `RequestOperationError`), and
+    /// between two plain forms (`get_v2`, `get_v_2`) the lexically smaller method wins, in either
+    /// listing order. The loser is suffixed from its own pointer.
+    #[test]
+    fn a_plain_error_form_beats_a_widened_one_and_the_smaller_method_wins() {
+        for (first, second, winner, loser) in [
+            (
+                "request",
+                "requestOperation",
+                "RequestOperationError",
+                "RequestOperationErrorDdb6e353",
+            ),
+            ("get_v_2", "getV2", "GetV2Error", "GetV2Error4d12aa9a"),
+        ] {
+            for reversed in [false, true] {
+                let mut api = api(Vec::new(), false);
+                let template = api.operations.remove(0);
+                for id in [first, second] {
+                    let mut operation = template.clone();
+                    operation.id = OperationId(id.to_owned());
+                    operation.provenance = Provenance::new(
+                        JsonPointer::root().push("paths").push(&format!("/{id}")),
+                        None,
+                    );
+                    api.operations.push(operation);
+                }
+                if reversed {
+                    api.operations.reverse();
+                }
+                let names = allocate(&api);
+                let error = |id: &str| names.operation_errors[&OperationId(id.to_owned())].as_str();
+                assert_eq!(
+                    error(second),
+                    winner,
+                    "{first} / {second}, reversed: {reversed}"
+                );
+                assert_eq!(
+                    error(first),
+                    loser,
+                    "{first} / {second}, reversed: {reversed}"
+                );
+            }
         }
     }
 
@@ -1494,6 +1548,44 @@ mod tests {
                     assert_scope(&format!("values of {name}"), variants, &[])?;
                 }
             }
+        }
+
+        /// Type names and the operation error and success-enum names do not depend on the order
+        /// the definitions or the operations are listed in: listing both in reverse renames
+        /// nothing. Operations whose ids escape to one method spelling are dropped first, because
+        /// method names are allocated first-come (see [`Names::operations`]).
+        #[test]
+        fn allocation_does_not_depend_on_definition_or_operation_order(
+            definitions in proptest::collection::vec(definition(), 0..10),
+            operations in proptest::collection::btree_map(hint(), operation(), 0..6),
+        ) {
+            let definitions: Vec<_> = definitions
+                .into_iter()
+                .map(|definition| Definition { anonymous: false, ..definition })
+                .collect();
+            let mut methods = std::collections::HashSet::new();
+            let operations = operations
+                .into_iter()
+                .filter(|(id, _)| methods.insert(super::escape(id, super::IdentRole::Method)))
+                .collect();
+            let api = synthetic_api(&definitions, &operations, &[]);
+            let mut reversed = api.clone();
+            reversed.operations.reverse();
+            reversed.types = TypeGraph::default();
+            for (_, def) in api.types.iter().collect::<Vec<_>>().into_iter().rev() {
+                reversed.types.insert(def.clone());
+            }
+            let type_names = |api: &Api, names: &Names| -> std::collections::BTreeMap<_, _> {
+                api.types
+                    .iter()
+                    .map(|(id, def)| (def.provenance.pointer.to_string(), names.types[&id].clone()))
+                    .collect()
+            };
+            let (forward, backward) = (allocate(&api), allocate(&reversed));
+            proptest::prop_assert_eq!(type_names(&api, &forward), type_names(&reversed, &backward));
+            proptest::prop_assert_eq!(&forward.operations, &backward.operations);
+            proptest::prop_assert_eq!(&forward.operation_errors, &backward.operation_errors);
+            proptest::prop_assert_eq!(&forward.success_enums, &backward.success_enums);
         }
 
         /// The parameter scopes alone, over the space the parameter collisions came from: names

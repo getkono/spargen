@@ -90,3 +90,41 @@ pub(super) fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::Method;
+
+    /// Each fixed method maps to its `reqwest::Method` constant; `QUERY`, which has none, and an
+    /// `additionalOperations` token are built from their exact bytes.
+    #[test]
+    fn reqwest_method_follows_the_table() {
+        let custom = |token: &str| Method::Custom(token.to_owned());
+        let from_bytes = |token: &str, reason: &str| {
+            format!("reqwest :: Method :: from_bytes (b\"{token}\") . expect (\"{reason}\")")
+        };
+        let validated = "validated additionalOperations key is a valid HTTP method token";
+        for (method, expected) in [
+            (Method::Get, "reqwest :: Method :: GET".to_owned()),
+            (Method::Put, "reqwest :: Method :: PUT".to_owned()),
+            (Method::Post, "reqwest :: Method :: POST".to_owned()),
+            (Method::Delete, "reqwest :: Method :: DELETE".to_owned()),
+            (Method::Options, "reqwest :: Method :: OPTIONS".to_owned()),
+            (Method::Head, "reqwest :: Method :: HEAD".to_owned()),
+            (Method::Patch, "reqwest :: Method :: PATCH".to_owned()),
+            (Method::Trace, "reqwest :: Method :: TRACE".to_owned()),
+            (
+                Method::Query,
+                from_bytes("QUERY", "QUERY is a valid HTTP method token"),
+            ),
+            (custom("PURGE"), from_bytes("PURGE", validated)),
+            (custom("copy"), from_bytes("copy", validated)),
+        ] {
+            assert_eq!(
+                super::reqwest_method(&method).to_string(),
+                expected,
+                "{method:?}"
+            );
+        }
+    }
+}

@@ -128,7 +128,68 @@ pub(super) fn normalize_rustdoc(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_rustdoc;
+    use super::{doc_tokens, normalize_rustdoc};
+
+    /// `doc_tokens` over each row's `(title, summary, description)` yields exactly that row's doc
+    /// text, or no attribute for `None`: one row per rule its doc states, and one showing the text
+    /// goes through `normalize_rustdoc`.
+    #[test]
+    fn doc_tokens_follows_the_table() {
+        type Row<'a> = (&'a str, [Option<&'a str>; 3], Option<&'a str>);
+        let rows: &[Row<'_>] = &[
+            ("nothing", [None, None, None], None),
+            ("summary alone", [None, Some("S"), None], Some("S")),
+            ("description alone", [None, None, Some("D")], Some("D")),
+            (
+                "summary and description are paragraphs",
+                [Some("T"), Some("S"), Some("D")],
+                Some("S\n\nD"),
+            ),
+            (
+                "a description repeating the summary is dropped",
+                [None, Some("S"), Some("S")],
+                Some("S"),
+            ),
+            (
+                "the title only when both are blank",
+                [Some("T"), Some(" "), Some("\n")],
+                Some("T"),
+            ),
+            (
+                "a blank summary is absent",
+                [None, Some("\t"), Some("D")],
+                Some("D"),
+            ),
+            (
+                "a blank description is absent",
+                [None, Some("S"), Some(" ")],
+                Some("S"),
+            ),
+            ("whitespace alone", [Some(" "), Some(" "), Some(" ")], None),
+            (
+                "the text is normalized",
+                [None, Some("a\tb"), None],
+                Some("a    b"),
+            ),
+        ];
+        for (case, [title, summary, description], expected) in rows {
+            let docs = crate::ir::Docs {
+                title: title.map(str::to_owned),
+                summary: summary.map(str::to_owned),
+                description: description.map(str::to_owned),
+                deprecated: false,
+            };
+            let expected = match expected {
+                Some(text) => quote::quote! { #[doc = #text] },
+                None => quote::quote! {},
+            };
+            assert_eq!(
+                doc_tokens(&docs).to_string(),
+                expected.to_string(),
+                "{case}"
+            );
+        }
+    }
 
     /// `normalize_rustdoc` over each row's input yields exactly that row's output. Every rule the
     /// function documents has a row, and so does each edge of its list-marker and fence grammar,

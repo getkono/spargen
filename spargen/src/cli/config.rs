@@ -218,6 +218,39 @@ mod tests {
         assert_eq!(resolved(&off, &["--uuid"]), file_off.uuid(true));
     }
 
+    /// Each of the eight switch flags, alone, moves its own setting off the file's value and leaves
+    /// the other three where the file put them.
+    #[test]
+    fn each_switch_flag_moves_only_its_own_setting() {
+        let (_on, on) =
+            with_config("carve = true\nuuid = true\ntime = true\nopen_narrowing = true\n");
+        let (_off, off) =
+            with_config("carve = false\nuuid = false\ntime = false\nopen_narrowing = false\n");
+        let file = |dir: &Utf8PathBuf| {
+            Spec::new(dir.join("openapi.yaml"))
+                .config_file(dir.join("spargen.toml"))
+                .unwrap()
+        };
+        type Moved = fn(Spec) -> Spec;
+        let rows: [(&str, &Utf8PathBuf, Moved); 8] = [
+            ("--no-carve", &on, |spec| spec.carve(false)),
+            ("--no-uuid", &on, |spec| spec.uuid(false)),
+            ("--no-time", &on, |spec| spec.time(false)),
+            ("--no-open-narrowing", &on, |spec| {
+                spec.open_narrowing(false)
+            }),
+            ("--carve", &off, |spec| spec.carve(true)),
+            ("--uuid", &off, |spec| spec.uuid(true)),
+            ("--time", &off, |spec| spec.time(true)),
+            ("--open-narrowing", &off, |spec| spec.open_narrowing(true)),
+        ];
+        for (flag, dir, moved) in rows {
+            let resolved = resolved(dir, &[flag]);
+            assert_ne!(resolved, file(dir), "{flag} moves its setting");
+            assert_eq!(resolved, moved(file(dir)), "{flag} moves nothing else");
+        }
+    }
+
     #[test]
     fn both_flags_of_a_switch_pair_are_a_usage_error() {
         for (on, off) in [

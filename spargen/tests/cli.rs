@@ -672,6 +672,11 @@ fn deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr() {
     let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned]);
     assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
     assert!(stdout.contains("reqwest"), "{stdout}");
+    let (_, clean_stdout, _) = spargen(temp.path(), &["deps", &clean]);
+    assert_eq!(
+        stdout, clean_stdout,
+        "the warning leaves the printed block as the clean spec's"
+    );
     assert!(
         stderr.contains("spargen: clean") && stderr.contains("warning[W001]"),
         "{stderr}"

@@ -255,3 +255,468 @@ pub(crate) struct Docs {
     /// Whether the construct is `deprecated` (also drives `#[deprecated]`).
     pub(crate) deprecated: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AdditionalProps, Api, BodyEncoding, Field, Info, MediaType, Method, Operation, OperationId,
+        ParamLoc, ParamStyle, Parameter, PathTemplate, Prim, PropertyName, RequestBody, Response,
+        Responses, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeKind, Union, UnionMode,
+        UnionStrategy, UnionVariant,
+    };
+    use crate::diag::{JsonPointer, Provenance};
+
+    /// One row: what it adds to [`api`]'s empty operation, and the predicate's answer.
+    type Row = (&'static str, fn(&mut Api), bool);
+
+    /// An API with one bodyless, parameterless `GET /items` and no types, which each row builds on.
+    fn api() -> Api {
+        Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: vec![Operation {
+                id: OperationId("listItems".to_owned()),
+                method: Method::Get,
+                path: PathTemplate {
+                    raw: "/items".to_owned(),
+                    segments: Vec::new(),
+                },
+                params: Vec::new(),
+                request_body: None,
+                responses: Responses {
+                    by_status: Vec::new(),
+                    default: None,
+                },
+                security: Vec::new(),
+                deprecated: false,
+                docs: Default::default(),
+                server: None,
+                provenance: Provenance::new(JsonPointer::root(), None),
+            }],
+            types: TypeGraph::default(),
+            security_schemes: Default::default(),
+        }
+    }
+
+    fn insert(api: &mut Api, kind: TypeKind) -> Ty {
+        let id = api.types.insert(TypeDef {
+            name_hint: "T".to_owned(),
+            kind,
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        Ty {
+            id,
+            nullable: false,
+            boxed: false,
+        }
+    }
+
+    fn bytes(api: &mut Api) -> Ty {
+        insert(api, TypeKind::Bytes)
+    }
+
+    fn string(api: &mut Api) -> Ty {
+        insert(api, TypeKind::Primitive(Prim::String))
+    }
+
+    fn object(api: &mut Api, field: Ty, additional: AdditionalProps) -> Ty {
+        let field = Field {
+            name: PropertyName {
+                wire: "field".to_owned(),
+            },
+            ty: field,
+            required: true,
+            deprecated: false,
+            read_only: false,
+            write_only: false,
+            default: None,
+            xml: Default::default(),
+            undeclared: false,
+        };
+        insert(
+            api,
+            TypeKind::Struct(Struct {
+                fields: vec![field],
+                additional,
+            }),
+        )
+    }
+
+    fn request(api: &mut Api, media: MediaType, ty: Ty) {
+        api.operations[0].request_body = Some(RequestBody {
+            media,
+            content_type: String::new(),
+            ty: Some(ty),
+            required: true,
+            encoding: BodyEncoding::default(),
+        });
+    }
+
+    /// A response under `status` (`None` is `default`), streamed when `media` frames a stream.
+    fn respond(api: &mut Api, status: Option<StatusSpec>, media: MediaType, ty: Ty) {
+        let response = Response {
+            body: Some(ty),
+            media: Some(media),
+            stream: media.stream_framing(),
+            accept: None,
+            headers: Vec::new(),
+        };
+        let responses = &mut api.operations[0].responses;
+        match status {
+            Some(status) => responses.by_status.push((status, response)),
+            None => responses.default = Some(response),
+        }
+    }
+
+    fn check(rows: &[Row], predicate: fn(&Api) -> bool) {
+        for (case, build, expected) in rows {
+            let mut api = api();
+            build(&mut api);
+            assert_eq!(predicate(&api), *expected, "{case}");
+        }
+    }
+
+    const OK: Option<StatusSpec> = Some(StatusSpec::Exact(200));
+
+    #[test]
+    fn uses_xml_follows_the_table() {
+        check(
+            &[
+                ("no body", |_| {}, false),
+                (
+                    "a JSON request and response",
+                    |api| {
+                        let ty = string(api);
+                        request(api, MediaType::Json, ty);
+                        respond(api, OK, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "an XML request body",
+                    |api| {
+                        let ty = string(api);
+                        request(api, MediaType::Xml, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an XML success body",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::Xml, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an XML error body",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, Some(StatusSpec::Range(4)), MediaType::Xml, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an XML default response",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, None, MediaType::Xml, ty);
+                    },
+                    true,
+                ),
+            ],
+            Api::uses_xml,
+        );
+    }
+
+    #[test]
+    fn uses_time_follows_the_table() {
+        check(
+            &[
+                ("no type", |_| {}, false),
+                (
+                    "a string and a uuid",
+                    |api| {
+                        string(api);
+                        insert(api, TypeKind::Primitive(Prim::Uuid));
+                    },
+                    false,
+                ),
+                (
+                    "a date-time",
+                    |api| {
+                        insert(api, TypeKind::Primitive(Prim::DateTime));
+                    },
+                    true,
+                ),
+                (
+                    "a date, referenced by nothing",
+                    |api| {
+                        insert(api, TypeKind::Primitive(Prim::Date));
+                    },
+                    true,
+                ),
+                (
+                    "a date only in an elided definition",
+                    |api| {
+                        let date = insert(api, TypeKind::Primitive(Prim::Date));
+                        api.types.elide(date.id);
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_time,
+        );
+    }
+
+    #[test]
+    fn uses_streams_follows_the_table() {
+        check(
+            &[
+                (
+                    "a JSON success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "an event-stream success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an NDJSON success under a range",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, Some(StatusSpec::Range(2)), MediaType::Ndjson, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a stream beside a second bodied success",
+                    |api| {
+                        let ty = string(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                        respond(api, Some(StatusSpec::Exact(201)), MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a stream on the error side",
+                    |api| {
+                        let ty = string(api);
+                        respond(
+                            api,
+                            Some(StatusSpec::Exact(500)),
+                            MediaType::EventStream,
+                            ty,
+                        );
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_streams,
+        );
+    }
+
+    /// Each row reaches `bytes` (or does not) through one position `uses_bytes_serde` documents,
+    /// and through each kind `contains_bytes` walks, cycles included.
+    #[test]
+    fn uses_bytes_serde_follows_the_table() {
+        check(
+            &[
+                ("no type", |_| {}, false),
+                (
+                    "a whole octet-stream request body",
+                    |api| {
+                        let ty = bytes(api);
+                        request(api, MediaType::OctetStream, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a whole JSON request body, sent raw",
+                    |api| {
+                        let ty = bytes(api);
+                        request(api, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a whole JSON response body, read raw",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::Json, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a JSON request body over an array of bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        request(api, MediaType::Json, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a text request body over an array of bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        request(api, MediaType::Text, ty);
+                    },
+                    false,
+                ),
+                (
+                    "a form request body over a tuple holding bytes",
+                    |api| {
+                        let (text, item) = (string(api), bytes(api));
+                        let ty = insert(api, TypeKind::Tuple(vec![text, item]));
+                        request(api, MediaType::FormUrlEncoded, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an event stream of whole bytes items",
+                    |api| {
+                        let ty = bytes(api);
+                        respond(api, OK, MediaType::EventStream, ty);
+                    },
+                    true,
+                ),
+                (
+                    "an XML error body over an array of bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        respond(api, None, MediaType::Xml, ty);
+                    },
+                    true,
+                ),
+                (
+                    "a model field, referenced by nothing",
+                    |api| {
+                        let item = bytes(api);
+                        object(api, item, AdditionalProps::Allow);
+                    },
+                    true,
+                ),
+                (
+                    "a typed additional-properties value",
+                    |api| {
+                        let (text, item) = (string(api), bytes(api));
+                        object(api, text, AdditionalProps::Typed(Box::new(item)));
+                    },
+                    true,
+                ),
+                (
+                    "a union variant",
+                    |api| {
+                        let (text, item) = (string(api), bytes(api));
+                        let variant = |ty| UnionVariant {
+                            name_hint: "V".to_owned(),
+                            ty,
+                        };
+                        insert(
+                            api,
+                            TypeKind::Union(Union {
+                                variants: vec![variant(text), variant(item)],
+                                strategy: UnionStrategy::Trial {
+                                    mode: UnionMode::AnyOf,
+                                    priorities: vec![0, 0],
+                                },
+                            }),
+                        );
+                    },
+                    true,
+                ),
+                (
+                    "a model holding bytes only in an elided definition",
+                    |api| {
+                        let item = bytes(api);
+                        let model = object(api, item, AdditionalProps::Deny);
+                        api.types.elide(model.id);
+                    },
+                    false,
+                ),
+                (
+                    "a self-referencing model without bytes",
+                    |api| {
+                        let text = string(api);
+                        let model = object(api, text, AdditionalProps::Allow);
+                        let TypeKind::Struct(object) =
+                            &mut api.types.get_mut(model.id).expect("inserted").kind
+                        else {
+                            unreachable!()
+                        };
+                        object.additional = AdditionalProps::Typed(Box::new(model));
+                    },
+                    false,
+                ),
+                (
+                    "a self-referencing model holding bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let model = object(api, item, AdditionalProps::Allow);
+                        let TypeKind::Struct(object) =
+                            &mut api.types.get_mut(model.id).expect("inserted").kind
+                        else {
+                            unreachable!()
+                        };
+                        object.additional = AdditionalProps::Typed(Box::new(model));
+                    },
+                    true,
+                ),
+                (
+                    "a JSON content parameter over an array of bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        api.operations[0]
+                            .params
+                            .push(parameter(ty, ParamStyle::Content(MediaType::Json)));
+                    },
+                    true,
+                ),
+                (
+                    "a form query parameter over an array of bytes",
+                    |api| {
+                        let item = bytes(api);
+                        let ty = insert(api, TypeKind::Array(Box::new(item)));
+                        api.operations[0]
+                            .params
+                            .push(parameter(ty, ParamStyle::Form));
+                    },
+                    false,
+                ),
+            ],
+            Api::uses_bytes_serde,
+        );
+    }
+
+    fn parameter(ty: Ty, style: ParamStyle) -> Parameter {
+        Parameter {
+            name: "filter".to_owned(),
+            location: ParamLoc::Query,
+            ty,
+            required: true,
+            style,
+            allow_reserved: false,
+            explode: false,
+            deprecated: false,
+            default_display: None,
+        }
+    }
+}

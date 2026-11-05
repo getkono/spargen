@@ -518,26 +518,6 @@ fn a_lone_xml_body_beside_a_bodyless_sibling_is_not_a_multi_body_xml_enum() {
     assert!(!responses.xml_in_multi_status());
 }
 
-/// Each sequential media maps to its own framing, and every other media to none.
-#[test]
-fn only_the_sequential_media_have_a_stream_framing() {
-    use super::{Framing, MediaType};
-    let cases = [
-        (MediaType::Json, None),
-        (MediaType::FormUrlEncoded, None),
-        (MediaType::Xml, None),
-        (MediaType::OctetStream, None),
-        (MediaType::Text, None),
-        (MediaType::Multipart, None),
-        (MediaType::EventStream, Some(Framing::Sse)),
-        (MediaType::Ndjson, Some(Framing::Ndjson)),
-        (MediaType::JsonSequence, Some(Framing::JsonSequence)),
-    ];
-    for (media, framing) in cases {
-        assert_eq!(media.stream_framing(), framing, "{media:?}");
-    }
-}
-
 #[test]
 fn only_2xx_selectors_are_success_and_every_other_range_prefix_is_error() {
     // Issue #198: the predicate that splits every generated shape. The emitted method enters

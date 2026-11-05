@@ -253,7 +253,8 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
 /// request to: the same path-parameter and query encoding, against the client's base URL with its
 /// path prefix, and through a path item's server override. Each URL is compared with the request
 /// line a local server then receives, so the accessor cannot drift from the request it describes.
-/// A required header parameter shapes no URL, so the accessor does not ask for it.
+/// A required header parameter shapes no URL, so the accessor does not ask for it, and an `apiKey`
+/// query credential rides on the request alone.
 #[test]
 fn an_operation_url_is_the_url_its_request_is_sent_to() {
     let temp = tempfile::tempdir().unwrap();
@@ -288,6 +289,17 @@ paths:
         - { name: name, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: read elsewhere }
+  /v1/search:
+    get:
+      operationId: search
+      security: [ { key: [] } ]
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+      responses:
+        "204": { description: results elsewhere }
+components:
+  securitySchemes:
+    key: { type: apiKey, in: query, name: api_key }
 "##,
     )
     .unwrap();
@@ -356,10 +368,9 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
     let bare_login = client.login_url(None).unwrap();
     assert_eq!(bare_login.as_str(), format!("{base}/v1/auth/login"));
     let blob = client.read_blob_url("x y").unwrap();
-    assert!(
-        !blob.path().starts_with("/api/"),
-        "the path item's server override must replace the base path: {blob}"
-    );
+    // The path item's server override replaces the base path, on the client's host.
+    let host = base.strip_suffix("/api").unwrap();
+    assert_eq!(blob.as_str(), format!("{host}/edge/blobs/x%20y"));
 
     // The async client's accessor is the one the blocking client forwards to.
     assert_eq!(client.inner().stream_file_url("a b/c").unwrap(), stream);
@@ -380,6 +391,23 @@ fn each_url_accessor_names_the_url_its_operation_sends_to() {
             request_line(&blob),
         ]
     );
+}
+
+/// The request carries the `apiKey` query credential beside its own query; the URL its accessor
+/// hands back is that URL less the credential.
+#[test]
+fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
+    let (base, server) = serve(1);
+    let client = urls_client::BlockingClient::new(&base).unwrap().with_credential(
+        "key",
+        urls_client::Credential::ApiKey(urls_client::SecretString::from("s3cret")),
+    );
+
+    let url = client.search_url("a b").unwrap();
+    assert_eq!(url.as_str(), format!("{base}/v1/search?q=a%20b"));
+    client.search("a b").unwrap();
+    let seen = server.join().unwrap();
+    assert_eq!(seen, vec!["GET /api/v1/search?q=a%20b&api_key=s3cret HTTP/1.1".to_owned()]);
 }
 "##;
 

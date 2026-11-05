@@ -301,6 +301,37 @@ mod tests {
         assert_ne!(allocated[1], loser_spelling);
     }
 
+    /// A hint biased to collide: two letters around an optional separator in either case, so
+    /// distinct hints often case to one spelling, plus keywords and spellings that escape alike.
+    fn hint() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => "[a-bA-B][-_ ]?[a-b]",
+            1 => proptest::sample::select(vec![
+                "", "-", "1a", "type", "type_", "r#type", "Self", "self", "super", "crate", "_",
+            ])
+            .prop_map(str::to_owned),
+        ]
+    }
+
+    fn role() -> impl Strategy<Value = IdentRole> {
+        proptest::sample::select(vec![
+            IdentRole::Type,
+            IdentRole::Field,
+            IdentRole::Variant,
+            IdentRole::Method,
+            IdentRole::Param,
+        ])
+    }
+
+    /// A scope holding `reserved`, as `allocate` reserves its fixed names before any request.
+    fn reserved_scope(reserved: &[String], role: IdentRole) -> Scope {
+        let mut scope = Scope::default();
+        for hint in reserved {
+            scope.reserve(hint, role);
+        }
+        scope
+    }
+
     proptest! {
         /// The property `alloc_ranked` exists for: with distinct ranks, permuting the batch permutes
         /// the result and changes nothing else.
@@ -341,48 +372,63 @@ mod tests {
             prop_assert_eq!(unique.len(), forward.len());
         }
 
+        /// No two requests get one identifier, and none gets a spelling the scope reserved.
         #[test]
-        fn allocations_are_injective(hints in proptest::collection::vec("[A-Za-z0-9_ -]{0,24}", 1..64)) {
-            let mut scope = Scope::default();
-            let mut seen = std::collections::HashSet::new();
+        fn allocations_are_injective(
+            hints in proptest::collection::vec(hint(), 1..64),
+            reserved in proptest::collection::vec(hint(), 0..8),
+            role in role(),
+        ) {
+            let mut scope = reserved_scope(&reserved, role);
+            let mut seen: std::collections::HashSet<String> = reserved
+                .iter()
+                .map(|hint| super::super::escape(hint, role).as_str().to_owned())
+                .collect();
             for (index, hint) in hints.iter().enumerate() {
                 let pointer = JsonPointer::root().push(&index.to_string());
-                let ident = scope.alloc(hint, IdentRole::Field, &pointer);
-                prop_assert!(seen.insert(ident.as_str().to_owned()));
+                let ident = scope.alloc(hint, role, &pointer);
+                prop_assert!(seen.insert(ident.as_str().to_owned()), "{ident:?} is taken");
             }
         }
 
         /// Byte-identical output requires the whole allocation sequence to be reproducible, not
-        /// just each name in isolation: two scopes fed the same hints and pointers must produce
-        /// the same identifiers, including the disambiguated ones.
+        /// just each name in isolation: the same requests against the same reserved set produce
+        /// the same identifiers, the disambiguated ones included, whatever order the set was
+        /// reserved in.
         #[test]
         fn allocation_sequences_are_deterministic(
-            hints in proptest::collection::vec("[A-Za-z0-9_ -]{0,24}", 1..64)
+            hints in proptest::collection::vec(hint(), 1..64),
+            reserved in proptest::collection::vec(hint(), 0..8),
+            role in role(),
         ) {
-            let allocate = || {
-                let mut scope = Scope::default();
+            let allocate = |reserved: &[String]| {
+                let mut scope = reserved_scope(reserved, role);
                 hints
                     .iter()
                     .enumerate()
                     .map(|(index, hint)| {
                         let pointer = JsonPointer::root().push(&index.to_string());
-                        scope.alloc(hint, IdentRole::Field, &pointer).as_str().to_owned()
+                        scope.alloc(hint, role, &pointer).as_str().to_owned()
                     })
                     .collect::<Vec<String>>()
             };
-            prop_assert_eq!(allocate(), allocate());
+            let mut backward = reserved.clone();
+            backward.reverse();
+            prop_assert_eq!(allocate(&reserved), allocate(&backward));
         }
 
         /// Every allocated identifier — the disambiguated ones included — must still be a legal
         /// Rust identifier. The suffix path rebuilds through `escape`, and this is what proves it.
         #[test]
         fn allocated_identifiers_are_always_legal(
-            hints in proptest::collection::vec("[A-Za-z0-9_ -]{0,24}", 1..32)
+            hints in proptest::collection::vec(hint(), 1..32),
+            reserved in proptest::collection::vec(hint(), 0..8),
+            role in role(),
         ) {
-            let mut scope = Scope::default();
+            let mut scope = reserved_scope(&reserved, role);
             for (index, hint) in hints.iter().enumerate() {
                 let pointer = JsonPointer::root().push(&index.to_string());
-                let ident = scope.alloc(hint, IdentRole::Field, &pointer);
+                let ident = scope.alloc(hint, role, &pointer);
                 let text = ident.as_str();
                 let parsed = text.parse::<proc_macro2::TokenStream>();
                 prop_assert!(parsed.is_ok(), "{text:?} does not lex");

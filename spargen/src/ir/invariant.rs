@@ -189,9 +189,11 @@ mod tests {
     use super::{check_invariants, INVARIANT_FAILURE};
     use crate::diag::{Code, Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
-        Api, BodyEncoding, HeaderShape, Info, MediaType, Method, Operation, OperationId,
-        PathSegment, PathTemplate, Prim, RequestBody, Response, ResponseHeader, Responses,
-        StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+        AdditionalProps, Api, BodyEncoding, Field, HeaderShape, Info, MediaType, Method, Operation,
+        OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
+        PropertyName, RequestBody, Response, ResponseHeader, Responses, StatusSpec, Struct, Ty,
+        TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant,
+        XmlField,
     };
     use indexmap::IndexMap;
 
@@ -266,6 +268,185 @@ mod tests {
         }
     }
 
+    /// The message of the one diagnostic `check_invariants` reports for `api`, after asserting it
+    /// is the only one and carries [`Code::InvalidInput`].
+    fn only_failure(api: &Api) -> String {
+        let mut diags = Diagnostics::new(100);
+        check_invariants(api, &mut diags);
+        let [diagnostic] = diags.items() else {
+            panic!("expected exactly one diagnostic: {diags:#?}");
+        };
+        assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+        diagnostic.message.clone()
+    }
+
+    fn def(name_hint: &str, kind: TypeKind) -> TypeDef {
+        TypeDef {
+            name_hint: name_hint.to_owned(),
+            kind,
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        }
+    }
+
+    /// Every position `check_invariants` documents as walked, each holding the one dangling
+    /// reference in an otherwise resolvable API, reported once under that position's label.
+    #[test]
+    fn every_reachable_type_reference_is_checked_for_dangling() {
+        let dangling = ty(999);
+        let response = |body, header| Response {
+            body: Some(body),
+            media: Some(MediaType::Json),
+            stream: None,
+            accept: None,
+            headers: vec![ResponseHeader {
+                name: "X-Rate".to_owned(),
+                ty: header,
+                required: false,
+                explode: false,
+                shape: HeaderShape::Scalar,
+                deprecated: false,
+                docs: Default::default(),
+            }],
+        };
+        let field = |name: &str, ty| Field {
+            name: PropertyName {
+                wire: name.to_owned(),
+            },
+            ty,
+            required: true,
+            deprecated: false,
+            read_only: false,
+            write_only: false,
+            default: None,
+            xml: XmlField::default(),
+            undeclared: false,
+        };
+        type Dangle<'a> = Box<dyn Fn(&mut Api) + 'a>;
+        let rows: Vec<(&str, Dangle<'_>)> = vec![
+            (
+                "petId",
+                Box::new(|api| {
+                    api.operations[0].params.push(Parameter {
+                        name: "petId".to_owned(),
+                        location: ParamLoc::Query,
+                        ty: dangling,
+                        required: true,
+                        style: ParamStyle::Form,
+                        allow_reserved: false,
+                        explode: true,
+                        deprecated: false,
+                        default_display: None,
+                    });
+                }),
+            ),
+            (
+                "request body",
+                Box::new(|api| {
+                    api.operations[0].request_body = Some(RequestBody {
+                        media: MediaType::Json,
+                        content_type: "application/json".to_owned(),
+                        ty: Some(dangling),
+                        required: true,
+                        encoding: BodyEncoding::default(),
+                    });
+                }),
+            ),
+            (
+                "response body",
+                Box::new(|api| {
+                    api.operations[0].responses.by_status[0].1.body = Some(dangling);
+                }),
+            ),
+            (
+                "response header `X-Total-Count`",
+                Box::new(|api| {
+                    api.operations[0].responses.by_status[0].1.headers[0].ty = dangling;
+                }),
+            ),
+            (
+                "default response body",
+                Box::new(|api| {
+                    api.operations[0].responses.default = Some(response(dangling, ty(0)));
+                }),
+            ),
+            (
+                "default response header `X-Rate`",
+                Box::new(|api| {
+                    api.operations[0].responses.default = Some(response(ty(0), dangling));
+                }),
+            ),
+            (
+                "name",
+                Box::new(|api| {
+                    let fields = vec![field("id", ty(0)), field("name", dangling)];
+                    api.types.insert(def(
+                        "Pet",
+                        TypeKind::Struct(Struct {
+                            fields,
+                            additional: AdditionalProps::Allow,
+                        }),
+                    ));
+                }),
+            ),
+            (
+                "additionalProperties",
+                Box::new(|api| {
+                    api.types.insert(def(
+                        "Labels",
+                        TypeKind::Struct(Struct {
+                            fields: vec![field("id", ty(0))],
+                            additional: AdditionalProps::Typed(Box::new(dangling)),
+                        }),
+                    ));
+                }),
+            ),
+            (
+                "Tags",
+                Box::new(|api| {
+                    api.types
+                        .insert(def("Tags", TypeKind::Array(Box::new(dangling))));
+                }),
+            ),
+            (
+                "Point",
+                Box::new(|api| {
+                    api.types
+                        .insert(def("Point", TypeKind::Tuple(vec![ty(0), dangling])));
+                }),
+            ),
+            (
+                "Shape",
+                Box::new(|api| {
+                    let variant = |name: &str, ty| UnionVariant {
+                        name_hint: name.to_owned(),
+                        ty,
+                    };
+                    api.types.insert(def(
+                        "Shape",
+                        TypeKind::Union(Union {
+                            variants: vec![variant("Circle", ty(0)), variant("Square", dangling)],
+                            strategy: UnionStrategy::Trial {
+                                mode: UnionMode::OneOf,
+                                priorities: vec![0, 0],
+                            },
+                        }),
+                    ));
+                }),
+            ),
+        ];
+        for (label, dangle) in rows {
+            let mut api = api_with_header_ty(ty(0));
+            dangle(&mut api);
+            assert_eq!(
+                only_failure(&api),
+                format!("{INVARIANT_FAILURE}: `{label}` references missing type 999"),
+                "the reference under `{label}`"
+            );
+        }
+    }
+
     #[test]
     fn a_resolvable_response_header_type_is_accepted() {
         let api = api_with_header_ty(ty(0));
@@ -291,12 +472,14 @@ mod tests {
             provenance: Provenance::new(JsonPointer::root(), None),
             document: String::new(),
         });
-        let mut diags = Diagnostics::new(100);
-        check_invariants(&api, &mut diags);
-        assert!(
-            diags.has_errors(),
+        assert_eq!(
+            only_failure(&api),
+            format!(
+                "{INVARIANT_FAILURE}: type `` is still a reservation, so its body was never \
+                 lowered"
+            ),
             "a reservation that survived lowering must be caught here, because the next stage \
-             emits it: {diags:#?}"
+             emits it"
         );
     }
 
@@ -305,9 +488,13 @@ mod tests {
         // Response headers are decoded by generated code exactly as bodies are, so a header whose
         // `TypeId` does not resolve is just as fatal.
         let api = api_with_header_ty(ty(999));
-        let mut diags = Diagnostics::new(100);
-        check_invariants(&api, &mut diags);
-        assert!(diags.has_errors(), "{diags:#?}");
+        assert_eq!(
+            only_failure(&api),
+            format!(
+                "{INVARIANT_FAILURE}: `response header `X-Total-Count`` references missing type \
+                 999"
+            )
+        );
     }
 
     /// An elided definition emits no item, so a reference to one is as dangling as an id that
@@ -316,9 +503,26 @@ mod tests {
     fn a_reference_to_an_elided_type_is_caught() {
         let mut api = api_with_header_ty(ty(0));
         api.types.elide(TypeId(0));
+        // The elided id also types the `200` body, so both references are reported.
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
-        assert!(diags.has_errors(), "{diags:#?}");
+        let messages: Vec<&str> = diags
+            .items()
+            .iter()
+            .inspect(|diagnostic| assert_eq!(diagnostic.code, Code::InvalidInput))
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                format!("{INVARIANT_FAILURE}: `response body` references missing type 0"),
+                format!(
+                    "{INVARIANT_FAILURE}: `response header `X-Total-Count`` references missing \
+                     type 0"
+                ),
+            ],
+            "{diags:#?}"
+        );
     }
 
     /// What an elided definition itself refers to is never read, so it is not checked: here a

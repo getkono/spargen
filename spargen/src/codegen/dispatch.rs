@@ -384,6 +384,50 @@ fn response_media_for_spec(
 mod tests {
     use crate::ir::{MediaType, Response, Responses, StatusSpec, Ty, TypeId};
 
+    /// Each IR status selector maps to the runtime selector that classifies the same statuses,
+    /// spelled with the literal's own type, and to the response variant named for it.
+    #[test]
+    fn each_status_selector_maps_to_its_runtime_spec_and_variant() {
+        for (spec, runtime, variant) in [
+            (
+                StatusSpec::Exact(200),
+                quote::quote! { support::StatusSpec::Exact(200u16) },
+                "Status200",
+            ),
+            (
+                StatusSpec::Exact(404),
+                quote::quote! { support::StatusSpec::Exact(404u16) },
+                "Status404",
+            ),
+            (
+                StatusSpec::Range(2),
+                quote::quote! { support::StatusSpec::Range(2u8) },
+                "Status2xx",
+            ),
+            (
+                StatusSpec::Range(5),
+                quote::quote! { support::StatusSpec::Range(5u8) },
+                "Status5xx",
+            ),
+            (
+                StatusSpec::Default,
+                quote::quote! { support::StatusSpec::Any },
+                "Default",
+            ),
+        ] {
+            assert_eq!(
+                super::runtime_status_spec(spec).to_string(),
+                runtime.to_string(),
+                "{spec:?}"
+            );
+            assert_eq!(
+                super::status_variant_ident(spec).to_string(),
+                variant,
+                "{spec:?}"
+            );
+        }
+    }
+
     /// Issue #233: each status selector reads only its own response, so a `0XX` entry decodes
     /// under its own codec, not the `default` response's (or the fallback, with no `default`), and
     /// its variant and runtime selector stay distinct from `default`'s.

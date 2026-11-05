@@ -94,12 +94,48 @@ mod tests {
         );
     }
 
+    /// Each literal's non-empty `/`-separated parts in order, each parameter as `by_{name}`, and
+    /// the whole snake-cased; an empty part leaks no separator. An exact expected id per row is
+    /// what determinism means for a synthesized id, which is spelled into a public method name.
     #[test]
-    fn synthesis_is_deterministic_and_empty_segments_do_not_leak_separators() {
-        let template = path("//a//b/", vec![PathSegment::Literal("//a//b/".to_owned())]);
-        let first = synth_operation_id(&Method::Get, &template);
-        assert_eq!(first, "get_a_b");
-        assert_eq!(first, synth_operation_id(&Method::Get, &template));
+    fn synthesis_follows_the_examples_table() {
+        let literal = |text: &str| PathSegment::Literal(text.to_owned());
+        let param = |name: &str| PathSegment::Param(name.to_owned());
+        for (raw, segments, expected) in [
+            ("//a//b/", vec![literal("//a//b/")], "get_a_b"),
+            (
+                "/users/{id}/posts",
+                vec![literal("/users/"), param("id"), literal("/posts")],
+                "get_users_by_id_posts",
+            ),
+            (
+                "/items/{itemId}",
+                vec![literal("/items/"), param("itemId")],
+                "get_items_by_item_id",
+            ),
+            (
+                "/{a}{b}",
+                vec![literal("/"), param("a"), param("b")],
+                "get_by_a_by_b",
+            ),
+            (
+                "/v1/user-profiles",
+                vec![literal("/v1/user-profiles")],
+                "get_v1_user_profiles",
+            ),
+            (
+                "/userProfiles",
+                vec![literal("/userProfiles")],
+                "get_user_profiles",
+            ),
+        ] {
+            let template = path(raw, segments);
+            assert_eq!(
+                synth_operation_id(&Method::Get, &template),
+                expected,
+                "{raw}"
+            );
+        }
     }
 
     #[test]

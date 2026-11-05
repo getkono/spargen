@@ -1305,4 +1305,83 @@ fn error_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     }
     server.join().unwrap();
 }
+
+// `getRangeOnly` documents only a `2XX` and a `5XX`, each with a body and no exact status beside
+// it. Every status in a class decodes through that class's arm, whatever its code; a status in
+// neither class is undocumented; and a body the matched arm cannot parse is `Decode`.
+#[test]
+fn a_range_only_operation_decodes_every_status_in_its_class() {
+    for (status, code) in [("200 OK", 200), ("201 Created", 201), ("299 Custom", 299)] {
+        let (base, server) = serve_once("application/json", status, br#"{"ok":"yes"}"#);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        let response = client.get_range_only().unwrap();
+        assert_eq!(response.status(), code);
+        assert_eq!(response.into_inner().ok, "yes");
+        server.join().unwrap();
+    }
+
+    for (status, code) in [("500 Internal Server Error", 500), ("503 Service Unavailable", 503)] {
+        let (base, server) = serve_once("application/json", status, br#"{"reason":"down"}"#);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        match client.get_range_only().unwrap_err() {
+            basic_client::Error::Api(response) => {
+                assert_eq!(response.status(), code);
+                let basic_client::GetRangeOnlyError(body) = response.into_inner();
+                assert_eq!(body.reason, "down");
+            }
+            other => panic!("expected a typed API error at {code}, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    let (base, server) = serve_once("application/json", "404 Not Found", br#"{"reason":"gone"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_range_only().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, .. } => assert_eq!(status, 404),
+        other => panic!("a 4xx is in neither documented class, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("text/html", "502 Bad Gateway", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_range_only().unwrap_err() {
+        basic_client::Error::Decode { status, body, .. } => {
+            assert_eq!(status, 502);
+            assert_eq!(&body[..], b"not json");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
+// `getTraced`'s optional parameters are a header and a cookie, neither of which shapes the URL:
+// the method takes the `…Params` bundle, and the URL accessor takes no argument at all.
+#[test]
+fn an_accessor_whose_optional_parameters_shape_no_url_takes_no_bundle() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+    let base = format!("http://{addr}");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.get_traced_url().unwrap().as_str(), format!("{base}/traced"));
+
+    let params = basic_client::GetTracedParams::default()
+        .x_trace_id("t-1".to_owned())
+        .session("s-1".to_owned());
+    assert_eq!(client.get_traced(params).unwrap().status(), 204);
+    let request = server.join().unwrap();
+    assert!(request.starts_with("get /traced http/1.1\r\n"), "{request}");
+    assert!(request.contains("x-trace-id: t-1\r\n"), "{request}");
+    assert!(request.contains("cookie: session=s-1\r\n"), "{request}");
+}
 "##;

@@ -947,7 +947,7 @@ fn the_getters_read_back_what_the_setters_wrote() {
 /// `config_files` lists every applied file in the order applied, and the knobs a file sets read
 /// back through the same getters as a setter's.
 #[test]
-fn config_files_lists_each_applied_file_in_order() {
+fn every_applied_config_file_is_listed_in_the_order_applied() {
     let temp = tempfile::tempdir().unwrap();
     let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     let discovered = dir.join("spargen.toml");
