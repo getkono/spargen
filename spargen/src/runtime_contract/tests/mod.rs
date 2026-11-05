@@ -1,16 +1,20 @@
 //! The audit's fixtures, one file per concern: `versions` (floors, ceilings and conditional
-//! requirements), `targets` (target-table evaluation), `workspace` (inheritance and the
-//! workspace-root walk), `explain` (the `E023` explain text) and `deps_block` (the block
-//! `spargen deps` prints). This file holds what they share — the sandbox every audit runs in, the
-//! helpers, and the list of test sources the self-reading tests scan, with the tests over those —
-//! and the tests of `runtime_contract/integration.rs`: the build-script manifest path, the
-//! directive guard, and the Cargo-integration policy and its messages.
+//! requirements), `targets` (target-table evaluation), `inheritance` (what a `workspace = true`
+//! declaration resolves to), `walk` (which workspace root the audit finds), `manifest_naming`
+//! (how each unreadable or missing manifest is named), `explain` (the `E023` explain text) and
+//! `deps_block` (the block `spargen deps` prints). This file holds what they share — the sandbox
+//! every audit runs in, the helpers, and the list of test sources the self-reading tests scan,
+//! with the tests over those — and the tests of `runtime_contract/integration.rs`: the
+//! build-script manifest path, the directive guard, and the Cargo-integration policy and its
+//! messages.
 
 mod deps_block;
 mod explain;
+mod inheritance;
+mod manifest_naming;
 mod targets;
 mod versions;
-mod workspace;
+mod walk;
 
 use cfg_expr::targets::{get_builtin_target_by_triple, ALL_BUILTINS};
 use cfg_expr::Expression;
@@ -33,10 +37,12 @@ use crate::CargoIntegration;
 const TEST_SOURCES: &[(&str, &str)] = &[
     ("deps_block.rs", include_str!("deps_block.rs")),
     ("explain.rs", include_str!("explain.rs")),
+    ("inheritance.rs", include_str!("inheritance.rs")),
+    ("manifest_naming.rs", include_str!("manifest_naming.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("targets.rs", include_str!("targets.rs")),
     ("versions.rs", include_str!("versions.rs")),
-    ("workspace.rs", include_str!("workspace.rs")),
+    ("walk.rs", include_str!("walk.rs")),
 ];
 
 /// Whether `name` is a `#[test]` in any file of this test module.
@@ -268,6 +274,33 @@ fn messages(diagnostics: &[Diagnostic]) -> String {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The working directory is process-global, so each test that has to change it restores it on
+/// the way out — including on a panic — and holds this lock so a second such test cannot race
+/// it.
+static WORKING_DIRECTORY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct RestoreWorkingDirectory(std::path::PathBuf);
+
+impl Drop for RestoreWorkingDirectory {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// The path a diagnostic spells in backticks directly after `prefix`.
+///
+/// The messages these fixtures read render the manifest as ``<noun> `<path>` ``, so lifting
+/// the path out of each is what lets it be compared to the file the fixture itself built.
+/// Asking whether one message `contains` the other's path cannot pin that: `contains` is a
+/// substring relation and every string contains the empty one, so a renderer that emitted no
+/// path at all would satisfy it.
+fn manifest_named_after<'m>(message: &'m str, prefix: &str) -> Option<&'m str> {
+    message
+        .split_once(prefix)
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(path, _)| path)
 }
 
 #[test]

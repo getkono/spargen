@@ -1500,10 +1500,12 @@ const RUNTIME_CONTRACT: (&str, &str) = (
     concat!(
         include_str!("../../runtime_contract/tests/deps_block.rs"),
         include_str!("../../runtime_contract/tests/explain.rs"),
+        include_str!("../../runtime_contract/tests/inheritance.rs"),
+        include_str!("../../runtime_contract/tests/manifest_naming.rs"),
         include_str!("../../runtime_contract/tests/mod.rs"),
         include_str!("../../runtime_contract/tests/targets.rs"),
         include_str!("../../runtime_contract/tests/versions.rs"),
-        include_str!("../../runtime_contract/tests/workspace.rs"),
+        include_str!("../../runtime_contract/tests/walk.rs"),
     ),
 );
 
