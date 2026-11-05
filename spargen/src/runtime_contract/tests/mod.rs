@@ -442,7 +442,14 @@ fn cargo_integration_policy_covers_each_environment() {
     assert_eq!(codes(&degraded), ["W013"]);
     assert!(!degraded.fatal);
 
-    // The same, but the caller declared it must not happen.
+    // Required and satisfied: a build script with its manifest behaves exactly as under `Auto`.
+    let satisfied = resolve_cargo_environment(CargoIntegration::Required, true, manifest.clone());
+    assert!(satisfied.directives);
+    assert_eq!(satisfied.manifest, manifest);
+    assert!(codes(&satisfied).is_empty());
+    assert!(!satisfied.fatal);
+
+    // Not a build script, but the caller declared it must not happen.
     let required = resolve_cargo_environment(CargoIntegration::Required, false, manifest.clone());
     assert_eq!(codes(&required), ["E024"]);
     assert!(required.fatal);
