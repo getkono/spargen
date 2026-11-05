@@ -7,8 +7,9 @@
 //! API and framing are the same. Dropping `EventStream` drops that body stream and cancels the
 //! transfer.
 //!
-//! Framing is a pure function ([`next_frame`]) over an owned byte buffer, with no network IO and
-//! no async runtime.
+//! Framing is a pure function ([`next_frame`]) over an owned [`FrameBuffer`], with no network IO
+//! and no async runtime. The buffer remembers how far the framer has already searched, so each
+//! byte is searched once however many chunks the item it belongs to arrives in.
 
 use std::convert::Infallible;
 use std::marker::PhantomData;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, StatusCode};
@@ -110,7 +111,7 @@ pub struct EventStream<T> {
     /// The headers of that same response, reported as `Error::Decode`'s `headers`.
     headers: HeaderMap,
     /// Bytes read but not yet framed into a complete item. Partial frames live here between chunks.
-    buffer: Vec<u8>,
+    buffer: FrameBuffer,
     /// `ClientConfig::max_stream_frame`: the most bytes `buffer` may hold for an item whose
     /// terminator has not arrived before the stream fails.
     max_frame: usize,
@@ -161,7 +162,7 @@ impl<T> EventStream<T> {
             status: response.status(),
             headers: std::mem::take(response.headers_mut()),
             state: StreamState::Body(Box::pin(response.bytes_stream())),
-            buffer: Vec::new(),
+            buffer: FrameBuffer::default(),
             max_frame: config.max_stream_frame,
             max_error_body: config.max_error_body,
             framing,
@@ -294,7 +295,7 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.state = StreamState::Body(body);
                         this.buffer.extend_from_slice(&chunk);
                         if this.bom_pending {
-                            this.bom_pending = strip_leading_bom(&mut this.buffer);
+                            this.bom_pending = this.buffer.strip_leading_bom();
                         }
                     }
                     Poll::Ready(Some(Err(error))) => {
@@ -360,10 +361,7 @@ impl<T> EventStream<T> {
     fn frame_overflow(&mut self) -> StreamError {
         self.state = StreamState::Done;
         // `truncated` is set whatever the cap: the item itself is incomplete.
-        let (body, _) = cap_body(
-            Bytes::from(std::mem::take(&mut self.buffer)),
-            self.max_error_body,
-        );
+        let (body, _) = cap_body(self.buffer.take_bytes(), self.max_error_body);
         Error::Decode {
             status: self.status,
             headers: self.headers.clone(),
@@ -466,10 +464,76 @@ enum FramePoll {
     NeedMore,
 }
 
+/// Bytes read but not yet framed, with how far the framer has already looked into them, so a
+/// frame arriving over many chunks is searched once rather than from its start on every chunk.
+/// Framed bytes leave the front through `BytesMut::split_to`, which moves no bytes, so framing
+/// many items out of one buffer costs nothing per item for what stays behind them.
+///
+/// The raw bytes of the item in progress stay in `bytes` until it is framed, so `len` is what
+/// `ClientConfig::max_stream_frame` measures and what an over-limit item's error reports.
+#[derive(Debug, Default)]
+struct FrameBuffer {
+    bytes: BytesMut,
+    /// SSE only: the offset just past the last complete line of the event in progress. Every line
+    /// before it has already been read into `event`.
+    line_start: usize,
+    /// Where the next terminator search starts: the bytes before it (from `line_start`, for SSE)
+    /// hold none of the terminators the framing in use looks for.
+    scanned: usize,
+    /// SSE only: the fields the lines before `line_start` set.
+    event: SseFields,
+}
+
+impl FrameBuffer {
+    fn extend_from_slice(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Drop every byte and everything read from them.
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.line_start = 0;
+        self.scanned = 0;
+        self.event = SseFields::default();
+    }
+
+    /// Take every byte, leaving the buffer empty.
+    fn take_bytes(&mut self) -> Bytes {
+        let bytes = std::mem::take(&mut self.bytes).freeze();
+        self.clear();
+        bytes
+    }
+
+    /// Split off the first `at` bytes, which the caller has framed. The search offsets restart at
+    /// the new front; `event` is the caller's to take.
+    fn consume(&mut self, at: usize) -> BytesMut {
+        self.line_start = 0;
+        self.scanned = 0;
+        self.bytes.split_to(at)
+    }
+
+    /// [`strip_leading_bom`] over the bytes. The search restarts at the front, since a mark the
+    /// bytes lost moves every offset.
+    fn strip_leading_bom(&mut self) -> bool {
+        self.line_start = 0;
+        self.scanned = 0;
+        self.event = SseFields::default();
+        strip_leading_bom(&mut self.bytes)
+    }
+}
+
 /// Frame the next item out of `buffer`, consuming the bytes it uses. `at_eof` is `true` once no
 /// further bytes will arrive, which lets a trailing frame not terminated by a delimiter still be
 /// emitted. Pure: no IO, no async.
-fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll {
+fn next_frame(buffer: &mut FrameBuffer, framing: Framing, at_eof: bool) -> FramePoll {
     match framing {
         Framing::Ndjson => ndjson_next(buffer, at_eof),
         Framing::Sse => sse_next(buffer, at_eof, SseOutput::LegacyData),
@@ -479,26 +543,38 @@ fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll
     }
 }
 
+/// The ASCII Record Separator that opens each RFC 7464 record.
+const RECORD_SEPARATOR: u8 = 0x1e;
+
+/// The index of the first `byte` in `buffer` at or after `from`.
+fn find_from(buffer: &[u8], from: usize, byte: u8) -> Option<usize> {
+    buffer[from..]
+        .iter()
+        .position(|&b| b == byte)
+        .map(|index| from + index)
+}
+
 /// ndjson framing: each complete `\n`-terminated line (CRLF tolerated) is one item; empty lines are
 /// skipped. At EOF a final line without a trailing newline is emitted.
-fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
+fn ndjson_next(buffer: &mut FrameBuffer, at_eof: bool) -> FramePoll {
     loop {
-        if let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
-            let line = trim_cr(&buffer[..nl]).to_vec();
-            buffer.drain(..=nl);
+        if let Some(nl) = find_from(&buffer.bytes, buffer.scanned, b'\n') {
+            let line = buffer.consume(nl + 1);
+            let line = trim_cr(&line[..nl]);
             if line.is_empty() {
                 continue;
             }
-            return frame_item(line);
+            return frame_item(line.to_vec());
         }
         if at_eof {
-            let line = trim_cr(buffer).to_vec();
+            let line = trim_cr(&buffer.bytes).to_vec();
             buffer.clear();
             if line.is_empty() {
                 return FramePoll::NeedMore;
             }
             return frame_item(line);
         }
+        buffer.scanned = buffer.len();
         return FramePoll::NeedMore;
     }
 }
@@ -506,45 +582,32 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
 /// RFC 7464 framing: each item starts with ASCII Record Separator (`0x1E`) and runs until the next
 /// separator (or EOF). Newlines are record terminators/formatting and are trimmed around the JSON
 /// text, while embedded newlines remain valid JSON whitespace.
-fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
+fn json_sequence_next(buffer: &mut FrameBuffer, at_eof: bool) -> FramePoll {
     loop {
-        let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
-            if at_eof {
-                buffer.clear();
-            }
-            return FramePoll::NeedMore;
-        };
-        // Mutation testing: replacing `>` with `>=` survives every test and is declared rather
-        // than killed: the comparison admits `first == 0` only to drain `..0`, which removes
-        // nothing.
-        if first > 0 {
-            buffer.drain(..first);
+        // Bytes before the first separator are discarded once it arrives, and held until then.
+        if buffer.bytes.first() != Some(&RECORD_SEPARATOR) {
+            let Some(first) = find_from(&buffer.bytes, buffer.scanned, RECORD_SEPARATOR) else {
+                if at_eof {
+                    buffer.clear();
+                } else {
+                    buffer.scanned = buffer.len();
+                }
+                return FramePoll::NeedMore;
+            };
+            buffer.consume(first);
         }
-        let end = buffer[1..]
-            .iter()
-            .position(|byte| *byte == 0x1e)
-            .map(|index| index + 1);
+        // The record's own separator is at 0, so the search for the next one starts past it.
+        let end = find_from(&buffer.bytes, buffer.scanned.max(1), RECORD_SEPARATOR);
         let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
+            buffer.scanned = buffer.len();
             return FramePoll::NeedMore;
         };
-        let mut payload = buffer[1..end].to_vec();
-        while payload.last().is_some_and(u8::is_ascii_whitespace) {
-            payload.pop();
-        }
-        let start = payload
-            .iter()
-            .position(|byte| !byte.is_ascii_whitespace())
-            .unwrap_or(payload.len());
-        payload.drain(..start);
-        if end == buffer.len() {
-            buffer.clear();
-        } else {
-            buffer.drain(..end);
-        }
+        let record = buffer.consume(end);
+        let payload = record[1..].trim_ascii();
         // An empty record frames nothing; keep going so every complete record behind it is
         // framed before the caller reads more bytes or measures what is left.
         if !payload.is_empty() {
-            return frame_item(payload);
+            return frame_item(payload.to_vec());
         }
     }
 }
@@ -571,7 +634,7 @@ struct SseMetadata {
     retry: Option<u64>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SseFields {
     data: Vec<u8>,
     event: Option<Vec<u8>>,
@@ -588,33 +651,48 @@ enum SseOutput {
 
 /// SSE framing. Events are parsed once, then rendered as the legacy JSON-in-`data` payload, the
 /// OpenAPI 3.2 event envelope, or the JSON payload described by `data.contentSchema`.
-fn sse_next(buffer: &mut Vec<u8>, at_eof: bool, output: SseOutput) -> FramePoll {
+/// The lines of the event in progress are read into `buffer.event` as they complete, so a later
+/// call resumes after the last complete line instead of reading the event again from its start.
+fn sse_next(buffer: &mut FrameBuffer, at_eof: bool, output: SseOutput) -> FramePoll {
     loop {
-        let mut pos = 0;
-        let mut fields = SseFields::default();
-        let mut saw_terminator = false;
-        while let Some((line, next)) = take_line(buffer, pos) {
-            pos = next;
-            if line.is_empty() {
-                saw_terminator = true;
-                break;
+        let terminator = loop {
+            match take_line(&buffer.bytes, buffer.line_start, buffer.scanned) {
+                Ok((line, next)) => {
+                    buffer.line_start = next;
+                    buffer.scanned = next;
+                    if line.is_empty() {
+                        break Some(next);
+                    }
+                    append_sse_field(line, &mut buffer.event);
+                }
+                Err(scanned) => {
+                    buffer.scanned = scanned;
+                    break None;
+                }
             }
-            append_sse_field(line, &mut fields);
-        }
-        if !saw_terminator {
-            if !at_eof {
-                return FramePoll::NeedMore;
+        };
+        let fields = match terminator {
+            Some(end) => {
+                buffer.consume(end);
+                std::mem::take(&mut buffer.event)
             }
-            // Mutation testing: replacing `<` with `<=` survives every test and is declared rather
-            // than killed: at `pos == buffer.len()` the field appended is the empty line, whose
-            // empty name matches no field, so `append_sse_field` leaves `fields` as it was.
-            if pos < buffer.len() {
-                append_sse_field(trim_cr(&buffer[pos..]), &mut fields);
+            None if !at_eof => return FramePoll::NeedMore,
+            None => {
+                // Mutation testing: replacing `<` with `<=` survives every test and is declared
+                // rather than killed: at `line_start == len` the field appended is the empty line,
+                // whose empty name matches no field, so `append_sse_field` leaves the event as it
+                // was.
+                if buffer.line_start < buffer.len() {
+                    append_sse_field(
+                        trim_cr(&buffer.bytes[buffer.line_start..]),
+                        &mut buffer.event,
+                    );
+                }
+                let fields = std::mem::take(&mut buffer.event);
+                buffer.clear();
+                fields
             }
-            buffer.clear();
-        } else {
-            buffer.drain(..pos);
-        }
+        };
         match finish_sse_fields(fields, output) {
             FramePoll::NeedMore if !buffer.is_empty() => continue,
             result => return result,
@@ -704,19 +782,27 @@ fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
 }
 
 /// If `buf[from..]` holds a complete SSE line, return it without its terminator and the index just
-/// past that terminator. As the SSE specification's grammar requires, a line ends at CRLF, at a
-/// bare LF, or at a bare CR. Returns `None` when no full line is buffered yet, which includes a CR
-/// that is the last buffered byte: the byte after it decides whether it ends the line alone or
-/// begins a CRLF, so it is held until that byte arrives (at EOF, `sse_next` takes the tail itself).
-fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
-    let rest = &buf[from..];
-    let end = rest.iter().position(|&b| b == b'\n' || b == b'\r')?;
-    let next = match (rest[end], rest.get(end + 1)) {
-        (b'\r', None) => return None,
+/// past that terminator. `scanned`, at or past `from`, is where the search for the terminator
+/// starts: `buf[from..scanned]` is known to hold none. As the SSE specification's grammar
+/// requires, a line ends at CRLF, at a bare LF, or at a bare CR. Returns `Err` with the offset the
+/// next search starts from when no full line is buffered yet, which includes a CR that is the last
+/// buffered byte: the byte after it decides whether it ends the line alone or begins a CRLF, so it
+/// is held, and searched again, until that byte arrives (at EOF, `sse_next` takes the tail
+/// itself).
+fn take_line(buf: &[u8], from: usize, scanned: usize) -> Result<(&[u8], usize), usize> {
+    let Some(end) = buf[scanned..]
+        .iter()
+        .position(|&b| b == b'\n' || b == b'\r')
+        .map(|index| scanned + index)
+    else {
+        return Err(buf.len());
+    };
+    let next = match (buf[end], buf.get(end + 1)) {
+        (b'\r', None) => return Err(end),
         (b'\r', Some(b'\n')) => end + 2,
         _ => end + 1,
     };
-    Some((&rest[..end], from + next))
+    Ok((&buf[from..end], next))
 }
 
 /// The UTF-8 byte order mark an SSE body may open with, which the SSE specification strips.
@@ -725,12 +811,12 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 /// Strip a UTF-8 byte order mark from the start of a freshly opened SSE body. Returns `true` while
 /// `buffer` is still a proper prefix of the mark (empty included), so the decision waits for more
 /// bytes, and `false` once it is made, whether or not a mark was removed.
-fn strip_leading_bom(buffer: &mut Vec<u8>) -> bool {
+fn strip_leading_bom(buffer: &mut BytesMut) -> bool {
     if buffer.len() < UTF8_BOM.len() && UTF8_BOM.starts_with(buffer) {
         return true;
     }
     if buffer.starts_with(UTF8_BOM) {
-        buffer.drain(..UTF8_BOM.len());
+        let _ = buffer.split_to(UTF8_BOM.len());
     }
     false
 }
