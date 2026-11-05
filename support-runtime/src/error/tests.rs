@@ -452,10 +452,13 @@ fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
 }
 
 /// A body stream that answers its first poll with `error`.
-struct FailingBody(Option<std::io::Error>);
+struct FailingBody(Option<BoxError>);
+
+/// The error a `FailingBody` fails with.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 impl futures_core::Stream for FailingBody {
-    type Item = Result<Bytes, std::io::Error>;
+    type Item = Result<Bytes, BoxError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -467,12 +470,37 @@ impl futures_core::Stream for FailingBody {
 
 /// The error reqwest reports when reading a body fails with an I/O error of `kind`.
 fn failed_body_read(kind: std::io::ErrorKind) -> reqwest::Error {
-    let body = reqwest::Body::wrap_stream(FailingBody(Some(std::io::Error::new(
-        kind,
-        "body read failed",
-    ))));
+    body_read_failing_with(Box::new(std::io::Error::new(kind, "body read failed")))
+}
+
+/// The error reqwest reports when reading a body fails with `error`.
+fn body_read_failing_with(error: BoxError) -> reqwest::Error {
+    let body = reqwest::Body::wrap_stream(FailingBody(Some(error)));
     crate::tests::poll_ready(crate::tests::response(200, body).bytes())
         .expect_err("the body fails to read")
+}
+
+/// With no I/O error anywhere in its source chain, a failed body read is an interruption exactly
+/// when a body-kind reqwest error is in that chain. reqwest's streaming `Body` wraps whatever its
+/// stream failed with as a body-kind error, and `bytes()` wraps that as decode-kind, so a stream
+/// failing with a non-I/O error gives a decode-kind error over a body-kind one over that error.
+#[test]
+fn a_failed_body_read_with_no_io_error_is_interrupted_by_a_body_kind_cause() {
+    let source = body_read_failing_with(Box::new(std::fmt::Error));
+    assert!(source.is_decode() && !source.is_body() && !source.is_timeout());
+    let mut chain = std::error::Error::source(&source);
+    let (mut io, mut body_kind) = (false, false);
+    while let Some(cause) = chain {
+        io |= cause.is::<std::io::Error>();
+        body_kind |= cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_body);
+        chain = cause.source();
+    }
+    assert!(!io && body_kind, "{source:?}");
+    let error = Error::<ApiBody>::from_body_read(source);
+    assert!(matches!(error, Error::InterruptedBody(_)), "{error:?}");
+    assert!(error.is_transient());
 }
 
 /// `from_body_read` reads the I/O error under a failed body read: a connection that gave out is

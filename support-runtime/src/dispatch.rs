@@ -434,6 +434,8 @@ async fn read_capped<E>(
 #[cfg(target_arch = "wasm32")]
 async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
     let cap = core.config().max_error_body;
+    // `fetch` reports a failed read as a JavaScript error, so `from_body_read` gives `Protocol`
+    // here even for a connection that gave out, as `Error::InterruptedBody` documents.
     let bytes = response.bytes().await.map_err(Error::from_body_read)?;
     Ok(cap_body(bytes, cap))
 }

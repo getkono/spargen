@@ -27,8 +27,9 @@ pub enum Error<E> {
     Transport(TransportError),
     /// #3 — connect vs total-request timeout (as configured on the injected client).
     Timeout(TimeoutKind),
-    /// #4 — malformed HTTP or decompression failure. A response body the connection cut short is
-    /// not this class but [`Error::InterruptedBody`].
+    /// #4 — malformed HTTP or decompression failure. On native targets, a response body the
+    /// connection cut short is not this class but [`Error::InterruptedBody`]; on `wasm32`, a
+    /// non-streamed one is this class, as [`Error::InterruptedBody`] describes.
     Protocol(ProtocolError),
     /// #5 — redirect-policy exhaustion (per the injected client's policy).
     Redirect(RedirectError),
@@ -68,7 +69,10 @@ pub enum Error<E> {
         truncated: bool,
     },
     /// #9 — the connection dropped partway through a response body: mid-stream on a streamed
-    /// response, or while any other response body, success or error, was being read.
+    /// response, or, on native targets, while any other response body, success or error, was
+    /// being read. On `wasm32`, the `fetch` backend reports a non-streamed body that fails to
+    /// read as a JavaScript error, which carries no evidence that the connection gave out, so
+    /// that failure is [`Error::Protocol`] there.
     InterruptedBody(TransportError),
     /// #11 — a `LinkPaginator` page's `rel="next"` link named a URL the paginator had already
     /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
@@ -142,7 +146,9 @@ impl<E> Error<E> {
     /// error in the chain, a body-kind reqwest error, the error itself or one in the chain, is an
     /// interruption. A timeout is asked for first, and everything that is not an interruption is
     /// classified as [`Error::from_reqwest`] classifies it, so a body that is malformed rather
-    /// than cut short stays [`Error::Protocol`].
+    /// than cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
+    /// failed read as a decode-kind error over a JavaScript error, with neither an I/O error nor
+    /// a body-kind error in its chain, so every such failure there is [`Error::Protocol`].
     pub(crate) fn from_body_read(error: reqwest::Error) -> Self {
         if !error.is_timeout() && is_interrupted_read(&error) {
             Error::InterruptedBody(TransportError::new(error))
