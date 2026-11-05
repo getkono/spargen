@@ -615,16 +615,16 @@ fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
             );
         }
         if *null_satisfies {
-            // The exact JSON null type, not a silently dropped body and not `Option<()>`: `null` is
-            // the only satisfying value, so the response type has exactly one inhabitant. Followed
-            // through the operation's own signature rather than by guessing an alias name — the
-            // sole-member path lowers its member under the same hint, so the union's own def gets a
-            // disambiguating suffix.
+            // The exact JSON null type, not a silently dropped body: `null` is the only satisfying
+            // value, so the body is the null type `type: 'null'` lowers to on its own, an `Option`
+            // of `()` (#1184). Followed through the operation's own signature rather than by
+            // guessing an alias name — the sole-member path lowers its member under the same hint,
+            // so the union's own def gets a disambiguating suffix.
             let body = code
-                .split("ResponseValue<types::")
+                .split("ResponseValue<Option<types::")
                 .nth(1)
                 .and_then(|rest| rest.split('>').next())
-                .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+                .unwrap_or_else(|| panic!("`{what}` emitted no nullable typed response: {code}"))
                 .trim()
                 .to_owned();
             assert!(
@@ -1035,8 +1035,9 @@ fn a_component_and_an_inline_schema_agree_about_null() {
         );
     }
 
-    // A component whose union admits ONLY `null` must be the exact null type in every spelling too
-    // — the component boundary previously wrapped it back into an `Option`.
+    // A component whose union admits ONLY `null` must be the exact null type in every spelling too,
+    // and that is the null type `type: 'null'` lowers to on its own: an `Option` of `()` on every
+    // operation, in every spelling alike (#1184).
     let only_null = "type: [integer, 'null']\noneOf: [{ type: string }, { type: 'null' }]";
     for (spelling, report, code) in every_spelling(only_null) {
         assert_ne!(
@@ -1046,9 +1047,9 @@ fn a_component_and_an_inline_schema_agree_about_null() {
         );
         assert_eq!(
             optional_returns(&code),
-            0,
-            "`{spelling}`: the intersection is `{{null}}`, so the type already has exactly one \
-             inhabitant and must not be wrapped in `Option`: {code}"
+            returns(&code),
+            "`{spelling}`: the intersection is `{{null}}`, so the type is the null type, an \
+             `Option` of `()` as `type: 'null'` is: {code}"
         );
     }
 }
@@ -1119,11 +1120,11 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
             types.contains("pub type Pet = ();"),
             "{spelling}: a nullable union refined to only `null` is not the null type:\n{types}"
         );
-        // The use site agrees too: the exact null type is the whole value set, so the holder's
-        // field is `Pet` itself, never an `Option` over it.
+        // The use site agrees too: the exact null type is the null type `type: 'null'` lowers
+        // to on its own, so the holder's field is an `Option` of `Pet` (#1184).
         assert!(
-            types.contains("pub p: Pet,"),
-            "{spelling}: the holder's field is not the bare null type:\n{types}"
+            types.contains("pub p: Option<Pet>,"),
+            "{spelling}: the holder's field is not the null type `type: 'null'` gives:\n{types}"
         );
     }
 

@@ -815,7 +815,7 @@ fn meet_admits_null(members: &[Obj]) -> bool {
 enum Lowered {
     /// No value satisfies every member: `E013`.
     Rejected,
-    /// Only `null` does: the null type `()`.
+    /// Only `null` does: the null type, `Option<()>` as `type: 'null'` lowers on its own (#1184).
     Null,
     /// An object struct, `Option`al exactly when `nullable`.
     Object { nullable: bool },
@@ -841,7 +841,7 @@ fn lowered(report: &Report, source: &str) -> Result<Lowered, TestCaseError> {
         return Ok(Lowered::Rejected);
     }
     let shape = holder_p_shape(source)?;
-    Ok(if shape == "()" {
+    Ok(if shape == "Option<()>" {
         Lowered::Null
     } else {
         Lowered::Object {
@@ -1342,8 +1342,8 @@ proptest! {
     }
 
     /// A nullable union of objects (#450) refined by untyped object keywords: where the refiner
-    /// excludes every object branch only `null` is left, and the schema is the null type `()`,
-    /// never `E013`; without the `null` branch nothing is left, which is a rejection; a refiner
+    /// excludes every object branch only `null` is left, and the schema is the null type
+    /// `Option<()>`, as `type: 'null'` lowers on its own (#1184), never `E013`; without the `null` branch nothing is left, which is a rejection; a refiner
     /// that excludes no branch keeps the union. Each holds in every spelling of the refinement.
     #[test]
     fn a_refined_nullable_union_keeps_exactly_what_the_refiner_admits(
@@ -1384,7 +1384,7 @@ proptest! {
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}\n{}", report, spec);
         let shape = holder_p_shape(&source)?;
         if excluded {
-            prop_assert_eq!(shape.as_str(), "()", "`Holder.p` is `{}`:\n{}", shape, spec);
+            prop_assert_eq!(shape.as_str(), "Option<()>", "`Holder.p` is `{}`:\n{}", shape, spec);
             return Ok(());
         }
         // A refiner every branch meets keeps the union it refines: `Holder.p` has the shape it has

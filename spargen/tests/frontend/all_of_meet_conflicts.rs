@@ -650,12 +650,21 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
 
 /// An irreconcilable meet of nullable objects leaves exactly `null`: no object satisfies both
 /// members, whose required property types share no value, and both admit `null`. Every spelling
-/// of that conjunction lowers it to the null type `()`, as the `$ref`-sibling spelling already
-/// did; the `allOf` spellings, and a `$ref` beside untyped object keywords, rejected it with
-/// `E013` (#542). A member that denies `null` leaves nothing at all, which stays `E013` in every
-/// spelling.
+/// of that conjunction lowers it to the null type, as the `$ref`-sibling spelling already did; the
+/// `allOf` spellings, and a `$ref` beside untyped object keywords, rejected it with `E013` (#542).
+/// That null type is the one `type: 'null'` lowers to on its own, so the required `Holder.p` is
+/// an `Option` of `()` (#1184). A member that denies `null` leaves nothing at all, which stays
+/// `E013` in every spelling.
 #[test]
 fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
+    // `Holder.p` is `Option<T>` with `T` an alias of `()`.
+    let holder_p_is_the_null_type = |code: &str| {
+        field_type(&types_module(code), "pub p:")
+            .as_deref()
+            .and_then(|ty| ty.strip_prefix("Option<"))
+            .and_then(|inner| inner.strip_suffix('>'))
+            .is_some_and(|unit| code.contains(&format!("pub type {unit} = ();")))
+    };
     let document = |second_type: &str, p: &str| {
         format!(
             "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
@@ -716,10 +725,8 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
                 !has_code(&report, Code::AllOfIrreconcilable),
                 "{what}: {report:#?}"
             );
-            let ty = field_type(&types_module(&code), "pub p:")
-                .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
             assert!(
-                code.contains(&format!("pub type {ty} = ();")),
+                holder_p_is_the_null_type(&code),
                 "{what}: only `null` satisfies both members, so `Holder.p` is the null type: {code}"
             );
         }
@@ -734,9 +741,7 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
     let (report, code) = generate_with_code(&untyped);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-    let ty = field_type(&types_module(&code), "pub p:")
-        .unwrap_or_else(|| panic!("no `Holder.p`: {code}"));
-    assert!(code.contains(&format!("pub type {ty} = ();")), "{code}");
+    assert!(holder_p_is_the_null_type(&code), "{code}");
 
     // The schema's own `type` listing `null` does not make `null` valid where its `allOf` members
     // deny it: no value satisfies the schema, so that stays `E013`, never the null type.
@@ -849,10 +854,8 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
             !has_code(&report, Code::AllOfIrreconcilable),
             "{what}: {report:#?}"
         );
-        let ty = field_type(&types_module(&code), "pub p:")
-            .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
         assert!(
-            code.contains(&format!("pub type {ty} = ();")),
+            holder_p_is_the_null_type(&code),
             "{what}: only `null` is left, so `Holder.p` is the null type: {code}"
         );
     }
@@ -894,10 +897,8 @@ fn an_irreconcilable_meet_of_nullable_objects_is_the_null_type() {
                 !has_code(&report, Code::AllOfIrreconcilable),
                 "{what}: {report:#?}"
             );
-            let ty = field_type(&types_module(&code), "pub p:")
-                .unwrap_or_else(|| panic!("{what}: no `Holder.p`: {code}"));
             assert!(
-                code.contains(&format!("pub type {ty} = ();")),
+                holder_p_is_the_null_type(&code),
                 "{what}: only `null` is left, so `Holder.p` is the null type: {code}"
             );
         }

@@ -332,12 +332,13 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
             pick(true, excluded_1.clone()),
         ),
         // #678, two branches that lower to one generated type, one of which the conjunct
-        // excludes: reported before the meet merges what it leaves.
+        // excludes: reported before the meet merges what it leaves. Only `null` is left, so `Pick`
+        // is the null type, an `Option` of `()` as `type: 'null'` is (#1184).
         (
             "#678",
             "type: [integer, 'null']",
             vec!["{ type: [string, 'null'] }", "{ type: string }"],
-            pick(false, excluded_1.clone()),
+            pick(true, excluded_1.clone()),
         ),
         // #673
         (
@@ -447,12 +448,12 @@ fn the_cases_one_null_decision_settles_agree_in_every_spelling() {
     }
     // #678, a union of one untyped object branch beside a scalar conjunct: the `$ref`'d union is
     // met as the union it is, not mixed with the conjunct as the object it lowers to, so only
-    // `null` is left in every spelling.
+    // `null` is left in every spelling: the null type, an `Option` of `()` (#1184).
     any_of_rows.push((
         "#678",
         "type: [integer, 'null']",
         vec!["{ properties: { a: { type: string } } }"],
-        pick(false, Vec::new()),
+        pick(true, Vec::new()),
     ));
     let mut mismatches = Vec::new();
     let rows = rows
@@ -666,4 +667,74 @@ fn unreferenced_member_types(source: &str) -> Vec<String> {
             .any(|use_site| source.contains(use_site.as_str()))
         })
         .collect()
+}
+
+/// A schema whose only value is `null` is the null type `type: 'null'` lowers to on its own,
+/// however it is composed (#1184): an `Option` of `()`, so an optional field of any spelling
+/// decodes a present `null` as `None` (no `decode_present`) and a required one is `Option<()>`.
+/// Every spelling here gives fields `a` (optional) and `r` (required) of `Merged` the attribute
+/// and type the outright spelling gives them, through `generate` and `check` alike.
+#[test]
+fn every_spelling_of_exactly_null_is_the_null_type_written_outright() {
+    let outright = "{ type: 'null' }";
+    let spellings = [
+        "{ allOf: [ { type: 'null' }, { type: 'null' } ] }",
+        "{ allOf: [ {}, { type: 'null' } ] }",
+        "{ const: null }",
+        "{ enum: [null] }",
+        "{ anyOf: [ { type: 'null' }, { const: null } ] }",
+        "{ oneOf: [ { type: 'null' } ] }",
+        "{ $ref: '#/components/schemas/Z', type: 'null' }",
+        "{ $ref: '#/components/schemas/Z' }",
+        "{ $ref: '#/components/schemas/C' }",
+        "{ allOf: [ { $ref: '#/components/schemas/Z' }, { $ref: '#/components/schemas/C' } ] }",
+    ];
+    // `Merged`'s field `name`: its `#[serde(..)]` line and its type, an alias of `()` read as `()`.
+    let field = |source: &str, name: &str| -> Option<(String, String)> {
+        let prefix = format!("pub {name}: ");
+        let lines: Vec<&str> = source.lines().map(str::trim).collect();
+        let at = lines.iter().position(|line| line.starts_with(&prefix))?;
+        let ty = lines[at].strip_prefix(&prefix)?.trim_end_matches(',');
+        let unit =
+            |alias: &str| alias == "()" || source.contains(&format!("pub type {alias} = ();"));
+        let ty = match ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
+            Some(inner) if unit(inner) => "Option<()>".to_owned(),
+            _ if unit(ty) => "()".to_owned(),
+            _ => ty.to_owned(),
+        };
+        Some((lines[at.checked_sub(1)?].to_owned(), ty))
+    };
+    let answer = |prop: &str| {
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Z: {{ type: 'null' }}\n    C: {{ const: null }}\n    Merged: {{ type: \
+             object, required: [r], properties: {{ a: {prop}, r: {prop} }} }}\n"
+        );
+        let (report, source) = generate_module(&spec);
+        let checked = check(&spec);
+        assert_eq!(rejected(&report), rejected(&checked), "{prop}");
+        assert_eq!(codes(&report), codes(&checked), "{prop}");
+        assert!(!rejected(&report), "{prop}: {report:#?}");
+        (field(&source, "a"), field(&source, "r"))
+    };
+    let expected = (
+        Some((
+            "#[serde(rename = \"a\", default, skip_serializing_if = \"Option::is_none\")]"
+                .to_owned(),
+            "Option<()>".to_owned(),
+        )),
+        Some((
+            "#[serde(rename = \"r\")]".to_owned(),
+            "Option<()>".to_owned(),
+        )),
+    );
+    assert_eq!(answer(outright), expected, "{outright}");
+    let mismatches: Vec<String> = spellings
+        .iter()
+        .filter_map(|prop| {
+            let got = answer(prop);
+            (got != expected).then(|| format!("{prop}: {got:?}"))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
