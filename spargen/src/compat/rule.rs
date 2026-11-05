@@ -91,7 +91,8 @@ impl UnknownOmitToken {
         &self.token
     }
 
-    /// What the token was parsed as: `"component kind"` or `"HTTP method"`.
+    /// What the token was parsed as, the noun its message names (`"component kind"` for a
+    /// [`ComponentKind`], `"HTTP method"` for an [`OmitMethod`]).
     pub fn noun(&self) -> &'static str {
         self.noun
     }
