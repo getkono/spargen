@@ -229,7 +229,8 @@ pub fn serialize_simple<T: Serialize>(
 }
 
 /// Serialize one `style: matrix` path parameter, including its leading `;` and — where the
-/// serialization rules keep it — the parameter name.
+/// serialization rules keep it — the parameter name. An empty array or object is undefined
+/// (RFC 6570 §2.3), like `null`: it renders as `;name` under either `explode`.
 pub fn serialize_matrix<T: Serialize>(
     name: &str,
     value: &T,
@@ -237,7 +238,7 @@ pub fn serialize_matrix<T: Serialize>(
     encoding: PercentEncoding,
 ) -> Result<String, ParameterError> {
     let name = encode(name, encoding);
-    match serde_json::to_value(value)? {
+    match empty_as_undefined(serde_json::to_value(value)?) {
         // An undefined value still carries the name, with no `=`.
         Value::Null => Ok(format!(";{name}")),
         Value::Array(values) if explode => values
@@ -283,6 +284,10 @@ pub fn serialize_label<T: Serialize>(
 ///
 /// With `explode: true`, arrays repeat the parameter name and objects use each property name.
 /// With `explode: false`, either shape is flattened into one comma-separated value under `name`.
+/// An empty array or object is undefined (RFC 6570 §2.3), like `null`: it renders as `name=`
+/// under either `explode`. An empty `name` is a form-encoded `in: querystring` value, the whole
+/// query rather than one parameter, so an empty composite there has no name to keep and renders
+/// no fragment.
 /// `style: cookie` is exactly this function with [`PercentEncoding::Passthrough`] — the two rows
 /// of the specification's serialization table are otherwise identical.
 pub fn serialize_form<T: Serialize>(
@@ -291,8 +296,15 @@ pub fn serialize_form<T: Serialize>(
     explode: bool,
     encoding: PercentEncoding,
 ) -> Result<Vec<String>, ParameterError> {
+    let value = serde_json::to_value(value)?;
+    let value = if name.is_empty() {
+        value
+    } else {
+        empty_as_undefined(value)
+    };
     let name = encode(name, encoding);
-    match serde_json::to_value(value)? {
+    match value {
+        // An undefined value keeps the name, with an empty value.
         Value::Null => Ok(vec![format!("{name}=")]),
         Value::Array(values) if explode => values
             .iter()
@@ -567,6 +579,17 @@ fn style_fragments(
         FormStyle::Form => serialize_form(name, value, explode, encoding),
         FormStyle::Delimited(delimiter) => serialize_delimited(name, value, delimiter, encoding),
         FormStyle::DeepObject => serialize_deep_object(name, value, encoding),
+    }
+}
+
+/// `value`, with an empty array or object replaced by `null`: RFC 6570 §2.3 counts an empty list
+/// or associative array as undefined, and the specification's style table renders an undefined
+/// value as `;name` under `matrix` and `name=` under `form`, whichever `explode` is.
+fn empty_as_undefined(value: Value) -> Value {
+    match value {
+        Value::Array(ref values) if values.is_empty() => Value::Null,
+        Value::Object(ref values) if values.is_empty() => Value::Null,
+        value => value,
     }
 }
 
