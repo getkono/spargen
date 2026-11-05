@@ -24,7 +24,7 @@ pub(super) fn attach_auth_tokens(
         quote! {}
     } else {
         let alternatives = operation.security.iter().map(|requirement| {
-            let schemes = requirement.0.iter().map(|(id, _scopes)| {
+            let schemes = requirement.0.iter().map(|id| {
                 let scheme = api
                     .security_schemes
                     .get(id)
