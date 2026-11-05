@@ -4485,7 +4485,7 @@ pub mod types {
         #[serde(rename = "status")]
         pub status: RefinedMember1status,
         #[serde(rename = "marker")]
-        pub marker: RefinedmarkerIntersection,
+        pub marker: Option<RefinedmarkerIntersection>,
         #[serde(rename = "labels")]
         pub labels: RefinedlabelsIntersection,
         #[serde(rename = "steps")]
