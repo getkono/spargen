@@ -11,7 +11,6 @@
 //! no async runtime.
 
 use std::convert::Infallible;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,6 +23,8 @@ use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
+use crate::dispatch::cap_body;
+use crate::wasm::BoxFuture;
 use crate::{
     send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend, MaybeSync, TransportError,
 };
@@ -36,17 +37,11 @@ type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Sen
 #[cfg(target_arch = "wasm32")]
 type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
 
-/// The caller-provided wait before an automatic reconnect attempt.
-#[cfg(not(target_arch = "wasm32"))]
-pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-/// The caller-provided wait before an automatic reconnect attempt (wasm variant).
-#[cfg(target_arch = "wasm32")]
-pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + 'static>>;
+/// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
+/// it, as the `wasm` module explains.
+pub type ReconnectWait = BoxFuture<'static, ()>;
 
-#[cfg(not(target_arch = "wasm32"))]
-type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>> + Send>>;
-#[cfg(target_arch = "wasm32")]
-type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>>>>;
+type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
 
 /// Why an automatic SSE reconnect is being considered.
 #[derive(Debug)]
@@ -156,11 +151,11 @@ impl<T> EventStream<T> {
     /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
     /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
     /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
-    pub(crate) fn new(response: Response, framing: Framing) -> Self {
+    pub(crate) fn new(mut response: Response, framing: Framing) -> Self {
         let config = ClientConfig::default();
         Self {
             status: response.status(),
-            headers: response.headers().clone(),
+            headers: std::mem::take(response.headers_mut()),
             state: StreamState::Body(Box::pin(response.bytes_stream())),
             buffer: Vec::new(),
             max_frame: config.max_stream_frame,
@@ -330,9 +325,9 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.state = StreamState::Connecting(future);
                         return Poll::Pending;
                     }
-                    Poll::Ready(Ok(response)) => {
+                    Poll::Ready(Ok(mut response)) => {
                         this.status = response.status();
-                        this.headers = response.headers().clone();
+                        this.headers = std::mem::take(response.headers_mut());
                         this.state = StreamState::Body(Box::pin(response.bytes_stream()));
                     }
                     Poll::Ready(Err(error)) => {
@@ -355,9 +350,11 @@ impl<T> EventStream<T> {
     /// reconnect is attempted: the server that sent the item is likely to send it again.
     fn frame_overflow(&mut self) -> StreamError {
         self.state = StreamState::Done;
-        let retained = self.buffer.len().min(self.max_error_body);
-        let body = Bytes::copy_from_slice(&self.buffer[..retained]);
-        self.buffer = Vec::new();
+        // `truncated` is set whatever the cap: the item itself is incomplete.
+        let (body, _) = cap_body(
+            Bytes::from(std::mem::take(&mut self.buffer)),
+            self.max_error_body,
+        );
         Error::Decode {
             status: self.status,
             headers: self.headers.clone(),

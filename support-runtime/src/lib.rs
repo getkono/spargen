@@ -45,6 +45,10 @@ mod paginate;
 mod parameter;
 mod response;
 mod retry;
+// Typed streaming of sequential response bodies pulls in the optional `futures-core` dependency
+// and reqwest's `stream` feature, so it is compiled only under the `stream` feature; a generated
+// client embeds this module only when its spec has a sequential (SSE, ndjson or JSON-seq) response.
+#[cfg(feature = "stream")]
 mod stream;
 mod transport;
 // The `MaybeSend`/`MaybeSync` conditional-bound abstraction. Compiled on every target (it is
@@ -67,8 +71,8 @@ pub use client::{ClientConfig, ClientCore};
 pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
     build_url_on, build_url_with_query_string_on, classify_error, classify_error_bytes,
-    classify_error_text, decode_success, decode_success_bytes, decode_success_text,
-    decode_success_with, decode_text_body, read_error_body, send, unexpected_status, StatusSpec,
+    classify_error_text, classify_with, decode_success, decode_success_bytes, decode_success_text,
+    decode_success_with, decode_text_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{
     ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
@@ -84,6 +88,7 @@ pub use parameter::{
 };
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+#[cfg(feature = "stream")]
 pub use stream::{
     EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
@@ -234,7 +239,9 @@ mod tests {
     pub(crate) enum Chunk {
         /// A chunk of body bytes.
         Data(Bytes),
-        /// One poll that answers `Pending`; the next poll moves on to the following step.
+        /// One poll that answers `Pending`; the next poll moves on to the following step. Only the
+        /// `stream` module's tests script one, so it is unused without that feature.
+        #[cfg_attr(not(feature = "stream"), allow(dead_code))]
         Pending,
         /// A failed read, as a dropped connection reports it.
         Fail,
@@ -333,7 +340,9 @@ mod tests {
             self
         }
 
-        /// Answer the first poll of the execute future with `Pending`.
+        /// Answer the first poll of the execute future with `Pending`. Only the `stream` module's
+        /// tests ask for it, so it is unused without that feature.
+        #[cfg_attr(not(feature = "stream"), allow(dead_code))]
         pub(crate) fn pending(mut self) -> Self {
             self.pending = true;
             self

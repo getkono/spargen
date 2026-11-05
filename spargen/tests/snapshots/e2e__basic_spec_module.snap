@@ -30,11 +30,10 @@ pub use support::{Date, DateParseError, DateTime};
 mod support {
     mod auth {
         use std::convert::Infallible;
-        use std::future::Future;
-        use std::pin::Pin;
         use std::sync::Arc;
         use reqwest::header::HeaderValue;
         use reqwest::RequestBuilder;
+        use super::wasm::BoxFuture;
         use super::{ClientCore, Error, RequestError};
         pub use secrecy::{ExposeSecret, SecretString};
         /// A failure from an async token provider.
@@ -54,17 +53,9 @@ mod support {
             }
         }
         impl std::error::Error for AuthError {}
-        /// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, through a
-        /// `cfg`-gated alias, as the `wasm` module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type TokenFuture = Pin<
-            Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>,
-        >;
-        /// The future returned by a [`TokenProvider`] (the wasm variant: no `Send`).
-        #[cfg(target_arch = "wasm32")]
-        pub type TokenFuture = Pin<
-            Box<dyn Future<Output = Result<SecretString, AuthError>>>,
-        >;
+        /// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, as the `wasm`
+        /// module explains.
+        pub type TokenFuture = BoxFuture<'static, Result<SecretString, AuthError>>;
         /// An async callback that yields a fresh credential, for rotating tokens. `Send + Sync` on native
         /// (the provider is shared across tasks); vacuous on `wasm32`, matching [`TokenFuture`].
         #[cfg(not(target_arch = "wasm32"))]
@@ -196,35 +187,35 @@ mod support {
             if requirements.is_empty() {
                 return Ok(request);
             }
-            let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(
-                requirements.len(),
-            );
-            for alternative in requirements {
-                let mut missing = Vec::new();
-                let mut registered = Vec::with_capacity(alternative.len());
-                for scheme in *alternative {
-                    match resolve(core, scheme) {
-                        Resolution::Transport => {}
-                        Resolution::Registered(credential) => {
-                            registered.push((scheme, credential))
-                        }
-                        Resolution::Missing => missing.push(scheme.name),
-                    }
+            let is_missing = |scheme: &AuthScheme| {
+                matches!(resolve(core, scheme), Resolution::Missing)
+            };
+            let Some(chosen) = requirements
+                .iter()
+                .find(|alternative| !alternative.iter().any(is_missing)) else {
+                let alternatives = requirements
+                    .iter()
+                    .map(|alternative| {
+                        alternative
+                            .iter()
+                            .filter(|scheme| is_missing(scheme))
+                            .map(|scheme| scheme.name)
+                            .collect()
+                    })
+                    .collect();
+                return Err(
+                    Error::RequestConstruction(RequestError::MissingCredential {
+                        alternatives,
+                    }),
+                );
+            };
+            let mut request = request;
+            for scheme in *chosen {
+                if let Resolution::Registered(credential) = resolve(core, scheme) {
+                    request = apply_credential(request, scheme, credential).await?;
                 }
-                if missing.is_empty() {
-                    let mut request = request;
-                    for (scheme, credential) in registered {
-                        request = apply_credential(request, scheme, credential).await?;
-                    }
-                    return Ok(request);
-                }
-                alternatives.push(missing);
             }
-            Err(
-                Error::RequestConstruction(RequestError::MissingCredential {
-                    alternatives,
-                }),
-            )
+            Ok(request)
         }
         /// How one scheme of a security alternative is satisfied, if at all.
         enum Resolution<'a> {
@@ -261,21 +252,19 @@ mod support {
             let takes_token = !matches!(
                 scheme.kind, AuthKind::Basic | AuthKind::MutualTls
             );
-            let token: Option<SecretString> = match credential {
-                Credential::Bearer(secret) | Credential::ApiKey(secret) => {
-                    Some(secret.clone())
-                }
+            let fetched: SecretString;
+            let token: Option<&SecretString> = match credential {
+                Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret),
                 Credential::Provider(provider) if takes_token => {
-                    Some(
-                        provider()
-                            .await
-                            .map_err(|source| {
-                                Error::RequestConstruction(RequestError::CredentialProvider {
-                                    scheme: scheme.name,
-                                    source,
-                                })
-                            })?,
-                    )
+                    fetched = provider()
+                        .await
+                        .map_err(|source| {
+                            Error::RequestConstruction(RequestError::CredentialProvider {
+                                scheme: scheme.name,
+                                source,
+                            })
+                        })?;
+                    Some(&fetched)
                 }
                 Credential::Provider(_) | Credential::Basic { .. } => None,
             };
@@ -365,7 +354,7 @@ mod support {
         use std::convert::Infallible;
         use std::sync::Arc;
         use reqwest::Url;
-        use super::{Credential, Error, HttpBackend, ReqwestBackend};
+        use super::{Credential, Error, HttpBackend, LinkPaginator, ReqwestBackend};
         /// Client-wide configuration.
         #[derive(Debug, Clone)]
         pub struct ClientConfig {
@@ -503,6 +492,11 @@ mod support {
             /// Retrieve a registered credential by scheme name.
             pub fn credential(&self, scheme: &str) -> Option<&Credential> {
                 self.credentials.get(scheme)
+            }
+            /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
+            /// See the `paginate` module's docs for the full pattern and the authentication caveat.
+            pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
+                LinkPaginator::new(self.clone(), first)
             }
         }
     }
@@ -702,11 +696,11 @@ mod support {
         /// binary variant keeps it without a copy.
         pub async fn decode_success_with<T>(
             core: &ClientCore,
-            response: Response,
+            mut response: Response,
             decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let status = response.status();
-            let headers = response.headers().clone();
+            let headers = std::mem::take(response.headers_mut());
             let body = response.bytes().await.map_err(Error::from_reqwest)?;
             match decode(&body) {
                 Ok(value) => Ok(ResponseValue::new(status, headers, value)),
@@ -751,19 +745,17 @@ mod support {
                 .map_err(|error| error.to_string())
         }
         /// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
-        /// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
-        /// picks the documented variant by status and decodes it (→ [`Error::Api`], or [`Error::Decode`] on
-        /// parse failure); a status matching no documented selector becomes [`Error::UnexpectedStatus`].
-        /// The `E` parameter only threads the taxonomy through a transport failure while reading.
-        pub async fn read_error_body<E>(
+        /// (capped) bytes, and whether they were truncated: the read step of [`classify_with`]. The `E`
+        /// parameter only threads the taxonomy through a transport failure while reading.
+        pub(crate) async fn read_error_body<E>(
             core: &ClientCore,
-            response: Response,
+            mut response: Response,
         ) -> Result<
             (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool),
             Error<E>,
         > {
             let status = response.status();
-            let headers = response.headers().clone();
+            let headers = std::mem::take(response.headers_mut());
             let (body, truncated) = read_capped(core, response).await?;
             Ok((status, headers, body, truncated))
         }
@@ -833,45 +825,48 @@ mod support {
                 )
                 .await
         }
-        /// The body every structured error classifier shares: read the body capped at `max_error_body`; a
-        /// status a `documented` selector matches runs `decode` over it ([`Error::Api`], or
-        /// [`Error::Decode`] carrying the decoder's message as its `path` on failure); any other status is
+        /// The body every error classifier shares: read the body capped at `max_error_body`; a status a
+        /// `documented` selector matches runs `decode` over it ([`Error::Api`], or [`Error::Decode`]
+        /// carrying the decoder's message as its `path` on failure); any other status is
         /// [`Error::UnexpectedStatus`] with the raw body preserved. `decode` receives the `Bytes` itself so
         /// a raw binary error body keeps it without a copy.
-        pub(crate) async fn classify_with<E>(
+        ///
+        /// Generated code for a multi-status error enum calls it from the arm whose selector matched, with
+        /// that selector as `documented` and a `decode` that builds that arm's variant, as the success side
+        /// calls [`decode_success_with`].
+        pub async fn classify_with<E>(
             core: &ClientCore,
             response: Response,
             documented: &[StatusSpec],
             decode: impl FnOnce(&Bytes) -> Result<E, String>,
         ) -> Error<E> {
-            let status = response.status();
-            let headers = response.headers().clone();
-            match read_capped(core, response).await {
-                Ok((body, truncated)) => {
-                    if documented.iter().any(|spec| spec.matches(status)) {
-                        match decode(&body) {
-                            Ok(value) => {
-                                Error::Api(ResponseValue::new(status, headers, value))
-                            }
-                            Err(path) => {
-                                Error::Decode {
-                                    status,
-                                    headers,
-                                    path,
-                                    body,
-                                    truncated,
-                                }
-                            }
-                        }
-                    } else {
-                        Error::UnexpectedStatus {
-                            status,
-                            headers,
-                            body,
-                        }
+            let (status, headers, body, truncated) = match read_error_body(
+                    core,
+                    response,
+                )
+                .await
+            {
+                Ok(parts) => parts,
+                Err(error) => return error,
+            };
+            if !documented.iter().any(|spec| spec.matches(status)) {
+                return Error::UnexpectedStatus {
+                    status,
+                    headers,
+                    body,
+                };
+            }
+            match decode(&body) {
+                Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
+                Err(path) => {
+                    Error::Decode {
+                        status,
+                        headers,
+                        path,
+                        body,
+                        truncated,
                     }
                 }
-                Err(error) => error,
             }
         }
         /// Classify a documented raw-byte error body without passing it through a structured decoder.
@@ -1715,8 +1710,10 @@ mod support {
             for value in values {
                 parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
             }
-            if shape == HeaderShape::SetCookie {
-                return text_then_json(
+            let raw = || parts.join(",");
+            match shape {
+                HeaderShape::SetCookie => {
+                    text_then_json(
                         name,
                         |scalars| {
                             Value::Array(
@@ -1724,15 +1721,31 @@ mod support {
                             )
                         },
                     )
-                    .map(Some);
+                }
+                HeaderShape::Json => {
+                    serde_json::from_str(&raw())
+                        .map_err(|error| parse_error(name, &error))
+                }
+                HeaderShape::Scalar => {
+                    let raw = raw();
+                    text_then_json(name, |scalars| scalar(&raw, scalars))
+                }
+                HeaderShape::Array => {
+                    let raw = raw();
+                    text_then_json(
+                        name,
+                        |scalars| {
+                            Value::Array(
+                                raw.split(',').map(|part| scalar(part, scalars)).collect(),
+                            )
+                        },
+                    )
+                }
+                HeaderShape::Object => {
+                    let raw = raw();
+                    text_then_json(name, |scalars| object(&raw, explode, scalars))
+                }
             }
-            let raw = parts.join(",");
-            if shape == HeaderShape::Json {
-                return serde_json::from_str(&raw)
-                    .map(Some)
-                    .map_err(|error| parse_error(name, &error));
-            }
-            text_then_json(name, |scalars| reconstruct(&raw, shape, explode, scalars))
                 .map(Some)
         }
         /// Deserialize the value `build` rebuilds from header text, reading every token as text first.
@@ -1776,40 +1789,25 @@ mod support {
             parse_header(headers, name, shape, explode)?
                 .ok_or(HeaderError::Missing { name })
         }
-        /// Rebuild a JSON value from `simple`-style header text.
-        fn reconstruct(
-            raw: &str,
-            shape: HeaderShape,
-            explode: bool,
-            scalars: Scalars,
-        ) -> Value {
-            match shape {
-                HeaderShape::Scalar => scalar(raw, scalars),
-                HeaderShape::Json | HeaderShape::SetCookie => scalar(raw, scalars),
-                HeaderShape::Array => {
-                    Value::Array(
-                        raw.split(',').map(|part| scalar(part, scalars)).collect(),
-                    )
-                }
-                HeaderShape::Object => {
-                    let mut members = serde_json::Map::new();
-                    if explode {
-                        for pair in raw.split(',') {
-                            if let Some((key, value)) = pair.split_once('=') {
-                                members.insert(key.to_owned(), scalar(value, scalars));
-                            }
-                        }
-                    } else {
-                        let parts: Vec<&str> = raw.split(',').collect();
-                        for pair in parts.chunks(2) {
-                            if let [key, value] = pair {
-                                members.insert((*key).to_owned(), scalar(value, scalars));
-                            }
-                        }
+        /// Rebuild a JSON object from `simple`-style header text: `key=value` members when `explode` is
+        /// set, alternating `key,value` tokens otherwise.
+        fn object(raw: &str, explode: bool, scalars: Scalars) -> Value {
+            let mut members = serde_json::Map::new();
+            if explode {
+                for pair in raw.split(',') {
+                    if let Some((key, value)) = pair.split_once('=') {
+                        members.insert(key.to_owned(), scalar(value, scalars));
                     }
-                    Value::Object(members)
+                }
+            } else {
+                let parts: Vec<&str> = raw.split(',').collect();
+                for pair in parts.chunks(2) {
+                    if let [key, value] = pair {
+                        members.insert((*key).to_owned(), scalar(value, scalars));
+                    }
                 }
             }
+            Value::Object(members)
         }
         /// Interpret one header token.
         fn scalar(raw: &str, scalars: Scalars) -> Value {
@@ -2787,13 +2785,6 @@ mod support {
                 }
             }
         }
-        impl ClientCore {
-            /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
-            /// See this module's docs for the full pattern and the authentication caveat.
-            pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
-                LinkPaginator::new(self.clone(), first)
-            }
-        }
         /// Extract the `rel="next"` target from a response's `Link` header(s) as an absolute [`Url`], or
         /// `None` when there is no usable next link. Pure and side-effect-free — the building block callers
         /// can reuse directly. A relative target is not resolved here (there is no base);
@@ -2968,22 +2959,17 @@ mod support {
         //! let backend: Arc<dyn HttpBackend> = Arc::new(RetryBackend::new(inner, Arc::new(Backoff)));
         //! let client = Client::with_backend(backend, "https://api.example.com")?;
         //! ```
-        use std::future::Future;
-        use std::pin::Pin;
         use std::sync::Arc;
         use std::time::Duration;
         use reqwest::{Request, Response, StatusCode};
         use super::error::is_transient_status;
         use super::transport::{ExecuteFuture, HttpBackend};
+        use super::wasm::BoxFuture;
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
         ///
-        /// `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm` module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-        /// The boxed backoff future a [`RetryPolicy`] returns (the wasm variant: no `Send`).
-        #[cfg(target_arch = "wasm32")]
-        pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+        /// `Send` off `wasm32` and not on it, as the `wasm` module explains.
+        pub type RetryWait<'a> = BoxFuture<'a, ()>;
         /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
         /// whether to retry. It is either the raw [`Response`] the inner backend returned (any status —
         /// success or error), or the [`TransportError`] it failed with (DNS, connect, timeout, …).
@@ -3090,21 +3076,19 @@ mod support {
         }
         impl HttpBackend for RetryBackend {
             fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-                let inner = self.inner.clone();
-                let policy = self.policy.clone();
                 Box::pin(async move {
                     let mut attempt: u32 = 0;
                     loop {
                         let Some(replay) = request.try_clone() else {
-                            return inner.execute(request).await;
+                            return self.inner.execute(request).await;
                         };
-                        let result = inner.execute(replay).await;
+                        let result = self.inner.execute(replay).await;
                         let decision = {
                             let outcome = match &result {
                                 Ok(response) => RetryOutcome::Response(response),
                                 Err(error) => RetryOutcome::Transport(error),
                             };
-                            policy.retry(attempt, &outcome)
+                            self.policy.retry(attempt, &outcome)
                         };
                         match decision {
                             Some(wait) => {
@@ -3147,27 +3131,18 @@ mod support {
         //! wrapping the underlying `reqwest::Error`; [`super::send`] reclassifies that error through the
         //! taxonomy ([`super::Error::from_reqwest`]) so timeout/redirect/protocol classification is
         //! identical to executing directly on a `reqwest::Client`.
-        use std::future::Future;
-        use std::pin::Pin;
         use reqwest::{Request, Response};
+        use super::wasm::BoxFuture;
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed future [`HttpBackend::execute`] returns: an executed [`Response`] or a
-        /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, but a backend is
-        /// free to return a `'static` future (as [`ReqwestBackend`] does) — a longer lifetime coerces to
-        /// the shorter one the trait requires.
+        /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, so a backend may
+        /// borrow its own fields while the request runs (as [`ReqwestBackend`] borrows its client); a
+        /// `'static` future fits too, since a longer lifetime coerces to the shorter one the trait
+        /// requires.
         ///
-        /// The future is `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm`
-        /// module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type ExecuteFuture<'a> = Pin<
-            Box<dyn Future<Output = Result<Response, TransportError>> + Send + 'a>,
-        >;
-        /// The boxed future [`HttpBackend::execute`] returns (the wasm variant: no `Send`, since reqwest's
-        /// `fetch`-backed futures are `!Send` on the single-threaded browser target).
-        #[cfg(target_arch = "wasm32")]
-        pub type ExecuteFuture<'a> = Pin<
-            Box<dyn Future<Output = Result<Response, TransportError>> + 'a>,
-        >;
+        /// The future is `Send` off `wasm32` and not on it, since reqwest's `fetch`-backed futures are
+        /// `!Send` on the single-threaded browser target; the `wasm` module explains the gating.
+        pub type ExecuteFuture<'a> = BoxFuture<'a, Result<Response, TransportError>>;
         /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
         /// [`reqwest::Response`].
         ///
@@ -3204,9 +3179,8 @@ mod support {
         }
         impl HttpBackend for ReqwestBackend {
             fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-                let client = self.client.clone();
                 Box::pin(async move {
-                    client.execute(request).await.map_err(TransportError::new)
+                    self.client.execute(request).await.map_err(TransportError::new)
                 })
             }
         }
@@ -3228,10 +3202,20 @@ mod support {
         //! `Send`/`Sync` ones — the abstraction collapses away off wasm.
         //!
         //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
-        //! boxed future, stream, and callback alias in the runtime, public or private, is instead
-        //! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
-        //! source that builds on both targets.
+        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so a boxed
+        //! trait object is instead `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm.
+        //! Every boxed future alias in the runtime, public or private, is a [`BoxFuture`], the one gated
+        //! future type; the stream module's body stream and the token-provider callback are gated the same
+        //! way where they are defined. The two mechanisms compose to one set of source that builds on both
+        //! targets.
+        use std::future::Future;
+        use std::pin::Pin;
+        /// A boxed future yielding `T` that may borrow for `'a`: `Send` off `wasm32`, and not on it.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+        /// A boxed future yielding `T` that may borrow for `'a` (the wasm variant: no `Send`).
+        #[cfg(target_arch = "wasm32")]
+        pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
         /// `Send` on native targets; a vacuous marker on `wasm32`.
         ///
         /// On native it has `Send` as a supertrait with a blanket impl for every `Send` type, so a bound of
@@ -3268,7 +3252,6 @@ mod support {
         //! Framing is a pure function ([`next_frame`]) over an owned byte buffer, with no network IO and
         //! no async runtime.
         use std::convert::Infallible;
-        use std::future::Future;
         use std::marker::PhantomData;
         use std::pin::Pin;
         use std::sync::Arc;
@@ -3279,6 +3262,8 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::{Request, Response, StatusCode};
         use serde::de::DeserializeOwned;
+        use super::dispatch::cap_body;
+        use super::wasm::BoxFuture;
         use super::{
             send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend,
             MaybeSync, TransportError,
@@ -3291,20 +3276,10 @@ mod support {
         >;
         #[cfg(target_arch = "wasm32")]
         type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
-        /// The caller-provided wait before an automatic reconnect attempt.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-        /// The caller-provided wait before an automatic reconnect attempt (wasm variant).
-        #[cfg(target_arch = "wasm32")]
-        pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + 'static>>;
-        #[cfg(not(target_arch = "wasm32"))]
-        type ReconnectFuture = Pin<
-            Box<dyn Future<Output = Result<Response, StreamError>> + Send>,
-        >;
-        #[cfg(target_arch = "wasm32")]
-        type ReconnectFuture = Pin<
-            Box<dyn Future<Output = Result<Response, StreamError>>>,
-        >;
+        /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
+        /// it, as the `wasm` module explains.
+        pub type ReconnectWait = BoxFuture<'static, ()>;
+        type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
         /// Why an automatic SSE reconnect is being considered.
         #[derive(Debug)]
         pub enum ReconnectReason<'a> {
@@ -3406,11 +3381,11 @@ mod support {
             /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
             /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
             /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
-            pub(crate) fn new(response: Response, framing: Framing) -> Self {
+            pub(crate) fn new(mut response: Response, framing: Framing) -> Self {
                 let config = ClientConfig::default();
                 Self {
                     status: response.status(),
-                    headers: response.headers().clone(),
+                    headers: std::mem::take(response.headers_mut()),
                     state: StreamState::Body(Box::pin(response.bytes_stream())),
                     buffer: Vec::new(),
                     max_frame: config.max_stream_frame,
@@ -3597,9 +3572,9 @@ mod support {
                                     this.state = StreamState::Connecting(future);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Ok(response)) => {
+                                Poll::Ready(Ok(mut response)) => {
                                     this.status = response.status();
-                                    this.headers = response.headers().clone();
+                                    this.headers = std::mem::take(response.headers_mut());
                                     this.state = StreamState::Body(
                                         Box::pin(response.bytes_stream()),
                                     );
@@ -3624,9 +3599,10 @@ mod support {
             /// reconnect is attempted: the server that sent the item is likely to send it again.
             fn frame_overflow(&mut self) -> StreamError {
                 self.state = StreamState::Done;
-                let retained = self.buffer.len().min(self.max_error_body);
-                let body = Bytes::copy_from_slice(&self.buffer[..retained]);
-                self.buffer = Vec::new();
+                let (body, _) = cap_body(
+                    Bytes::from(std::mem::take(&mut self.buffer)),
+                    self.max_error_body,
+                );
                 Error::Decode {
                     status: self.status,
                     headers: self.headers.clone(),
@@ -4072,9 +4048,10 @@ mod support {
         //! Both types are transparent wrappers — they `Deref` to the `time` type and convert with `From` in
         //! both directions — so anything `time` can do with the inner value is one `.0` or one deref away.
         use std::fmt;
+        use std::marker::PhantomData;
         use std::ops::{Deref, DerefMut};
         use std::str::FromStr;
-        use serde::de::{Deserialize, Deserializer, Error as _};
+        use serde::de::{Deserialize, Deserializer, Unexpected, Visitor};
         use serde::ser::{Serialize, Serializer};
         use time::format_description::well_known::Rfc3339;
         /// An RFC 3339 `date-time`, the wire form of OpenAPI's `format: date-time`.
@@ -4099,31 +4076,42 @@ mod support {
             }
         }
         impl std::error::Error for DateParseError {}
-        impl DateTime {
-            /// The wrapped `time` value.
-            pub fn into_inner(self) -> time::OffsetDateTime {
-                self.0
-            }
+        /// What both newtypes implement alike over their wrapped `time` value: `into_inner`, `Deref` and
+        /// `DerefMut`, `From` in both directions, and a `Deserialize` that parses the string through the
+        /// type's `FromStr`.
+        macro_rules! transparent_newtype {
+            ($name:ident, $inner:ty) => {
+                impl $name { #[doc = " The wrapped `time` value."] pub fn
+                into_inner(self) -> $inner { self.0 } } impl Deref for $name { type
+                Target = $inner; fn deref(& self) -> & Self::Target { & self.0 } } impl
+                DerefMut for $name { fn deref_mut(& mut self) -> & mut Self::Target { &
+                mut self.0 } } impl From <$inner > for $name { fn from(value : $inner) ->
+                Self { Self(value) } } impl From <$name > for $inner { fn from(value :
+                $name) -> Self { value.0 } } impl <'de > Deserialize <'de > for $name {
+                fn deserialize < D : Deserializer <'de >> (deserializer : D) -> Result <
+                Self, D::Error > { deserializer
+                .deserialize_str(ParseVisitor(PhantomData)) } }
+            };
         }
-        impl Deref for DateTime {
-            type Target = time::OffsetDateTime;
-            fn deref(&self) -> &Self::Target {
-                &self.0
+        transparent_newtype!(DateTime, time::OffsetDateTime);
+        transparent_newtype!(Date, time::Date);
+        /// Parses a string through `T`'s `FromStr`, reading it in place: a borrowed or transient string is
+        /// never copied into an owned one first. It accepts what `String` does (a string, or UTF-8 bytes)
+        /// and names the same expectation, so a value of the wrong type is refused with the same message.
+        struct ParseVisitor<T>(PhantomData<T>);
+        impl<T: FromStr<Err = DateParseError>> Visitor<'_> for ParseVisitor<T> {
+            type Value = T;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string")
             }
-        }
-        impl DerefMut for DateTime {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<T, E> {
+                text.parse().map_err(E::custom)
             }
-        }
-        impl From<time::OffsetDateTime> for DateTime {
-            fn from(value: time::OffsetDateTime) -> Self {
-                Self(value)
-            }
-        }
-        impl From<DateTime> for time::OffsetDateTime {
-            fn from(value: DateTime) -> Self {
-                value.0
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<T, E> {
+                match std::str::from_utf8(bytes) {
+                    Ok(text) => self.visit_str(text),
+                    Err(_) => Err(E::invalid_value(Unexpected::Bytes(bytes), &self)),
+                }
             }
         }
         impl fmt::Display for DateTime {
@@ -4169,41 +4157,6 @@ mod support {
                         )
                     })?;
                 serializer.serialize_str(&text)
-            }
-        }
-        impl<'de> Deserialize<'de> for DateTime {
-            fn deserialize<D: Deserializer<'de>>(
-                deserializer: D,
-            ) -> Result<Self, D::Error> {
-                let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-                text.parse().map_err(D::Error::custom)
-            }
-        }
-        impl Date {
-            /// The wrapped `time` value.
-            pub fn into_inner(self) -> time::Date {
-                self.0
-            }
-        }
-        impl Deref for Date {
-            type Target = time::Date;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl DerefMut for Date {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-        impl From<time::Date> for Date {
-            fn from(value: time::Date) -> Self {
-                Self(value)
-            }
-        }
-        impl From<Date> for time::Date {
-            fn from(value: Date) -> Self {
-                value.0
             }
         }
         impl fmt::Display for Date {
@@ -4274,14 +4227,6 @@ mod support {
                 serializer.serialize_str(&text)
             }
         }
-        impl<'de> Deserialize<'de> for Date {
-            fn deserialize<D: Deserializer<'de>>(
-                deserializer: D,
-            ) -> Result<Self, D::Error> {
-                let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-                text.parse().map_err(D::Error::custom)
-            }
-        }
     }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     mod blocking {
@@ -4335,8 +4280,8 @@ mod support {
     pub use client::{ClientConfig, ClientCore};
     pub use dispatch::{
         build_url_on, build_url_with_query_string_on, classify_error,
-        classify_error_bytes, classify_error_text, decode_success, decode_success_bytes,
-        decode_success_text, decode_success_with, decode_text_body, read_error_body,
+        classify_error_bytes, classify_error_text, classify_with, decode_success,
+        decode_success_bytes, decode_success_text, decode_success_with, decode_text_body,
         send, unexpected_status, StatusSpec,
     };
     pub use error::{
@@ -8784,71 +8729,38 @@ Response `409`: Conflict*/
             }
             Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::NotFoundError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMultiError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::NotFoundError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMultiError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ConflictError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ConflictError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMultiError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMultiError>(&self.core, response).await)
         }
     }
     ///The URL `get_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -8885,82 +8797,49 @@ Response `409`: Conflict*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetSharedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(401u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetSharedError::Status401,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(401u16)],
+                            |_| Ok::<_, String>(GetSharedError::Status401),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetSharedError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetSharedError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetSharedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetSharedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetSharedError>(&self.core, response).await)
         }
     }
     ///The URL `get_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -8997,103 +8876,59 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetMaybeError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<
-                        Option<Box<types::MaybeProblem>>,
-                    >(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetMaybeError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<
+                                    Option<Box<types::MaybeProblem>>,
+                                >(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetMaybeError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(support::unexpected_status::<GetMaybeError>(&self.core, response).await)
         }
     }
     ///The URL `get_maybe` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9278,56 +9113,39 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessDefaultError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessDefaultError::Default,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |_| Ok::<_, String>(GetBodylessDefaultError::Default),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessDefaultError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_default` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9367,82 +9185,54 @@ Response `default`: Anything else*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessDefaultMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultMultiError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultMultiError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessDefaultMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessDefaultMultiError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessDefaultMultiError::Default,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |_| Ok::<_, String>(GetBodylessDefaultMultiError::Default),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessDefaultMultiError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_default_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9477,56 +9267,39 @@ Response `404`: Not Found*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetBodylessSiblingError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(403u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetBodylessSiblingError::Status403,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(403u16)],
+                            |_| Ok::<_, String>(GetBodylessSiblingError::Status403),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetBodylessSiblingError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetBodylessSiblingError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetBodylessSiblingError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9561,54 +9334,38 @@ Response `404`: Not Found*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetXmlBodylessSiblingError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(403u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetXmlBodylessSiblingError::Status403,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(403u16)],
+                            |_| Ok::<_, String>(GetXmlBodylessSiblingError::Status403),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match support::decode_xml_body::<Box<types::XmlReceipt>>(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetXmlBodylessSiblingError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                support::decode_xml_body::<Box<types::XmlReceipt>>(body)
+                                    .map(GetXmlBodylessSiblingError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<
+                    GetXmlBodylessSiblingError,
+                >(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_xml_bodyless_sibling` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9644,56 +9401,37 @@ Response `default`: Anything else*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetConditionalError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(304u16).matches(status) {
                 return Err(
-                    support::Error::Api(
-                        support::ResponseValue::new(
-                            status,
-                            headers,
-                            GetConditionalError::Status304,
-                        ),
-                    ),
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(304u16)],
+                            |_| Ok::<_, String>(GetConditionalError::Status304),
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::Problem>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetConditionalError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<Box<types::Problem>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetConditionalError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetConditionalError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_conditional` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -9766,71 +9504,41 @@ Response `409`: Conflict*/
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetAliasSharedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::PlainMessage>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetAliasSharedError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::PlainMessage>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetAliasSharedError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ResponseBody>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetAliasSharedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ResponseBody>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetAliasSharedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetAliasSharedError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_alias_shared` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -10528,72 +10236,41 @@ Response `409`: binary error*/
                     .await,
             )
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetRawMultiError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(400u16).matches(status) {
                 return Err(
-                    match support::decode_text_body::<
-                        Box<types::ResponseBody48bb7a8a>,
-                    >(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetRawMultiError::Status400(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(400u16)],
+                            |body| {
+                                support::decode_text_body::<
+                                    Box<types::ResponseBody48bb7a8a>,
+                                >(body)
+                                    .map(GetRawMultiError::Status400)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match Ok::<
-                        Box<types::ResponseBodyDbe5ca3a>,
-                        String,
-                    >(Box::new(body.clone())) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetRawMultiError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| Ok::<
+                                _,
+                                String,
+                            >(GetRawMultiError::Status409(Box::new(body.clone()))),
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetRawMultiError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_raw_multi` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -11579,71 +11256,42 @@ Response `default`: Anything else*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetNoSuccessError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(404u16).matches(status) {
                 return Err(
-                    match support::decode_text_body::<
-                        Box<types::ResponseBody2a32723f>,
-                    >(&body) {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetNoSuccessError::Status404(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(404u16)],
+                            |body| {
+                                support::decode_text_body::<
+                                    Box<types::ResponseBody2a32723f>,
+                                >(body)
+                                    .map(GetNoSuccessError::Status404)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Any.matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::DeepFilter>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetNoSuccessError::Default(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Any],
+                            |body| {
+                                serde_json::from_slice::<Box<types::DeepFilter>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetNoSuccessError::Default)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetNoSuccessError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_no_success` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
@@ -11867,71 +11515,41 @@ Response `409`: Conflict*/
                 .await
                 .map_err(support::Error::widen)
         } else {
-            let (status, headers, body, truncated) = match support::read_error_body::<
-                GetErrorRangedError,
-            >(&self.core, response)
-                .await
-            {
-                Ok(parts) => parts,
-                Err(error) => return Err(error),
-            };
+            let status = response.status();
             if support::StatusSpec::Exact(409u16).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::ConflictError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetErrorRangedError::Status409(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Exact(409u16)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::ConflictError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetErrorRangedError::Status409)
+                            },
+                        )
+                        .await,
                 );
             }
             if support::StatusSpec::Range(4u8).matches(status) {
                 return Err(
-                    match serde_json::from_slice::<Box<types::NotFoundError>>(&body)
-                        .map_err(|error| error.to_string())
-                    {
-                        Ok(value) => {
-                            support::Error::Api(
-                                support::ResponseValue::new(
-                                    status,
-                                    headers,
-                                    GetErrorRangedError::Status4xx(value),
-                                ),
-                            )
-                        }
-                        Err(path) => {
-                            support::Error::Decode {
-                                status,
-                                headers,
-                                path,
-                                body,
-                                truncated,
-                            }
-                        }
-                    },
+                    support::classify_with(
+                            &self.core,
+                            response,
+                            &[support::StatusSpec::Range(4u8)],
+                            |body| {
+                                serde_json::from_slice::<Box<types::NotFoundError>>(body)
+                                    .map_err(|error| error.to_string())
+                                    .map(GetErrorRangedError::Status4xx)
+                            },
+                        )
+                        .await,
                 );
             }
-            Err(support::Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            })
+            Err(
+                support::unexpected_status::<GetErrorRangedError>(&self.core, response)
+                    .await,
+            )
         }
     }
     ///The URL `get_error_ranged` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.

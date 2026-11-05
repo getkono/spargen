@@ -233,6 +233,68 @@ proptest::proptest! {
     }
 }
 
+/// Both newtypes read whatever string form a deserializer hands them, as `String` does: a string
+/// that borrows the input, one that cannot (it holds an escape), an owned one (`from_value`, the
+/// path the text codec takes), and UTF-8 bytes; and refuse any other type or non-UTF-8 bytes
+/// with the message `String` gives them.
+#[test]
+fn newtypes_deserialize_every_string_form_and_refuse_other_types_as_string_does() {
+    let stamp = date_time();
+    let date = Date(stamp.date());
+    let stamp_text = stamp.to_string();
+    let date_text = date.to_string();
+
+    assert_eq!(
+        serde_json::from_str::<DateTime>(&format!("\"{stamp_text}\"")).unwrap(),
+        stamp
+    );
+    assert_eq!(
+        serde_json::from_str::<Date>(&format!(
+            "\"{}\\u002d{}\"",
+            &date_text[..4],
+            &date_text[5..]
+        ))
+        .unwrap(),
+        date
+    );
+    assert_eq!(
+        serde_json::from_value::<DateTime>(serde_json::Value::String(stamp_text.clone())).unwrap(),
+        stamp
+    );
+    fn bytes(text: &[u8]) -> serde::de::value::BytesDeserializer<'_, serde::de::value::Error> {
+        serde::de::value::BytesDeserializer::new(text)
+    }
+    assert_eq!(
+        DateTime::deserialize(bytes(stamp_text.as_bytes())).unwrap(),
+        stamp
+    );
+    assert_eq!(
+        Date::deserialize(bytes(date_text.as_bytes())).unwrap(),
+        date
+    );
+
+    for json in ["1", "true", "null", "[]", "{}"] {
+        let expected = serde_json::from_str::<String>(json)
+            .unwrap_err()
+            .to_string();
+        let date_time = serde_json::from_str::<DateTime>(json).unwrap_err();
+        assert_eq!(date_time.to_string(), expected, "{json}");
+        let date = serde_json::from_str::<Date>(json).unwrap_err();
+        assert_eq!(date.to_string(), expected, "{json}");
+    }
+    let expected = String::deserialize(bytes(b"\xff")).unwrap_err().to_string();
+    assert_eq!(
+        Date::deserialize(bytes(b"\xff")).unwrap_err().to_string(),
+        expected
+    );
+    assert_eq!(
+        DateTime::deserialize(bytes(b"\xff"))
+            .unwrap_err()
+            .to_string(),
+        expected
+    );
+}
+
 /// The newtypes are transparent: `time`'s API is one deref away.
 #[test]
 fn newtypes_deref_to_the_time_types() {
