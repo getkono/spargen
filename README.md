@@ -252,7 +252,7 @@ to that API are minor; generator-internal fixes are patch.
 
 Publishing runs strictly in CI via crates.io [Trusted Publishing](https://crates.io/docs/trusted-publishing)
 (OIDC) — no `CARGO_REGISTRY_TOKEN` secret; `release-plz.yml` publishes `spargen` before its
-dependent `spargen-macro`. The maintainer bootstrap history is in [`AGENTS.md`](AGENTS.md#releases).
+dependent `spargen-macro`. The maintainer release rules are in [`AGENTS.md`](AGENTS.md#releases).
 
 ## License
 
