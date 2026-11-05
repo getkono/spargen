@@ -34,9 +34,12 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             });
             report_or(requirements, args.format)
         }),
-        Command::Lock(args) => with_spec(args.spec, &args.options, |spec| {
-            report_or(spargen::vendor(&spec), args.format)
-        }),
+        Command::Lock(args) => {
+            warn_ignored(&args.options.flags_lock_ignores(), args.format);
+            with_spec(args.spec, &args.options, |spec| {
+                report_or(spargen::vendor(&spec), args.format)
+            })
+        }
         Command::Diff(args) => {
             let (old, new) = match spec_pair(args.old, args.new, &args.options) {
                 Ok(pair) => pair,
@@ -125,6 +128,27 @@ fn spec_pair(
         config::resolve(old, options)?,
         config::resolve(new, options)?,
     ))
+}
+
+/// Warn on stderr that `spargen lock` ignores `flags`, when any was given. Human output is one
+/// `warning:` line; JSON output is one object (`warning` and the `ignored` flags), so stderr stays
+/// parseable as JSON, as every report beside a JSON run is. The run itself is unaffected.
+fn warn_ignored(flags: &[&str], format: Format) {
+    if flags.is_empty() {
+        return;
+    }
+    let warning = format!(
+        "`spargen lock` ignores {}: it reads only --config and --batch-cap, and fetches every \
+         remote $ref the spec reaches",
+        flags.join(", ")
+    );
+    match format {
+        Format::Human => eprintln!("warning: {warning}"),
+        Format::Json => eprintln!(
+            "{}",
+            serde_json::json!({ "warning": warning, "ignored": flags })
+        ),
+    }
 }
 
 /// Render a config/flag error to stderr and exit with a usage status — never a panic.
