@@ -68,9 +68,8 @@ impl Names {
 
 /// The identifiers allocated for one operation.
 ///
-/// The method, URL-accessor and `…Params` names are allocated first-come with [`Scope::alloc`] in
-/// operation order, as are the response-header structs; the error, success-enum and parameter
-/// names are allocated with [`Scope::alloc_ranked`].
+/// Every name here but the generator-owned bindings and the header struct fields is allocated with
+/// [`Scope::alloc_ranked`], so reordering the spec's operations renames none of them.
 #[derive(Debug)]
 pub(crate) struct OperationNames {
     /// The method on `Client` and `BlockingClient`.
@@ -381,11 +380,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // Response-header structs are allocated in the model type scope above (the `types` module's),
     // so a documented header's struct can never collide with a generated model. The `…Params`
     // structs, error types and success enums take the module root's scope below.
-    let response_headers: Vec<HashMap<String, ResponseHeaderNames>> = api
-        .operations
-        .iter()
-        .map(|operation| allocate_response_headers(operation, &mut type_scope))
-        .collect();
+    let response_headers = allocate_response_headers(api, &mut type_scope);
 
     // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
     // those spellings are taken before any operation asks for one.
@@ -409,19 +404,28 @@ pub(crate) fn allocate(api: &Api) -> Names {
     {
         root_scope.reserve(name, IdentRole::Type);
     }
+    // Methods, `…Params` structs and URL accessors are public names, so each family is allocated
+    // as one ranked batch: of two operations whose ids escape to one spelling, the lexically
+    // smaller `operationId` keeps it whatever order the spec lists them in, and the other takes a
+    // suffix seeded from its own pointer.
+    let method_hints: Vec<String> = api
+        .operations
+        .iter()
+        .map(|operation| operation.id.0.clone())
+        .collect();
+    let methods =
+        operation_scope.alloc_ranked(&operation_requests(api, &method_hints), IdentRole::Method);
+    let params_hints: Vec<String> = api
+        .operations
+        .iter()
+        .map(|operation| format!("{} params", operation.id.0))
+        .collect();
+    let params_structs =
+        root_scope.alloc_ranked(&operation_requests(api, &params_hints), IdentRole::Type);
     let mut signatures = Vec::with_capacity(api.operations.len());
-    for operation in &api.operations {
-        let method = operation_scope.alloc(
-            &operation.id.0,
-            IdentRole::Method,
-            &operation.provenance.pointer,
-        );
-        let params_struct = root_scope.alloc(
-            &format!("{} params", operation.id.0),
-            IdentRole::Type,
-            &operation.provenance.pointer,
-        );
-
+    for ((operation, method), params_struct) in
+        api.operations.iter().zip(methods).zip(params_structs)
+    {
         // Required parameters are fixed by the generated public surface. Allocate them first, then
         // every generator-owned binding in the same lexical scope so the implementation yields on
         // collision without renaming ordinary arguments. Optional parameters are fields of the
@@ -450,18 +454,12 @@ pub(crate) fn allocate(api: &Api) -> Names {
         signatures.push((method, params_struct, parameters, bindings));
     }
     // After every method, so the accessor yields (see `OperationNames::url_accessor`).
-    let url_accessors: Vec<Ident> = api
-        .operations
+    let accessor_hints: Vec<String> = signatures
         .iter()
-        .zip(&signatures)
-        .map(|(operation, (method, ..))| {
-            operation_scope.alloc(
-                &format!("{}_url", method.unraw()),
-                IdentRole::Method,
-                &operation.provenance.pointer,
-            )
-        })
+        .map(|(method, ..)| format!("{}_url", method.unraw()))
         .collect();
+    let url_accessors =
+        operation_scope.alloc_ranked(&operation_requests(api, &accessor_hints), IdentRole::Method);
     let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
     let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
     let records = api
@@ -553,6 +551,20 @@ pub(crate) fn allocate(api: &Api) -> Names {
     }
 
     names
+}
+
+/// One ranked request per operation of `api`, asking for its entry of `hints` and ranked by its
+/// `operationId`, which lowering keeps unique.
+fn operation_requests<'a>(api: &'a Api, hints: &'a [String]) -> Vec<RankedRequest<'a, &'a str>> {
+    api.operations
+        .iter()
+        .zip(hints)
+        .map(|(operation, hint)| RankedRequest {
+            hint,
+            provenance: &operation.provenance.pointer,
+            rank: operation.id.0.as_str(),
+        })
+        .collect()
 }
 
 /// Allocate each operation's error type and, where its success is an enum, its success enum, in the
@@ -647,33 +659,61 @@ fn allocate_operation_types(
     (errors, success_enums)
 }
 
-/// Allocate the header struct of each of `operation`'s responses that documents a header, in
-/// `scope`, the `types` module's, and each struct's fields in a scope of its own.
+/// Allocate the header struct of each response of every operation of `api` that documents a
+/// header, in `scope`, the `types` module's, and each struct's fields in a scope of its own. The
+/// records are returned in operation order, keyed by status label.
+///
+/// The structs are allocated as one ranked batch, so which of two contending structs keeps the bare
+/// spelling depends on the operations and not on the order the spec lists them in: the lexically
+/// smaller `operationId` wins, then the smaller status label.
 fn allocate_response_headers(
-    operation: &crate::ir::Operation,
+    api: &Api,
     scope: &mut Scope,
-) -> HashMap<String, ResponseHeaderNames> {
+) -> Vec<HashMap<String, ResponseHeaderNames>> {
     let pointer = crate::diag::JsonPointer::root();
-    operation
-        .responses
-        .entries()
-        .filter(|(_, response)| !response.headers.is_empty())
-        .map(|(spec, response)| {
-            let label = status_label(spec);
-            let hint = format!("{} {label} headers", operation.id.0);
-            let ty = scope.alloc(&hint, IdentRole::Type, &pointer);
-            let mut field_scope = Scope::default();
-            let fields = response
-                .headers
-                .iter()
-                .map(|header| {
-                    let field = field_scope.alloc(&header.name, IdentRole::Field, &pointer);
-                    (header.name.clone(), field)
+    let documented: Vec<(usize, &str, String, &crate::ir::Response)> = api
+        .operations
+        .iter()
+        .enumerate()
+        .flat_map(|(index, operation)| {
+            operation
+                .responses
+                .entries()
+                .filter(|(_, response)| !response.headers.is_empty())
+                .map(move |(spec, response)| {
+                    (index, operation.id.0.as_str(), status_label(spec), response)
                 })
-                .collect();
-            (label, ResponseHeaderNames { ty, fields })
         })
-        .collect()
+        .collect();
+    let hints: Vec<String> = documented
+        .iter()
+        .map(|(_, id, label, _)| format!("{id} {label} headers"))
+        .collect();
+    let requests: Vec<_> = documented
+        .iter()
+        .zip(&hints)
+        .map(|((_, id, label, _), hint)| RankedRequest {
+            hint,
+            provenance: &pointer,
+            rank: (*id, label.as_str()),
+        })
+        .collect();
+    let types = scope.alloc_ranked(&requests, IdentRole::Type);
+    let mut records: Vec<HashMap<String, ResponseHeaderNames>> =
+        api.operations.iter().map(|_| HashMap::new()).collect();
+    for ((index, _, label, response), ty) in documented.into_iter().zip(types) {
+        let mut field_scope = Scope::default();
+        let fields = response
+            .headers
+            .iter()
+            .map(|header| {
+                let field = field_scope.alloc(&header.name, IdentRole::Field, &pointer);
+                (header.name.clone(), field)
+            })
+            .collect();
+        records[index].insert(label, ResponseHeaderNames { ty, fields });
+    }
+    records
 }
 
 /// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required

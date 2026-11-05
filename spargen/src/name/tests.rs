@@ -385,6 +385,93 @@ fn a_plain_error_form_beats_a_widened_one_and_the_smaller_method_wins() {
     }
 }
 
+/// Two operations whose ids escape to one method spelling (`getItem` and `get_item`): the
+/// lexically smaller `operationId` keeps the bare method, URL accessor, `…Params` struct and
+/// response-header struct in either listing order, and the other's names are suffixed, the
+/// same in both orders (#1120).
+#[test]
+fn operation_names_do_not_depend_on_operation_order() {
+    use crate::ir::{Response, ResponseHeader, StatusSpec};
+    let mut losers = Vec::new();
+    for reversed in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let template = api.operations.remove(0);
+        for id in ["getItem", "get_item"] {
+            let mut operation = template.clone();
+            operation.id = OperationId(id.to_owned());
+            operation.params = vec![parameter("limit", ParamLoc::Query, false)];
+            operation.provenance = Provenance::new(
+                JsonPointer::root().push("paths").push(&format!("/{id}")),
+                None,
+            );
+            let header = ResponseHeader {
+                name: "x-rate-limit".to_owned(),
+                ty: operation.params[0].ty,
+                required: false,
+                explode: false,
+                shape: crate::ir::HeaderShape::Scalar,
+                deprecated: false,
+                docs: Default::default(),
+            };
+            let response = Response {
+                body: None,
+                media: None,
+                stream: None,
+                accept: None,
+                headers: vec![header],
+            };
+            operation.responses.by_status = [(StatusSpec::Exact(200), response)].into();
+            api.operations.push(operation);
+        }
+        if reversed {
+            api.operations.reverse();
+        }
+        let names = allocate(&api);
+        let record = |id: &str| &names.operations[&OperationId(id.to_owned())];
+        let spelled = |id: &str| {
+            let record = record(id);
+            [
+                record.method.as_str().to_owned(),
+                record.url_accessor.as_str().to_owned(),
+                record.params_struct.as_str().to_owned(),
+                record.response_headers["Status200"].ty.as_str().to_owned(),
+            ]
+        };
+        assert_eq!(
+            spelled("getItem"),
+            [
+                "get_item",
+                "get_item_url",
+                "GetItemParams",
+                "GetItemStatus200Headers"
+            ],
+            "reversed: {reversed}"
+        );
+        let loser = spelled("get_item");
+        for (bare, suffixed) in [
+            ("get_item", &loser[0]),
+            ("GetItemParams", &loser[2]),
+            ("GetItemStatus200Headers", &loser[3]),
+        ] {
+            assert!(
+                suffixed.len() > bare.len() && suffixed.starts_with(bare),
+                "{suffixed} is not a suffixed {bare}, reversed: {reversed}"
+            );
+        }
+        // The loser's accessor is spelled from its own, suffixed, method.
+        assert_eq!(
+            loser[1],
+            format!("{}_url", loser[0]),
+            "reversed: {reversed}"
+        );
+        losers.push(loser);
+    }
+    assert_eq!(
+        losers[0], losers[1],
+        "the loser's names move with the listing order"
+    );
+}
+
 #[test]
 fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
     // A definition is anonymous only when it has neither a document nor a pointer. A schema
@@ -915,10 +1002,10 @@ proptest::proptest! {
         }
     }
 
-    /// Type names and the operation error and success-enum names do not depend on the order
-    /// the definitions or the operations are listed in: listing both in reverse renames
-    /// nothing. Operations whose ids escape to one method spelling are dropped first, because
-    /// method names are allocated first-come (see [`OperationNames`](super::OperationNames)).
+    /// Type names and every operation-level name (method, URL accessor, `…Params` struct, error
+    /// type, success enum, response-header structs) do not depend on the order the definitions
+    /// or the operations are listed in: listing both in reverse renames nothing, operations
+    /// whose ids escape to one method spelling included.
     #[test]
     fn allocation_does_not_depend_on_definition_or_operation_order(
         definitions in proptest::collection::vec(definition(), 0..10),
@@ -927,11 +1014,6 @@ proptest::proptest! {
         let definitions: Vec<_> = definitions
             .into_iter()
             .map(|definition| Definition { anonymous: false, ..definition })
-            .collect();
-        let mut methods = std::collections::HashSet::new();
-        let operations = operations
-            .into_iter()
-            .filter(|(id, _)| methods.insert(super::escape(id, super::IdentRole::Method)))
             .collect();
         let api = synthetic_api(&definitions, &operations, &[]);
         let mut reversed = api.clone();
@@ -946,14 +1028,24 @@ proptest::proptest! {
                 .map(|(id, def)| (def.provenance.pointer.to_string(), names.types[&id].clone()))
                 .collect()
         };
-        // The method, error and success-enum names of each operation, by operation.
+        // Every name of each operation but its bindings and parameters, by operation.
         let operation_types = |names: &Names| -> std::collections::BTreeMap<_, _> {
             names
                 .operations
                 .iter()
                 .map(|(id, record)| {
-                    let types = (record.method.clone(), record.error.clone());
-                    (id.0.clone(), (types, record.success_enum.clone()))
+                    let methods = (record.method.clone(), record.url_accessor.clone());
+                    let types = (
+                        record.params_struct.clone(),
+                        record.error.clone(),
+                        record.success_enum.clone(),
+                    );
+                    let headers: std::collections::BTreeMap<_, _> = record
+                        .response_headers
+                        .iter()
+                        .map(|(label, headers)| (label.clone(), headers.ty.clone()))
+                        .collect();
+                    (id.0.clone(), (methods, types, headers))
                 })
                 .collect()
         };
