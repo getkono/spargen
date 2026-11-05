@@ -656,16 +656,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
                     Err(NoMeet::Empty) => {
-                        // W011 case: excluded-union-branch
-                        Diagnostic::warning(
-                            Code::DeclarationHasNoEffect,
-                            schema.provenance.clone(),
-                        )
-                        .message(format!(
-                            "union member {index} cannot satisfy the enclosing schema's own \
-                             constraints, so it is not a variant of the generated enum"
-                        ))
-                        .emit(self.diags);
+                        self.warn_excluded_union_branch(&schema.provenance, index);
                         continue;
                     }
                     // Object and array applicators together beside a branch that states no
@@ -1114,6 +1105,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .filter(|(variant, _)| matches!(self.kind_of(variant.ty.id), Some(TypeKind::Any)))
             .map(|(variant, label)| (variant.name_hint.clone(), *label))
             .collect()
+    }
+
+    /// Report, as `W011` at `at`, that the union's real member `member` cannot satisfy the
+    /// enclosing schema's own constraints and so is no variant of the generated enum.
+    pub(super) fn warn_excluded_union_branch(&mut self, at: &Provenance, member: usize) {
+        // W011 case: excluded-union-branch
+        Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+            .message(format!(
+                "union member {member} cannot satisfy the enclosing schema's own constraints, so \
+                 it is not a variant of the generated enum"
+            ))
+            .emit(self.diags);
     }
 
     /// Report `warning`, an inline `oneOf`'s `W001` for its `serde_json::Value` variants, or hold

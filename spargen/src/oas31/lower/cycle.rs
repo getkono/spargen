@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::diag::Provenance;
 use crate::ir::{Ty, TypeId};
-use crate::oas31::{Document, SchemaOr};
+use crate::oas31::{Document, Schema, SchemaOr};
 use crate::source::SpannedValue;
 
 use super::{LowerCtx, Reservation};
@@ -140,6 +140,21 @@ impl LowerCtx<'_, '_> {
             target: target.reservation.clone(),
         };
         self.member_orders.push(order);
+    }
+
+    /// Refuse the `allOf` meet `schema` makes as `E013` with `message`, because a type it needs
+    /// (each of `types` that is an open reservation's root) has a body not known yet; each is
+    /// recorded for the next pass ([`Self::record_open_member`]).
+    pub(super) fn refuse_open_meet<T>(
+        &mut self,
+        schema: &Schema,
+        types: impl IntoIterator<Item = TypeId>,
+        message: &str,
+    ) -> Option<T> {
+        for id in types {
+            self.record_open_member(id);
+        }
+        self.reject_all_of_cycle(schema.provenance.clone(), message)
     }
 
     /// Open `opening` from the top level of a pass, as the `$ref` that first reached it did.

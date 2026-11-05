@@ -209,13 +209,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if unlowered {
                         // The value's target can be open only because of the order lowering
                         // reached it in, as an `allOf` member's can (`record_open_member`).
-                        for policy in [&additional, member_additional] {
-                            if let AdditionalProps::Typed(ty) = policy {
-                                self.record_open_member(ty.id);
-                            }
-                        }
-                        return self.reject_all_of_cycle(
-                            schema.provenance.clone(),
+                        let values =
+                            [&additional, member_additional]
+                                .into_iter()
+                                .filter_map(|policy| match policy {
+                                    AdditionalProps::Typed(ty) => Some(ty.id),
+                                    AdditionalProps::Allow | AdditionalProps::Deny => None,
+                                });
+                        return self.refuse_open_meet(
+                            schema,
+                            values,
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
                              that closes a reference cycle back to the schema being lowered, whose \
                              body is not yet known, so the merged overflow map has no computable \
@@ -250,16 +253,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 if self.is_reservation(existing.ty.id)
                                     || self.is_reservation(field.ty.id) =>
                             {
-                                self.record_open_member(existing.ty.id);
-                                self.record_open_member(field.ty.id);
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members is typed by a \
                                      `$ref` that closes a reference cycle back to the schema \
                                      being lowered, so its intersection cannot be computed",
                                     field.name.wire
                                 );
-                                return self
-                                    .reject_all_of_cycle(schema.provenance.clone(), &message);
+                                let types = [existing.ty.id, field.ty.id];
+                                return self.refuse_open_meet(schema, types, &message);
                             }
                             // The same rule `intersect_structs` applies to a `$ref` and its
                             // siblings, so the four equivalent spellings of one conjunction agree:
@@ -331,10 +332,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         if self.is_reservation(field.ty.id)
                             || matches!(member_additional, AdditionalProps::Typed(value) if self.is_reservation(value.id)) =>
                     {
-                        self.record_open_member(field.ty.id);
-                        if let AdditionalProps::Typed(value) = member_additional {
-                            self.record_open_member(value.id);
-                        }
+                        let value = match member_additional {
+                            AdditionalProps::Typed(value) => Some(value.id),
+                            AdditionalProps::Allow | AdditionalProps::Deny => None,
+                        };
+                        let types = std::iter::once(field.ty.id).chain(value);
                         let message = format!(
                             "required property `{}`, which no `allOf` member declares, is typed by \
                              an `additionalProperties` value schema that is a `$ref` closing a \
@@ -342,7 +344,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                              intersection cannot be computed",
                             field.name.wire
                         );
-                        return self.reject_all_of_cycle(schema.provenance.clone(), &message);
+                        return self.refuse_open_meet(schema, types, &message);
                     }
                     // The field is required, so a value no type admits empties the object meet:
                     // only `null` can be left (see `null_only_all_of`).

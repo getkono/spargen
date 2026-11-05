@@ -5,14 +5,11 @@ use std::collections::HashSet;
 
 use crate::diag::{Diagnostics, Provenance};
 use crate::ir::{Ty, TypeId, TypeKind, Union, UnionMode, UnionStrategy};
-use crate::oas31::{JsonType, RefOr, Schema, SchemaOr};
+use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
 use super::combine::Contribution;
-use super::refiner::{implied_applicator_category, ImpliedCategory};
-use super::shape::{
-    ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
-};
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union};
 use super::strategy::retain_strategy;
 use super::{memoised_answer, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -479,9 +476,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// A cycle-closing `$ref` lowers to its target's still-open reservation, whose kind is not
     /// known yet, so it is read from the target body instead: a target whose object or array
-    /// applicators establish its category ([`implied_applicator_category`]) is the struct, `Vec`
-    /// or tuple it will be filled with, and the same branch leaves `null` undecided inside the
-    /// cycle as outside it (#627).
+    /// applicators, or untyped `allOf`, establish its category ([`Self::untyped_shape_category`])
+    /// is the struct, `Vec` or tuple it will be filled with, and the same branch leaves `null`
+    /// undecided inside the cycle as outside it (#627, #636). A target that cannot be read keeps
+    /// the reservation's stated nullability.
     pub(super) fn branch_leaves_null_undecided(&self, member: &SchemaOr, ty: Ty) -> bool {
         let SchemaOr::Schema(member) = member else {
             return false;
@@ -489,99 +487,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let undecided_kind = match self.kind_of(ty.id) {
             Some(TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_)) => true,
             Some(TypeKind::Reserved) => member.reference.as_deref().is_some_and(|reference| {
-                self.ref_target_is_untyped_shape(reference, &member.provenance, 0)
+                self.ref_target_body(reference, &member.provenance)
+                    .is_some_and(|target| self.untyped_shape_category(&target, 1).is_some())
             }),
             _ => false,
         };
         !ty.nullable && undecided_kind && self.null_admission(member) == NullAdmission::Undecided
-    }
-
-    /// Whether the body the `$ref` written at `at` names ([`Self::ref_target_body`]) lowers to a
-    /// struct, `Vec` or tuple of untyped keywords, as [`Self::branch_leaves_null_undecided`] reads
-    /// a cycle-closing reservation ([`Self::schema_is_untyped_shape`]).
-    fn ref_target_is_untyped_shape(&self, reference: &str, at: &Provenance, depth: u32) -> bool {
-        self.ref_target_body(reference, at)
-            .is_some_and(|target| self.schema_is_untyped_shape(&target, depth + 1))
-    }
-
-    /// Whether `schema`, which names no `type`, lowers to a struct, `Vec` or tuple: object or array
-    /// applicators that establish its category ([`implied_applicator_category`]), or an untyped
-    /// `allOf` whose members, and object keywords beside them, merge into one (#627, #636); see
-    /// [`Self::untyped_shape_category`]. A shape this cannot read answers `false`, and keeps the
-    /// reservation's stated nullability.
-    fn schema_is_untyped_shape(&self, schema: &Schema, depth: u32) -> bool {
-        self.untyped_shape_category(schema, depth).is_some()
-    }
-
-    /// The category of the struct, `Vec` or tuple `schema`, which names no `type`, lowers to, as
-    /// [`Self::schema_is_untyped_shape`] reads it: [`JsonType::Object`] or [`JsonType::Array`],
-    /// and `None` for a shape this cannot read.
-    ///
-    /// Untyped object or array applicators are their own category. An untyped `allOf` is read by
-    /// its members: one counts when it is untyped object keywords, untyped array applicators
-    /// alone, a nested such `allOf`, a `$ref` to any of them, or a pure annotation. The merge is a
-    /// struct where a member, or the keywords beside the `allOf`, is an object, untyped array
-    /// members being vacuous beside it (#636); an array where every constraining member is one,
-    /// since they then establish the array category; and `None` where no member constrains.
-    /// Anything else (a scalar keyword, a union, object and array applicators in one member)
-    /// answers `None`. `depth` bounds the walk.
-    pub(super) fn untyped_shape_category(&self, schema: &Schema, depth: u32) -> Option<JsonType> {
-        if depth >= MAX_SCHEMA_DEPTH {
-            return None;
-        }
-        match implied_applicator_category(schema) {
-            Some(ImpliedCategory::Only(category)) => return Some(category),
-            Some(ImpliedCategory::Conflicting) => return None,
-            None => {}
-        }
-        let only_all_of = !schema.all_of.is_empty()
-            && schema.types.types.is_empty()
-            && schema.reference.is_none()
-            && schema.enum_values.is_none()
-            && schema.const_value.is_none()
-            && !schema_has_union(schema)
-            && schema.content_encoding.is_none()
-            && schema.format.as_deref() != Some("binary")
-            && schema.items.is_none()
-            && schema.prefix_items.is_empty();
-        if !only_all_of {
-            return None;
-        }
-        let mut object = schema_is_object_like(schema);
-        let mut array = false;
-        for member in &schema.all_of {
-            match member {
-                SchemaOr::Bool(true) => {}
-                SchemaOr::Bool(false) => return None,
-                SchemaOr::Schema(member) if !schema_has_shape_constraint(member) => {}
-                SchemaOr::Schema(member) => {
-                    let category = if let Some(reference) = member.reference.as_deref() {
-                        // A `$ref` member with siblings of its own is an intersection this does
-                        // not read.
-                        if ref_siblings_bear_shape(member) {
-                            None
-                        } else {
-                            self.ref_target_body(reference, &member.provenance)
-                                .and_then(|target| self.untyped_shape_category(&target, depth + 1))
-                        }
-                    } else {
-                        self.untyped_shape_category(member, depth + 1)
-                    };
-                    match category {
-                        Some(JsonType::Object) => object = true,
-                        Some(_) => array = true,
-                        None => return None,
-                    }
-                }
-            }
-        }
-        if object {
-            Some(JsonType::Object)
-        } else if array {
-            Some(JsonType::Array)
-        } else {
-            None
-        }
     }
 
     /// Whether `member`, a union branch lowered to `ty`, accepts `null` wherever a conjunct the
@@ -681,57 +592,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn ref_target_decides_null(&self, reference: &str, at: &Provenance) -> bool {
         self.ref_target_body(reference, at)
             .is_none_or(|target| self.null_admission(&target) != NullAdmission::Undecided)
-    }
-
-    /// The body of the schema the `$ref` written at `at` names, shared by the lowering steps that
-    /// read a reference's target: a root component first, then a remote document
-    /// from the root, and otherwise the referring file's target, with a bare alias (a `$ref` with
-    /// no shape-bearing sibling) followed to the schema it names. `None` where the chain cannot be
-    /// read, which reports nothing a second time.
-    pub(super) fn ref_target_body(
-        &self,
-        reference: &str,
-        at: &Provenance,
-    ) -> Option<std::borrow::Cow<'_, Schema>> {
-        let mut reference = reference.to_owned();
-        let mut at = at.clone();
-        // Lowering the chain already refused an alias cycle; the bound only keeps this total.
-        for _ in 0..MAX_SCHEMA_DEPTH {
-            let component = reference
-                .strip_prefix("#/components/schemas/")
-                .and_then(|name| self.document.components.schemas.get(name));
-            let target = match component {
-                Some(RefOr::Item(target)) => std::borrow::Cow::Borrowed(target),
-                Some(RefOr::Ref(alias)) => {
-                    reference.clone_from(&alias.reference);
-                    at = alias.provenance.clone();
-                    continue;
-                }
-                None => {
-                    let from = if is_remote_ref(&reference) {
-                        &self.document.provenance
-                    } else {
-                        &at
-                    };
-                    let Ok(resolved) =
-                        self.resolver
-                            .resolve(&reference, from, &mut Diagnostics::new(0))
-                    else {
-                        return None;
-                    };
-                    resolved.schema
-                }
-            };
-            let Some(next) = &target.reference else {
-                return Some(target);
-            };
-            if ref_siblings_bear_shape(&target) {
-                return Some(target);
-            }
-            reference.clone_from(next);
-            at = target.provenance.clone();
-        }
-        None
     }
 
     /// The null type for an object `allOf` whose object meet is empty, when `null` still satisfies

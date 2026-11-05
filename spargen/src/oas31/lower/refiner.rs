@@ -12,7 +12,7 @@ use super::shape::{
     ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
 };
 use super::strategy::retain_strategy;
-use super::{LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling};
+use super::{LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` (the schema without its union and
@@ -686,6 +686,77 @@ impl LowerCtx<'_, '_> {
             }
         }
         self.meet_refiner(branch, refiner, reach, hint)
+    }
+
+    /// The category of the struct, `Vec` or tuple `schema`, which names no `type`, lowers to, as
+    /// [`Self::branch_leaves_null_undecided`] reads it: [`JsonType::Object`] or [`JsonType::Array`],
+    /// and `None` for a shape this cannot read.
+    ///
+    /// Untyped object or array applicators are their own category. An untyped `allOf` is read by
+    /// its members: one counts when it is untyped object keywords, untyped array applicators
+    /// alone, a nested such `allOf`, a `$ref` to any of them, or a pure annotation. The merge is a
+    /// struct where a member, or the keywords beside the `allOf`, is an object, untyped array
+    /// members being vacuous beside it (#636); an array where every constraining member is one,
+    /// since they then establish the array category; and `None` where no member constrains.
+    /// Anything else (a scalar keyword, a union, object and array applicators in one member)
+    /// answers `None`. `depth` bounds the walk.
+    pub(super) fn untyped_shape_category(&self, schema: &Schema, depth: u32) -> Option<JsonType> {
+        if depth >= MAX_SCHEMA_DEPTH {
+            return None;
+        }
+        match implied_applicator_category(schema) {
+            Some(ImpliedCategory::Only(category)) => return Some(category),
+            Some(ImpliedCategory::Conflicting) => return None,
+            None => {}
+        }
+        let only_all_of = !schema.all_of.is_empty()
+            && schema.types.types.is_empty()
+            && schema.reference.is_none()
+            && schema.enum_values.is_none()
+            && schema.const_value.is_none()
+            && !schema_has_union(schema)
+            && schema.content_encoding.is_none()
+            && schema.format.as_deref() != Some("binary")
+            && schema.items.is_none()
+            && schema.prefix_items.is_empty();
+        if !only_all_of {
+            return None;
+        }
+        let mut object = schema_is_object_like(schema);
+        let mut array = false;
+        for member in &schema.all_of {
+            match member {
+                SchemaOr::Bool(true) => {}
+                SchemaOr::Bool(false) => return None,
+                SchemaOr::Schema(member) if !schema_has_shape_constraint(member) => {}
+                SchemaOr::Schema(member) => {
+                    let category = if let Some(reference) = member.reference.as_deref() {
+                        // A `$ref` member with siblings of its own is an intersection this does
+                        // not read.
+                        if ref_siblings_bear_shape(member) {
+                            None
+                        } else {
+                            self.ref_target_body(reference, &member.provenance)
+                                .and_then(|target| self.untyped_shape_category(&target, depth + 1))
+                        }
+                    } else {
+                        self.untyped_shape_category(member, depth + 1)
+                    };
+                    match category {
+                        Some(JsonType::Object) => object = true,
+                        Some(_) => array = true,
+                        None => return None,
+                    }
+                }
+            }
+        }
+        if object {
+            Some(JsonType::Object)
+        } else if array {
+            Some(JsonType::Array)
+        } else {
+            None
+        }
     }
 }
 

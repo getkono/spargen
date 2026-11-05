@@ -418,16 +418,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             excluded.sort_unstable();
             for member in excluded {
-                // W011 case: excluded-union-branch
-                crate::diag::Diagnostic::warning(
-                    crate::diag::Code::DeclarationHasNoEffect,
-                    schema.provenance.clone(),
-                )
-                .message(format!(
-                    "union member {member} cannot satisfy the enclosing schema's own \
-                     constraints, so it is not a variant of the generated enum"
-                ))
-                .emit(self.diags);
+                self.warn_excluded_union_branch(&schema.provenance, member);
             }
         }
     }
