@@ -73,7 +73,7 @@ pub struct Diagnostic {
 /// emitted by `check` and by `generate`. A message can only be true on every run if it claims
 /// nothing more than what its emission site decides, or if it declares the outcome it claims
 /// here. `Outcome::admits` then checks that claim against the run that emitted it (#413).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum OutcomeClaim {
