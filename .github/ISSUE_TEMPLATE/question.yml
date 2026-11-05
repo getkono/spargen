@@ -1,0 +1,71 @@
+name: Question
+description: Ask what the documentation, the diagnostics, and the API reference leave unanswered.
+title: "question(scope): "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read before you ask. The [book](https://github.com/getkono/spargen/tree/master/docs/book/src)
+        covers getting started, the CLI and the runtime; the
+        [support matrix](https://github.com/getkono/spargen/blob/master/docs/support-matrix.md)
+        and [diagnostic index](https://github.com/getkono/spargen/blob/master/docs/errors.md)
+        say what each construct does; `spargen explain <CODE>` gives every
+        diagnostic's causes and remedy; and the
+        [API reference](https://docs.rs/spargen) documents the build-script facade.
+        Most usage questions are answered in one of them.
+
+        A question here is one they leave open. If the answer is that spargen
+        behaves other than they promise, file a bug report instead; if it is
+        that spargen cannot generate what you need, file a feature request.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the open and closed issues and this is not a duplicate.
+          required: true
+        - label: I read the parts of the docs, and `spargen explain` for any code, this concerns.
+          required: true
+        - label: A human wrote and reviewed this question.
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What you want to know, in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: read
+    attributes:
+      label: What you read
+      description: >
+        The docs pages, diagnostic explanations and API reference items you
+        consulted, as links or paths, and what each told you.
+      placeholder: |
+        - docs/book/src/getting-started.md: ...
+        - `spargen explain E023`: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: unanswered
+    attributes:
+      label: What remains unanswered
+      description: >
+        The gap between what you read and what you need: what it leaves out,
+        or where two sources seem to disagree.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >
+        The spec fragment, configuration, generation path (build.rs or macro)
+        and spargen version, or anything else that narrows the answer.

@@ -1,0 +1,166 @@
+name: Bug report
+description: Spargen behaves other than the OpenAPI specification, its documentation, or its own diagnostics promise.
+title: "fix(scope): "
+labels: ["bug"]
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Three things this tracker does not treat as bugs:
+
+        - **A documented rejection or warning.** Every construct is supported,
+          warned, or rejected, and [`docs/support-matrix.md`](https://github.com/getkono/spargen/blob/master/docs/support-matrix.md)
+          says which. A construct the matrix rejects is a feature request, not a bug.
+        - **A deliberate refusal.** OpenAPI 3.0.x and older is rejected, never
+          converted; undiscriminated unions are rejected rather than emitted as
+          `serde(untagged)`; there is no `generate` subcommand; and only
+          `spargen lock` touches the network.
+        - **A manifest-audit (`E023`) failure the floors explain.** Generation
+          audits your manifest against the runtime dependency floors on purpose;
+          `spargen deps <spec>` prints the block it expects.
+
+        What *is* always a bug: generated code that does not compile, output
+        that differs between two runs of the same version, spec and config, a
+        typed schema silently degraded to `serde_json::Value` or otherwise
+        handled with no diagnostic, a diagnostic that names the wrong construct
+        or location, and any panic or `E011` invariant violation.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched the open and closed issues and this is not a duplicate.
+          required: true
+        - label: I checked `docs/support-matrix.md` and `spargen explain` for any code involved; this is not documented behaviour.
+          required: true
+        - label: I reproduced this myself, and a human wrote and reviewed this report.
+          required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Generated code does not compile or fails clippy
+        - Generated client misbehaves at runtime (wire format, status dispatch, auth, streaming)
+        - A construct is handled silently, with no warning or rejection
+        - A supported construct is rejected, or the wrong diagnostic fires
+        - Output is not deterministic
+        - Panic, hang, or E011 invariant violation inside spargen
+        - Manifest audit (E023) or `spargen deps` is wrong
+        - CLI (`check`, `deps`, `lock`, `diff`, `explain`)
+        - Documentation
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: path
+    attributes:
+      label: Generation path
+      options:
+        - build.rs (`spargen::generate`)
+        - Macro (`spargen_macro::generate_api!`)
+        - CLI only
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >
+        The `spargen` version you depend on (and `spargen-macro`, on the macro
+        path), or the commit SHA if you build from git. The generated module's
+        provenance header stamps it.
+      placeholder: spargen 0.5.0, spargen-macro 0.5.0
+    validations:
+      required: true
+
+  - type: input
+    id: openapi
+    attributes:
+      label: OpenAPI version
+      description: The document's `openapi` field.
+      placeholder: 3.1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: >
+        Your `spargen.toml`, the `spargen::Spec` setters your build script
+        calls, or the flags you pass. Write `default` if you changed nothing.
+        Switches such as `uuid`, `time`, `carve` and the omit rules change what
+        is emitted, so a wrong answer here wastes the whole report.
+      render: toml
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Toolchain and target
+      description: >
+        Output of `rustc -V`, your OS, and the target you build the client for
+        (native, or `wasm32-unknown-unknown`). The MSRV is 1.88.
+      placeholder: rustc 1.98.1 — Linux x86_64, target wasm32-unknown-unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen, and on whose authority
+      description: >
+        Name the source of the expectation: an OpenAPI 3.1 or 3.2 section, a
+        JSON Schema 2020-12 section, a row of `docs/support-matrix.md`, a
+        diagnostic's explain text, or a rustdoc guarantee. "It surprised me"
+        names no source, so it is not a bug.
+      placeholder: |
+        The support matrix lists `prefixItems` as supported, and JSON Schema
+        2020-12 §10.3.1.1 defines it as ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happens instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest complete OpenAPI document that shows it (inline; not a
+        link to a large spec), the exact command or build script you ran, and,
+        for a runtime bug, the request and response on the wire. A report
+        without one is closed unread.
+      placeholder: |
+        ```yaml
+        openapi: 3.1.0
+        info: { title: repro, version: "1" }
+        paths: {}
+        components:
+          schemas: {}
+        ```
+
+        `spargen check openapi.yaml`, or `cargo build` with the build.rs above
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >
+        The diagnostics (`spargen check --format json` if you have the CLI),
+        compiler output, panic backtrace, or the emitted code fragment.
+      render: text

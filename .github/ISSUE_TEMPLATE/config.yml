@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/getkono/spargen/security/advisories/new
+    about: Report privately through a security advisory. Do not open a public issue.
+  - name: What a diagnostic code means
+    url: https://github.com/getkono/spargen/blob/master/docs/errors.md
+    about: The diagnostic index lists every code; `spargen explain <CODE>` prints its causes and remedy.
