@@ -7,9 +7,9 @@ use crate::{AuthError, ResponseValue};
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
 ///
-/// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
-/// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
-/// standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
+/// Ten variants are constructed: classes #1 to #9, and #11. Taxonomy class #10, cancellation, is a
+/// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
+/// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
 /// each retained cause, and `Debug` never leaks secrets.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -68,6 +68,13 @@ pub enum Error<E> {
     },
     /// #9 — the connection dropped mid-stream on a streamed response.
     InterruptedBody(TransportError),
+    /// #11 — a `LinkPaginator` page's `rel="next"` link named a URL the paginator had already
+    /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
+    /// would never end. Every page before it was yielded; nothing was sent for `url`.
+    PaginationCycle {
+        /// The revisited URL the `next` link resolved to.
+        url: reqwest::Url,
+    },
 }
 
 impl<E> Error<E> {
@@ -134,7 +141,10 @@ impl<E> Error<E> {
             Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
                 is_transient_status(*status)
             }
-            Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
+            Error::RequestConstruction(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::PaginationCycle { .. } => false,
         }
     }
 
@@ -152,7 +162,8 @@ impl<E> Error<E> {
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => None,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
         }
     }
 }
@@ -201,6 +212,7 @@ impl Error<std::convert::Infallible> {
                 truncated,
             },
             Error::InterruptedBody(e) => Error::InterruptedBody(e),
+            Error::PaginationCycle { url } => Error::PaginationCycle { url },
         }
     }
 }
@@ -248,7 +260,8 @@ impl<E: ApiErrorBody> Error<E> {
             | Error::Redirect(_)
             | Error::UnexpectedStatus { .. }
             | Error::Decode { .. }
-            | Error::InterruptedBody(_) => None,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
         }
     }
 }
@@ -367,7 +380,8 @@ impl<E: ApiErrorProblem> Error<E> {
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::InterruptedBody(_) => None,
+            | Error::InterruptedBody(_)
+            | Error::PaginationCycle { .. } => None,
         }
     }
 }
@@ -392,6 +406,9 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 write_escaped(f, path)
             }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
+            Error::PaginationCycle { url } => {
+                write!(f, "pagination cycle: the next link revisits {url}")
+            }
         }
     }
 }
@@ -418,7 +435,10 @@ impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
             Error::Redirect(e) => Some(e),
             Error::Api(value) => Some(value.inner()),
             Error::InterruptedBody(e) => Some(e),
-            Error::Timeout(_) | Error::UnexpectedStatus { .. } | Error::Decode { .. } => None,
+            Error::Timeout(_)
+            | Error::UnexpectedStatus { .. }
+            | Error::Decode { .. }
+            | Error::PaginationCycle { .. } => None,
         }
     }
 }

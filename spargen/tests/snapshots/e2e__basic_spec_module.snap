@@ -970,9 +970,9 @@ mod support {
         /// The closed error taxonomy shared by every spargen-generated client. `E` is the
         /// operation's typed error body (an enum when several error statuses are documented).
         ///
-        /// Nine variants are constructed. Taxonomy class #10, cancellation, is a documented drop-safety
-        /// guarantee rather than a variant: dropping a returned future is safe and side-effect-free beyond
-        /// standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
+        /// Ten variants are constructed: classes #1 to #9, and #11. Taxonomy class #10, cancellation, is a
+        /// documented drop-safety guarantee rather than a variant: dropping a returned future is safe and
+        /// side-effect-free beyond standard HTTP semantics. The enum implements [`std::error::Error`], whose `source()` reaches
         /// each retained cause, and `Debug` never leaks secrets.
         #[derive(Debug)]
         #[non_exhaustive]
@@ -1031,6 +1031,13 @@ mod support {
             },
             /// #9 — the connection dropped mid-stream on a streamed response.
             InterruptedBody(TransportError),
+            /// #11 — a `LinkPaginator` page's `rel="next"` link named a URL the paginator had already
+            /// fetched (a self-link, or a longer cycle such as page 1 → page 2 → page 1), so following it
+            /// would never end. Every page before it was yielded; nothing was sent for `url`.
+            PaginationCycle {
+                /// The revisited URL the `next` link resolved to.
+                url: reqwest::Url,
+            },
         }
         impl<E> Error<E> {
             /// Build a request-construction error from any owned error value.
@@ -1109,7 +1116,8 @@ mod support {
                     | Error::Decode { status, .. } => is_transient_status(*status),
                     Error::RequestConstruction(_)
                     | Error::Protocol(_)
-                    | Error::Redirect(_) => false,
+                    | Error::Redirect(_)
+                    | Error::PaginationCycle { .. } => false,
                 }
             }
             /// The HTTP status the failed call's response carried: `Some` for a documented error status
@@ -1127,7 +1135,8 @@ mod support {
                     | Error::Timeout(_)
                     | Error::Protocol(_)
                     | Error::Redirect(_)
-                    | Error::InterruptedBody(_) => None,
+                    | Error::InterruptedBody(_)
+                    | Error::PaginationCycle { .. } => None,
                 }
             }
         }
@@ -1167,6 +1176,7 @@ mod support {
                         }
                     }
                     Error::InterruptedBody(e) => Error::InterruptedBody(e),
+                    Error::PaginationCycle { url } => Error::PaginationCycle { url },
                 }
             }
         }
@@ -1206,7 +1216,8 @@ mod support {
                     | Error::Redirect(_)
                     | Error::UnexpectedStatus { .. }
                     | Error::Decode { .. }
-                    | Error::InterruptedBody(_) => None,
+                    | Error::InterruptedBody(_)
+                    | Error::PaginationCycle { .. } => None,
                 }
             }
         }
@@ -1315,7 +1326,8 @@ mod support {
                     | Error::Timeout(_)
                     | Error::Protocol(_)
                     | Error::Redirect(_)
-                    | Error::InterruptedBody(_) => None,
+                    | Error::InterruptedBody(_)
+                    | Error::PaginationCycle { .. } => None,
                 }
             }
         }
@@ -1341,6 +1353,9 @@ mod support {
                     }
                     Error::InterruptedBody(_) => {
                         f.write_str("response body was interrupted")
+                    }
+                    Error::PaginationCycle { url } => {
+                        write!(f, "pagination cycle: the next link revisits {url}")
                     }
                 }
             }
@@ -1371,7 +1386,8 @@ mod support {
                     Error::InterruptedBody(e) => Some(e),
                     Error::Timeout(_)
                     | Error::UnexpectedStatus { .. }
-                    | Error::Decode { .. } => None,
+                    | Error::Decode { .. }
+                    | Error::PaginationCycle { .. } => None,
                 }
             }
         }
@@ -2673,10 +2689,15 @@ mod support {
         //! carries them. A page that comes back non-`2xx` (e.g. a `401` on an unauthenticated page 2)
         //! terminates the paginator as an [`Error::UnexpectedStatus`](super::Error), never a decoded page.
         //!
-        //! Termination is otherwise entirely driven by the server's `rel="next"` links, so a buggy or
-        //! malicious server can advertise a self-referential or cyclic `next`, yielding an unbounded chain.
-        //! The iterator is pull-based (nothing is fetched until you call `next_page`), so bound your own loop
-        //! — e.g. cap the number of pages you will follow.
+        //! Termination is otherwise driven by the server's `rel="next"` links. The paginator remembers
+        //! every URL it has fetched, and a `next` link that resolves to one of them — a page linking to
+        //! itself, or a longer cycle such as page 1 → page 2 → page 1 — ends the chain with
+        //! [`Error::PaginationCycle`](super::Error) instead of fetching it again, so a buggy server's cycle
+        //! surfaces as an error rather than as an endless loop or a silently truncated collection. URLs
+        //! are compared as parsed, without their fragment, which is never sent. A server that mints a
+        //! fresh URL for every page can still advertise an unbounded chain; the iterator is pull-based
+        //! (nothing is fetched until you call `next_page`), so cap the number of pages you will follow
+        //! where that matters.
         //!
         //! # Cursor / offset / page-number pagination (bring your own)
         //!
@@ -2702,6 +2723,7 @@ mod support {
         //!
         //! The loop pattern above is the supported shape: Rust closures returning futures are awkward to
         //! type, and a plain loop over the generated operation method is clearer and fully typed.
+        use std::collections::HashSet;
         use std::convert::Infallible;
         use std::marker::PhantomData;
         use reqwest::header::HeaderMap;
@@ -2724,6 +2746,9 @@ mod support {
             core: ClientCore,
             /// The next page to fetch; `None` once the chain is exhausted or an error terminated it.
             next: Option<Url>,
+            /// Every URL this paginator has requested, fragment removed: a `next` that names one of them
+            /// is a cycle.
+            fetched: HashSet<Url>,
             /// `T` is produced, never consumed; the `fn() -> T` marker keeps `LinkPaginator<T>: Send + Sync`
             /// regardless of `T`.
             _marker: PhantomData<fn() -> T>,
@@ -2735,21 +2760,26 @@ mod support {
                 Self {
                     core,
                     next: Some(first),
+                    fetched: HashSet::new(),
                     _marker: PhantomData,
                 }
             }
             /// Seed a paginator from the headers of an already-fetched first response (the `rel="next"`
             /// link), so a caller who fetched page one through a normal operation method can continue from
             /// its headers. Only an absolute `next` URL is followed; a relative one yields no next page (use
-            /// [`Self::new`] with the resolved URL instead).
+            /// [`Self::new`] with the resolved URL instead). The first page's own URL is not known here,
+            /// so a cycle back to it is caught one fetch later, when the refetched first page links on to
+            /// a page this paginator already fetched.
             pub fn from_headers(core: ClientCore, headers: &HeaderMap) -> Self {
                 Self {
                     core,
                     next: next_link(headers),
+                    fetched: HashSet::new(),
                     _marker: PhantomData,
                 }
             }
-            /// Whether another page will be fetched by the next [`Self::next_page`] call.
+            /// Whether the next [`Self::next_page`] call returns `Some`: a fetched page, or the error that
+            /// ends the chain, [`Error::PaginationCycle`] included.
             pub fn has_next(&self) -> bool {
                 self.next.is_some()
             }
@@ -2759,8 +2789,11 @@ mod support {
             ///
             /// `GET`s the current `next` URL, parses its response `Link` header for `rel="next"` (resolving a
             /// relative target against the fetched URL) to arm the following page, then decodes the body as
-            /// `T`. Four things terminate the paginator (subsequent calls return `None`):
+            /// `T`. Five things terminate the paginator (subsequent calls return `None`):
             ///
+            /// * a `next` URL the paginator has already fetched (fragments aside) →
+            ///   `Some(Err(Error::PaginationCycle { url }))`, without sending a request. The page whose
+            ///   link closed the cycle was already yielded by the call before;
             /// * a request for the `next` URL that cannot be built →
             ///   `Some(Err(Error::RequestConstruction(..)))`;
             /// * a **transport failure** → `Some(Err(..))`;
@@ -2777,6 +2810,11 @@ mod support {
                 &mut self,
             ) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
                 let url = self.next.take()?;
+                let mut key = url.clone();
+                key.set_fragment(None);
+                if !self.fetched.insert(key) {
+                    return Some(Err(Error::PaginationCycle { url }));
+                }
                 let request = match self.core.http().get(url.clone()).build() {
                     Ok(request) => request,
                     Err(error) => return Some(Err(Error::request_construction(error))),
