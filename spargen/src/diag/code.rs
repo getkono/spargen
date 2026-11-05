@@ -212,7 +212,9 @@ impl Code {
         //   outside the enumeration, a case with no emission site, or a case deleted from the body
         //   fails `every_emission_site_falls_into_a_case_its_explain_text_lists`. A case may also
         //   reserve a message wording, which its sites must use and no other site of the code
-        //   may. Adding an enumerating body means adding it to that table.
+        //   may. Each case also has a fixture carrying the same marker in the suite that owns
+        //   the code (`every_enumerated_case_has_a_frontend_fixture`). Adding an enumerating body
+        //   means adding it to that table.
         // - `E023`'s body is pinned byte-for-byte, clause by clause, by
         //   `runtime_contract::tests::explain::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
         //   Its consumer-obligation clauses are tied to the fixtures that enforce them by this
