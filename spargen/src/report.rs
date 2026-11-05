@@ -3,7 +3,7 @@
 use crate::diag::{Diagnostic, Diagnostics, OutcomeClaim, Severity};
 
 /// The outcome of a pipeline run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Outcome {
@@ -231,6 +231,23 @@ mod tests {
             outcome,
             truncated: false,
         }
+    }
+
+    /// The public value types a report or diff carries can key a hash set, like their siblings
+    /// `Code`, `Side`, `FileId`, `InterpId` and `JsonPointer`, and equal values land on one key.
+    #[test]
+    fn the_public_value_types_are_hashable() {
+        fn assert_hash<T: std::hash::Hash + Eq>() {}
+        assert_hash::<Severity>();
+        assert_hash::<Outcome>();
+        assert_hash::<crate::Impact>();
+        assert_hash::<crate::ChangeKind>();
+        assert_hash::<crate::Span>();
+        assert_hash::<crate::Loc>();
+
+        let outcomes: std::collections::HashSet<Outcome> =
+            [Outcome::Generated, Outcome::Rejected, Outcome::Generated].into();
+        assert_eq!(outcomes.len(), 2);
     }
 
     /// `wrote_output` holds only for a run that rendered the output, which rewrites the file only

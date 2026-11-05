@@ -14,7 +14,7 @@ impl FileId {
 
 /// A position within a source file: 1-based `line` and `col`, plus the 0-based byte `offset`
 /// (span-preserving parse).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct Loc {
     /// 1-based line number.
     pub line: u32,
@@ -27,7 +27,7 @@ pub struct Loc {
 /// A half-open source span `[start, end)`: line and column positions within the file its
 /// [`FileId`] names. A diagnostic renders its start as `line:column`, prefixed by the file's path
 /// when the run loaded it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct Span {
     /// The file this span lies in.
     pub file: FileId,

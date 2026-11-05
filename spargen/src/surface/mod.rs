@@ -219,7 +219,7 @@ struct OverflowSurface {
 ///
 /// Serializes as the lowercase bump label (`major` / `minor` / `patch`) rather than the Rust
 /// variant name, so the JSON form agrees with [`Impact::as_str`] and with the human rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Impact {
     /// No consumer-visible surface change (docs-only / internal).
@@ -250,7 +250,7 @@ impl std::fmt::Display for Impact {
 
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ChangeKind {
     /// A new operation (client method) appeared. **Minor** — additive.

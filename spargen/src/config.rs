@@ -368,6 +368,11 @@ impl ConfigError {
             message: message.into(),
         }
     }
+
+    /// The message [`Display`](std::fmt::Display) writes.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl std::fmt::Display for ConfigError {
@@ -502,6 +507,7 @@ mod tests {
         let error = ConfigError::new("bad flag");
         assert_eq!(error.clone(), error);
         assert_eq!(error.clone().to_string(), "bad flag");
+        assert_eq!(error.message(), "bad flag");
         assert_eq!(error, ConfigError::new("bad flag"));
         assert_ne!(error, ConfigError::new("another flag"));
     }
