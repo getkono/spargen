@@ -75,8 +75,9 @@ impl OmitRule {
 }
 
 /// A string that names no known omit component kind or HTTP method. Its message names the
-/// rejected token and one canonical spelling of every value the parser accepts, so `omit!`, the
-/// command line, and `spargen.toml` answer a mistyped token with the same list.
+/// rejected token and one canonical spelling of every value the parser accepts, so
+/// `generate_api!`, the command line, and `spargen.toml` answer a mistyped token with the same
+/// list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownOmitToken {
     token: String,
