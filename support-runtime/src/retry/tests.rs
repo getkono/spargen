@@ -10,7 +10,10 @@ use crate::tests::{
 };
 use crate::transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 
-use super::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+use super::{
+    days_from_civil, exponential_backoff, parse_http_date, parse_retry_after, year_of_day,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+};
 
 fn retrying(inner: Arc<dyn HttpBackend>, max_retries: u32) -> RetryBackend {
     RetryBackend::new(inner, Arc::new(RetryTransient { max_retries }))
@@ -49,7 +52,7 @@ fn a_transient_transport_failure_is_retried_and_the_last_failure_returned() {
     let backend = retrying(inner.clone(), 2);
     let error = poll_ready(backend.execute(request())).expect_err("every attempt fails");
     assert_eq!(inner.calls(), 3);
-    assert!(RetryOutcome::Transport(&error).is_transient());
+    assert!(RetryOutcome::new(&request(), Err(&error)).is_transient());
     let source = std::error::Error::source(&error)
         .expect("a transport error wraps its reqwest error")
         .to_string();
@@ -132,7 +135,10 @@ fn non_cloneable_request_is_executed_exactly_once() {
 #[test]
 fn retry_outcome_exposes_status_and_transience() {
     let response = crate::tests::response(429, String::new());
-    let outcome = RetryOutcome::Response(&response);
+    let sent = request();
+    let outcome = RetryOutcome::new(&sent, Ok(&response));
+    assert!(std::ptr::eq(outcome.request(), &sent));
+    assert_eq!(*outcome.method(), Method::GET);
     assert_eq!(
         outcome.status(),
         Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
@@ -143,8 +149,9 @@ fn retry_outcome_exposes_status_and_transience() {
     assert!(outcome.result().is_ok());
 }
 
-/// `RetryOutcome::is_transient` documents itself as exactly what `Error::is_transient` answers
-/// for the error the outcome becomes. For a response that is every status-carrying class:
+/// `RetryOutcome::is_transient` documents itself, for an idempotent request such as this `GET`,
+/// as exactly what `Error::is_transient` answers for the error the outcome becomes. For a
+/// response that is every status-carrying class:
 /// documented (`Api`), undocumented (`UnexpectedStatus`), and undecodable (`Decode`). Both
 /// sides are held to that agreement, and to the rule itself (`429` or `5xx`), at every
 /// status code from `100` to `599`. For `Decode` that is the rule `Error::is_transient` states:
@@ -161,7 +168,7 @@ fn a_response_outcome_is_transient_exactly_when_its_error_is() {
     for code in 100u16..=599 {
         let status = StatusCode::from_u16(code).expect("a three-digit status");
         let response = crate::tests::response(code, String::new());
-        let outcome = RetryOutcome::Response(&response).is_transient();
+        let outcome = RetryOutcome::new(&request(), Ok(&response)).is_transient();
         let errors: [Error<String>; 3] = [
             Error::Api(ResponseValue::new(status, HeaderMap::new(), String::new())),
             Error::UnexpectedStatus {
@@ -215,6 +222,7 @@ impl HttpBackend for CountingBackend {
 fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
     for (client, request) in refused_at_execute() {
         let url = request.url().to_string();
+        let probe = request.try_clone().expect("a bodyless request clones");
         let inner = Arc::new(CountingBackend {
             inner: ReqwestBackend::new(client),
             calls: AtomicU32::new(0),
@@ -226,7 +234,7 @@ fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
             .expect("a transport error wraps a reqwest error");
         assert!(source.is_builder(), "{url}: {error}");
         assert_eq!(inner.calls.load(Ordering::SeqCst), 1, "{url}");
-        let outcome = RetryOutcome::Transport(&error);
+        let outcome = RetryOutcome::new(&probe, Err(&error));
         assert!(
             !outcome.is_transient(),
             "{url}: a builder-kind refusal is permanent"
@@ -313,7 +321,319 @@ fn exponential_backoff_never_exceeds_max_even_at_attempt_zero() {
     );
 }
 
+/// A request with `method` and, where `key` is `Some`, that `Idempotency-Key`.
+fn request_with(method: Method, key: Option<&str>) -> Request {
+    let builder = reqwest::Client::new().request(method, "https://example.com/op");
+    let builder = match key {
+        Some(key) => builder.header("Idempotency-Key", key),
+        None => builder,
+    };
+    builder.body("payload").build().expect("build request")
+}
+
+/// The fixture for the bug: a `POST` that drew a `503` may already have been applied, so the
+/// default classifier never retries it, however generous the budget; the backend sees it once.
+#[test]
+fn a_non_idempotent_request_is_not_retried_by_the_default_classifier() {
+    for method in [Method::POST, Method::PATCH, Method::CONNECT] {
+        let inner = SequenceBackend::statuses([503, 200]);
+        let backend = retrying(inner.clone(), 5);
+        let response =
+            poll_ready(backend.execute(request_with(method.clone(), None))).expect("responds");
+        assert_eq!(response.status(), 503, "{method}");
+        assert_eq!(inner.calls(), 1, "{method}");
+
+        let inner = SequenceBackend::new([Reply::failure(503), Reply::status(200, "")]);
+        let backend = retrying(inner.clone(), 5);
+        poll_ready(backend.execute(request_with(method.clone(), None)))
+            .expect_err("the transport failure is returned unretried");
+        assert_eq!(inner.calls(), 1, "{method}");
+    }
+}
+
+/// An `Idempotency-Key` marks a request of any method as safe to repeat, so a `POST` carrying
+/// one is retried like a `GET`, and every replay carries the same key.
+#[test]
+fn an_idempotency_key_makes_any_method_retryable() {
+    let inner = SequenceBackend::statuses([503, 503, 200]);
+    let backend = retrying(inner.clone(), 5);
+    let request = request_with(Method::POST, Some("k-1"));
+    let response = poll_ready(backend.execute(request)).expect("execute succeeds");
+    assert_eq!(response.status(), 200);
+    assert_eq!(inner.calls(), 3);
+    assert_eq!(
+        inner.header("idempotency-key"),
+        vec![Some("k-1".to_owned()); 3]
+    );
+}
+
+/// Every method RFC 9110 §9.2.2 calls idempotent is retried on a transient outcome, and every
+/// other one only with an `Idempotency-Key`; the classification of the failure itself is the
+/// same for all of them.
+#[test]
+fn is_idempotent_follows_rfc_9110_and_the_idempotency_key() {
+    let response = crate::tests::response(503, String::new());
+    let extension = Method::from_bytes(b"PURGE").expect("an extension method");
+    let cases = [
+        (Method::GET, true),
+        (Method::HEAD, true),
+        (Method::OPTIONS, true),
+        (Method::TRACE, true),
+        (Method::PUT, true),
+        (Method::DELETE, true),
+        (Method::POST, false),
+        (Method::PATCH, false),
+        (Method::CONNECT, false),
+        (extension, false),
+    ];
+    for (method, idempotent) in cases {
+        let bare = request_with(method.clone(), None);
+        let outcome = RetryOutcome::new(&bare, Ok(&response));
+        assert_eq!(*outcome.method(), method);
+        assert_eq!(outcome.is_idempotent(), idempotent, "{method}");
+        assert_eq!(outcome.is_transient(), idempotent, "{method}");
+        let keyed = request_with(method.clone(), Some("k"));
+        let outcome = RetryOutcome::new(&keyed, Ok(&response));
+        assert!(outcome.is_idempotent(), "{method} with a key");
+        assert!(outcome.is_transient(), "{method} with a key");
+    }
+    // A non-transient status stays non-retryable whatever the method.
+    let ok = crate::tests::response(400, String::new());
+    let keyed = request_with(Method::POST, Some("k"));
+    assert!(!RetryOutcome::new(&keyed, Ok(&ok)).is_transient());
+}
+
+/// Records the method each outcome the loop hands the policy carries, and never retries.
+#[derive(Default)]
+struct RecordMethod(Mutex<Vec<Method>>);
+
+impl RetryPolicy for RecordMethod {
+    fn retry<'a>(&'a self, _attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
+        self.0.lock().unwrap().push(outcome.method().clone());
+        None
+    }
+}
+
+/// The loop hands the policy the request it sent, so the outcome's method is the request's.
+#[test]
+fn the_policy_sees_the_method_of_the_request_sent() {
+    let policy = Arc::new(RecordMethod::default());
+    let backend = RetryBackend::new(SequenceBackend::statuses([503]), policy.clone());
+    poll_ready(backend.execute(request_with(Method::DELETE, None))).expect("responds");
+    assert_eq!(*policy.0.lock().unwrap(), [Method::DELETE]);
+}
+
+/// 1994-11-06T08:49:37Z, the instant RFC 9110's HTTP-date examples name, as epoch seconds.
+const RFC_EXAMPLE: i64 = 784_111_777;
+
+fn at(seconds: i64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + Duration::from_secs(u64::try_from(seconds).expect("after the epoch"))
+}
+
+/// A response carrying `Retry-After` `values`, one header line each.
+fn response_with_retry_after(values: &[&str]) -> reqwest::Response {
+    let mut builder = http::Response::builder().status(503);
+    for value in values {
+        builder = builder.header("retry-after", *value);
+    }
+    reqwest::Response::from(builder.body(String::new()).expect("valid response"))
+}
+
+/// The three HTTP-date forms RFC 9110 §5.6.7 obliges a recipient to accept all name the same
+/// instant, and every malformed variant of them is refused.
+#[test]
+fn every_http_date_form_parses_and_malformed_dates_do_not() {
+    let now = RFC_EXAMPLE;
+    for value in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+        "Sun Nov 06 08:49:37 1994",
+    ] {
+        assert_eq!(parse_http_date(value, now), Some(RFC_EXAMPLE), "{value}");
+    }
+    assert_eq!(
+        parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT", now),
+        Some(0)
+    );
+    assert_eq!(
+        parse_http_date("Thu, 29 Feb 2024 23:59:60 GMT", now),
+        Some(1_709_251_200),
+        "a leap day and a leap second"
+    );
+    for value in [
+        "",
+        "Sun, 6 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 94 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Sun, 06 Nov 1994 08:49:37 GMT trailing",
+        "Sun, 06 Foo 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 24:00:00 GMT",
+        "Sun, 06 Nov 1994 08:60:00 GMT",
+        "Sun, 06 Nov 1994 08:49:61 GMT",
+        "Sun, 06 Nov 1994 08:49 GMT",
+        "Sun, 31 Nov 1994 08:49:37 GMT",
+        "Sun, 29 Feb 1900 08:49:37 GMT",
+        "Sun, 00 Nov 1994 08:49:37 GMT",
+        "Sundae, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94-1 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 94",
+        "Sun Nov   6 08:49:37 1994",
+        "Sun Nov 6 08:49:37 1994",
+        "Xyz Nov  6 08:49:37 1994",
+        "Sun Nov  6 08:49:37 1994 ",
+        "Sun,06 Nov 1994 08:49:37 GMT",
+    ] {
+        assert_eq!(parse_http_date(value, now), None, "{value:?}");
+    }
+}
+
+/// An RFC 850 two-digit year is the year with those digits not more than 50 years after now's.
+#[test]
+fn an_rfc_850_year_is_placed_within_fifty_years_of_now() {
+    let now = days_from_civil(2026, 11, 5) * 86_400;
+    let year = |value: &str| {
+        year_of_day(
+            parse_http_date(value, now)
+                .expect("parses")
+                .div_euclid(86_400),
+        )
+    };
+    assert_eq!(year("Sunday, 06-Nov-94 08:49:37 GMT"), 1994);
+    assert_eq!(year("Thursday, 01-Jan-76 00:00:00 GMT"), 2076);
+    assert_eq!(year("Friday, 01-Jan-77 00:00:00 GMT"), 1977);
+    assert_eq!(year("Monday, 01-Jan-26 00:00:00 GMT"), 2026);
+}
+
+/// Delay-seconds read as seconds (saturating past `u64`), a date as the time until it (zero once
+/// it has passed), surrounding whitespace ignored, and anything else refused.
+#[test]
+fn a_retry_after_value_is_read_as_seconds_or_as_the_time_until_its_date() {
+    let now = at(RFC_EXAMPLE - 30);
+    let cases: [(&str, Option<Duration>); 9] = [
+        ("120", Some(Duration::from_secs(120))),
+        ("0", Some(Duration::ZERO)),
+        (" 7\t", Some(Duration::from_secs(7))),
+        (
+            "99999999999999999999999",
+            Some(Duration::from_secs(u64::MAX)),
+        ),
+        (
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            Some(Duration::from_secs(30)),
+        ),
+        ("Sat, 05 Nov 1994 08:49:37 GMT", Some(Duration::ZERO)),
+        ("-5", None),
+        ("1.5", None),
+        ("soon", None),
+    ];
+    for (value, expected) in cases {
+        assert_eq!(parse_retry_after(value, now), expected, "{value:?}");
+    }
+    // A clock before the epoch reads every date as still ahead of it.
+    let before_epoch = std::time::UNIX_EPOCH - Duration::from_secs(1);
+    assert_eq!(
+        parse_retry_after("Thu, 01 Jan 1970 00:00:10 GMT", before_epoch),
+        Some(Duration::from_secs(10))
+    );
+}
+
+/// The outcome reads exactly one `Retry-After` off the response: none on a transport failure, on
+/// a response without one, or on one carrying two.
+#[test]
+fn retry_after_reads_the_single_header_of_a_response() {
+    let now = at(RFC_EXAMPLE);
+    let sent = request();
+    let response = response_with_retry_after(&["5"]);
+    let outcome = RetryOutcome::new(&sent, Ok(&response));
+    assert_eq!(outcome.retry_after(now), Some(Duration::from_secs(5)));
+    let bare = response_with_retry_after(&[]);
+    assert_eq!(RetryOutcome::new(&sent, Ok(&bare)).retry_after(now), None);
+    let twice = response_with_retry_after(&["5", "6"]);
+    assert_eq!(RetryOutcome::new(&sent, Ok(&twice)).retry_after(now), None);
+    let unreadable = reqwest::Response::from(
+        http::Response::builder()
+            .header(
+                "retry-after",
+                http::HeaderValue::from_bytes(b"\xff").expect("an opaque value"),
+            )
+            .body(String::new())
+            .expect("valid response"),
+    );
+    assert_eq!(
+        RetryOutcome::new(&sent, Ok(&unreadable)).retry_after(now),
+        None
+    );
+    let failure = crate::tests::transport_failure(503);
+    assert_eq!(
+        RetryOutcome::new(&sent, Err(&failure)).retry_after(now),
+        None
+    );
+}
+
+/// The server's `Retry-After` is a floor under the exponential backoff: a longer one wins, even
+/// past `max`; a shorter one, or none, leaves the backoff as it is.
+#[test]
+fn backoff_takes_the_servers_delay_as_a_floor() {
+    let now = at(RFC_EXAMPLE);
+    let sent = request();
+    let (base, max) = (Duration::from_millis(100), Duration::from_secs(1));
+    let long = response_with_retry_after(&["30"]);
+    let outcome = RetryOutcome::new(&sent, Ok(&long));
+    assert_eq!(outcome.backoff(0, base, max, now), Duration::from_secs(30));
+    let dated = response_with_retry_after(&["Sun, 06 Nov 1994 08:49:39 GMT"]);
+    let outcome = RetryOutcome::new(&sent, Ok(&dated));
+    assert_eq!(outcome.backoff(0, base, max, now), Duration::from_secs(2));
+    let short = response_with_retry_after(&["0"]);
+    let outcome = RetryOutcome::new(&sent, Ok(&short));
+    for attempt in 0..6 {
+        assert_eq!(
+            outcome.backoff(attempt, base, max, now),
+            exponential_backoff(attempt, base, max)
+        );
+    }
+    let bare = response_with_retry_after(&[]);
+    let outcome = RetryOutcome::new(&sent, Ok(&bare));
+    assert_eq!(
+        outcome.backoff(2, base, max, now),
+        Duration::from_millis(400)
+    );
+}
+
 proptest::proptest! {
+    /// Every IMF-fixdate of a valid day and time parses to the instant its fields name, read back
+    /// through the inverse day count.
+    #[test]
+    fn an_imf_fixdate_parses_to_the_instant_it_names(
+        days in -719_162i64..2_932_896,
+        second_of_day in 0i64..86_400,
+    ) {
+        let year = year_of_day(days);
+        let start = days_from_civil(year, 1, 1);
+        proptest::prop_assert!(start <= days && days < days_from_civil(year + 1, 1, 1));
+        let (mut month, mut first) = (1u32, start);
+        while month < 12 && days_from_civil(year, month + 1, 1) <= days {
+            month += 1;
+            first = days_from_civil(year, month, 1);
+        }
+        let day = days - first + 1;
+        let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+            [usize::try_from(days.rem_euclid(7)).unwrap()];
+        let month_name = super::MONTHS[usize::try_from(month - 1).unwrap()];
+        let value = format!(
+            "{weekday}, {day:02} {month_name} {year:04} {:02}:{:02}:{:02} GMT",
+            second_of_day / 3600,
+            second_of_day / 60 % 60,
+            second_of_day % 60,
+        );
+        proptest::prop_assert_eq!(
+            parse_http_date(&value, 0),
+            Some(days * 86_400 + second_of_day),
+            "{}", value
+        );
+    }
+
     /// Over every attempt, base and ceiling, the wait never exceeds `max`, never shrinks as the
     /// attempt grows, and is exactly `base * 2^attempt` wherever that product is below `max`.
     #[test]

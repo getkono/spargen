@@ -54,7 +54,23 @@ execute step goes through the backend.
 one as a `RetryWait`, built on the caller's own timer: the runtime has none. A request whose body
 cannot be cloned is sent exactly once. `Error::is_transient()` and `RetryOutcome::is_transient()`
 classify retry-worthy failures, and `Error::status()` reports the status of every failure that
-produced a response. The [`retry` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/retry.rs)
+produced a response. `RetryOutcome::is_transient()` also requires the request to be safe to
+repeat: its method idempotent by [RFC 9110 §9.2.2](https://www.rfc-editor.org/rfc/rfc9110#section-9.2.2)
+(`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`), or an `Idempotency-Key` header on it. A
+`POST` or `PATCH` without one may already have been applied when its response was lost, so the
+default classifier does not resend it; `RetryOutcome::method()` and `RetryOutcome::request()`
+give a policy that knows better what it needs to decide otherwise.
+
+`RetryOutcome::retry_after(now)` reads a response's `Retry-After`, as delay-seconds or any of the
+three HTTP-date forms, as the delay from the caller's clock, and `RetryOutcome::backoff(attempt,
+base, max, now)` is `exponential_backoff(attempt, base, max)` raised to that delay where it is
+longer. The server's delay is a floor that `max` does not cap, so a policy unwilling to wait that
+long stops instead.
+
+Size `base` and `max` against the failures being retried. A backoff shorter than the network's
+loss bursts, or than the server's outages, lands each retry inside the same bad state and spends
+the retry budget there; a `base` above a typical loss burst and a `max` above a typical outage
+let later attempts arrive after the condition has cleared. The [`retry` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/retry.rs)
 states the timing and replay contracts and carries an example policy; the
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete one driven by a tokio timer.

@@ -124,7 +124,9 @@ impl<E> Error<E> {
     /// Whether the failure is worth retrying: transport failures, timeouts, and a `429` or `5xx`
     /// response — whichever class carries it, including [`Error::Decode`], since a server that
     /// answered `503` is unavailable whether or not its body matched the schema. This is the
-    /// rule `RetryOutcome::is_transient` applies to the undecoded response.
+    /// rule `RetryOutcome::is_transient` applies to the undecoded response of an idempotent
+    /// request. This classifies the failure alone: whether re-sending the request is safe also
+    /// depends on its method, which `RetryOutcome::is_idempotent` reads.
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
@@ -157,7 +159,7 @@ impl<E> Error<E> {
 
 /// Whether a response status is transient: a `429` or any `5xx`. [`Error::is_transient`] applies
 /// it to every class that carries a status, and `RetryOutcome::is_transient` to the undecoded
-/// response.
+/// response of an idempotent request.
 pub(crate) fn is_transient_status(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
