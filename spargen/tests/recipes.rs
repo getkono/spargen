@@ -25,6 +25,10 @@
 use camino::Utf8PathBuf;
 use spargen::{Code, Outcome, Report, Spec};
 
+#[allow(
+    dead_code,
+    reason = "this suite generates recipe files through `generate_to_string` alone"
+)]
 #[path = "shared/generate.rs"]
 mod generate;
 #[path = "oracles/readers.rs"]

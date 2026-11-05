@@ -9,11 +9,11 @@
 //! (`oracles::internal_failures`: lowering must produce a valid IR for any input), every
 //! diagnostic names a real location (`oracles::location_violations`, #454), a document that is
 //! valid JSON reports the same sorted codes through the JSON and the YAML parser, and `generate`
-//! over the valid-skeleton documents reaches the verdict `check` reaches with the identical
-//! diagnostics (`oracles::parity_violations`), and writes a module that parses as Rust whenever it
-//! reports `Generated`, whose unions' variants a value can tell apart unless a `W001` at the union
-//! says why (`oracles::unexplained_variants`, #402), and whose every emitted type is a component or
-//! named by another item (`oracles::unreferenced_types`, #928).
+//! over the valid-skeleton and operation documents reaches the verdict `check` reaches with the
+//! identical diagnostics (`oracles::parity_violations`), and writes a module that parses as Rust
+//! whenever it reports `Generated`, whose unions' variants a value can tell apart unless a `W001`
+//! at the union says why (`oracles::unexplained_variants`, #402), and whose every emitted type is a
+//! component or named by another item (`oracles::unreferenced_types`, #928).
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -23,19 +23,26 @@
 //!     `discriminator`/`properties`/`required`/…), so the fuzzer reaches deep into lowering rather
 //!     than bouncing off the parser's reject path;
 //!   * valid-skeleton documents declaring a supported version and wrapping random schemas, most of
-//!     them well-formed Schema Objects, so lowering runs to completion (at least half of the cases
+//!     them well-formed Schema Objects (`discriminator`, `patternProperties`, `prefixItems` and
+//!     `xml` among their keywords), so lowering runs to completion (at least half of the cases
 //!     reach lowering, or the test fails);
+//!   * operation documents whose one operation varies its parameters' locations, styles and
+//!     `explode`, its request and response media, and its form and multipart `encoding`, over
+//!     well-formed schemas, so parameter and body codegen runs to completion (at least half of the
+//!     cases generate, or the test fails), through `generate` only;
 //!   * deep `$ref` chains that exercise the recursion depth guard (the stack-overflow vector this
 //!     issue found and fixed);
 //!   * block-style YAML nested past the parsers' nesting cap, up to issue #706's million levels;
 //!   * components whose root is a `$ref` beside random sibling keywords, over a random ref graph
 //!     (the release-mode assertion abort of issue #148).
 //!
-//! Every generated document is fed through BOTH the JSON and the YAML parser (by file extension;
-//! JSON is a subset of YAML). The run is deterministic and bounded: a fixed-seed RNG and capped
-//! case counts / input sizes keep `mise run test` fast and non-flaky. A panic anywhere inside
-//! `check` fails the test with the (shrunk) offending input, and a stack overflow aborts the test
-//! process. A hang shows up as a test that never finishes.
+//! Every document a `check_never_panics_*` test draws is fed through BOTH the JSON and the YAML
+//! parser (by file extension; JSON is a subset of YAML), except the block-style YAML of
+//! `check_never_panics_on_deeply_nested_yaml`, which is not JSON and goes through the YAML parser
+//! only. The run is deterministic and bounded: a fixed-seed RNG and capped case counts / input
+//! sizes keep `mise run test` fast and non-flaky. A panic anywhere inside `check` fails the test
+//! with the (shrunk) offending input, and a stack overflow aborts the test process. A hang shows up
+//! as a test that never finishes.
 
 use std::cell::Cell;
 
@@ -245,11 +252,55 @@ const TYPE_NAMES: &[&str] = &[
     "object", "array", "string", "integer", "number", "boolean", "null",
 ];
 
+/// A Discriminator Object: a `propertyName` the generated schemas can declare, and a `mapping`
+/// from tag values to components.
+fn arb_discriminator() -> impl Strategy<Value = Value> {
+    (
+        "[a-c]",
+        prop::collection::btree_map("[x-z]", 0usize..5, 0..3),
+    )
+        .prop_map(|(property, mapping)| {
+            let mut discriminator = serde_json::json!({ "propertyName": property });
+            if !mapping.is_empty() {
+                let mapping: Map<String, Value> = mapping
+                    .into_iter()
+                    .map(|(tag, at)| (tag, Value::from(format!("#/components/schemas/S{at}"))))
+                    .collect();
+                discriminator["mapping"] = Value::Object(mapping);
+            }
+            discriminator
+        })
+}
+
+/// An XML Object: an element or attribute name, and whether an array is wrapped.
+fn arb_xml() -> impl Strategy<Value = Value> {
+    (
+        proptest::option::of("[a-c]"),
+        proptest::option::of(any::<bool>()),
+        proptest::option::of(any::<bool>()),
+    )
+        .prop_map(|(name, attribute, wrapped)| {
+            let mut xml = Map::new();
+            if let Some(name) = name {
+                xml.insert("name".to_owned(), Value::from(name));
+            }
+            if let Some(attribute) = attribute {
+                xml.insert("attribute".to_owned(), Value::from(attribute));
+            }
+            if let Some(wrapped) = wrapped {
+                xml.insert("wrapped".to_owned(), Value::from(wrapped));
+            }
+            Value::Object(xml)
+        })
+}
+
 /// A Schema Object whose every keyword holds a value of the shape that keyword requires: types
-/// from [`TYPE_NAMES`], subschemas under `properties`/`items`/`allOf`/`oneOf`/`anyOf`/`not`,
-/// string arrays under `required`, a component `$ref`, and arbitrary values only where any value
-/// is valid (`enum`, `const`, `default`). The structural validator accepts it, so a document built
-/// from it reaches lowering, where the combinations of keywords are what is under test.
+/// from [`TYPE_NAMES`], subschemas under `properties`/`items`/`prefixItems`/`patternProperties`/
+/// `allOf`/`oneOf`/`anyOf`/`not`, string arrays under `required`, a component `$ref`, a
+/// `discriminator` ([`arb_discriminator`]) and an `xml` ([`arb_xml`]), and arbitrary values only
+/// where any value is valid (`enum`, `const`, `default`). The structural validator accepts it, so a
+/// document built from it reaches lowering, where the combinations of keywords are what is under
+/// test.
 fn arb_schema() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
         prop::sample::select(TYPE_NAMES).prop_map(|name| serde_json::json!({ "type": name })),
@@ -282,6 +333,16 @@ fn arb_schema() -> impl Strategy<Value = Value> {
             prop::sample::select(&["int32", "int64", "date-time", "uuid", "binary", "byte"][..])
                 .prop_map(|format| ("format", Value::from(format))),
             (0u64..4).prop_map(|bound| ("minLength", Value::from(bound))),
+            prop::collection::vec(inner.clone(), 1..3)
+                .prop_map(|prefix| ("prefixItems", Value::from(prefix))),
+            prop::collection::vec(("\\^[a-c]\\$?", inner.clone()), 1..3).prop_map(|patterns| {
+                (
+                    "patternProperties",
+                    Value::Object(patterns.into_iter().collect()),
+                )
+            }),
+            arb_discriminator().prop_map(|discriminator| ("discriminator", discriminator)),
+            arb_xml().prop_map(|xml| ("xml", xml)),
         ];
         prop::collection::vec(keyword, 1..4).prop_map(|keywords| {
             Value::Object(
@@ -333,6 +394,286 @@ fn arb_skeleton_doc() -> impl Strategy<Value = String> {
                     }
                 },
                 "components": { "schemas": Value::Object(schema_map) }
+            });
+            serde_json::to_string(&doc).unwrap()
+        })
+}
+
+/// How many components an operation document declares, `S0` to `S2`, each a [`arb_typed_schema`].
+const OPERATION_COMPONENTS: usize = 3;
+
+/// A Schema Object a value of every JSON type can be described by, with no keyword combination
+/// that rejects it by construction: scalars, a `format`, a string `enum`, a nullable scalar, a
+/// `$ref` to an operation document's components, and arrays, objects and `oneOf`s of those.
+/// [`arb_schema`] draws the keyword combinations; this draws the bodies and parameters an operation
+/// carries, so most operation documents reach the codegen they are built to exercise.
+fn arb_typed_schema() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        3 => prop::sample::select(&["string", "integer", "number", "boolean"][..])
+            .prop_map(|name| serde_json::json!({ "type": name })),
+        1 => prop::sample::select(&["date-time", "uuid", "int32", "binary"][..])
+            .prop_map(|format| serde_json::json!({ "type": "string", "format": format })),
+        1 => Just(serde_json::json!({ "type": "string", "enum": ["x", "y"] })),
+        1 => Just(serde_json::json!({ "type": ["integer", "null"] })),
+        1 => (0usize..OPERATION_COMPONENTS)
+            .prop_map(|at| serde_json::json!({ "$ref": format!("#/components/schemas/S{at}") })),
+    ];
+    leaf.prop_recursive(3, 16, 3, |inner| {
+        prop_oneof![
+            inner
+                .clone()
+                .prop_map(|items| serde_json::json!({ "type": "array", "items": items })),
+            arb_object_schema(inner.clone()),
+            prop::collection::vec(inner, 2..4)
+                .prop_map(|branches| serde_json::json!({ "oneOf": branches })),
+        ]
+    })
+}
+
+/// An object schema whose properties `a` to `c` are drawn from `property`, some of them required.
+fn arb_object_schema(property: impl Strategy<Value = Value>) -> impl Strategy<Value = Value> {
+    prop::collection::btree_map("[a-c]", (property, any::<bool>()), 1..4).prop_map(|props| {
+        let required: Vec<&String> = props
+            .iter()
+            .filter(|(_, (_, required))| *required)
+            .map(|(name, _)| name)
+            .collect();
+        let mut schema = serde_json::json!({ "type": "object", "required": required });
+        let properties: Map<String, Value> = props
+            .iter()
+            .map(|(name, (schema, _))| (name.clone(), schema.clone()))
+            .collect();
+        schema["properties"] = Value::Object(properties);
+        schema
+    })
+}
+
+/// A parameter's schema: a scalar, an array of scalars, or an object of scalars.
+fn arb_parameter_schema() -> impl Strategy<Value = Value> {
+    let scalar = || {
+        prop::sample::select(&["string", "integer", "number", "boolean"][..])
+            .prop_map(|name| serde_json::json!({ "type": name }))
+    };
+    prop_oneof![
+        2 => scalar(),
+        1 => scalar().prop_map(|items| serde_json::json!({ "type": "array", "items": items })),
+        1 => arb_object_schema(scalar()),
+    ]
+}
+
+/// A Parameter Object outside the path: a location and a `style` that location takes, an optional
+/// `explode`, whether it is required, and a schema ([`arb_parameter_schema`]). The caller names it.
+fn arb_parameter() -> impl Strategy<Value = Value> {
+    (
+        prop_oneof![
+            prop::sample::select(&["form", "spaceDelimited", "pipeDelimited", "deepObject"][..])
+                .prop_map(|style| ("query", Some(style))),
+            Just(("query", None)),
+            Just(("header", Some("simple"))),
+            Just(("header", None)),
+            Just(("cookie", Some("form"))),
+        ],
+        proptest::option::of(any::<bool>()),
+        any::<bool>(),
+        arb_parameter_schema(),
+    )
+        .prop_map(|((location, style), explode, required, schema)| {
+            let mut parameter = serde_json::json!({
+                "in": location,
+                "required": required,
+                "schema": schema,
+            });
+            if let Some(style) = style {
+                parameter["style"] = Value::from(style);
+            }
+            if let Some(explode) = explode {
+                parameter["explode"] = Value::from(explode);
+            }
+            parameter
+        })
+}
+
+/// The `contentType`s an Encoding Object declares for a part or a field.
+const PART_MEDIA_TYPES: &[&str] = &[
+    "application/json",
+    "application/vnd.api+json",
+    "application/xml",
+    "application/octet-stream",
+    "text/plain",
+    "image/png",
+];
+
+/// An Encoding Object: an optional part `contentType`, `style` and `explode`.
+fn arb_encoding() -> impl Strategy<Value = Value> {
+    (
+        proptest::option::of(prop::sample::select(PART_MEDIA_TYPES)),
+        proptest::option::of(prop::sample::select(
+            &["form", "spaceDelimited", "pipeDelimited", "deepObject"][..],
+        )),
+        proptest::option::of(any::<bool>()),
+    )
+        .prop_map(|(content_type, style, explode)| {
+            let mut encoding = Map::new();
+            if let Some(content_type) = content_type {
+                encoding.insert("contentType".to_owned(), Value::from(content_type));
+            }
+            if let Some(style) = style {
+                encoding.insert("style".to_owned(), Value::from(style));
+            }
+            if let Some(explode) = explode {
+                encoding.insert("explode".to_owned(), Value::from(explode));
+            }
+            Value::Object(encoding)
+        })
+}
+
+/// One media type of a body's `content` and its Media Type Object: a JSON or XML document of any
+/// [`arb_typed_schema`], text or octets of a string schema, and, on a request, a form or multipart
+/// object whose fields are scalars, arrays, binary strings or objects, now and then with an
+/// `encoding` ([`arb_encoding`]) for fields `a` to `c`.
+fn arb_media(request: bool) -> BoxedStrategy<(&'static str, Value)> {
+    let document = (
+        prop::sample::select(
+            &[
+                "application/json",
+                "application/vnd.api+json",
+                "application/xml",
+            ][..],
+        ),
+        arb_typed_schema(),
+    )
+        .prop_map(|(media, schema)| (media, serde_json::json!({ "schema": schema })));
+    let text = prop_oneof![
+        Just((
+            "text/plain",
+            serde_json::json!({ "schema": { "type": "string" } })
+        )),
+        Just((
+            "application/octet-stream",
+            serde_json::json!({ "schema": { "type": "string", "format": "binary" } })
+        )),
+        Just((
+            "image/png",
+            serde_json::json!({ "schema": { "type": "string", "contentEncoding": "base64" } })
+        )),
+    ];
+    let field = prop_oneof![
+        3 => prop::sample::select(&["string", "integer", "boolean"][..])
+            .prop_map(|name| serde_json::json!({ "type": name })),
+        1 => Just(serde_json::json!({ "type": "array", "items": { "type": "integer" } })),
+        1 => Just(serde_json::json!({ "type": "string", "format": "binary" })),
+        1 => Just(serde_json::json!({ "type": "object", "properties": { "x": { "type": "string" } } })),
+    ];
+    let form = (
+        prop::sample::select(&["application/x-www-form-urlencoded", "multipart/form-data"][..]),
+        arb_object_schema(field),
+        proptest::option::of(prop::collection::btree_map("[a-c]", arb_encoding(), 1..3)),
+    )
+        .prop_map(|(media, schema, encoding)| {
+            let mut object = serde_json::json!({ "schema": schema });
+            if let Some(encoding) = encoding {
+                object["encoding"] = Value::Object(encoding.into_iter().collect());
+            }
+            (media, object)
+        });
+    if request {
+        prop_oneof![3 => document, 1 => text, 2 => form].boxed()
+    } else {
+        prop_oneof![3 => document, 1 => text].boxed()
+    }
+}
+
+/// A body's `content`: one to two media types ([`arb_media`]), a request's or a response's.
+fn arb_content(request: bool) -> impl Strategy<Value = Value> {
+    prop::collection::vec(arb_media(request), 1..3).prop_map(|media| {
+        Value::Object(
+            media
+                .into_iter()
+                .map(|(key, object)| (key.to_owned(), object))
+                .collect(),
+        )
+    })
+}
+
+/// An Operation Object on `/p/{id}`: the path parameter `id` in a path `style` with or without
+/// `explode`, up to three more parameters ([`arb_parameter`]), an optional request body, and a
+/// success response with or without content beside an optional error response.
+fn arb_operation() -> impl Strategy<Value = Value> {
+    (
+        (
+            proptest::option::of(prop::sample::select(&["simple", "label", "matrix"][..])),
+            proptest::option::of(any::<bool>()),
+            arb_parameter_schema(),
+        ),
+        prop::collection::vec(arb_parameter(), 0..4),
+        proptest::option::of((any::<bool>(), arb_content(true))),
+        proptest::option::of(arb_content(false)),
+        proptest::option::of((
+            prop::sample::select(&["404", "4XX", "default"][..]),
+            arb_content(false),
+        )),
+    )
+        .prop_map(
+            |((style, explode, schema), mut parameters, body, success, error)| {
+                for (at, parameter) in parameters.iter_mut().enumerate() {
+                    parameter["name"] = Value::from(format!("p{at}"));
+                }
+                let mut id = serde_json::json!({
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": schema,
+                });
+                if let Some(style) = style {
+                    id["style"] = Value::from(style);
+                }
+                if let Some(explode) = explode {
+                    id["explode"] = Value::from(explode);
+                }
+                parameters.insert(0, id);
+                let mut ok = serde_json::json!({ "description": "ok" });
+                if let Some(content) = success {
+                    ok["content"] = content;
+                }
+                let mut responses = serde_json::json!({ "200": ok });
+                if let Some((status, content)) = error {
+                    responses[status] =
+                        serde_json::json!({ "description": "error", "content": content });
+                }
+                let mut operation = serde_json::json!({
+                    "operationId": "op",
+                    "parameters": parameters,
+                    "responses": responses,
+                });
+                if let Some((required, content)) = body {
+                    operation["requestBody"] =
+                        serde_json::json!({ "required": required, "content": content });
+                }
+                operation
+            },
+        )
+}
+
+/// A document under a version spargen implements whose one operation ([`arb_operation`]) is a
+/// `post` on `/p/{id}`, beside the components `S0` to `S2` its schemas refer to. This is the
+/// strategy that exercises parameter serialization, body media and multipart encoding end to end.
+fn arb_operation_doc() -> impl Strategy<Value = String> {
+    (
+        arb_operation(),
+        prop::collection::vec(arb_typed_schema(), OPERATION_COMPONENTS),
+        prop::sample::select(SUPPORTED_VERSIONS),
+    )
+        .prop_map(|(operation, schemas, version)| {
+            let schemas: Map<String, Value> = schemas
+                .into_iter()
+                .enumerate()
+                .map(|(i, schema)| (format!("S{i}"), schema))
+                .collect();
+            let doc = serde_json::json!({
+                "openapi": version,
+                "info": { "title": "t", "version": "1.0.0" },
+                "paths": { "/p/{id}": { "post": operation } },
+                "components": { "schemas": Value::Object(schemas) }
             });
             serde_json::to_string(&doc).unwrap()
         })
@@ -532,14 +873,40 @@ fn check_never_panics_on_skeleton_documents() {
 /// ([`oracles::parity_violations`]).
 #[test]
 fn generate_writes_parseable_rust_for_skeleton_documents() {
+    // Fewer cases than `check`: each generating case renders and parses the whole module,
+    // embedded runtime included.
+    let (generated, _) = generate_and_hold(96, arb_skeleton_doc());
+    assert!(
+        generated > 0,
+        "no skeleton document generated, so the parse oracle was never reached"
+    );
+}
+
+/// [`generate_writes_parseable_rust_for_skeleton_documents`] over documents whose one operation
+/// varies ([`arb_operation_doc`]): parameter locations, styles and `explode`, request and response
+/// media, and multipart and form `encoding`. At least half of them generate, so the parameter and
+/// body codegen they vary is what the parse oracle reads.
+#[test]
+fn generate_writes_parseable_rust_for_operation_documents() {
+    let (generated, cases) = generate_and_hold(96, arb_operation_doc());
+    assert!(
+        generated * 2 >= cases,
+        "only {generated} of {cases} operation documents generated"
+    );
+}
+
+/// Run `generate` over `cases` documents `documents` draws, holding each run to [`hold_report`]
+/// and to parity with `check` ([`oracles::parity_violations`]). Returns how many of the runs
+/// generated, and how many there were.
+fn generate_and_hold(cases: u32, documents: impl Strategy<Value = String>) -> (u32, u32) {
     let dir = TempDir::new().unwrap();
     let spec = Utf8PathBuf::from_path_buf(dir.path().join("spec.json")).unwrap();
     let out = Utf8PathBuf::from_path_buf(dir.path().join("client.rs")).unwrap();
     let generated = Cell::new(0u32);
-    // Fewer cases than `check`: each generating case renders and parses the whole module,
-    // embedded runtime included.
-    deterministic_runner(96)
-        .run(&arb_skeleton_doc(), |text| {
+    let runs = Cell::new(0u32);
+    deterministic_runner(cases)
+        .run(&documents, |text| {
+            runs.set(runs.get() + 1);
             std::fs::write(&spec, &text).unwrap();
             let _ = std::fs::remove_file(&out);
             let report = spargen::generate(
@@ -563,10 +930,7 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
             Ok(())
         })
         .unwrap();
-    assert!(
-        generated.get() > 0,
-        "no skeleton document generated, so the parse oracle was never reached"
-    );
+    (generated.get(), runs.get())
 }
 
 #[test]

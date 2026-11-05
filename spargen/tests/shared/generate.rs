@@ -1,12 +1,31 @@
-//! Generating a description into a throwaway directory and reading the module back, shared by the
-//! suites that inspect what a description generates (`snapshot.rs`, `recipes.rs`,
-//! `determinism.rs`). Each integration test is its own crate, so each declares this file with
-//! `#[path = "shared/generate.rs"]`.
+//! Writing a description to disk, generating it into a throwaway directory, and reading the module
+//! back, shared by the integration suites that write or inspect what a description generates. Each
+//! integration test is its own crate, so each declares this file with
+//! `#[path = "shared/generate.rs"]`; a suite that calls only some of these helpers allows
+//! `dead_code` on that declaration, naming what it uses.
 
 use std::io::ErrorKind;
+use std::path::Path;
 
 use camino::Utf8PathBuf;
 use spargen::{CargoIntegration, Outcome, Report, Spec};
+
+/// Write `contents` to `name` in `dir`, returning the file's path.
+pub fn write_spec(dir: &Path, name: &str, contents: &str) -> Utf8PathBuf {
+    let path = Utf8PathBuf::from_path_buf(dir.join(name)).expect("the directory path is UTF-8");
+    std::fs::write(&path, contents).unwrap_or_else(|error| panic!("{path} is writable: {error}"));
+    path
+}
+
+/// The module `contents` generates, written as `openapi.yaml` into a fresh directory, with
+/// `configure` applied to its [`Spec`]. The run must reach `Generated`.
+pub fn generate_text(contents: &str, configure: impl FnOnce(Spec) -> Spec) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = write_spec(dir.path(), "openapi.yaml", contents);
+    let (report, text) = generate_to_string(configure(Spec::new(spec)));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    text.expect("a `Generated` run wrote its module")
+}
 
 /// Run `generate` on `spec`, its module written into a fresh temporary directory outside any Cargo
 /// build, and return the report plus the module text.

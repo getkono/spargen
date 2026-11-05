@@ -174,9 +174,8 @@ components:
 #[test]
 fn a_multi_file_json_root_compiles_in_a_consumer_crate() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.json");
-    std::fs::write(&spec, MULTI_FILE_ROOT).unwrap();
-    std::fs::write(temp.path().join("lib.yaml"), MULTI_FILE_LIB).unwrap();
+    let spec = write_spec(temp.path(), "openapi.json", MULTI_FILE_ROOT);
+    write_spec(temp.path(), "lib.yaml", MULTI_FILE_LIB);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "split_client");
@@ -220,8 +219,7 @@ fn a_multi_file_json_root_compiles_in_a_consumer_crate() {
 #[test]
 fn the_macro_preview_emits_the_module_generate_writes() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
     let configure = |spec: Spec| {
         spec.uuid(false)
@@ -236,7 +234,7 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     let written = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
 
     let preview = spargen::__private::preview_for_macro(
-        &configure(Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())),
+        &configure(Spec::new(spec)),
         out.join("Cargo.toml").to_str().unwrap(),
     );
     assert_eq!(
@@ -267,8 +265,7 @@ fn the_macro_preview_emits_the_module_generate_writes() {
 #[test]
 fn generated_module_compiles_in_basic_oas31_crate() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "basic_client");
@@ -300,10 +297,8 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // fixture manifest: `tokio` is the one opt-in dependency — optional, native-only, needed only
     // by the `blocking` feature — and every other dependency is unconditional. `uuid`/`time` are
     // not consumer features at all: generated code names them unconditionally.
-    let (requirements, _) = spargen::requirements(&Spec::new(
-        Utf8PathBuf::from_path_buf(spec.clone()).unwrap(),
-    ))
-    .expect("the basic spec lowers");
+    let (requirements, _) =
+        spargen::requirements(&Spec::new(spec.clone())).expect("the basic spec lowers");
     let opt_in: Vec<_> = requirements
         .dependencies
         .iter()
@@ -354,14 +349,12 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // A real round-trip driven by a blocking method against a std-thread mock server (the generated
     // crate is not inside an async runtime, so building a `BlockingClient` here is valid). Gated on
     // the `blocking` feature so the default `cargo test` compiles it to nothing.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/blocking.rs"), basic_blocking::BLOCKING_TEST).unwrap();
+    write_fixture_test(&out, "blocking", basic_blocking::BLOCKING_TEST);
 
     // Prove the wired serde defaults actually deserialize: an absent optional field with a
     // representable scalar default fills in the default instead of `None`, while a required field
     // (default rustdoc-only) still comes from the payload.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/defaults.rs"), basic_defaults::DEFAULTS_TEST).unwrap();
+    write_fixture_test(&out, "defaults", basic_defaults::DEFAULTS_TEST);
     let status = fixture_cargo(&out).arg("test").status().unwrap();
     assert!(status.success());
 
@@ -390,7 +383,7 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // satisfy, so `?` into `Box<dyn Error>` (the pattern the book's own snippet uses), `anyhow`,
     // `thiserror`'s `#[from]`, and `to_string()` were all unavailable on a client with a
     // documented error body.
-    std::fs::write(out.join("tests/errors.rs"), basic_errors::ERRORS_TEST).unwrap();
+    write_fixture_test(&out, "errors", basic_errors::ERRORS_TEST);
     let status = fixture_cargo(&out)
         .args(["test", "--test", "errors"])
         .status()
@@ -410,150 +403,4 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         status.success(),
         "the BlockingClient round-trip must pass with --features blocking"
     );
-}
-
-/// A response shape as the emitted client spells it, with the side's naming stripped: no body type
-/// (`()` on the success side, the uninhabited alias on the error side), one body type alone, or an
-/// enum listing, per variant, the index of the entry it stands for and its payload type (`None` for
-/// a unit variant).
-#[derive(Debug, PartialEq)]
-enum EmittedShape {
-    NoBody,
-    OneBody(String),
-    Enum(Vec<(u16, Option<String>)>),
-}
-
-/// The variants of the emitted `pub enum {name}`, each as its status minus `base` and its payload.
-fn emitted_variants(code: &str, name: &str, base: u16) -> Vec<(u16, Option<String>)> {
-    let head = format!("pub enum {name} {{\n");
-    let start = code.find(&head).expect(&head) + head.len();
-    let body = &code[start..start + code[start..].find("\n}").unwrap()];
-    body.lines()
-        .filter_map(|line| line.trim().strip_prefix("Status"))
-        .map(|variant| {
-            let variant = variant.trim_end_matches(',');
-            let (status, payload) = match variant.split_once('(') {
-                Some((status, payload)) => (status, Some(payload.trim_end_matches(')').to_owned())),
-                None => (variant, None),
-            };
-            (status.parse::<u16>().unwrap() - base, payload)
-        })
-        .collect()
-}
-
-/// `Responses::success` and `Responses::error` count bodies through one computation, and their doc
-/// comments state the resulting rule once per side. They disagreed for two rounds of review with
-/// every gate green (issue #210), because each side was pinned on its own. This drives every
-/// pattern of one to three bodied/bodyless entries through `spargen::generate` twice — once as the
-/// success statuses `200..` of one operation, once as the error statuses `400..` of another, each
-/// entry `i` carrying the same body `Bi` on both sides — and requires the two emitted shapes to be
-/// the same: both count bodies, both emit one variant per entry in status order, and both give a
-/// bodyless entry beside any body its own unit variant. Only then is the shared rule itself checked.
-/// The success side's streaming exception is the one deliberate asymmetry, and these bodies are
-/// JSON, so it never applies.
-#[test]
-fn success_and_error_shapes_agree_on_the_shared_rule() {
-    let patterns: Vec<Vec<bool>> = (1..=3u32)
-        .flat_map(|len| {
-            (0..1u32 << len).map(move |bits| (0..len).map(|i| bits & (1 << i) != 0).collect())
-        })
-        .collect();
-    let entries = |base: u16, pattern: &[bool]| -> String {
-        pattern
-            .iter()
-            .enumerate()
-            .map(|(i, bodied)| {
-                let content = if *bodied {
-                    format!(
-                        ", content: {{application/json: {{schema: {{$ref: '#/components/schemas/B{i}'}}}}}}"
-                    )
-                } else {
-                    String::new()
-                };
-                format!("        '{}': {{description: d{content}}}\n", base + i as u16)
-            })
-            .collect()
-    };
-    let mut spec = String::from("openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths:\n");
-    for (n, pattern) in patterns.iter().enumerate() {
-        spec.push_str(&format!(
-            "  /ok{n}:\n    get:\n      operationId: okSide{n}\n      responses:\n{}",
-            entries(200, pattern)
-        ));
-        spec.push_str(&format!(
-            "  /err{n}:\n    get:\n      operationId: errSide{n}\n      responses:\n        '200': {{description: ok}}\n{}",
-            entries(400, pattern)
-        ));
-    }
-    spec.push_str("components:\n  schemas:\n");
-    for i in 0..3 {
-        spec.push_str(&format!(
-            "    B{i}: {{type: object, properties: {{field{i}: {{type: string}}}}}}\n"
-        ));
-    }
-
-    let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, &spec).unwrap();
-    let out = temp.path().join("client.rs");
-    let report = spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
-            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
-            .cargo(CargoIntegration::Off),
-    );
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}\n{spec}");
-    let code = std::fs::read_to_string(out).unwrap();
-
-    for (n, pattern) in patterns.iter().enumerate() {
-        // The signature, whitespace removed, since the formatter wraps a long one across lines.
-        let method = format!("pub async fn ok_side{n}(");
-        let start = code.find(&method).expect(&method);
-        let signature: String = code[start..start + code[start..].find('{').unwrap()]
-            .split_whitespace()
-            .collect();
-        let head = "Result<support::ResponseValue<";
-        let start = signature.find(head).expect(head) + head.len();
-        let success_ty =
-            &signature[start..start + signature[start..].find(">,support::Error<").unwrap()];
-        let success = match success_ty {
-            "()" => EmittedShape::NoBody,
-            enum_ty if enum_ty == format!("OkSide{n}Response") => {
-                EmittedShape::Enum(emitted_variants(&code, enum_ty, 200))
-            }
-            body => EmittedShape::OneBody(body.to_owned()),
-        };
-
-        let error_ty = format!("ErrSide{n}Error");
-        let newtype = format!("pub struct {error_ty}(pub ");
-        let error = if code.contains(&format!("pub type {error_ty} = std::convert::Infallible;")) {
-            EmittedShape::NoBody
-        } else if let Some(at) = code.find(&newtype) {
-            let start = at + newtype.len();
-            EmittedShape::OneBody(code[start..start + code[start..].find(");").unwrap()].to_owned())
-        } else {
-            EmittedShape::Enum(emitted_variants(&code, &error_ty, 400))
-        };
-
-        assert_eq!(
-            success, error,
-            "the success and error sides disagree on the entry pattern {pattern:?} (bodied?)"
-        );
-
-        let bodied: Vec<usize> = (0..pattern.len()).filter(|&i| pattern[i]).collect();
-        let expected = match (bodied.as_slice(), pattern.len()) {
-            ([], _) => EmittedShape::NoBody,
-            ([only], 1) => EmittedShape::OneBody(format!("types::B{only}")),
-            _ => EmittedShape::Enum(
-                pattern
-                    .iter()
-                    .enumerate()
-                    .map(|(i, bodied)| (i as u16, bodied.then(|| format!("Box<types::B{i}>"))))
-                    .collect(),
-            ),
-        };
-        assert_eq!(
-            success, expected,
-            "both sides departed from the shared rule on {pattern:?} (bodied?)"
-        );
-    }
 }

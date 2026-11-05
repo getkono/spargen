@@ -14,8 +14,17 @@ use std::path::Path;
 #[cfg(feature = "cli")]
 use std::process::{Command, Output};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
+
+#[allow(
+    dead_code,
+    reason = "this suite writes specs through `write_spec` and generates through its own `Build`s"
+)]
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::write_spec;
 
 #[cfg(feature = "cli")]
 fn spargen(dir: &Path, args: &[&str]) -> Output {
@@ -26,19 +35,13 @@ fn spargen(dir: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-fn config(spec: &Path, out: &Path) -> Build {
-    build(
-        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()),
-        out,
-    )
+fn config(spec: &Utf8Path, out: &Path) -> Build {
+    build(Spec::new(spec.to_owned()), out)
 }
 
 /// As [`config`], but with auto-carve on.
-fn carving(spec: &Path, out: &Path) -> Build {
-    build(
-        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()).carve(true),
-        out,
-    )
+fn carving(spec: &Utf8Path, out: &Path) -> Build {
+    build(Spec::new(spec.to_owned()).carve(true), out)
 }
 
 /// An omit profile holding exactly `rules`, built from its default the way a consumer builds one
@@ -50,23 +53,14 @@ fn omit_of(rules: Vec<spargen::OmitRule>) -> spargen::Omit {
 }
 
 /// As [`config`], but with an explicit omit profile.
-fn omitting(spec: &Path, out: &Path, omit: spargen::Omit) -> Build {
-    build(
-        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()).omit(omit),
-        out,
-    )
+fn omitting(spec: &Utf8Path, out: &Path, omit: spargen::Omit) -> Build {
+    build(Spec::new(spec.to_owned()).omit(omit), out)
 }
 
 fn build(spec: Spec, out: &Path) -> Build {
     spec.build(Utf8PathBuf::from_path_buf(out.to_path_buf()).unwrap())
         // Not a build script; keep `W013` out of the carve reports these tests assert on.
         .cargo(CargoIntegration::Off)
-}
-
-fn write_spec(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, contents).unwrap();
-    path
 }
 
 fn w009_count(report: &Report) -> usize {
@@ -560,13 +554,7 @@ fn check_with_carve_reports_the_carved_construct_and_exits_zero() {
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let output = spargen(
         temp.path(),
-        &[
-            "check",
-            spec.to_str().unwrap(),
-            "--carve",
-            "--format",
-            "json",
-        ],
+        &["check", spec.as_str(), "--carve", "--format", "json"],
     );
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1285,7 +1273,7 @@ fn carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file() {
 
 /// The split description [`carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file`]
 /// carves, written into `dir`; returns the root document's path.
-fn write_split_description(dir: &Path) -> std::path::PathBuf {
+fn write_split_description(dir: &Path) -> Utf8PathBuf {
     let spec = write_spec(
         dir,
         "openapi.yaml",
@@ -1621,7 +1609,7 @@ components:
         missing: { $ref: "#/components/schemas/Missing" }
 "##,
     );
-    let lib = lib.to_str().unwrap();
+    let lib = lib.as_str();
     let spec = write_spec(
         root.path(),
         "openapi.yaml",

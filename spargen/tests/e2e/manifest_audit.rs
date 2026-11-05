@@ -829,8 +829,7 @@ fn assert_audit_clean(preview: &spargen::__private::MacroPreview, layout: &str) 
 #[test]
 fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inheritance() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", EVERY_CAPABILITY_SPEC);
     let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
 
     // The set is non-trivial: every conditional crate and feature is in it, so neither layout can
@@ -1149,9 +1148,7 @@ paths:
 /// The `[dependencies]` block `spargen deps` prints for an inline spec.
 fn manifest_block(spec: &str) -> String {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
-    spargen::requirements(&Spec::new(spec_path))
+    spargen::requirements(&Spec::new(write_spec(temp.path(), "openapi.yaml", spec)))
         .expect("spec lowers")
         .0
         .manifest_block()
@@ -1174,8 +1171,7 @@ paths:
       responses: { "204": { description: ok } }
 "#;
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
+    let spec_path = write_spec(temp.path(), "openapi.yaml", spec);
 
     let (requirements, report) =
         spargen::requirements(&Spec::new(spec_path.clone())).expect("spec lowers");

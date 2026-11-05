@@ -119,9 +119,10 @@ components:
     );
 }
 
-/// Media types are case-insensitive (RFC 9110 § 8.3.1), so an SSE key spelled in another letter
-/// case is the same stream: it is lowered, its `contentSchema` types the payload, and a validation
-/// keyword inside that schema warns exactly as it does under the lowercase key (#709).
+/// The stream position of `bodies_media_keys`'s
+/// `any_letter_case_of_every_media_key_generates_the_same_module`: an SSE key in another letter
+/// case is lowered, its `contentSchema` types the payload, and a validation keyword inside that
+/// schema warns exactly as it does under the lowercase key (#709).
 #[test]
 fn an_sse_key_in_another_letter_case_is_the_same_stream() {
     let spec = |media: &str| {
@@ -187,9 +188,9 @@ paths:
 
 #[test]
 fn a_body_key_in_another_letter_case_classifies_as_its_lowercase_spelling() {
-    // One case rule for every media key, not only the stream: `Application/JSON` is the JSON body
-    // `application/json` is, on a request and on a response: the same client, up to any place the
-    // document's spelling of the key is quoted.
+    // The JSON-body positions of `bodies_media_keys`'s
+    // `any_letter_case_of_every_media_key_generates_the_same_module`: `Application/JSON` is the
+    // JSON body `application/json` is, on a request and on a response.
     let spec = |media: &str| {
         format!(
             r##"

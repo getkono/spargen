@@ -1077,7 +1077,8 @@ fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
 /// The codes the frontend cannot produce, each with the suite under `spargen/tests/` that asserts
 /// it instead. [`every_code_is_asserted_by_the_suite_that_owns_it`] holds each to its suite.
 const OWNED_ELSEWHERE: &[(&str, &str)] = &[
-    // `compat` rules: the frontend never sees an omit rule.
+    // `compat` rules: the frontend never sees an omit rule. `carve.rs` asserts each through
+    // the public API; `compat`'s in-module tests also pin `W009` and `E019` per rule.
     ("InvalidOmitRule", "carve.rs"),
     ("OmitCreatedInvalidDocument", "carve.rs"),
     ("OmittedConstruct", "carve.rs"),

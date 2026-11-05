@@ -14,8 +14,7 @@ const OPEN_NARROWING_SPEC: &str = include_str!("specs/open_narrowing.yaml");
 #[test]
 fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("problems.yaml");
-    std::fs::write(&spec, OPEN_NARROWING_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "problems.yaml", OPEN_NARROWING_SPEC);
 
     let out = temp.path().join("client");
     let report = generate_configured_fixture_crate(&spec, &out, "open_problems", "2021", |spec| {

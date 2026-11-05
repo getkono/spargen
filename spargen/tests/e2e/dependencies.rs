@@ -29,9 +29,7 @@ paths:
 #[test]
 fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, BYTES_ERROR_SPEC).unwrap();
-    let spec = Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap());
+    let spec = Spec::new(write_spec(temp.path(), "openapi.yaml", BYTES_ERROR_SPEC));
 
     let (requirements, _) = spargen::requirements(&spec).expect("spec lowers");
     let out = temp.path().join("client");
@@ -249,8 +247,7 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("wasm_client");
 
     let report = generate_fixture_crate(&spec, &out, "wasm_client");
