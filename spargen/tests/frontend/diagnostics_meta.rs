@@ -679,7 +679,7 @@ fn the_parity_fixtures_span_both_verdicts() {
     assert!(succeeded >= 2, "only {succeeded} fixtures succeed");
 }
 
-/// The label check in [`assert_parity`] is opt-in by naming convention, so on its own it can be
+/// The label check in [`assert_labelled_code_fires`] is opt-in by naming convention, so on its own it can be
 /// disarmed rather than satisfied: renaming `"E004 unresolvable ref"` to `"unresolvable ref"`, or
 /// widening [`parity_label`] until it matches nothing, makes the whole suite pass again — the same
 /// silent escape the label check was added to close.

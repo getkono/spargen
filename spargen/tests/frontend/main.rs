@@ -1,7 +1,7 @@
 //! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
 //! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
 //! `generate`. Check/generate parity is a property of the harness rather than a remark about one
-//! case: every description `generate`, `generate_with_code` or a multi-file helper runs is also run
+//! case: every description any fixture runs through `generate` (`run_generate`) is also run
 //! through `check`, which must reach the same accept/reject verdict and report the identical
 //! diagnostics, code, pointer and message alike (`oracles::parity_violations`). `PARITY_FIXTURES`
 //! adds a named set a companion test keeps spanning rejections, warnings and clean runs.
@@ -89,15 +89,25 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
     Spec::new(spec).build(out).cargo(CargoIntegration::Off)
 }
 
-/// `spargen::generate`, then [`hold_run`] on the report and on the module a `Generated` run wrote.
-/// Every fixture here reaches `generate` through this function, so every run any fixture makes is
-/// held to every oracle.
+/// `spargen::generate`, then [`hold_run`] on the report and on the module a `Generated` run wrote,
+/// and [`assert_check_agrees`] against `check` over the same spec, as [`run_generate_and_check`].
+/// Every fixture here reaches `generate` through this function or that one, so every run any
+/// fixture makes is held to every oracle and every description it generates to parity.
 fn run_generate(build: &Build) -> Report {
-    let report = spargen::generate(build);
-    let module = (report.outcome() == Outcome::Generated)
+    run_generate_and_check(build).0
+}
+
+/// [`run_check`] over `build`'s spec, then `spargen::generate` and [`hold_run`] on its report and
+/// on the module a `Generated` run wrote, holding the pair to [`assert_check_agrees`]. Returns
+/// `(generate, check)`.
+fn run_generate_and_check(build: &Build) -> (Report, Report) {
+    let checked = run_check(build.spec());
+    let generated = spargen::generate(build);
+    let module = (generated.outcome() == Outcome::Generated)
         .then(|| std::fs::read_to_string(build.output()).unwrap_or_default());
-    hold_run(&report, build.spec(), module.as_deref());
-    report
+    hold_run(&generated, build.spec(), module.as_deref());
+    assert_check_agrees(&generated, &checked);
+    (generated, checked)
 }
 
 /// `spargen::check`, then [`hold_run`] on the report, as [`run_generate`].
@@ -558,10 +568,9 @@ fn generate_and_check_dir(dir: &camino::Utf8Path, root: &str) -> (Report, Report
 /// writes several files, or sets an option, gets the same parity check as one written inline.
 fn generate_and_check_spec(spec: Spec) -> (Report, Report, String) {
     let out = spec.path().with_file_name("client.rs");
-    let checked = run_check(&spec);
-    let generated = run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off));
+    let (generated, checked) =
+        run_generate_and_check(&spec.build(out.clone()).cargo(CargoIntegration::Off));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    assert_check_agrees(&generated, &checked);
     (generated, checked, code)
 }
 
