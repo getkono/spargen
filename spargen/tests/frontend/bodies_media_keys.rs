@@ -1179,7 +1179,7 @@ fn w014_a_suffix_range_listed_after_a_sendable_request_sibling_is_withheld() {
                 "`{sibling}` through {entry}: {report:#?}"
             );
             assert_eq!(
-                messages_with_code(&report, Code::AlternativeMediaIgnored),
+                messages_for(&report, Code::AlternativeMediaIgnored),
                 [expected.as_str()],
                 "`{sibling}` through {entry}: {report:#?}"
             );
@@ -1203,7 +1203,7 @@ fn w014_every_suffix_range_beside_a_sendable_request_sibling_is_withheld() {
             "{report:#?}"
         );
         assert_eq!(
-            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            messages_for(&report, Code::AlternativeMediaIgnored),
             [
                 "`application/json` is selected; the alternative media type(s) \
                  `application/*+json`, `application/*+json-seq` are not"
@@ -1224,7 +1224,7 @@ fn e009_a_suffix_range_beside_only_an_unclassified_request_sibling_is_a_media_ra
     for report in [generate(&spec), check(&spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
-            messages_with_code(&report, Code::UnsupportedMediaType)
+            messages_for(&report, Code::UnsupportedMediaType)
                 .iter()
                 .any(|message| message
                     .starts_with("media type `application/*+json` is a media range")),
@@ -1249,7 +1249,7 @@ fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itsel
             !has_code(&report, Code::AlternativeMediaIgnored),
             "{report:#?}"
         );
-        let unsupported = messages_with_code(&report, Code::UnsupportedMediaType);
+        let unsupported = messages_for(&report, Code::UnsupportedMediaType);
         assert!(
             unsupported
                 .iter()
@@ -1282,7 +1282,7 @@ fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separatel
             "{report:#?}"
         );
         assert_eq!(
-            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            messages_for(&report, Code::AlternativeMediaIgnored),
             [
                 "`application/json` is selected; the alternative media type(s) \
                  `application/xml` are not",
@@ -1320,7 +1320,7 @@ paths:
             "{report:#?}"
         );
         assert_eq!(
-            messages_with_code(&report, Code::UnsupportedMediaType),
+            messages_for(&report, Code::UnsupportedMediaType),
             ["media type `text/plain` requires a string-like or binary response schema"],
             "{report:#?}"
         );
@@ -1348,7 +1348,7 @@ paths:
     for report in [generate(spec), check(spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert_eq!(
-            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            messages_for(&report, Code::AlternativeMediaIgnored),
             ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
             "{report:#?}"
         );
@@ -1371,7 +1371,7 @@ fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
         assert_eq!(
-            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            messages_for(&report, Code::AlternativeMediaIgnored),
             ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
             "{report:#?}"
         );

@@ -9,19 +9,13 @@ use super::*;
 const OPEN_NARROWING_SPEC: &str = include_str!("../e2e/specs/open_narrowing.yaml");
 
 /// `generate` over [`OPEN_NARROWING_SPEC`] with `open_narrowing` set to `open`, through the
-/// harness's [`run_generate`] and [`run_check`], returning the report, the `(code, pointer)` of
-/// each diagnostic, and the emitted module.
+/// harness's [`generate_spec_with_code`], returning the report, the `(code, pointer)` of each
+/// diagnostic, and the emitted module.
 fn generate_narrowing(open: bool) -> (Report, Vec<(&'static str, String)>, String) {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = write_spec(temp.path(), "problems.yaml", OPEN_NARROWING_SPEC);
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let spec = Spec::new(spec_path).open_narrowing(open);
-    let report = run_generate(&spec.clone().build(out.clone()).cargo(CargoIntegration::Off));
+    let (report, code) = generate_spec_with_code(Spec::new(spec_path).open_narrowing(open));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    assert_no_codegen_failure(&report);
-    assert_check_agrees(&report, &run_check(&spec));
-    let code = std::fs::read_to_string(out).unwrap();
-    assert_parseable(&code);
     let reported = report
         .diagnostics()
         .iter()

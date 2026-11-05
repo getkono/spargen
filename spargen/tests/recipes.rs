@@ -31,8 +31,11 @@ use spargen::{Code, Outcome, Report, Spec};
 )]
 #[path = "shared/generate.rs"]
 mod generate;
+#[path = "oracles/readers.rs"]
+mod readers;
 
 use generate::generate_to_string;
+use readers::{alias_target, declared_fields, enum_variants, has_code};
 
 /// Absolute path to a vendored recipe spec (workspace root is one level up from this crate).
 fn recipe_path(name: &str) -> Utf8PathBuf {
@@ -52,10 +55,6 @@ fn check(name: &str) -> Report {
 /// the emitted module text (when generation ran). Output goes to a throwaway tempdir.
 fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
     generate_to_string(Spec::new(recipe_path(name)).carve(carve))
-}
-
-fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics().iter().any(|d| d.code == code)
 }
 
 /// One field of `pub struct ty`: its declared type and the attribute text written above it.
@@ -105,34 +104,6 @@ fn field(text: &str, ty: &str, field: &str) -> Field {
         .find(|(name, _)| name == field)
         .map(|(_, declared)| declared)
         .unwrap_or_else(|| panic!("`{ty}` declares no `{field}` field"))
-}
-
-fn field_names(text: &str, ty: &str) -> Vec<String> {
-    struct_fields(text, ty)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect()
-}
-
-/// The right-hand side of `pub type ty = …;`.
-fn alias_target(text: &str, ty: &str) -> Option<String> {
-    let head = format!("pub type {ty} = ");
-    text.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&head))
-        .map(|rest| rest.trim_end_matches(';').to_owned())
-}
-
-/// The variant declarations of `pub enum ty`, attributes skipped.
-fn enum_variants(text: &str, ty: &str) -> Vec<String> {
-    let head = format!("pub enum {ty} {{");
-    let mut lines = text.lines().map(str::trim).skip_while(|line| *line != head);
-    lines.next();
-    lines
-        .take_while(|line| !line.starts_with('}'))
-        .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
-        .map(|line| line.trim_end_matches(',').to_owned())
-        .collect()
 }
 
 fn error_codes(report: &Report) -> Vec<&'static str> {
@@ -200,7 +171,7 @@ fn utoipa_document_generates_cleanly() {
         "`category` is not nullable: {}",
         category.ty
     );
-    assert_eq!(field_names(&text, "Petcategory"), ["id", "name"]);
+    assert_eq!(declared_fields(&text, "Petcategory"), ["id", "name"]);
     // The control: an optional, non-nullable field refuses a present `null`.
     assert!(
         !field(&text, "Pet", "status").is_nullable_option(),
@@ -208,7 +179,7 @@ fn utoipa_document_generates_cleanly() {
     );
     // `allOf: [$ref Pet, {created_at}]`: one struct with `Pet`'s fields and the inline member's.
     assert_eq!(
-        field_names(&text, "PetWithMeta"),
+        declared_fields(&text, "PetWithMeta"),
         ["id", "name", "tag", "category", "status", "created_at"]
     );
     assert_eq!(
@@ -291,7 +262,7 @@ fn aide_document_generates_with_only_validation_warnings() {
     }
     // The `allOf` flatten: `Item`'s fields plus the inline member's `note`.
     assert_eq!(
-        field_names(&text, "DetailedItem"),
+        declared_fields(&text, "DetailedItem"),
         ["id", "label", "count", "note"]
     );
     // The externally tagged union: one variant per single-key object, each wrapping its payload.

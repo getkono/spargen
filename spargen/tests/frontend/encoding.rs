@@ -1077,7 +1077,7 @@ fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
             "{report:#?}"
         );
         assert_eq!(
-            messages_with_code(&report, Code::UnsupportedMediaType),
+            messages_for(&report, Code::UnsupportedMediaType),
             [
                 "a `multipart/form-data` request body must be an object schema; its properties \
                  are the form parts, so a non-object multipart body is not representable"

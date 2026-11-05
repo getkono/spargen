@@ -679,11 +679,12 @@ mod tests {
         assert!(!diags.has_errors(), "{diags:#?}");
     }
 
-    /// Every invariant failure starts with [`INVARIANT_FAILURE`], and the fuzz harness matches that
-    /// very literal, so its no-invariant-failure oracle sees each one: renaming the prefix here
-    /// without the harness fails this test rather than silently blinding the oracle.
+    /// Every invariant failure starts with [`INVARIANT_FAILURE`], and the shared test oracles match
+    /// that very literal, and every harness that runs the frontend holds its runs to them, so each
+    /// no-invariant-failure oracle sees each one: renaming the prefix here without the oracles, or
+    /// a harness that stops calling them, fails this test rather than silently blinding the oracle.
     #[test]
-    fn the_fuzz_harness_matches_the_prefix_every_invariant_failure_carries() {
+    fn every_harness_matches_the_invariant_failure_prefix() {
         let mut reserved = api_with_header_ty(ty(0));
         reserved.types.insert(TypeDef {
             name_hint: String::new(),
@@ -712,14 +713,24 @@ mod tests {
                 );
             }
         }
-        let harness = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz_frontend.rs"),
-        )
-        .expect("the fuzz harness is readable");
-        let declared = format!("const INVARIANT_FAILURE: &str = \"{INVARIANT_FAILURE}\";");
+        let read = |path: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap_or_else(|error| panic!("{path} is unreadable: {error}"))
+        };
+        let declared = format!("pub const INVARIANT_FAILURE: &str = \"{INVARIANT_FAILURE}\";");
         assert!(
-            harness.contains(&declared),
-            "tests/fuzz_frontend.rs must declare `{declared}`"
+            read("tests/oracles/mod.rs").contains(&declared),
+            "tests/oracles/mod.rs must declare `{declared}`"
         );
+        for harness in [
+            "tests/frontend/main.rs",
+            "tests/fuzz_frontend.rs",
+            "tests/lowering_props.rs",
+        ] {
+            assert!(
+                read(harness).contains("oracles::run_violations("),
+                "{harness} must hold its runs to `oracles::run_violations`"
+            );
+        }
     }
 }
