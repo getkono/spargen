@@ -242,7 +242,37 @@ struct CachedDiagnostic {
     interpretation: Option<u16>,
     /// Persisted rather than re-derived from the code's severity, so a replayed diagnostic makes
     /// the claim the fresh run's diagnostic made.
-    claim: OutcomeClaim,
+    claim: CachedClaim,
+}
+
+/// The cache's copy of an [`OutcomeClaim`], in the kebab-case spelling the public type
+/// serializes as.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CachedClaim {
+    Independent,
+    Rejected,
+    Generated,
+}
+
+impl From<OutcomeClaim> for CachedClaim {
+    fn from(value: OutcomeClaim) -> Self {
+        match value {
+            OutcomeClaim::Independent => Self::Independent,
+            OutcomeClaim::Rejected => Self::Rejected,
+            OutcomeClaim::Generated => Self::Generated,
+        }
+    }
+}
+
+impl From<CachedClaim> for OutcomeClaim {
+    fn from(value: CachedClaim) -> Self {
+        match value {
+            CachedClaim::Independent => Self::Independent,
+            CachedClaim::Rejected => Self::Rejected,
+            CachedClaim::Generated => Self::Generated,
+        }
+    }
 }
 
 impl From<&Diagnostic> for CachedDiagnostic {
@@ -255,7 +285,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
-            claim: value.claim,
+            claim: CachedClaim::from(value.claim),
         }
     }
 }
@@ -272,7 +302,7 @@ impl CachedDiagnostic {
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),
-            claim: self.claim,
+            claim: OutcomeClaim::from(self.claim),
         })
     }
 }
@@ -458,7 +488,12 @@ components:
     fn a_replayed_diagnostic_makes_the_claim_the_fresh_one_made() {
         // A cache hit replays the fresh run's warnings under `Outcome::Cached`. The claim is not
         // re-derived from the code, so one that differs from its severity's survives the replay.
-        for claim in [OutcomeClaim::Independent, OutcomeClaim::Generated] {
+        // The record stores each claim in the spelling the public type serializes as.
+        for (claim, spelling) in [
+            (OutcomeClaim::Independent, "independent"),
+            (OutcomeClaim::Rejected, "rejected"),
+            (OutcomeClaim::Generated, "generated"),
+        ] {
             let fresh = Diagnostic {
                 claim,
                 ..Diagnostic::warning(
@@ -467,7 +502,13 @@ components:
                 )
                 .build()
             };
-            let replayed = CachedDiagnostic::from(&fresh).into_diagnostic().unwrap();
+            let recorded = serde_json::to_value(CachedDiagnostic::from(&fresh)).unwrap();
+            assert_eq!(recorded["claim"], spelling);
+            assert_eq!(recorded["claim"], serde_json::to_value(claim).unwrap());
+            let replayed = serde_json::from_value::<CachedDiagnostic>(recorded)
+                .unwrap()
+                .into_diagnostic()
+                .unwrap();
             assert_eq!(replayed.claim, claim);
         }
     }
