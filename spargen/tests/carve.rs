@@ -893,6 +893,73 @@ fn every_omit_spelling_reaches_the_same_rule() {
     }
 }
 
+#[test]
+fn the_omit_macro_accepts_every_component_kind_spelling_the_parser_accepts() {
+    // Each rule's name is the spelling that wrote its kind, so the expected profile is that name
+    // parsed by `ComponentKind::from_str`, the parser the CLI, `spargen.toml` and `generate_api!`
+    // share.
+    let written = spargen::omit! {
+        components {
+            schema { "schema"; }
+            schemas { "schemas"; }
+            response { "response"; }
+            responses { "responses"; }
+            parameter { "parameter"; }
+            parameters { "parameters"; }
+            request_body { "request_body"; }
+            request_bodies { "request_bodies"; }
+            requestBody { "requestBody"; }
+            requestBodies { "requestBodies"; }
+            header { "header"; }
+            headers { "headers"; }
+            security_scheme { "security_scheme"; }
+            security_schemes { "security_schemes"; }
+            securityScheme { "securityScheme"; }
+            securitySchemes { "securitySchemes"; }
+            path_item { "path_item"; }
+            path_items { "path_items"; }
+            pathItem { "pathItem"; }
+            pathItems { "pathItems"; }
+            media_type { "media_type"; }
+            media_types { "media_types"; }
+            mediaType { "mediaType"; }
+            mediaTypes { "mediaTypes"; }
+        }
+    };
+    let parsed = omit_of(
+        [
+            "schema",
+            "schemas",
+            "response",
+            "responses",
+            "parameter",
+            "parameters",
+            "request_body",
+            "request_bodies",
+            "requestBody",
+            "requestBodies",
+            "header",
+            "headers",
+            "security_scheme",
+            "security_schemes",
+            "securityScheme",
+            "securitySchemes",
+            "path_item",
+            "path_items",
+            "pathItem",
+            "pathItems",
+            "media_type",
+            "media_types",
+            "mediaType",
+            "mediaTypes",
+        ]
+        .into_iter()
+        .map(|token| spargen::OmitRule::component(token.parse().unwrap(), token))
+        .collect(),
+    );
+    assert_eq!(written, parsed);
+}
+
 // --- (c) Literal glob metacharacters in document text -------------------------------------------
 
 /// A path containing `*` is a legal URI path (RFC 3986 lists `*` as a sub-delimiter). Auto-carve

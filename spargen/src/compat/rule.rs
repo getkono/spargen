@@ -101,9 +101,9 @@ impl std::error::Error for UnknownOmitToken {}
 impl std::str::FromStr for ComponentKind {
     type Err = UnknownOmitToken;
 
-    /// Accepts the canonical snake_case plural spelling used by [`omit!`](crate::omit), plus the singular and
-    /// the camelCase OAS key, so a rule reads the same whether it was written in Rust, on the
-    /// command line, or in `spargen.toml`.
+    /// Accepts the canonical snake_case plural spelling, plus the singular and the camelCase OAS
+    /// key, the set [`omit!`](crate::omit) also accepts, so a rule reads the same whether it was
+    /// written in Rust, on the command line, or in `spargen.toml`.
     fn from_str(token: &str) -> Result<Self, Self::Err> {
         Ok(match token {
             "schema" | "schemas" => ComponentKind::Schemas,
@@ -385,9 +385,8 @@ pub enum ComponentKind {
 }
 
 impl ComponentKind {
-    /// One spelling per kind, the snake_case plural [`omit!`](crate::omit) writes, as an
-    /// [`UnknownOmitToken`] lists them; `FromStr` also accepts the singular and the camelCase OAS
-    /// key.
+    /// One spelling per kind, the snake_case plural, as an [`UnknownOmitToken`] lists them;
+    /// `FromStr` and [`omit!`](crate::omit) also accept the singular and the camelCase OAS key.
     pub(crate) const CANONICAL: &'static [&'static str] = &[
         "schemas",
         "responses",
@@ -415,6 +414,11 @@ impl ComponentKind {
 }
 
 /// Build a compatibility omit profile (exact or glob rules).
+///
+/// A component kind inside `components { … }` takes every spelling [`ComponentKind`]'s `FromStr`
+/// accepts — the snake_case plural, the singular, and the camelCase OAS key — so
+/// `schema { "Legacy"; }` and `requestBodies { "Legacy"; }` write the same rules as `schemas` and
+/// `request_bodies`.
 #[macro_export]
 macro_rules! omit {
     () => {
@@ -484,38 +488,35 @@ macro_rules! omit {
         $crate::omit!(@paths $omit; $($rest)*);
     }};
     (@components $omit:ident;) => {};
-    (@components $omit:ident; schemas { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::Schemas; $($names)*);
+    (@components $omit:ident; $kind:ident { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::omit!(@kind $kind); $($names)*);
         $crate::omit!(@components $omit; $($rest)*);
     }};
-    (@components $omit:ident; responses { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::Responses; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; parameters { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::Parameters; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; request_bodies { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::RequestBodies; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; headers { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::Headers; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; security_schemes { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::SecuritySchemes; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; path_items { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::PathItems; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
-    (@components $omit:ident; media_types { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::omit!(@component_names $omit; $crate::ComponentKind::MediaTypes; $($names)*);
-        $crate::omit!(@components $omit; $($rest)*);
-    }};
+    // The spellings `ComponentKind::from_str` accepts, one arm each.
+    (@kind schema) => { $crate::ComponentKind::Schemas };
+    (@kind schemas) => { $crate::ComponentKind::Schemas };
+    (@kind response) => { $crate::ComponentKind::Responses };
+    (@kind responses) => { $crate::ComponentKind::Responses };
+    (@kind parameter) => { $crate::ComponentKind::Parameters };
+    (@kind parameters) => { $crate::ComponentKind::Parameters };
+    (@kind request_body) => { $crate::ComponentKind::RequestBodies };
+    (@kind request_bodies) => { $crate::ComponentKind::RequestBodies };
+    (@kind requestBody) => { $crate::ComponentKind::RequestBodies };
+    (@kind requestBodies) => { $crate::ComponentKind::RequestBodies };
+    (@kind header) => { $crate::ComponentKind::Headers };
+    (@kind headers) => { $crate::ComponentKind::Headers };
+    (@kind security_scheme) => { $crate::ComponentKind::SecuritySchemes };
+    (@kind security_schemes) => { $crate::ComponentKind::SecuritySchemes };
+    (@kind securityScheme) => { $crate::ComponentKind::SecuritySchemes };
+    (@kind securitySchemes) => { $crate::ComponentKind::SecuritySchemes };
+    (@kind path_item) => { $crate::ComponentKind::PathItems };
+    (@kind path_items) => { $crate::ComponentKind::PathItems };
+    (@kind pathItem) => { $crate::ComponentKind::PathItems };
+    (@kind pathItems) => { $crate::ComponentKind::PathItems };
+    (@kind media_type) => { $crate::ComponentKind::MediaTypes };
+    (@kind media_types) => { $crate::ComponentKind::MediaTypes };
+    (@kind mediaType) => { $crate::ComponentKind::MediaTypes };
+    (@kind mediaTypes) => { $crate::ComponentKind::MediaTypes };
     (@component_names $omit:ident; $kind:expr;) => {};
     (@component_names $omit:ident; $kind:expr; $name:literal; $($rest:tt)*) => {{
         $omit.rules.push($crate::OmitRule::component($kind, $name));
