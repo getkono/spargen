@@ -8,5 +8,7 @@ fn main() {
     .batch_cap(100_000)
     .build(format!("{out}/github.rs"))
     .cargo(spargen::CargoIntegration::Required);
-    spargen::generate(&build).expect_success();
+    let report = spargen::generate(&build);
+    report.emit_cargo_diagnostics();
+    report.expect_success();
 }
