@@ -22,9 +22,16 @@ use spargen::{
     Build, CargoIntegration, Code, Diagnostic, Outcome, OutcomeClaim, Report, Severity, Spec,
 };
 
+#[allow(
+    dead_code,
+    reason = "this suite writes specs through `write_spec` and generates through `run_generate`"
+)]
+#[path = "../shared/generate.rs"]
+mod generate;
 #[path = "../oracles/mod.rs"]
 mod oracles;
 
+use generate::write_spec;
 use oracles::types_module;
 
 mod all_of_arrays;
@@ -230,16 +237,13 @@ fn generate(spec: &str) -> Report {
 /// As [`generate`], but through the `check` entry point (no codegen/emit).
 fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, spec).unwrap();
-    run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
+    run_check(&Spec::new(write_spec(temp.path(), "openapi.yaml", spec)))
 }
 
 /// As [`generate`], also returning the emitted module (empty when nothing was written).
 fn generate_with_code(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
+    let spec_path = write_spec(temp.path(), "openapi.yaml", spec);
     let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
     let report = run_generate(&build(spec_path.clone(), out.clone()));
     let code = std::fs::read_to_string(out).unwrap_or_default();

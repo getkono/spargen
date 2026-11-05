@@ -8,8 +8,7 @@ fn generated_module_compiles_in_oas32_crate_with_query_method() {
     // method (which must emit a real client method) alongside a plain `get`, and must produce a
     // module in an application-owned crate that passes `cargo check` + `cargo clippy -D warnings`.
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, OAS32_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", OAS32_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "oas32_client");

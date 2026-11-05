@@ -38,8 +38,7 @@ components:
 #[test]
 fn a_one_position_tuple_is_a_tuple_on_the_wire() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, TUPLE_ARITY_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", TUPLE_ARITY_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "tuple_client");
@@ -124,8 +123,7 @@ components:
 #[test]
 fn an_array_or_tuple_closing_an_alias_cycle_compiles_and_round_trips() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, ALIAS_CYCLE_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", ALIAS_CYCLE_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "alias_cycle_client");
@@ -285,8 +283,7 @@ components:
 #[test]
 fn a_module_naming_its_deprecated_components_lints_clean() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, DEPRECATED_COMPONENTS_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", DEPRECATED_COMPONENTS_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "deprecated_client");
@@ -356,8 +353,7 @@ components:
 #[test]
 fn an_all_of_beside_a_union_decodes_every_value_both_accept() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, ALL_OF_BESIDE_UNION_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", ALL_OF_BESIDE_UNION_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "all_of_union_client");

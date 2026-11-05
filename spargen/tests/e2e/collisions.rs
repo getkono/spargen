@@ -31,8 +31,7 @@ paths:
 #[test]
 fn an_operation_named_after_a_runtime_type_still_compiles() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, PRELUDE_COLLISION_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", PRELUDE_COLLISION_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "collide_client");
@@ -119,8 +118,7 @@ components:
 #[test]
 fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, TYPES_SCOPE_COLLISION_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", TYPES_SCOPE_COLLISION_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "types_scope_collide");
@@ -203,8 +201,7 @@ paths:
 #[test]
 fn an_operation_named_after_a_client_method_still_compiles() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, CLIENT_METHOD_COLLISION_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", CLIENT_METHOD_COLLISION_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "client_method_collide");
@@ -333,12 +330,11 @@ fn assert_contested_names_won_by_rank(generated: &str) {
 #[test]
 fn operations_whose_type_names_derive_alike_get_distinct_types() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
-        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS),
-    )
-    .unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS),
+    );
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "operation_types_collide");
@@ -347,12 +343,11 @@ fn operations_whose_type_names_derive_alike_get_distinct_types() {
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_contested_names_won_by_rank(&generated);
 
-    let reversed_spec = temp.path().join("reversed.yaml");
-    std::fs::write(
-        &reversed_spec,
-        operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS.into_iter().rev()),
-    )
-    .unwrap();
+    let reversed_spec = write_spec(
+        temp.path(),
+        "reversed.yaml",
+        &operation_type_collision_spec(OPERATION_TYPE_COLLISION_PATHS.into_iter().rev()),
+    );
     let reversed_out = temp.path().join("reversed");
     let report = generate_fixture_crate(
         &reversed_spec,
@@ -442,8 +437,7 @@ paths:
 #[test]
 fn parameters_whose_names_escape_alike_get_distinct_identifiers() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, PARAMETER_COLLISION_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", PARAMETER_COLLISION_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "params_collide");
@@ -593,8 +587,11 @@ paths:
 #[test]
 fn a_keyword_header_or_server_variable_generates_compiling_code() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("api.yaml");
-    std::fs::write(&spec, KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC).unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "api.yaml",
+        KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC,
+    );
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "keyword_ident_client");
@@ -657,8 +654,7 @@ components:
 #[test]
 fn a_gen_named_spec_compiles_under_edition_2024() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("api.yaml");
-    std::fs::write(&spec, GEN_KEYWORD_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "api.yaml", GEN_KEYWORD_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate_in_edition(&spec, &out, "gen_client", "2024");

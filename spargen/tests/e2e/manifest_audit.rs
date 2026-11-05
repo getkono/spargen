@@ -827,8 +827,7 @@ fn assert_audit_clean(preview: &spargen::__private::MacroPreview, layout: &str) 
 #[test]
 fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inheritance() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", EVERY_CAPABILITY_SPEC);
     let (requirements, _) = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
 
     // The set is non-trivial: every conditional crate and feature is in it, so neither layout can

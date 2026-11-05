@@ -11,15 +11,23 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use spargen::{Outcome, Spec};
 
+#[allow(
+    dead_code,
+    reason = "this suite reads only a case's `id`, `path` and `expect`"
+)]
 #[path = "shared/corpus.rs"]
 mod corpus;
+#[allow(
+    dead_code,
+    reason = "this suite generates through `generate_to_string` and `write_spec` alone"
+)]
 #[path = "shared/generate.rs"]
 mod generate;
 #[path = "lowering_props/strategies.rs"]
 mod strategies;
 
 use corpus::{corpus_dir, manifest};
-use generate::generate_to_string;
+use generate::{generate_to_string, write_spec};
 use strategies::{
     category_strategy, key_set_strategy, member_strategy, Category, Member, PropType, KEYS,
 };
@@ -91,21 +99,26 @@ fn assert_configured_generates_identically(
     (report_a.outcome(), module_a)
 }
 
-/// Write `text` to `openapi.yaml` in a fresh directory, returning the directory and the path.
-fn write_spec(text: &str) -> (tempfile::TempDir, Utf8PathBuf) {
-    let src = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(src.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, text).unwrap();
-    (src, spec_path)
-}
-
+/// The inline spec above and two of the specifications `e2e.rs` compiles, each written as its own
+/// root document. The OpenAPI 3.2 specification's constructs (`itemSchema` sequential media, the
+/// `query` method, `additionalOperations`) take code paths `BASIC_SPEC` does not reach, and the date
+/// specification `e2e.rs` round-trips over the wire puts both date formats in every position a
+/// value reaches the wire from.
 #[test]
-fn two_runs_produce_byte_identical_output() {
-    let (_src, spec_path) = write_spec(SPEC);
-    assert_eq!(
-        assert_generates_identically(&spec_path, "inline spec"),
-        Outcome::Generated
-    );
+fn the_inline_and_e2e_specs_are_byte_identical_across_runs() {
+    for (label, text) in [
+        ("inline spec", SPEC),
+        ("e2e OAS32_SPEC", include_str!("e2e/specs/oas32.yaml")),
+        ("e2e DATE_SPEC", include_str!("e2e/specs/date.yaml")),
+    ] {
+        let src = tempfile::tempdir().unwrap();
+        let spec_path = write_spec(src.path(), "openapi.yaml", text);
+        assert_eq!(
+            assert_generates_identically(&spec_path, label),
+            Outcome::Generated,
+            "{label}"
+        );
+    }
 }
 
 /// Every `expect = "generate"` case in `corpus/manifest.toml`: real-world descriptions carry far
@@ -136,36 +149,14 @@ fn e2e_basic_spec() -> &'static str {
     include_str!("e2e/specs/basic.yaml")
 }
 
-/// The OpenAPI 3.2 specification `e2e.rs` compile-checks: its constructs (`itemSchema` sequential
-/// media, the `query` method, `additionalOperations`) take code paths `BASIC_SPEC` does not
-/// reach.
-#[test]
-fn the_e2e_oas32_spec_is_byte_identical_across_runs() {
-    let (_src, spec_path) = write_spec(include_str!("e2e/specs/oas32.yaml"));
-    assert_eq!(
-        assert_generates_identically(&spec_path, "e2e OAS32_SPEC"),
-        Outcome::Generated
-    );
-}
-
-/// The date specification `e2e.rs` round-trips over the wire: both date formats in every
-/// position a value reaches the wire from.
-#[test]
-fn the_e2e_date_spec_is_byte_identical_across_runs() {
-    let (_src, spec_path) = write_spec(include_str!("e2e/specs/date.yaml"));
-    assert_eq!(
-        assert_generates_identically(&spec_path, "e2e DATE_SPEC"),
-        Outcome::Generated
-    );
-}
-
 /// The broad spec under the default options and under every option set away from its default: the
 /// configuration is part of the invariant's input, so a non-default value must be as deterministic
 /// as the default one. Both runs generate, and the two modules must differ, or the options reached
 /// nothing this test could hold.
 #[test]
 fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_default_options() {
-    let (_src, spec_path) = write_spec(e2e_basic_spec());
+    let src = tempfile::tempdir().unwrap();
+    let spec_path = write_spec(src.path(), "openapi.yaml", e2e_basic_spec());
     let (outcome, module) =
         assert_configured_generates_identically(&spec_path, "e2e BASIC_SPEC, options", |spec| {
             spec.uuid(false)
@@ -189,7 +180,8 @@ fn the_e2e_basic_spec_is_byte_identical_across_runs_under_default_and_non_defaul
 /// two previews the spec's directory holds the spec alone.
 #[test]
 fn the_macro_preview_is_byte_identical_across_runs_and_writes_nothing() {
-    let (src, spec_path) = write_spec(e2e_basic_spec());
+    let src = tempfile::tempdir().unwrap();
+    let spec_path = write_spec(src.path(), "openapi.yaml", e2e_basic_spec());
     let config = Spec::new(spec_path);
     let preview = spargen::__private::preview(&config);
     assert_eq!(
@@ -306,7 +298,8 @@ proptest! {
         members in proptest::collection::vec(member_strategy(), 2..=4),
     ) {
         let text = composite_spec(&categories, &closed, &members);
-        let (_src, spec_path) = write_spec(&text);
+        let src = tempfile::tempdir().unwrap();
+        let spec_path = write_spec(src.path(), "openapi.yaml", &text);
         assert_generates_identically(&spec_path, &text);
     }
 }

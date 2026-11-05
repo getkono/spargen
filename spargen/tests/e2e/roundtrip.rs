@@ -18,8 +18,7 @@ use super::*;
 #[test]
 fn union_and_allof_roundtrip_under_proptest() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, ROUNDTRIP_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", ROUNDTRIP_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "roundtrip_client");

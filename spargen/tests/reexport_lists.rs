@@ -26,8 +26,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
-use spargen::{CargoIntegration, Outcome, Spec};
 use syn::{Item, UseTree, Visibility};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::generate_text;
 
 /// One JSON operation and nothing conditional: only the unconditional root re-exports appear.
 const PLAIN_SPEC: &str = r##"
@@ -99,17 +103,7 @@ components:
 
 /// Generate `spec` and parse the emitted module.
 fn generate(spec: &str) -> syn::File {
-    let dir = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(dir.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
-    let out = Utf8PathBuf::from_path_buf(dir.path().join("api.rs")).unwrap();
-    let report = spargen::generate(
-        &Spec::new(spec_path)
-            .build(out.clone())
-            .cargo(CargoIntegration::Off),
-    );
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    syn::parse_file(&std::fs::read_to_string(&out).unwrap()).expect("generated module parses")
+    syn::parse_file(&generate_text(spec, |spec| spec)).expect("generated module parses")
 }
 
 fn full_spec(collisions: &str) -> String {

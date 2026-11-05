@@ -15,8 +15,7 @@ use super::*;
 #[test]
 fn date_and_date_time_reach_the_wire_as_rfc3339() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, DATE_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", DATE_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "dates_client");
@@ -157,10 +156,10 @@ fn a_server_override_sends_the_operation_to_another_host() {
     });
 
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
-        format!(
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &format!(
             r##"
 openapi: 3.1.0
 info: {{ title: Servers, version: 1.0.0 }}
@@ -181,8 +180,7 @@ paths:
         "204": {{ description: No Content }}
 "##
         ),
-    )
-    .unwrap();
+    );
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "servers_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -258,9 +256,9 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
 #[test]
 fn an_operation_url_is_the_url_its_request_is_sent_to() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
         r##"
 openapi: 3.1.0
 info: { title: Urls, version: "1" }
@@ -301,8 +299,7 @@ components:
   securitySchemes:
     key: { type: apiKey, in: query, name: api_key }
 "##,
-    )
-    .unwrap();
+    );
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "urls_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -421,9 +418,9 @@ fn a_url_accessor_leaves_off_the_query_api_key_its_request_sends() {
 #[test]
 fn multipart_rfc6570_parts_carry_literal_delimiters() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
         r##"
 openapi: 3.1.0
 info: { title: Multipart, version: 1.0.0 }
@@ -465,8 +462,7 @@ paths:
       responses:
         "204": { description: No Content }
 "##,
-    )
-    .unwrap();
+    );
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "multipart_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -555,9 +551,9 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
 #[test]
 fn cbor_bodies_reach_the_wire_under_their_own_media_type() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
         r##"
 openapi: 3.1.0
 info: { title: Cbor, version: 1.0.0 }
@@ -605,8 +601,7 @@ paths:
             application/octet-stream:
               schema: { type: string, format: binary }
 "##,
-    )
-    .unwrap();
+    );
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "cbor_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -731,9 +726,9 @@ fn octet_stream_still_leaves_accept_to_the_http_stack() {
 #[test]
 fn an_optional_nullable_json_content_parameter_sends_an_explicit_null() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
         r##"
 openapi: 3.1.0
 info: { title: Nulls, version: 1.0.0 }
@@ -757,8 +752,7 @@ paths:
       responses:
         "204": { description: No Content }
 "##,
-    )
-    .unwrap();
+    );
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "nulls_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");

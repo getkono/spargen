@@ -8,8 +8,12 @@
 //! fixtures for the remaining change kinds sit in one module per surface area under `diff/`, each
 //! reaching the helpers through `use super::*`.
 
-use camino::Utf8PathBuf;
 use spargen::{ChangeKind, DiffReport, Impact, Spec};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::{generate_text, write_spec};
 
 /// Assemble a minimal, valid 3.1 spec from its variable parts:
 /// * `params` — the `get` operation's `parameters:` block (6-space indent), or `""` for none;
@@ -114,12 +118,8 @@ fn diff_with_sides(
     configure_new: impl FnOnce(Spec) -> Spec,
 ) -> (DiffReport, spargen::DiffSides) {
     let temp = tempfile::tempdir().unwrap();
-    let old_path = temp.path().join("old.yaml");
-    let new_path = temp.path().join("new.yaml");
-    std::fs::write(&old_path, old_spec).unwrap();
-    std::fs::write(&new_path, new_spec).unwrap();
-    let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
-    let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
+    let old = configure_old(Spec::new(write_spec(temp.path(), "old.yaml", old_spec)));
+    let new = configure_new(Spec::new(write_spec(temp.path(), "new.yaml", new_spec)));
     spargen::diff(&old, &new).expect("both specs should lower")
 }
 
@@ -389,12 +389,8 @@ paths:
 #[test]
 fn carve_reports_an_uncarvable_side_with_the_carve_drivers_report() {
     let temp = tempfile::tempdir().unwrap();
-    let old_path = temp.path().join("old.yaml");
-    let new_path = temp.path().join("new.yaml");
-    std::fs::write(&old_path, base()).unwrap();
-    std::fs::write(&new_path, UNCARVABLE).unwrap();
-    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()).carve(true);
-    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap())
+    let old = Spec::new(write_spec(temp.path(), "old.yaml", &base())).carve(true);
+    let new = Spec::new(write_spec(temp.path(), "new.yaml", UNCARVABLE))
         .carve(true)
         .batch_cap(1);
 
@@ -430,12 +426,8 @@ const UNLOWERABLE: &str = "not: a valid openapi document\n";
 /// `spargen::diff` over two inline specs that are expected not to lower together.
 fn rejection(old_spec: &str, new_spec: &str) -> spargen::DiffRejection {
     let temp = tempfile::tempdir().unwrap();
-    let old_path = temp.path().join("old.yaml");
-    let new_path = temp.path().join("new.yaml");
-    std::fs::write(&old_path, old_spec).unwrap();
-    std::fs::write(&new_path, new_spec).unwrap();
-    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
-    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+    let old = Spec::new(write_spec(temp.path(), "old.yaml", old_spec));
+    let new = Spec::new(write_spec(temp.path(), "new.yaml", new_spec));
     spargen::diff(&old, &new).expect_err("a side does not lower, so there is no diff")
 }
 
@@ -517,12 +509,12 @@ fn a_rejection_names_exactly_the_sides_that_failed() {
 fn a_successful_diff_keeps_each_sides_warnings() {
     let validated = "        id: { type: integer, minimum: 1 }\n        name: { type: string }\n";
     let temp = tempfile::tempdir().unwrap();
-    let old_path = temp.path().join("old.yaml");
-    let new_path = temp.path().join("new.yaml");
-    std::fs::write(&old_path, base()).unwrap();
-    std::fs::write(&new_path, spec("", "id", validated, "")).unwrap();
-    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
-    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+    let old = Spec::new(write_spec(temp.path(), "old.yaml", &base()));
+    let new = Spec::new(write_spec(
+        temp.path(),
+        "new.yaml",
+        &spec("", "id", validated, ""),
+    ));
 
     let (report, sides) = spargen::diff(&old, &new).expect("both specs should lower");
     assert_eq!(report.bump, Impact::Patch, "{report}");
@@ -722,16 +714,5 @@ const STATUS_STRUCT: &str = "    Status:
 
 /// The module `spec_text` generates, with `open_narrowing` set to `open`.
 fn generated_source(spec_text: &str, open: bool) -> String {
-    let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("spec.yaml");
-    std::fs::write(&spec_path, spec_text).unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
-    let report = spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
-            .open_narrowing(open)
-            .build(out.clone())
-            .cargo(spargen::CargoIntegration::Off),
-    );
-    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
-    std::fs::read_to_string(&out).unwrap()
+    generate_text(spec_text, |spec| spec.open_narrowing(open))
 }

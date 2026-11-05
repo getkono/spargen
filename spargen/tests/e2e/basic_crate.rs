@@ -174,9 +174,8 @@ components:
 #[test]
 fn a_multi_file_json_root_compiles_in_a_consumer_crate() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.json");
-    std::fs::write(&spec, MULTI_FILE_ROOT).unwrap();
-    std::fs::write(temp.path().join("lib.yaml"), MULTI_FILE_LIB).unwrap();
+    let spec = write_spec(temp.path(), "openapi.json", MULTI_FILE_ROOT);
+    write_spec(temp.path(), "lib.yaml", MULTI_FILE_LIB);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "split_client");
@@ -220,8 +219,7 @@ fn a_multi_file_json_root_compiles_in_a_consumer_crate() {
 #[test]
 fn the_macro_preview_emits_the_module_generate_writes() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
     let configure = |spec: Spec| {
         spec.uuid(false)
@@ -236,7 +234,7 @@ fn the_macro_preview_emits_the_module_generate_writes() {
     let written = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
 
     let preview = spargen::__private::preview_for_macro(
-        &configure(Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())),
+        &configure(Spec::new(spec)),
         out.join("Cargo.toml").to_str().unwrap(),
     );
     assert_eq!(
@@ -267,8 +265,7 @@ fn the_macro_preview_emits_the_module_generate_writes() {
 #[test]
 fn generated_module_compiles_in_basic_oas31_crate() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "basic_client");
@@ -300,10 +297,8 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // fixture manifest: `tokio` is the one opt-in dependency — optional, native-only, needed only
     // by the `blocking` feature — and every other dependency is unconditional. `uuid`/`time` are
     // not consumer features at all: generated code names them unconditionally.
-    let (requirements, _) = spargen::requirements(&Spec::new(
-        Utf8PathBuf::from_path_buf(spec.clone()).unwrap(),
-    ))
-    .expect("the basic spec lowers");
+    let (requirements, _) =
+        spargen::requirements(&Spec::new(spec.clone())).expect("the basic spec lowers");
     let opt_in: Vec<_> = requirements
         .dependencies
         .iter()

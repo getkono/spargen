@@ -4,6 +4,15 @@
 use std::path::Path;
 use std::process::Command;
 
+#[allow(
+    dead_code,
+    reason = "this suite writes specs through `write_spec` and generates through the binary"
+)]
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::write_spec;
+
 fn spargen_bin() -> &'static str {
     env!("CARGO_BIN_EXE_spargen")
 }
@@ -305,18 +314,16 @@ fn explain_rejects_an_unresolvable_code() {
 #[test]
 fn check_reports_the_same_for_every_spelling_of_the_spec_path() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(
-        &spec,
+    let absolute = spec_arg(
+        temp.path(),
+        "openapi.yaml",
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n\
          paths:\n  /n:\n    get:\n      operationId: getN\n      responses:\n        '200':\n          \
          description: ok\n          content:\n            application/json: { schema: { $ref: \
          '#/components/schemas/Node' } }\ncomponents:\n  schemas:\n    Node:\n      type: object\n      \
          properties:\n        parent: { $ref: '#/components/schemas/MaybeNode' }\n    MaybeNode:\n      \
          oneOf:\n        - $ref: './openapi.yaml#/components/schemas/Node'\n        - type: 'null'\n",
-    )
-    .unwrap();
-    let absolute = spec.to_str().unwrap().to_owned();
+    );
     for spelling in ["openapi.yaml", "./openapi.yaml", absolute.as_str()] {
         let output = Command::new(spargen_bin())
             .args(["check", spelling])
@@ -395,11 +402,9 @@ paths:
 /// A 3.0 document, which every subcommand that lowers a spec rejects with `E001`.
 const REJECTED: &str = "openapi: 3.0.3\ninfo: { title: Old, version: 1.0.0 }\npaths: {}\n";
 
-/// Write `contents` to `name` in `dir`, returning its path as the `&str` a command line takes.
-fn write_spec(dir: &Path, name: &str, contents: &str) -> String {
-    let path = dir.join(name);
-    std::fs::write(&path, contents).unwrap();
-    path.to_str().unwrap().to_owned()
+/// [`write_spec`], returning the path as the `String` a command line takes.
+fn spec_arg(dir: &Path, name: &str, contents: &str) -> String {
+    write_spec(dir, name, contents).into_string()
 }
 
 /// Run the binary in `dir`, returning its exit status, stdout, and stderr.
@@ -439,8 +444,8 @@ fn outcome_and_codes(report: &serde_json::Value) -> (&str, Vec<&str>) {
 #[test]
 fn diff_prints_its_report_on_stdout_and_exits_zero_on_a_breaking_change_without_the_gate() {
     let temp = tempfile::tempdir().unwrap();
-    let old = write_spec(temp.path(), "old.yaml", TWO_OPERATIONS);
-    let new = write_spec(temp.path(), "new.yaml", ONE_OPERATION);
+    let old = spec_arg(temp.path(), "old.yaml", TWO_OPERATIONS);
+    let new = spec_arg(temp.path(), "new.yaml", ONE_OPERATION);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new]);
     assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
@@ -454,8 +459,8 @@ fn diff_prints_its_report_on_stdout_and_exits_zero_on_a_breaking_change_without_
 #[test]
 fn diff_exit_code_fails_exactly_a_breaking_change() {
     let temp = tempfile::tempdir().unwrap();
-    let two = write_spec(temp.path(), "two.yaml", TWO_OPERATIONS);
-    let one = write_spec(temp.path(), "one.yaml", ONE_OPERATION);
+    let two = spec_arg(temp.path(), "two.yaml", TWO_OPERATIONS);
+    let one = spec_arg(temp.path(), "one.yaml", ONE_OPERATION);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &two, &one, "--exit-code"]);
     assert_eq!(
@@ -492,8 +497,8 @@ fn diff_exit_code_fails_exactly_a_breaking_change() {
 #[test]
 fn diff_json_goes_to_stdout() {
     let temp = tempfile::tempdir().unwrap();
-    let old = write_spec(temp.path(), "old.yaml", TWO_OPERATIONS);
-    let new = write_spec(temp.path(), "new.yaml", ONE_OPERATION);
+    let old = spec_arg(temp.path(), "old.yaml", TWO_OPERATIONS);
+    let new = spec_arg(temp.path(), "new.yaml", ONE_OPERATION);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["diff", &old, &new, "--format", "json"]);
     assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
@@ -512,8 +517,8 @@ fn diff_json_goes_to_stdout() {
 #[test]
 fn diff_exits_one_when_either_spec_fails_to_lower_with_or_without_the_gate() {
     let temp = tempfile::tempdir().unwrap();
-    let good = write_spec(temp.path(), "good.yaml", ONE_OPERATION);
-    let rejected = write_spec(temp.path(), "rejected.yaml", REJECTED);
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let rejected = spec_arg(temp.path(), "rejected.yaml", REJECTED);
 
     for (old, new, side) in [(&rejected, &good, "old"), (&good, &rejected, "new")] {
         for gate in [&[][..], &["--exit-code"][..]] {
@@ -554,7 +559,7 @@ fn diff_exits_one_when_either_spec_fails_to_lower_with_or_without_the_gate() {
 #[test]
 fn check_exits_one_on_a_rejected_spec() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(temp.path(), "openapi.yaml", REJECTED);
+    let spec = spec_arg(temp.path(), "openapi.yaml", REJECTED);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["check", &spec]);
     assert_eq!(status, Some(1), "stdout {stdout} stderr {stderr}");
@@ -629,8 +634,8 @@ fn check_names_the_referenced_file_a_diagnostic_lies_in() {
 #[test]
 fn deps_json_carries_the_dependencies_or_the_rejection_on_stdout() {
     let temp = tempfile::tempdir().unwrap();
-    let good = write_spec(temp.path(), "good.yaml", ONE_OPERATION);
-    let rejected = write_spec(temp.path(), "rejected.yaml", REJECTED);
+    let good = spec_arg(temp.path(), "good.yaml", ONE_OPERATION);
+    let rejected = spec_arg(temp.path(), "rejected.yaml", REJECTED);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["deps", &good, "--format", "json"]);
     assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
@@ -666,8 +671,8 @@ fn deps_json_carries_the_dependencies_or_the_rejection_on_stdout() {
 #[test]
 fn deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr() {
     let temp = tempfile::tempdir().unwrap();
-    let warned = write_spec(temp.path(), "warned.yaml", WARNED);
-    let clean = write_spec(temp.path(), "clean.yaml", ONE_OPERATION);
+    let warned = spec_arg(temp.path(), "warned.yaml", WARNED);
+    let clean = spec_arg(temp.path(), "clean.yaml", ONE_OPERATION);
 
     let (status, stdout, stderr) = spargen(temp.path(), &["deps", &warned]);
     assert_eq!(status, Some(0), "stdout {stdout} stderr {stderr}");
@@ -707,7 +712,7 @@ fn deps_and_diff_print_the_warnings_of_a_successful_run_on_stderr() {
 #[test]
 fn lock_reports_what_it_wrote_and_exits_zero() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(temp.path(), "openapi.yaml", ONE_OPERATION);
+    let spec = spec_arg(temp.path(), "openapi.yaml", ONE_OPERATION);
     let lock = temp.path().join("spargen.lock");
 
     let (status, stdout, stderr) = spargen(temp.path(), &["lock", &spec]);

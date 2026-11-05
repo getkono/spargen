@@ -6,9 +6,7 @@ use super::*;
 /// The `[dependencies]` block `spargen deps` prints for an inline spec.
 fn manifest_block(spec: &str) -> String {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
-    spargen::requirements(&Spec::new(spec_path))
+    spargen::requirements(&Spec::new(write_spec(temp.path(), "openapi.yaml", spec)))
         .expect("spec lowers")
         .0
         .manifest_block()
@@ -31,8 +29,7 @@ paths:
       responses: { "204": { description: ok } }
 "#;
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
+    let spec_path = write_spec(temp.path(), "openapi.yaml", spec);
 
     let (requirements, report) =
         spargen::requirements(&Spec::new(spec_path.clone())).expect("spec lowers");
