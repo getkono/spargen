@@ -25,7 +25,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::diag::Diagnostic;
 use crate::Code;
 
-use check::{check_dependency, DependencyCheck, WorkspaceOrigin};
+use check::{
+    check_dependency, reads_underscore_default_features, DependencyCheck, WorkspaceOrigin,
+};
 #[cfg(test)]
 pub(crate) use integration::rerun_if_changed_lines;
 pub(crate) use integration::{build_script_manifest, cargo_environment, print_rerun};
@@ -119,6 +121,7 @@ fn audit_in(
         },
     };
 
+    let underscore_default_features = reads_underscore_default_features(&manifest, workspace);
     for required in requirement_table(requirements) {
         if let Some(feature) = required.conditional {
             if !declares_feature(&manifest, feature) {
@@ -140,6 +143,7 @@ fn audit_in(
                 require_optional: required.optional,
                 origin,
                 audited,
+                underscore_default_features,
             },
             target,
             &mut diagnostics,

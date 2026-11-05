@@ -113,7 +113,7 @@ pub(super) enum Subject<'t> {
 }
 
 impl<'t> Subject<'t> {
-    pub(super) fn triple(self) -> &'t str {
+    fn triple(self) -> &'t str {
         match self {
             Self::Build(build) => build.triple(),
             Self::Builtin(info) => info.triple.as_str(),

@@ -26,6 +26,9 @@ pub(super) struct DependencyCheck<'a> {
     pub(super) origin: WorkspaceOrigin<'a>,
     /// The absolutized consumer manifest the audit read, which every diagnostic names.
     pub(super) audited: &'a Utf8Path,
+    /// Whether Cargo reads the underscore `default_features` spelling in the audited manifest
+    /// ([`reads_underscore_default_features`]), decided once per manifest.
+    pub(super) underscore_default_features: bool,
 }
 
 /// What the workspace lookup found, for the one diagnostic that has to explain itself.
@@ -64,16 +67,7 @@ pub(super) fn check_dependency(
                 diagnostics.push(diagnostic(check.audited, missing_message(check.dependency)));
                 return;
             };
-            let underscore = reads_underscore_default_features(manifest, workspace);
-            check_declaration(
-                workspace,
-                declaration,
-                &check,
-                true,
-                underscore,
-                "",
-                diagnostics,
-            );
+            check_declaration(workspace, declaration, &check, "", diagnostics);
         }
         Placement::NativeTarget => {
             check_native_target(manifest, workspace, &check, target, diagnostics);
@@ -86,6 +80,12 @@ pub(super) fn missing_message(dependency: Dependency) -> String {
         "generated client requires `{}`; add `{}` with version `{}`",
         dependency.name, dependency.name, dependency.floor
     )
+}
+
+/// The message for a required Cargo feature that `dependency`'s declarations leave off, ending
+/// with `context`.
+fn missing_feature_message(feature: &str, dependency: &str, context: &str) -> String {
+    format!("generated client requires Cargo feature `{feature}` on `{dependency}`{context}")
 }
 
 /// Locate and check a dependency that belongs in a native-only target table — the blocking
@@ -258,22 +258,13 @@ fn check_native_target(
     let several = counting.len() > 1;
     let mut resolved = Vec::new();
     let mut all_resolved = true;
-    let underscore = reads_underscore_default_features(manifest, workspace);
     for (table, declaration, applies) in &counting {
         let location = if several {
             format!(" (in {table})")
         } else {
             String::new()
         };
-        match check_declaration(
-            workspace,
-            declaration,
-            check,
-            false,
-            underscore,
-            &location,
-            diagnostics,
-        ) {
+        match check_declaration(workspace, declaration, check, &location, diagnostics) {
             Some(features) => resolved.push((features, applies)),
             None => all_resolved = false,
         }
@@ -293,8 +284,8 @@ fn check_native_target(
         if let Some(index) = missing_on {
             let context = if several {
                 let triple = match target {
-                    TargetContext::Build(build) => build.triple().to_owned(),
-                    TargetContext::Unknown => domain[index].triple.to_string(),
+                    TargetContext::Build(build) => build.triple(),
+                    TargetContext::Unknown => domain[index].triple.as_str(),
                 };
                 format!(" (not enabled by the tables that apply to `{triple}`)")
             } else {
@@ -302,15 +293,19 @@ fn check_native_target(
             };
             diagnostics.push(diagnostic(
                 check.audited,
-                format!("generated client requires Cargo feature `{feature}` on `{name}`{context}"),
+                missing_feature_message(feature, name, &context),
             ));
         }
     }
 }
 
 /// The rules every declaration that counts is held to: `workspace = true` resolution, version,
-/// features (when `check_features`), `default-features` (also spelled `default_features` when
-/// `underscore`), `optional` both ways, and renames. `location` is appended to each message.
+/// features, `default-features` (also spelled `default_features` where Cargo reads it),
+/// `optional` both ways, and renames. `location` is appended to each message.
+///
+/// A `[dependencies]` declaration's features are checked here. A native-target one's are not:
+/// Cargo unifies them across every table that applies, so [`check_native_target`] judges them on
+/// that union, from the feature set this returns.
 ///
 /// Returns the declaration's resolved feature set, or `None` when its inheritance could not be
 /// resolved (already reported).
@@ -318,12 +313,11 @@ fn check_declaration<'v>(
     workspace: Option<&'v toml::Value>,
     declaration: &'v toml::Value,
     check: &DependencyCheck<'_>,
-    check_features: bool,
-    underscore: bool,
     location: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<BTreeSet<&'v str>> {
     let dependency = check.dependency;
+    let underscore = check.underscore_default_features;
     let inherited = declaration
         .as_table()
         .and_then(|table| table.get("workspace"))
@@ -388,15 +382,12 @@ fn check_declaration<'v>(
 
     let mut features = declaration_features(workspace_declaration.unwrap_or(declaration));
     features.extend(declaration_features(declaration));
-    if check_features {
+    if check.placement == Placement::Dependencies {
         for feature in check.features {
             if !features.contains(*feature) {
                 diagnostics.push(diagnostic(
                     check.audited,
-                    format!(
-                        "generated client requires Cargo feature `{feature}` on `{}`{location}",
-                        dependency.name
-                    ),
+                    missing_feature_message(feature, dependency.name, location),
                 ));
             }
         }
@@ -500,7 +491,7 @@ fn declaration_default_features(value: &toml::Value, underscore: bool) -> Option
 /// `[workspace.package]` one under `edition.workspace = true`, and 2015 when none is stated —
 /// also for a `[workspace.dependencies]` entry, which Cargo judges by the inheriting member's
 /// edition. An edition that does not resolve to a known year is treated as 2024 or later.
-fn reads_underscore_default_features(
+pub(super) fn reads_underscore_default_features(
     manifest: &toml::Value,
     workspace: Option<&toml::Value>,
 ) -> bool {

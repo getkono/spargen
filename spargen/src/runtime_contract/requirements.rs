@@ -8,16 +8,16 @@ use serde::{Deserialize, Serialize};
 use crate::ir::{Api, MediaType, Prim, TypeKind};
 use crate::Spec;
 
-pub(super) const BYTES: Dependency = Dependency::stable("bytes", "1.12.1", 2);
-pub(super) const FUTURES_CORE: Dependency = Dependency::unstable("futures-core", "0.3.32", 0, 4);
-pub(super) const REQWEST: Dependency = Dependency::unstable("reqwest", "0.12.28", 0, 13);
-pub(super) const SECRECY: Dependency = Dependency::unstable("secrecy", "0.10.3", 0, 11);
-pub(super) const SERDE: Dependency = Dependency::stable("serde", "1.0.229", 2);
-pub(super) const SERDE_JSON: Dependency = Dependency::stable("serde_json", "1.0.151", 2);
-pub(super) const QUICK_XML: Dependency = Dependency::unstable("quick-xml", "0.41.0", 0, 42);
-pub(super) const UUID: Dependency = Dependency::stable("uuid", "1.24.0", 2);
-pub(super) const TIME: Dependency = Dependency::unstable("time", "0.3.55", 0, 4);
-pub(super) const TOKIO: Dependency = Dependency::stable("tokio", "1.53.1", 2);
+pub(super) const BYTES: Dependency = Dependency::new("bytes", "1.12.1", 2, 0);
+pub(super) const FUTURES_CORE: Dependency = Dependency::new("futures-core", "0.3.32", 0, 4);
+pub(super) const REQWEST: Dependency = Dependency::new("reqwest", "0.12.28", 0, 13);
+pub(super) const SECRECY: Dependency = Dependency::new("secrecy", "0.10.3", 0, 11);
+pub(super) const SERDE: Dependency = Dependency::new("serde", "1.0.229", 2, 0);
+pub(super) const SERDE_JSON: Dependency = Dependency::new("serde_json", "1.0.151", 2, 0);
+pub(super) const QUICK_XML: Dependency = Dependency::new("quick-xml", "0.41.0", 0, 42);
+pub(super) const UUID: Dependency = Dependency::new("uuid", "1.24.0", 2, 0);
+pub(super) const TIME: Dependency = Dependency::new("time", "0.3.55", 0, 4);
+pub(super) const TOKIO: Dependency = Dependency::new("tokio", "1.53.1", 2, 0);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Dependency {
@@ -28,16 +28,10 @@ pub(super) struct Dependency {
 }
 
 impl Dependency {
-    const fn stable(name: &'static str, floor: &'static str, ceiling_major: u64) -> Self {
-        Self {
-            name,
-            floor,
-            ceiling_major,
-            ceiling_minor: 0,
-        }
-    }
-
-    const fn unstable(
+    /// A dependency tested from `floor` up to, not including, `ceiling_major.ceiling_minor.0`:
+    /// the next major for a crate at 1.0 or later (`ceiling_minor` 0), the next minor of a `0.x`
+    /// line.
+    const fn new(
         name: &'static str,
         floor: &'static str,
         ceiling_major: u64,
