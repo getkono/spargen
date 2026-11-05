@@ -55,6 +55,21 @@ mod tests {
         assert_eq!(value, 4);
     }
 
+    /// `enable_all` wires up the timer driver: a future that waits on tokio's clock completes,
+    /// where a runtime without it would panic on the first poll.
+    #[test]
+    fn block_on_drives_a_timer_future() {
+        let runtime = BlockingRuntime::new().expect("current-thread runtime builds");
+        let wait = std::time::Duration::from_millis(5);
+        let started = std::time::Instant::now();
+        let value = runtime.block_on(async {
+            tokio::time::sleep(wait).await;
+            7
+        });
+        assert_eq!(value, 7);
+        assert!(started.elapsed() >= wait);
+    }
+
     #[test]
     fn block_on_is_reusable_across_calls() {
         // One owned runtime drives many operation futures over the client's lifetime.

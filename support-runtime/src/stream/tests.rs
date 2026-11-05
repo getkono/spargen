@@ -1,13 +1,15 @@
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use reqwest::{Method, Request};
+use reqwest::Method;
 
 use super::{
     next_frame, EventStream, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
     SseMetadata,
 };
-use crate::{ClientCore, Error, ExecuteFuture, HttpBackend};
+use crate::tests::{
+    core, poll_ready, poll_to_completion, Chunk, Chunks, PendingOnce, Reply, SequenceBackend,
+};
+use crate::{ClientCore, Error};
 
 /// Frame every item currently extractable from `buffer` under `framing`, stopping at the first
 /// `NeedMore` (partial frame retained) or `Done` (terminated). Returns the framed payloads as
@@ -218,11 +220,18 @@ fn sse_strips_the_trailing_cr_from_an_unterminated_last_line_at_eof() {
     assert!(buf.is_empty());
 }
 
+/// Framing yields the raw bytes and `deserialize_item` decodes them the way `next` does: a
+/// well-formed frame is the value, and a malformed one is a `Decode` error, not a silent skip.
 #[test]
-fn malformed_json_frame_surfaces_as_a_decode_error() {
-    // Framing yields the raw bytes; the async `next` deserializes them. Deserialize the framed
-    // payload the same way `next` does and assert a malformed frame is a `Decode` error, not a
-    // silent skip.
+fn a_framed_payload_decodes_or_is_a_decode_error() {
+    let decoded: Result<serde_json::Value, Error<std::convert::Infallible>> =
+        super::deserialize_item(
+            reqwest::StatusCode::OK,
+            &reqwest::header::HeaderMap::new(),
+            br#"{"a":1}"#,
+        );
+    assert_eq!(decoded.unwrap(), serde_json::json!({"a": 1}));
+
     let mut buf = b"not json\n".to_vec();
     let (items, _) = drain(&mut buf, Framing::Ndjson, false);
     assert_eq!(items, vec!["not json"]);
@@ -241,27 +250,39 @@ fn malformed_json_frame_surfaces_as_a_decode_error() {
     ));
 }
 
+/// A bare `\r` is not a line terminator to the SSE framer: only `\n` ends a line, and one `\r`
+/// before it is trimmed. So `\r` inside a line stays in the field value, and `\r\r` ends no
+/// event. This pins the framer's present behaviour, not the SSE specification's, which also
+/// accepts a bare `\r` as a line ending.
 #[test]
-fn well_formed_json_frame_deserializes() {
-    let decoded: Result<serde_json::Value, Error<std::convert::Infallible>> =
-        super::deserialize_item(
-            reqwest::StatusCode::OK,
-            &reqwest::header::HeaderMap::new(),
-            br#"{"a":1}"#,
-        );
-    assert_eq!(decoded.unwrap(), serde_json::json!({"a": 1}));
+fn a_bare_cr_does_not_terminate_an_sse_line() {
+    let mut buf = b"data: 1\rdata: 2\n\n".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::Sse, false),
+        FramePoll::Item {
+            payload: b"1\rdata: 2".to_vec(),
+            metadata: SseMetadata::default(),
+        }
+    );
+    assert!(buf.is_empty());
+
+    let mut buf = b"data: 1\r\r".to_vec();
+    assert_eq!(
+        next_frame(&mut buf, Framing::Sse, false),
+        FramePoll::NeedMore
+    );
+    assert_eq!(buf, b"data: 1\r\r");
 }
 
-// The tests below drive the async `next` await-loop poll-once (noop waker, no async runtime),
+// The tests below drive the async `next` await-loop with a noop waker and no async runtime,
 // proving it threads the pure framing correctly over an in-memory `reqwest::Response`.
-use crate::tests::poll_ready;
 
 fn response(body: &str) -> reqwest::Response {
     response_with_status(200, body)
 }
 
 /// Every synthetic initial response carries `x-response: initial`, and every response a
-/// [`SequenceBackend`] returns carries `x-response: reconnected`, so a test can tell which
+/// [`SequenceBackend`] returns carries `x-response: backend`, so a test can tell which
 /// response's headers a `Decode` error reports.
 fn response_with_status(status: u16, body: &str) -> reqwest::Response {
     reqwest::Response::from(
@@ -273,55 +294,21 @@ fn response_with_status(status: u16, body: &str) -> reqwest::Response {
     )
 }
 
-#[derive(Debug)]
-struct SequenceBackend {
-    responses: Mutex<VecDeque<(u16, String)>>,
-    headers: Mutex<Vec<(Option<String>, Option<String>)>>,
+/// The `Last-Event-ID` and `Cookie` headers of every request `backend` was handed, in order.
+fn replay_headers(backend: &SequenceBackend) -> Vec<(Option<String>, Option<String>)> {
+    backend
+        .header("last-event-id")
+        .into_iter()
+        .zip(backend.header("cookie"))
+        .collect()
 }
 
-impl SequenceBackend {
-    fn new(responses: impl IntoIterator<Item = (u16, &'static str)>) -> Self {
-        Self {
-            responses: Mutex::new(
-                responses
-                    .into_iter()
-                    .map(|(status, body)| (status, body.to_owned()))
-                    .collect(),
-            ),
-            headers: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl HttpBackend for SequenceBackend {
-    fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-        let last_event_id = request
-            .headers()
-            .get("last-event-id")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let cookie = request
-            .headers()
-            .get(reqwest::header::COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        self.headers.lock().unwrap().push((last_event_id, cookie));
-        let (status, body) = self.responses.lock().unwrap().pop_front().unwrap();
-        Box::pin(async move {
-            Ok(reqwest::Response::from(
-                http::Response::builder()
-                    .status(status)
-                    .header("x-response", "reconnected")
-                    .body(body)
-                    .expect("valid synthetic response"),
-            ))
-        })
-    }
-}
-
+/// Accepts a reconnect while `attempt` is below `max_attempts`, recording what each call saw. Its
+/// wait is ready at once, or, with `pending_wait`, answers `Pending` once first.
 #[derive(Default)]
 struct ImmediateReconnect {
     max_attempts: u32,
+    pending_wait: bool,
     seen: Mutex<Vec<(u32, &'static str, Option<std::time::Duration>)>>,
 }
 
@@ -340,12 +327,29 @@ impl ReconnectPolicy for ImmediateReconnect {
             .lock()
             .unwrap()
             .push((attempt, reason, server_delay));
-        (attempt < self.max_attempts).then(|| Box::pin(async {}) as ReconnectWait)
+        let pending_wait = self.pending_wait;
+        (attempt < self.max_attempts).then(|| {
+            if pending_wait {
+                Box::pin(PendingOnce::new(async {})) as ReconnectWait
+            } else {
+                Box::pin(async {}) as ReconnectWait
+            }
+        })
     }
 }
 
 fn reconnectable_stream(
     initial_body: &str,
+    backend: Arc<SequenceBackend>,
+    policy: Arc<ImmediateReconnect>,
+) -> EventStream<serde_json::Value> {
+    reconnectable_stream_over(response(initial_body), backend, policy)
+}
+
+/// A `SseJsonData` stream over `initial` whose request carries a cookie and whose reconnects go
+/// to `backend` under `policy`.
+fn reconnectable_stream_over(
+    initial: reqwest::Response,
     backend: Arc<SequenceBackend>,
     policy: Arc<ImmediateReconnect>,
 ) -> EventStream<serde_json::Value> {
@@ -356,12 +360,7 @@ fn reconnectable_stream(
         .header(reqwest::header::COOKIE, "session=secret")
         .build()
         .unwrap();
-    let stream = EventStream::new_reconnectable(
-        response(initial_body),
-        Framing::SseJsonData,
-        core,
-        Some(request),
-    );
+    let stream = EventStream::new_reconnectable(initial, Framing::SseJsonData, core, Some(request));
     match stream.with_reconnect(policy) {
         Ok(stream) => stream,
         Err(error) => panic!("reconnect should be available: {error}"),
@@ -370,7 +369,7 @@ fn reconnectable_stream(
 
 #[test]
 fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
-    let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":2}\n\n")]));
+    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -390,7 +389,7 @@ fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
         serde_json::json!({"seq": 2})
     );
     assert_eq!(
-        backend.headers.lock().unwrap().as_slice(),
+        replay_headers(&backend),
         &[(Some("evt-1".to_owned()), Some("session=secret".to_owned()))]
     );
     assert_eq!(
@@ -405,7 +404,7 @@ fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
 /// server; `last_event_id` keeps reporting the id the server sent.
 #[test]
 fn an_unsendable_sse_id_reconnects_without_last_event_id() {
-    let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":2}\n\n")]));
+    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -439,7 +438,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
         other => panic!("expected the reconnected item, got {other:?}"),
     }
     assert_eq!(
-        backend.headers.lock().unwrap().as_slice(),
+        replay_headers(&backend),
         &[(None, Some("session=secret".to_owned()))]
     );
     assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
@@ -449,7 +448,7 @@ fn an_unsendable_sse_id_reconnects_without_last_event_id() {
 /// empty header, nor the server's earlier id, nor the one the original request carried.
 #[test]
 fn an_empty_sse_id_reconnects_without_last_event_id() {
-    let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":3}\n\n")]));
+    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":3}\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -488,7 +487,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
         other => panic!("expected the reconnected item, got {other:?}"),
     }
     assert_eq!(
-        backend.headers.lock().unwrap().as_slice(),
+        replay_headers(&backend),
         &[(None, Some("session=secret".to_owned()))]
     );
     assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
@@ -496,7 +495,7 @@ fn an_empty_sse_id_reconnects_without_last_event_id() {
 
 #[test]
 fn declined_reconnect_failure_preserves_the_original_error_variant() {
-    let backend = Arc::new(SequenceBackend::new([(503, "unavailable")]));
+    let backend = SequenceBackend::new([Reply::status(503, "unavailable")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -555,7 +554,7 @@ fn next_yields_a_decode_error_for_a_malformed_item() {
 /// not the initial one's: the frame was read from the new body.
 #[test]
 fn a_decode_error_after_a_reconnect_reports_the_reconnected_status_and_headers() {
-    let backend = Arc::new(SequenceBackend::new([(203, "data: not json\n\n")]));
+    let backend = SequenceBackend::new([Reply::status(203, "data: not json\n\n")]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 1,
         ..ImmediateReconnect::default()
@@ -571,7 +570,7 @@ fn a_decode_error_after_a_reconnect_reports_the_reconnected_status_and_headers()
             status, headers, ..
         }) => {
             assert_eq!(status.as_u16(), 203);
-            assert_eq!(headers.get("x-response").unwrap(), "reconnected");
+            assert_eq!(headers.get("x-response").unwrap(), "backend");
         }
         other => panic!("expected a Decode error from the reconnected body, got {other:?}"),
     }
@@ -598,11 +597,11 @@ fn next_resumes_after_a_decode_error() {
 /// then: a frame that fails to decode leaves the count where it was.
 #[test]
 fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_error() {
-    let backend = Arc::new(SequenceBackend::new([
-        (200, "data: {\"seq\":2}\n\n"),
-        (200, "data: not json\n\n"),
-        (200, ""),
-    ]));
+    let backend = SequenceBackend::new([
+        Reply::status(200, "data: {\"seq\":2}\n\n"),
+        Reply::status(200, "data: not json\n\n"),
+        Reply::status(200, ""),
+    ]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 2,
         ..ImmediateReconnect::default()
@@ -642,7 +641,7 @@ fn the_reconnect_attempt_resets_after_a_decoded_item_and_not_after_a_decode_erro
 #[test]
 fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
     let policy: Arc<dyn ReconnectPolicy> = Arc::new(ImmediateReconnect::default());
-    let core = ClientCore::new("https://example.com").unwrap();
+    let core = core();
     for stream in [
         EventStream::<serde_json::Value>::new(response(""), Framing::Sse),
         EventStream::new_reconnectable(response(""), Framing::Sse, core, None),
@@ -662,7 +661,7 @@ fn with_reconnect_refuses_a_stream_that_holds_no_replayable_request() {
 /// wait elapses, the stream yields that as `RequestConstruction`, sends nothing, and ends.
 #[test]
 fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
-    let backend = Arc::new(SequenceBackend::new([]));
+    let backend = SequenceBackend::statuses([200]);
     let policy = Arc::new(ImmediateReconnect {
         max_attempts: 5,
         ..ImmediateReconnect::default()
@@ -690,7 +689,7 @@ fn a_reconnect_whose_request_cannot_be_cloned_fails_once_and_ends_the_stream() {
         other => panic!("expected RequestConstruction, got {other:?}"),
     }
     assert!(poll_ready(stream.next()).is_none());
-    assert!(backend.headers.lock().unwrap().is_empty());
+    assert_eq!(backend.calls(), 0);
     assert_eq!(policy.seen.lock().unwrap().as_slice(), &[(0, "eof", None)]);
 }
 
@@ -817,7 +816,7 @@ fn sse_frames_the_event_behind_one_that_dispatches_nothing() {
 /// before any event has been read.
 #[test]
 fn a_reconnectable_stream_starts_from_the_requests_last_event_id() {
-    let core = ClientCore::new("https://example.com").unwrap();
+    let core = core();
     let request = core
         .http()
         .request(Method::GET, "https://example.com/events")
@@ -907,7 +906,7 @@ fn bounded_stream(
     max_stream_frame: usize,
     policy: Arc<ImmediateReconnect>,
 ) -> EventStream<serde_json::Value> {
-    let backend = Arc::new(SequenceBackend::new([(200, "{\"a\":2}\n")]));
+    let backend = SequenceBackend::new([Reply::status(200, "{\"a\":2}\n")]);
     let mut core = ClientCore::with_backend(backend, "https://example.com").unwrap();
     core.config_mut().max_stream_frame = max_stream_frame;
     core.config_mut().max_error_body = 4;
@@ -1037,18 +1036,140 @@ fn max_stream_frame_defaults_to_sixteen_mebibytes() {
     assert_eq!(stream.max_frame, 16 * 1024 * 1024);
 }
 
-/// A body that is ready with each of its chunks in turn, then ends.
-struct Chunks(VecDeque<bytes::Bytes>);
-
-impl futures_core::Stream for Chunks {
-    type Item = Result<bytes::Bytes, std::convert::Infallible>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(self.get_mut().0.pop_front().map(Ok))
+/// A frame within `max_stream_frame` that fails to decode is reported whole: `max_error_body`
+/// does not cap it, and `truncated` stays unset, as `ClientConfig::max_stream_frame` documents.
+#[test]
+fn a_per_frame_decode_error_retains_the_whole_frame_past_max_error_body() {
+    let frame = "{\"b\":not-json-at-all}";
+    let mut stream = bounded_stream(
+        &format!("{frame}\n"),
+        Framing::Ndjson,
+        64,
+        Arc::new(ImmediateReconnect::default()),
+    );
+    match poll_ready(stream.next()) {
+        Some(Err(Error::Decode {
+            body, truncated, ..
+        })) => {
+            assert!(frame.len() > 4, "the frame must outgrow max_error_body");
+            assert_eq!(&body[..], frame.as_bytes());
+            assert!(!truncated);
+        }
+        other => panic!("expected a Decode error, got {other:?}"),
     }
+}
+
+/// A body read that fails partway through an item yields `InterruptedBody`, a transient
+/// failure, and with no reconnect policy ends the stream: the partial item is never yielded.
+#[test]
+fn a_body_that_fails_mid_item_yields_interrupted_body_and_ends_the_stream() {
+    let initial = Chunks::new([Chunk::data("{\"a\":1}\n{\"b\":"), Chunk::Fail]).into_response(200);
+    let mut stream: EventStream<serde_json::Value> = EventStream::new(initial, Framing::Ndjson);
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"a": 1})
+    );
+    match poll_ready(stream.next()) {
+        Some(Err(error @ Error::InterruptedBody(_))) => assert!(error.is_transient()),
+        other => panic!("expected InterruptedBody, got {other:?}"),
+    }
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// The bytes of an event the failed connection left unfinished are dropped before the replay's
+/// first bytes arrive. Joined, the two would frame `{"seq":2}`; apart, the replay's leading
+/// `2}` line is a field the framer ignores, so the next item is `{"seq":3}`.
+#[test]
+fn a_reconnect_after_an_interrupted_body_discards_the_partial_event() {
+    let backend = SequenceBackend::new([
+        Reply::status(200, "2}\n\ndata: {\"seq\":3}\n\n"),
+        Reply::status(200, ""),
+    ]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        ..ImmediateReconnect::default()
+    });
+    let initial = Chunks::new([
+        Chunk::data("data: {\"seq\":1}\n\ndata: {\"seq\":"),
+        Chunk::Fail,
+    ])
+    .into_response(200);
+    let mut stream = reconnectable_stream_over(initial, backend.clone(), policy.clone());
+
+    let mut items = Vec::new();
+    while let Some(item) = poll_ready(stream.next()) {
+        items.push(item.unwrap());
+    }
+    assert_eq!(
+        items,
+        [serde_json::json!({"seq": 1}), serde_json::json!({"seq": 3})]
+    );
+    assert_eq!(backend.calls(), 2);
+    assert_eq!(
+        policy
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(attempt, reason, _)| (*attempt, *reason))
+            .collect::<Vec<_>>(),
+        [(0, "failure"), (0, "eof"), (1, "eof")]
+    );
+}
+
+/// A body that is not ready yet answers `Pending` and keeps the partial item it has buffered:
+/// the next poll appends the following chunk to it and frames the whole item.
+#[test]
+fn a_pending_body_chunk_resumes_framing() {
+    let initial = Chunks::new([
+        Chunk::data("{\"a\":"),
+        Chunk::Pending,
+        Chunk::data("1}\n{\"b\":2}\n"),
+    ])
+    .into_response(200);
+    let mut stream: EventStream<serde_json::Value> = EventStream::new(initial, Framing::Ndjson);
+    let (item, pending) = poll_to_completion(stream.next());
+    assert_eq!(item.unwrap().unwrap(), serde_json::json!({"a": 1}));
+    assert_eq!(pending, 1);
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"b": 2})
+    );
+    assert!(poll_ready(stream.next()).is_none());
+}
+
+/// A reconnect wait and a reconnect request that are not ready yet each answer `Pending`, and
+/// the stream resumes from where it was: the replay still carries the last event ID, and the
+/// server's `retry:` delay is still reported.
+#[test]
+fn a_pending_reconnect_wait_resumes_without_losing_state() {
+    let backend = SequenceBackend::new([Reply::status(200, "data: {\"seq\":2}\n\n").pending()]);
+    let policy = Arc::new(ImmediateReconnect {
+        max_attempts: 1,
+        pending_wait: true,
+        ..ImmediateReconnect::default()
+    });
+    let mut stream = reconnectable_stream(
+        "id: evt-1\nretry: 750\ndata: {\"seq\":1}\n\n",
+        backend.clone(),
+        policy,
+    );
+    assert_eq!(
+        poll_ready(stream.next()).unwrap().unwrap(),
+        serde_json::json!({"seq": 1})
+    );
+    let (item, pending) = poll_to_completion(stream.next());
+    assert_eq!(item.unwrap().unwrap(), serde_json::json!({"seq": 2}));
+    assert_eq!(
+        pending, 2,
+        "one for the wait, one for the reconnect request"
+    );
+    assert_eq!(backend.header("last-event-id"), [Some("evt-1".to_owned())]);
+    assert_eq!(stream.last_event_id(), Some("evt-1"));
+    assert_eq!(
+        stream.reconnect_delay(),
+        Some(std::time::Duration::from_millis(750))
+    );
 }
 
 /// What a caller observes from a stream: each item, as its decoded value or the frame a
@@ -1061,14 +1182,7 @@ type Observed = (
 
 /// Drive an `EventStream` poll-once over `body` delivered as the given chunks.
 fn observe(chunks: Vec<Vec<u8>>, framing: Framing) -> Observed {
-    let body =
-        reqwest::Body::wrap_stream(Chunks(chunks.into_iter().map(bytes::Bytes::from).collect()));
-    let response = reqwest::Response::from(
-        http::Response::builder()
-            .status(200)
-            .body(body)
-            .expect("valid synthetic response"),
-    );
+    let response = Chunks::new(chunks.into_iter().map(Chunk::data)).into_response(200);
     let mut stream: EventStream<serde_json::Value> = EventStream::new(response, framing);
     let mut items = Vec::new();
     while let Some(item) = poll_ready(stream.next()) {

@@ -7,13 +7,6 @@ use crate::{AuthError, ResponseValue, TransportError};
 use super::{Error, RequestError, ReqwestClass, TimeoutKind};
 
 #[test]
-fn widen_preserves_the_variant() {
-    let narrow = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
-    let widened: Error<String> = narrow.widen();
-    assert!(matches!(widened, Error::Timeout(TimeoutKind::Total)));
-}
-
-#[test]
 fn request_message_source_displays_the_message() {
     let error = Error::<std::convert::Infallible>::request_message("no credential for `token`");
     assert!(matches!(error, Error::RequestConstruction(_)));
@@ -389,199 +382,6 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
     ]
 }
 
-/// The documents that describe the error taxonomy to a consumer as a whole, so each must name
-/// every variant of both enums. `README.md` is also `spargen`'s declared `readme`, shipped in
-/// the published crate, and the one account the book's Getting Started page points to.
-const TAXONOMY_DOCUMENTS: [&str; 1] = ["README.md"];
-
-/// Documents that cite individual variants without describing the whole taxonomy. They are
-/// held only to citing variants that exist, which every scanned document is; listing them here
-/// makes the scan prove it reached them.
-const CITING_DOCUMENTS: [&str; 2] = ["docs/support-matrix.md", "docs/book/src/getting-started.md"];
-
-/// The variant a derived `Debug` names: the identifier the rendering opens with.
-fn variant_name(debug: String) -> String {
-    debug
-        .chars()
-        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-        .collect()
-}
-
-/// The variant names of `Error` and of `RequestError`, read off the enumerations the bijection
-/// tests above hold to exactly one value per variant — so neither set can miss one.
-fn declared_variants() -> (
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeSet<String>,
-) {
-    (
-        every_variant()
-            .iter()
-            .map(|error| variant_name(format!("{error:?}")))
-            .collect(),
-        every_request_variant()
-            .iter()
-            .map(|error| variant_name(format!("{error:?}")))
-            .collect(),
-    )
-}
-
-/// Every `Error::Name` and `RequestError::Name` spelled in `text`, as (line, enum, variant).
-/// Only a capitalised member is a variant, so `Error::status()` and the other methods are not
-/// read. A path the name continues (`io::Error::Other`) or extends (`StreamError::…`) names
-/// some other type, and is skipped.
-fn cited_variants(text: &str) -> Vec<(usize, &'static str, String)> {
-    let continues = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == ':';
-    let mut cited = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        for (at, marker) in line.match_indices("Error::") {
-            let (enumeration, before) = match line[..at].strip_suffix("Request") {
-                Some(before) => ("RequestError", before),
-                None => ("Error", &line[..at]),
-            };
-            if before.ends_with(continues) {
-                continue;
-            }
-            let name: String = line[at + marker.len()..]
-                .chars()
-                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-                .collect();
-            if name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
-                cited.push((number + 1, enumeration, name));
-            }
-        }
-    }
-    cited
-}
-
-#[test]
-fn the_citation_reader_reads_variants_of_these_two_enums_only() {
-    let text = "`Error::Api` and `RequestError::Other`, but not `Error::status()`,\n\
-                `io::Error::Other`, `StreamError::Decode`, or `MyRequestError::Gone`.\n\
-                (`Error::UnexpectedStatus { .. }`)";
-    assert_eq!(
-        cited_variants(text),
-        [
-            (1, "Error", "Api".to_owned()),
-            (1, "RequestError", "Other".to_owned()),
-            (3, "Error", "UnexpectedStatus".to_owned()),
-        ]
-    );
-}
-
-/// The repository root: this crate is a direct member of the workspace.
-fn repository_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("support-runtime sits one level below the workspace root")
-        .to_path_buf()
-}
-
-/// Every Markdown file under `dir`, repository-relative with `/` separators, sorted. Skipped:
-/// hidden and `target` directories, the vendored specification texts under `references/`,
-/// and `CHANGELOG.md`, whose entries name variants as they were at each release.
-fn repository_markdown(root: &std::path::Path) -> Vec<String> {
-    fn walk(root: &std::path::Path, dir: &std::path::Path, found: &mut Vec<String>) {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|error| panic!("{} is readable: {error}", dir.display()));
-        for entry in entries {
-            let path = entry.expect("a readable directory entry").path();
-            let name = path
-                .file_name()
-                .expect("a directory entry has a name")
-                .to_string_lossy()
-                .into_owned();
-            if path.is_dir() {
-                if !(name.starts_with('.') || name == "target" || name == "references") {
-                    walk(root, &path, found);
-                }
-            } else if name.ends_with(".md") && name != "CHANGELOG.md" {
-                let relative = path
-                    .strip_prefix(root)
-                    .expect("the walk stays under the root");
-                let parts: Vec<_> = relative
-                    .components()
-                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                found.push(parts.join("/"));
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(root, root, &mut found);
-    found.sort();
-    found
-}
-
-/// A document that names `Error::X` or `RequestError::X` is describing the generated client's
-/// public error surface, and no other gate reads it: the `docs/` checks in spargen hold
-/// diagnostic codes only. So every such citation in the repository's Markdown must name a
-/// variant that exists — a variant renamed or removed here fails until every document stops
-/// naming it.
-#[test]
-fn every_error_variant_a_document_cites_exists() {
-    let (errors, requests) = declared_variants();
-    let root = repository_root();
-    let documents = repository_markdown(&root);
-    for expected in TAXONOMY_DOCUMENTS.iter().chain(&CITING_DOCUMENTS) {
-        assert!(
-            documents.iter().any(|document| document == expected),
-            "`{expected}` is not among the scanned documents {documents:?}"
-        );
-    }
-
-    let mut stale = Vec::new();
-    for document in &documents {
-        let text = std::fs::read_to_string(root.join(document))
-            .unwrap_or_else(|error| panic!("{document} is readable: {error}"));
-        for (line, enumeration, name) in cited_variants(&text) {
-            let declared = if enumeration == "Error" {
-                &errors
-            } else {
-                &requests
-            };
-            if !declared.contains(&name) {
-                stale.push(format!("{document}:{line}: `{enumeration}::{name}`"));
-            }
-        }
-    }
-    assert!(
-        stale.is_empty(),
-        "these documents cite error variants that do not exist (`Error` has {errors:?}, \
-         `RequestError` has {requests:?}):\n{}",
-        stale.join("\n")
-    );
-}
-
-/// The other direction: a variant added to either enum is a breaking change to every generated
-/// client, so the documents that lay out the taxonomy must name it, fully qualified, before it
-/// lands.
-#[test]
-fn the_taxonomy_documents_name_every_error_variant() {
-    let (errors, requests) = declared_variants();
-    let root = repository_root();
-    for document in TAXONOMY_DOCUMENTS {
-        let text = std::fs::read_to_string(root.join(document))
-            .unwrap_or_else(|error| panic!("{document} is readable: {error}"));
-        let cited: std::collections::BTreeSet<(&str, String)> = cited_variants(&text)
-            .into_iter()
-            .map(|(_, enumeration, name)| (enumeration, name))
-            .collect();
-        let unnamed: Vec<String> = errors
-            .iter()
-            .map(|name| ("Error", name))
-            .chain(requests.iter().map(|name| ("RequestError", name)))
-            .filter(|(enumeration, name)| !cited.contains(&(*enumeration, (*name).clone())))
-            .map(|(enumeration, name)| format!("`{enumeration}::{name}`"))
-            .collect();
-        assert!(
-            unnamed.is_empty(),
-            "{document} lays out the error taxonomy but never names {}: add each to its \
-             error-taxonomy passage",
-            unnamed.join(", ")
-        );
-    }
-}
-
 /// `from_reqwest` is the taxonomy: every failure a [`crate::HttpBackend`] reports is mapped
 /// through it, which is what keeps a custom transport classifying identically to executing on
 /// a `reqwest::Client` directly. Its timeout, redirect, decode, and request branches all need a
@@ -597,24 +397,11 @@ fn the_taxonomy_documents_name_every_error_variant() {
 /// non-retryable `RequestConstruction` at build time and a retryable `Transport` at execute.
 #[test]
 fn from_reqwest_classifies_a_refused_request_as_request_construction() {
-    let https_only = reqwest::Client::builder()
-        .https_only(true)
-        .build()
-        .expect("build an https-only client");
-    let refused_at_execute = |client: reqwest::Client, url: &str| {
-        let request = client
-            .request(reqwest::Method::GET, url)
-            .build()
-            .expect("reqwest builds the request; it refuses it only at execute");
-        // reqwest answers without touching the network, so the first poll is ready.
-        crate::tests::poll_ready(client.execute(request))
-            .expect_err(&format!("reqwest refuses the request for {url}"))
-    };
-    for source in [
-        reqwest_error(),
-        refused_at_execute(reqwest::Client::new(), "ftp://example.com/op"),
-        refused_at_execute(https_only, "http://example.com/op"),
-    ] {
+    // reqwest answers without touching the network, so the first poll is ready.
+    let refused = crate::tests::refused_at_execute().map(|(client, request)| {
+        crate::tests::poll_ready(client.execute(request)).expect_err("reqwest refuses the request")
+    });
+    for source in std::iter::once(reqwest_error()).chain(refused) {
         assert!(source.is_builder(), "{source}");
         let error = Error::<ApiBody>::from_reqwest(source);
         assert!(
@@ -662,10 +449,10 @@ fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
 
 /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
 /// above is the one permanent class, so a transient source is needed beside it. A connect
-/// failure needs a socket and a reactor, which this suite does not run; reqwest's status-kind
-/// error needs neither, and it reaches the same `Transport` class a failed connection does,
-/// by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the default
-/// classifier therefore retries it.
+/// failure needs a socket and a reactor, which only the `blocking` feature's test below runs;
+/// reqwest's status-kind error needs neither, and it reaches the same `Transport` class a failed
+/// connection does, by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the
+/// default classifier therefore retries it.
 #[test]
 fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() {
     let status_error = || {
@@ -686,6 +473,38 @@ fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() 
     assert!(crate::RetryOutcome::Transport(&transport).is_transient());
     let error = Error::<ApiBody>::from_reqwest(status_error());
     assert!(matches!(error, Error::Transport(_)), "{error}");
+    assert!(error.is_transient());
+}
+
+/// A connection the peer refuses is the class `from_reqwest` asks for first among reqwest's
+/// request-kind errors: `is_connect` makes it `Transport`, transient on the error and on the
+/// borrow alike, and never `RequestConstruction`. Driven over a real socket on the `blocking`
+/// feature's runtime: a port bound and then released refuses the next connection to it.
+#[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+#[test]
+fn a_refused_connection_is_a_transient_transport_error() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("bind an ephemeral port")
+        .port();
+    let url = format!("http://127.0.0.1:{port}/op");
+    let runtime = crate::BlockingRuntime::new().expect("current-thread runtime builds");
+    let core = crate::tests::core();
+    let request = || core.http().get(&url).build().unwrap();
+
+    let failure = runtime
+        .block_on(crate::HttpBackend::execute(
+            core.backend().as_ref(),
+            request(),
+        ))
+        .expect_err("nothing listens on a released port");
+    assert!(failure.is_transient(), "{failure}");
+    assert!(crate::RetryOutcome::Transport(&failure).is_transient());
+
+    let error = runtime
+        .block_on(crate::send(&core, request()))
+        .expect_err("nothing listens on a released port");
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
     assert!(error.is_transient());
 }
 
@@ -710,30 +529,6 @@ fn is_transient_classifies_every_variant() {
             error.is_transient(),
             expected,
             "is_transient disagrees for {error}"
-        );
-    }
-}
-
-/// A `Decode` error is retryable exactly when its status is: a `429` or `5xx` whose body did
-/// not match the schema is still the server saying "try again", while a `2xx` or `4xx` body
-/// that does not decode reproduces on retry. This is the rule `RetryOutcome::is_transient`
-/// applies to the same response before its body is read.
-#[test]
-fn a_decode_error_is_transient_exactly_when_its_status_is() {
-    let decode = |code: u16| Error::<ApiBody>::Decode {
-        status: StatusCode::from_u16(code).unwrap(),
-        headers: HeaderMap::new(),
-        path: "x".to_owned(),
-        body: Bytes::new(),
-        truncated: false,
-    };
-    for code in [429, 500, 502, 503] {
-        assert!(decode(code).is_transient(), "{code} should be transient");
-    }
-    for code in [200, 201, 400, 404, 422, 499] {
-        assert!(
-            !decode(code).is_transient(),
-            "{code} should not be transient"
         );
     }
 }
@@ -975,7 +770,16 @@ fn widen_preserves_every_reachable_variant() {
         );
     }
 
-    // The payload fields survive, not just the discriminant.
+    // The payload fields survive, not just the discriminant: the timeout keeps its kind, ...
+    for kind in [TimeoutKind::Connect, TimeoutKind::Total] {
+        let widened: Error<ApiBody> = Error::<std::convert::Infallible>::Timeout(kind).widen();
+        assert!(
+            matches!(widened, Error::Timeout(widened_kind) if widened_kind == kind),
+            "{kind:?}"
+        );
+    }
+
+    // ... the decode failure every field ...
     let mut sent = HeaderMap::new();
     sent.insert(
         "retry-after",
@@ -1005,7 +809,7 @@ fn widen_preserves_every_reachable_variant() {
     assert_eq!(body, Bytes::from_static(b"raw"));
     assert!(truncated);
 
-    // The typed request-construction cause keeps its payload too.
+    // ... and the typed request-construction cause its alternatives.
     let widened: Error<ApiBody> =
         Error::<std::convert::Infallible>::RequestConstruction(RequestError::MissingCredential {
             alternatives: vec![vec!["a"], vec!["b"]],

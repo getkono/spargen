@@ -3,8 +3,8 @@ use std::sync::Arc;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::{next_link, next_link_target, LinkPaginator};
-use crate::tests::poll_ready;
-use crate::{ClientCore, Error, ExecuteFuture, HttpBackend};
+use crate::tests::{core, poll_ready, Reply, SequenceBackend};
+use crate::{ClientCore, Error};
 
 fn link_headers(values: &[&str]) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -228,90 +228,98 @@ fn next_link_returns_parsed_absolute_url() {
     assert!(next_link(&HeaderMap::new()).is_none());
 }
 
-/// Synthesize an in-memory `reqwest::Response` (no server, no runtime) with a status, JSON body,
-/// and optional `Link` header, so `next_page`'s post-`send` half can be driven poll-once.
-fn response_with(status: u16, body: &str, link: Option<&str>) -> reqwest::Response {
-    let mut builder = http::Response::builder().status(status);
-    if let Some(link) = link {
-        builder = builder.header(reqwest::header::LINK, link);
+/// A page answered with `status` and `body`, carrying `link` as its `Link` header when given.
+fn page(status: u16, body: &str, link: Option<&str>) -> Reply {
+    let reply = Reply::status(status, body);
+    match link {
+        Some(link) => reply.header("link", link),
+        None => reply,
     }
-    reqwest::Response::from(
-        builder
-            .body(body.to_owned())
-            .expect("valid synthetic response"),
-    )
 }
 
-fn ok_page(body: &str, link: Option<&str>) -> reqwest::Response {
-    response_with(200, body, link)
+/// A paginator seeded at `first` whose pages come from `pages`, in order.
+fn paginator<T>(
+    pages: impl IntoIterator<Item = Reply>,
+    first: &str,
+) -> (LinkPaginator<T>, Arc<SequenceBackend>) {
+    let backend = SequenceBackend::new(pages);
+    let core = ClientCore::with_backend(backend.clone(), "https://x").unwrap();
+    let pager = core.paginate_links(reqwest::Url::parse(first).unwrap());
+    (pager, backend)
 }
 
-/// Drive `next_page`'s state machine directly over in-memory responses via `handle_response` —
-/// `next_page` only adds the socket-bound `send`, so feeding the synthetic responses to
-/// `handle_response` (after mirroring the `self.next.take()`) exercises the real Link-following,
-/// decode, and re-arm logic end to end.
+/// `next_page` fetches the armed URL, decodes the page, and re-arms from its `rel="next"` link;
+/// a page without one is yielded and ends the chain, and the pull after it sends nothing.
 #[test]
 fn next_page_advances_next_from_link_header_then_terminates() {
-    let mut pager: LinkPaginator<Vec<i64>> = LinkPaginator::new(
-        core(),
-        reqwest::Url::parse("https://x/items?page=1").unwrap(),
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [
+            page(
+                200,
+                "[1,2]",
+                Some(r#"<https://x/items?page=2>; rel="next""#),
+            ),
+            page(200, "[3,4]", None),
+        ],
+        "https://x/items?page=1",
     );
 
-    // Page 1: 200 carrying a `rel="next"` → decodes and re-arms `next` to page 2.
-    let url1 = pager.next.take().expect("seeded first url");
-    let page1 = ok_page(r#"[1,2]"#, Some(r#"<https://x/items?page=2>; rel="next""#));
-    let decoded1 = poll_ready(pager.handle_response(url1, page1))
-        .unwrap()
-        .unwrap();
-    assert_eq!(decoded1.into_inner(), vec![1, 2]);
-    assert_eq!(
-        pager.next.as_ref().map(reqwest::Url::as_str),
-        Some("https://x/items?page=2")
-    );
+    let page1 = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(page1.into_inner(), vec![1, 2]);
+    assert!(pager.has_next());
 
-    // Page 2: 200 with no `rel="next"` → decodes and disarms; the chain then ends.
-    let url2 = pager.next.take().expect("re-armed second url");
-    let page2 = ok_page(r#"[3,4]"#, None);
-    let decoded2 = poll_ready(pager.handle_response(url2, page2))
-        .unwrap()
-        .unwrap();
-    assert_eq!(decoded2.into_inner(), vec![3, 4]);
+    let page2 = poll_ready(pager.next_page()).unwrap().unwrap();
+    assert_eq!(page2.into_inner(), vec![3, 4]);
     assert!(!pager.has_next());
-    // A further pull makes no request (no armed url) and returns `None`.
+
     assert!(poll_ready(pager.next_page()).is_none());
+    assert_eq!(
+        backend.urls(),
+        ["https://x/items?page=1", "https://x/items?page=2"]
+    );
 }
 
+/// `send` returns `Ok` for 4xx/5xx, so `next_page` gates on status before decoding. A follow-up
+/// page that 401s or 500s (plausible: the generic paginator attaches no per-op credentials)
+/// surfaces as `UnexpectedStatus` and terminates the chain — never decoded as `T`, never a
+/// `Decode` error. The error body here structurally fits the lenient page type `Vec<Value>`, so
+/// without the status gate `decode_success` would accept it as a page.
 #[test]
 fn non_success_page_terminates_as_unexpected_status_not_decoded() {
-    // `send` returns `Ok` for 4xx/5xx, so `next_page` gates on status before decoding. A follow-up
-    // page that 401s or 500s (plausible: the generic paginator attaches no per-op credentials)
-    // must surface as `UnexpectedStatus` and terminate the chain — never decoded as `T`, never a
-    // `Decode` error. The error body here structurally fits the lenient page type `Vec<Value>`, so
-    // without the status gate `decode_success` would happily accept it as a page.
     for status in [401u16, 500u16] {
-        let mut pager: LinkPaginator<Vec<serde_json::Value>> =
-            LinkPaginator::new(core(), reqwest::Url::parse("https://x/1").unwrap());
-        // Mirror `next_page`'s `self.next.take()` (the send() it wraps needs a live socket).
-        let url = pager.next.take().expect("seeded");
-        let resp = response_with(
-            status,
-            r#"[{"message":"denied"}]"#,
-            Some(r#"<https://x/2>; rel="next""#),
+        let (mut pager, backend) = paginator::<Vec<serde_json::Value>>(
+            [page(
+                status,
+                r#"[{"message":"denied"}]"#,
+                Some(r#"<https://x/2>; rel="next""#),
+            )],
+            "https://x/1",
         );
-        let outcome = poll_ready(pager.handle_response(url, resp));
+        let outcome = poll_ready(pager.next_page());
         assert!(
             matches!(&outcome, Some(Err(Error::UnexpectedStatus { .. }))),
             "status {status}: expected UnexpectedStatus, got {outcome:?}"
         );
-        // Terminated: the `rel="next"` link was NOT followed, and the next pull returns `None`
+        // Terminated: the `rel="next"` link was not followed, and the next pull returns `None`
         // without issuing a request.
         assert!(!pager.has_next());
         assert!(poll_ready(pager.next_page()).is_none());
+        assert_eq!(backend.calls(), 1, "{status}");
     }
 }
 
-fn core() -> ClientCore {
-    ClientCore::new("https://x").unwrap()
+/// A page whose request fails at the transport is yielded as that failure and ends the chain:
+/// nothing re-arms the paginator, and the next pull sends nothing.
+#[test]
+fn a_transport_failure_terminates_the_paginator() {
+    let (mut pager, backend) = paginator::<Vec<i64>>([Reply::failure(503)], "https://x/1");
+    match poll_ready(pager.next_page()) {
+        Some(Err(error @ Error::Transport(_))) => assert!(error.is_transient()),
+        other => panic!("expected a Transport error, got {other:?}"),
+    }
+    assert!(!pager.has_next());
+    assert!(poll_ready(pager.next_page()).is_none());
+    assert_eq!(backend.calls(), 1);
 }
 
 #[test]
@@ -342,20 +350,18 @@ fn a_relative_next_link_resolves_against_the_fetched_page_url() {
         ("?page=3", "https://x/api/items?page=3"),
         ("more?page=4", "https://x/api/more?page=4"),
     ] {
-        let mut pager: LinkPaginator<Vec<i64>> = LinkPaginator::new(
-            core(),
-            reqwest::Url::parse("https://x/api/items?page=1").unwrap(),
-        );
-        let url = pager.next.take().expect("seeded first url");
         let link = format!(r#"<{target}>; rel="next""#);
-        let page = ok_page("[1]", Some(&link));
-        let decoded = poll_ready(pager.handle_response(url, page))
-            .unwrap()
-            .unwrap();
-        assert_eq!(decoded.into_inner(), vec![1]);
+        let (mut pager, backend) = paginator::<Vec<i64>>(
+            [page(200, "[1]", Some(&link)), page(200, "[2]", None)],
+            "https://x/api/items?page=1",
+        );
+        let first = poll_ready(pager.next_page()).unwrap().unwrap();
+        assert_eq!(first.into_inner(), vec![1]);
+        let second = poll_ready(pager.next_page()).unwrap().unwrap();
+        assert_eq!(second.into_inner(), vec![2]);
         assert_eq!(
-            pager.next.as_ref().map(reqwest::Url::as_str),
-            Some(resolved),
+            backend.urls(),
+            ["https://x/api/items?page=1", resolved],
             "{target}"
         );
     }
@@ -378,45 +384,35 @@ fn from_headers_refuses_a_relative_next_link() {
 /// and terminates the chain: the `rel="next"` link it carried is not followed.
 #[test]
 fn a_success_page_that_fails_to_decode_terminates_as_a_decode_error() {
-    let mut pager: LinkPaginator<Vec<i64>> =
-        LinkPaginator::new(core(), reqwest::Url::parse("https://x/1").unwrap());
-    let url = pager.next.take().expect("seeded");
-    let page = response_with(
-        203,
-        r#"{"not":"a list"}"#,
-        Some(r#"<https://x/2>; rel="next""#),
+    let (mut pager, backend) = paginator::<Vec<i64>>(
+        [page(
+            203,
+            r#"{"not":"a list"}"#,
+            Some(r#"<https://x/2>; rel="next""#),
+        )],
+        "https://x/1",
     );
-    match poll_ready(pager.handle_response(url, page)) {
+    match poll_ready(pager.next_page()) {
         Some(Err(Error::Decode { status, .. })) => assert_eq!(status.as_u16(), 203),
         other => panic!("expected a Decode error, got {other:?}"),
     }
     assert!(!pager.has_next());
     assert!(poll_ready(pager.next_page()).is_none());
-}
-
-/// A backend that answers every request with one canned page carrying a `rel="next"` link, so
-/// `next_page` can run through `send` without a socket.
-#[derive(Debug)]
-struct OnePageBackend;
-
-impl HttpBackend for OnePageBackend {
-    fn execute(&self, _request: reqwest::Request) -> ExecuteFuture<'_> {
-        Box::pin(async {
-            Ok(ok_page(
-                "[7]",
-                Some(r#"<https://x/items?page=2>; rel="next""#),
-            ))
-        })
-    }
+    assert_eq!(backend.calls(), 1);
 }
 
 /// An armed paginator's `next_page` sends the request, yields the decoded page, and re-arms
 /// from the page's `Link` header.
 #[test]
 fn next_page_fetches_and_decodes_the_armed_url() {
-    let core = ClientCore::with_backend(Arc::new(OnePageBackend), "https://x").unwrap();
-    let mut pager: LinkPaginator<Vec<i64>> =
-        core.paginate_links(reqwest::Url::parse("https://x/items?page=1").unwrap());
+    let (mut pager, _) = paginator::<Vec<i64>>(
+        [page(
+            200,
+            "[7]",
+            Some(r#"<https://x/items?page=2>; rel="next""#),
+        )],
+        "https://x/items?page=1",
+    );
     let page = poll_ready(pager.next_page())
         .expect("an armed paginator yields a page")
         .expect("the page decodes");

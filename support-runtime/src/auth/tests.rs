@@ -5,11 +5,7 @@ use secrecy::SecretString;
 use crate::{ClientCore, Error, RequestError};
 
 use super::{attach_auth, AuthError, AuthKind, AuthScheme, Credential, TokenFuture};
-use crate::tests::poll_ready;
-
-fn core() -> ClientCore {
-    ClientCore::new("https://example.com").unwrap()
-}
+use crate::tests::{core, poll_ready};
 
 fn get(core: &ClientCore) -> reqwest::RequestBuilder {
     core.http()
@@ -550,30 +546,11 @@ fn removing_the_selected_credential_falls_through_to_a_later_alternative() {
     assert_eq!(alternatives, [vec!["primary"], vec!["fallback"]]);
 }
 
-#[test]
-fn api_key_header_is_sensitive() {
-    let mut core = core();
-    core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
-    let request = poll_ready(attach_auth(
-        &core,
-        get(&core),
-        &[&[AuthScheme {
-            name: "key",
-            kind: AuthKind::ApiKeyHeader("X-Api-Key"),
-        }]],
-    ))
-    .unwrap()
-    .build()
-    .unwrap();
-    let value = &request.headers()["X-Api-Key"];
-    assert_eq!(value, "k3y");
-    assert!(value.is_sensitive());
-}
-
 /// `Credential`'s shipped documentation states which variant each kind of scheme accepts: both
 /// static token variants under every token-carrying kind, and neither under `http basic`. The
 /// provider's half of that table is pinned by the provider tests; this pins the static half,
-/// so the documented rule and the attach code cannot drift apart unseen.
+/// so the documented rule and the attach code cannot drift apart unseen. An apiKey header or
+/// cookie the secret travels in is marked sensitive, so it is redacted wherever it is printed.
 #[test]
 fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_basic() {
     for (credential, registered) in [
@@ -601,6 +578,7 @@ fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_ba
             .build()
             .unwrap();
         assert_eq!(header.headers()["X-Api-Key"], "t0k", "{registered}");
+        assert!(header.headers()["X-Api-Key"].is_sensitive(), "{registered}");
         let query = attach(AuthKind::ApiKeyQuery("api_key"))
             .unwrap()
             .build()
@@ -613,6 +591,10 @@ fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_ba
         assert_eq!(
             cookie.headers()[reqwest::header::COOKIE],
             "SESSION=t0k",
+            "{registered}"
+        );
+        assert!(
+            cookie.headers()[reqwest::header::COOKIE].is_sensitive(),
             "{registered}"
         );
 
@@ -725,24 +707,46 @@ fn a_basic_credential_does_not_satisfy_a_token_scheme() {
     }
 }
 
+/// An apiKey whose text a header value refuses (a line break here) fails the call as
+/// `RequestConstruction` before anything is sent, under the two kinds that put it in a header.
+/// It is not attached in some other form, and not dropped.
 #[test]
-fn attaches_api_key_cookie_and_marks_it_sensitive() {
+fn an_api_key_that_is_not_a_header_value_fails_as_request_construction() {
     let mut core = core();
-    core.set_credential("session", Credential::ApiKey(SecretString::from("s3ss")));
-    let request = poll_ready(attach_auth(
-        &core,
-        get(&core),
-        &[&[AuthScheme {
-            name: "session",
-            kind: AuthKind::ApiKeyCookie("SESSION"),
-        }]],
-    ))
-    .unwrap()
-    .build()
-    .unwrap();
-    let value = &request.headers()[reqwest::header::COOKIE];
-    assert_eq!(value, "SESSION=s3ss");
-    assert!(value.is_sensitive());
+    core.set_credential(
+        "key",
+        Credential::ApiKey(SecretString::from("k3y\nX-Evil: 1")),
+    );
+    for kind in [
+        AuthKind::ApiKeyHeader("X-Api-Key"),
+        AuthKind::ApiKeyCookie("SESSION"),
+    ] {
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme { name: "key", kind }]],
+        ))
+        .unwrap_err();
+        match error {
+            Error::RequestConstruction(RequestError::Other(_)) => {}
+            other => panic!("{kind:?}: expected RequestConstruction, got {other:?}"),
+        }
+    }
+}
+
+/// A bearer token a header value refuses is handed to reqwest's `bearer_auth`, which records the
+/// failure in the builder: `attach_auth` succeeds, and building the request fails, so it is
+/// still never sent.
+#[test]
+fn a_bearer_token_that_is_not_a_header_value_fails_at_build() {
+    let mut core = core();
+    core.set_credential(
+        "token",
+        Credential::Bearer(SecretString::from("t0k\nX-Evil: 1")),
+    );
+    let builder = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap();
+    let error = builder.build().unwrap_err();
+    assert!(error.is_builder(), "{error:?}");
 }
 
 #[test]

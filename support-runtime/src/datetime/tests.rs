@@ -97,13 +97,18 @@ fn date_rejects_a_sign_prefixed_field() {
 /// `Display` must never fail: generated code renders a `multipart/form-data` text part and a
 /// `text/plain` body through `to_string()`, which panics on a `Display` error. A year outside
 /// RFC 3339's four-digit range is constructible (`time` holds -9999..=9999), so this is
-/// reachable from ordinary user input rather than only from a malformed response.
+/// reachable from ordinary user input rather than only from a malformed response. Such a value
+/// renders in `time`'s own form instead, as `Display` documents.
 #[test]
-fn display_never_panics_for_a_year_rfc3339_cannot_express() {
+fn display_falls_back_to_times_form_for_a_year_rfc3339_cannot_express() {
+    for year in [-1, -9_999] {
+        let date = Date(time::Date::from_calendar_date(year, time::Month::January, 2).unwrap());
+        assert_eq!(date.to_string(), date.0.to_string(), "{year}");
+        let stamp = DateTime(time::OffsetDateTime::new_utc(date.0, time::Time::MIDNIGHT));
+        assert_eq!(stamp.to_string(), stamp.0.to_string(), "{year}");
+    }
     let date = Date(time::Date::from_calendar_date(-1, time::Month::January, 2).unwrap());
-    assert!(!date.to_string().is_empty());
     let stamp = DateTime(time::OffsetDateTime::new_utc(date.0, time::Time::MIDNIGHT));
-    assert!(!stamp.to_string().is_empty());
     // Serialization still refuses: such a value must never reach a body claiming RFC 3339.
     assert!(serde_json::to_string(&date).is_err());
     assert!(serde_json::to_string(&stamp).is_err());
