@@ -4,6 +4,12 @@
 //! lossy string encoding, so the shape a value was written in cannot be recovered from the text
 //! alone. Codegen supplies it, because it is a static function of the documented schema.
 //!
+//! The inverse is exact for a finite float too: a `simple` token that reads as a float is parsed
+//! with the standard library's correctly rounding parser, not `serde_json`'s, which without its
+//! `float_roundtrip` feature may read a float's text as a neighbouring value. A
+//! [`HeaderShape::Json`] header, like a JSON body, is decoded by `serde_json` itself, so its floats
+//! are exact only when the consumer enables `serde_json`'s `float_roundtrip` feature.
+//!
 //! Header parsing is an explicitly-called second step rather than part of an operation's return
 //! type. The body is already decoded and returned before a caller opts in, so a malformed or
 //! missing header can never turn a successful call into a failed one.
@@ -208,9 +214,26 @@ fn scalar(raw: &str, scalars: Scalars) -> Value {
         return Value::String(raw.to_owned());
     }
     match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Number(number)) if number.is_f64() => Value::Number(exact_float(raw, number)),
         Ok(value @ (Value::Number(_) | Value::Bool(_) | Value::Null)) => value,
         _ => Value::String(raw.to_owned()),
     }
+}
+
+/// The float `raw` spells, correctly rounded, in place of `parsed`, `serde_json`'s reading of it.
+///
+/// Without its `float_roundtrip` feature `serde_json` may read a float's text as a neighbouring
+/// value, so a finite `f64` written by [`crate::parameter::serialize_simple`] would not come back
+/// as itself. The standard library's parser rounds correctly, and accepts every JSON number, which
+/// `serde_json` has already checked `raw` is. A token that rounds out of the finite range keeps
+/// `parsed`, since a JSON number cannot hold an infinity.
+fn exact_float(raw: &str, parsed: serde_json::Number) -> serde_json::Number {
+    // `serde_json` skips JSON whitespace around the number; the standard parser does not.
+    raw.trim_matches([' ', '\t', '\n', '\r'])
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .unwrap_or(parsed)
 }
 
 #[cfg(test)]

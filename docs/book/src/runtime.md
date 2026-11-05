@@ -204,6 +204,17 @@ registered format "strictly OPTIONAL" and lets a tool "default back to the `type
 narrower float would round-trip fewer values than the wire carries. An unrecognized `format` is a
 JSON Schema annotation, not an assertion, so it is likewise carried into the base type.
 
+A finite `f64` read from a `simple`-style response header is exactly the value the server wrote:
+its text is parsed with the standard library's correctly rounding parser. A JSON body (and a
+`content`-typed header) is decoded by `serde_json`, which without its `float_roundtrip` feature
+may read a float's shortest text as a neighbouring value. Generated code does not require that
+feature; a consumer that needs exact floats from JSON enables it on its own `serde_json`
+dependency, and Cargo's feature unification applies it to the generated client:
+
+```toml
+serde_json = { version = "1", features = ["float_roundtrip"] }
+```
+
 ### `uuid` and `time`
 
 `format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
