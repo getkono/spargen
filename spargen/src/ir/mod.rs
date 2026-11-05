@@ -34,9 +34,9 @@ pub(crate) use responses::{
     SuccessShape,
 };
 pub(crate) use types::{
-    AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,
-    Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeGraph,
-    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    AdditionalProps, DefaultValue, DisjointFeature, Emission, Field, FieldDefault, JsonCategory,
+    Openness, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef,
+    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.

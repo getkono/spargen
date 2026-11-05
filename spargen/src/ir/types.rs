@@ -163,6 +163,29 @@ impl TypeGraph {
         })
     }
 
+    /// The item codegen emits for `def`, the definition `id` names: the one decision codegen and
+    /// the API surface both read, so neither can list a definition as an item of another kind.
+    ///
+    /// Asked only after `check_invariants`, so it panics on a reservation.
+    pub(crate) fn emission<'a>(&self, id: TypeId, def: &'a TypeDef) -> Emission<'a> {
+        match &def.kind {
+            TypeKind::Struct(object) => Emission::Struct(object),
+            TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
+                Emission::StringEnum(enumeration)
+            }
+            TypeKind::Enum(enumeration) => Emission::ScalarAlias(enumeration.repr),
+            TypeKind::Union(union) => Emission::Union(union),
+            TypeKind::Never => Emission::Never,
+            TypeKind::Reserved => unreachable!(
+                "a reservation reached emission; `check_invariants` should have rejected it"
+            ),
+            TypeKind::Array(_) | TypeKind::Tuple(_) if self.closes_alias_cycle(id) => {
+                Emission::Newtype
+            }
+            _ => Emission::Alias,
+        }
+    }
+
     /// Whether `id`'s alias walk reaches a reservation — `id` itself, or an array or tuple item
     /// along the way — so a `false` from [`same_generated_type`](Self::same_generated_type) for it
     /// is not final: it may answer `true` once the reservation is filled.
@@ -358,6 +381,27 @@ impl TypeGraph {
                 })
             })
     }
+}
+
+/// The item a definition is emitted as, by [`TypeGraph::emission`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Emission<'a> {
+    /// A `pub struct` with one field per property.
+    Struct(&'a Struct),
+    /// A `pub enum` with one unit variant per listed string (plus a catch-all when open).
+    StringEnum(&'a ScalarEnum),
+    /// `pub type X = i64;` or `pub type X = bool;`: an integer or boolean enum, whose values the
+    /// type does not narrow.
+    ScalarAlias(ScalarRepr),
+    /// A `pub enum` with one variant per union member.
+    Union(&'a Union),
+    /// `pub struct X(pub T);`, `#[serde(transparent)]`: an array or tuple that
+    /// [closes an alias cycle](TypeGraph::closes_alias_cycle), which an alias cannot express.
+    Newtype,
+    /// The empty `pub enum X {}` of an uninhabited schema.
+    Never,
+    /// `pub type X = …;` naming the type the definition lowered to.
+    Alias,
 }
 
 /// A named or structurally-derived type definition.
@@ -787,6 +831,18 @@ pub(crate) enum ScalarValue {
     Int(i64),
     /// A string value.
     String(String),
+}
+
+impl ScalarValue {
+    /// The value as its JSON text spells it, a string without its quotes: the key `name`
+    /// allocates an enum variant under and the label the API surface lists it by.
+    pub(crate) fn wire(&self) -> String {
+        match self {
+            ScalarValue::Bool(value) => value.to_string(),
+            ScalarValue::Int(value) => value.to_string(),
+            ScalarValue::String(value) => value.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

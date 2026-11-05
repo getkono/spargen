@@ -15,7 +15,7 @@ mod synth;
 
 use std::collections::HashMap;
 
-use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Api, OperationId, TypeId, TypeKind};
 
 use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
@@ -514,11 +514,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
                 for variant in &enumeration.variants {
-                    let value = match variant {
-                        ScalarValue::Bool(value) => value.to_string(),
-                        ScalarValue::Int(value) => value.to_string(),
-                        ScalarValue::String(value) => value.clone(),
-                    };
+                    let value = variant.wire();
                     names.variants.insert(
                         (id, value.clone()),
                         scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),

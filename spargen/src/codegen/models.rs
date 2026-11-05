@@ -5,7 +5,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph, TypeKind,
+    AdditionalProps, Api, Emission, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -173,8 +174,8 @@ fn emit_type_def(
     let ident = names.types.get(&id).expect("type name allocated");
     let docs = doc_tokens(&def.docs);
     let deprecated = def.docs.deprecated.then(|| quote! { #[deprecated] });
-    match &def.kind {
-        TypeKind::Struct(object) => {
+    match types.emission(id, def) {
+        Emission::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
             // A root `xml.name`, or a component's inferred one, names the element quick-xml writes
@@ -217,7 +218,7 @@ fn emit_type_def(
                 #(#providers)*
             }
         }
-        TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
+        Emission::StringEnum(enumeration) => {
             let listed = string_variants(id, enumeration, names);
             let variants = listed.iter().map(|(value, variant_ident)| {
                 quote! { #[serde(rename = #value)] #variant_ident, }
@@ -253,15 +254,15 @@ fn emit_type_def(
                 }
             }
         }
-        TypeKind::Enum(enumeration) => {
-            let ty = match enumeration.repr {
-                ScalarRepr::String => unreachable!("a string enum is emitted by the arm above"),
+        Emission::ScalarAlias(repr) => {
+            let ty = match repr {
+                ScalarRepr::String => unreachable!("a string enum is emitted as a `pub enum`"),
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
             quote! { #docs #deprecated pub type #ident = #ty; }
         }
-        TypeKind::Never => {
+        Emission::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
             quote! {
                 #docs
@@ -288,18 +289,11 @@ fn emit_type_def(
                 }
             }
         }
-        TypeKind::Union(union) => emit_union(id, ident, union, names, docs, deprecated),
-        // Named here rather than left to the alias arm: `type_kind_tokens` refuses it too, but a
-        // reservation is not an alias and must not read as one at this site either.
-        TypeKind::Reserved => {
-            unreachable!(
-                "a reservation reached codegen; `check_invariants` should have rejected it"
-            )
-        }
+        Emission::Union(union) => emit_union(id, ident, union, names, docs, deprecated),
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.
-        TypeKind::Array(_) | TypeKind::Tuple(_) if types.closes_alias_cycle(id) => {
+        Emission::Newtype => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
@@ -309,7 +303,7 @@ fn emit_type_def(
                 pub struct #ident(pub #ty);
             }
         }
-        _ => {
+        Emission::Alias => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! { #docs #deprecated pub type #ident = #ty; }
         }
