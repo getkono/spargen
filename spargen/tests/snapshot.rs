@@ -19,6 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use camino::Utf8PathBuf;
 use spargen::{Outcome, Report, Spec};
 
+#[allow(
+    dead_code,
+    reason = "this suite generates corpus files through `generate_to_string` alone"
+)]
 #[path = "shared/generate.rs"]
 mod generate;
 

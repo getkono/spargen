@@ -13,8 +13,7 @@ const OPEN_NARROWING_SPEC: &str = include_str!("../e2e/specs/open_narrowing.yaml
 /// diagnostic, and the emitted module.
 fn generate_narrowing(open: bool) -> (Report, Vec<(&'static str, String)>, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("problems.yaml")).unwrap();
-    std::fs::write(&spec_path, OPEN_NARROWING_SPEC).unwrap();
+    let spec_path = write_spec(temp.path(), "problems.yaml", OPEN_NARROWING_SPEC);
     let (report, code) = generate_spec_with_code(Spec::new(spec_path).open_narrowing(open));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let reported = report

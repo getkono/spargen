@@ -769,12 +769,7 @@ components:
             "both admin paths gone"
         );
         // One W009 per removed construct, none silent.
-        let w009 = diags
-            .items()
-            .iter()
-            .filter(|d| d.code == Code::OmittedConstruct)
-            .count();
-        assert_eq!(w009, 2, "one W009 per removed path");
+        assert_eq!(omitted_count(&diags), 2, "one W009 per removed path");
     }
 
     #[test]
@@ -804,12 +799,7 @@ components:
             vec!["/admin/users/{id}".to_owned(), "/public/health".to_owned()],
             "only the exact path is gone"
         );
-        let w009 = diags
-            .items()
-            .iter()
-            .filter(|d| d.code == Code::OmittedConstruct)
-            .count();
-        assert_eq!(w009, 1);
+        assert_eq!(omitted_count(&diags), 1);
     }
 
     #[test]
@@ -849,10 +839,7 @@ components:
             rules: vec![OmitRule::path("/nope/**")],
         };
         assert!(omit.apply(&mut bundle, &mut diags).is_err());
-        assert!(diags
-            .items()
-            .iter()
-            .any(|d| d.code == Code::InvalidOmitRule));
+        assert!(!invalid_rule_messages(&diags).is_empty());
         // A glob that matched nothing means the *pattern* is wrong; say which kind of rule it was,
         // because the fix differs from an exact rule naming a construct that is not there.
         assert!(
@@ -876,14 +863,10 @@ components:
             rules: vec![OmitRule::path("/nope")],
         };
         assert!(omit.apply(&mut bundle, &mut diags).is_err());
-        let invalid: Vec<_> = diags
-            .items()
-            .iter()
-            .filter(|d| d.code == Code::InvalidOmitRule)
-            .collect();
+        let invalid = invalid_rule_messages(&diags);
         assert_eq!(invalid.len(), 1, "{invalid:#?}");
         assert!(
-            invalid[0].message.starts_with("omit rule did not match"),
+            invalid[0].starts_with("omit rule did not match"),
             "{invalid:#?}"
         );
 

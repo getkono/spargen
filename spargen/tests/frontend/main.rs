@@ -23,9 +23,16 @@ use spargen::{
     Build, CargoIntegration, Code, Diagnostic, Outcome, OutcomeClaim, Report, Severity, Spec,
 };
 
+#[allow(
+    dead_code,
+    reason = "this suite writes specs through `write_spec` and generates through `run_generate`"
+)]
+#[path = "../shared/generate.rs"]
+mod generate;
 #[path = "../oracles/mod.rs"]
 mod oracles;
 
+use generate::write_spec;
 use oracles::readers::{
     alias_target, codes, declared_fields, declared_types, enum_variants, field_owner, field_type,
     has_code, messages_for,
@@ -203,17 +210,13 @@ fn generate(spec: &str) -> Report {
 /// As [`generate`], but through the `check` entry point (no codegen/emit).
 fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, spec).unwrap();
-    run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
+    run_check(&Spec::new(write_spec(temp.path(), "openapi.yaml", spec)))
 }
 
 /// As [`generate`], also returning the emitted module (empty when nothing was written).
 fn generate_with_code(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    std::fs::write(&spec_path, spec).unwrap();
-    generate_spec_with_code(Spec::new(spec_path))
+    generate_spec_with_code(Spec::new(write_spec(temp.path(), "openapi.yaml", spec)))
 }
 
 /// As [`generate_with_code`], over the description already written at `spec`'s path and with the

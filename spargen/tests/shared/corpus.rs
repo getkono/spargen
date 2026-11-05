@@ -1,10 +1,8 @@
 //! `corpus/manifest.toml` through one typed reader, shared by `corpus_manifest.rs`, which holds
 //! the repository to the manifest, and `determinism.rs`, which drives its generating cases. Each
 //! integration test is its own crate, so each declares this file with
-//! `#[path = "shared/corpus.rs"]`.
-
-// Each test crate that declares this module reads the fields its checks need.
-#![allow(dead_code)]
+//! `#[path = "shared/corpus.rs"]`; `determinism.rs`, which reads only some of the fields, allows
+//! `dead_code` on that declaration.
 
 use camino::Utf8PathBuf;
 

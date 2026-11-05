@@ -6,12 +6,18 @@
 //! `runtime-dependencies` gate runs by its exact name. Every `insta::assert_snapshot!` sits in
 //! this file, because insta names a snapshot after the module path and the source file of the
 //! call: from here it is `snapshots/e2e__<name>.snap`. The tests sit in one module per area under
-//! `e2e/`, each reaching the harness through `use super::*`.
+//! `e2e/`, each reaching the harness through `use super::*`; `e2e/mock_server.rs` is the mock HTTP
+//! server written into each fixture crate that serves its client ([`MOCK_SERVER`]).
 
 use std::process::Command;
 
 use camino::Utf8PathBuf;
 use spargen::{CargoIntegration, Code, Outcome, Spec};
+
+#[path = "shared/generate.rs"]
+mod generate;
+
+use generate::{generate_text, generate_to_string, write_spec};
 
 /// A `cargo` invocation that builds the fixture crate at `crate_dir` into [`fixture_target_dir`],
 /// the one target directory every fixture of this run shares, so the dependency graph the fixtures
@@ -351,8 +357,7 @@ fn runtime_floors() -> &'static std::collections::BTreeMap<&'static str, &'stati
         std::sync::OnceLock::new();
     FLOORS.get_or_init(|| {
         let temp = tempfile::tempdir().unwrap();
-        let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-        std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
+        let spec = write_spec(temp.path(), "openapi.yaml", EVERY_CAPABILITY_SPEC);
         spargen::requirements(&Spec::new(spec))
             .expect("spec lowers")
             .0
@@ -374,7 +379,7 @@ fn runtime_floor(name: &str) -> &'static str {
 }
 
 fn generate_fixture_crate(
-    spec: &std::path::Path,
+    spec: impl AsRef<std::path::Path>,
     out: &std::path::Path,
     name: &str,
 ) -> spargen::Report {
@@ -386,7 +391,7 @@ fn generate_fixture_crate(
 /// exists so a fixture can pin a different one, because an identifier legal in 2021 is not
 /// necessarily legal in 2024.
 fn generate_fixture_crate_in_edition(
-    spec: &std::path::Path,
+    spec: impl AsRef<std::path::Path>,
     out: &std::path::Path,
     name: &str,
     edition: &str,
@@ -397,7 +402,7 @@ fn generate_fixture_crate_in_edition(
 /// [`generate_fixture_crate_in_edition`] with the `Spec` passed through `configure` first, for a
 /// fixture that needs a generation option set.
 fn generate_configured_fixture_crate(
-    spec: &std::path::Path,
+    spec: impl AsRef<std::path::Path>,
     out: &std::path::Path,
     name: &str,
     edition: &str,
@@ -444,7 +449,7 @@ tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
     .unwrap();
     spargen::generate(
         &configure(Spec::new(
-            Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
+            Utf8PathBuf::from_path_buf(spec.as_ref().to_path_buf()).unwrap(),
         ))
         .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
         // This test process is not a build script; the fixture crate below is compiled by a
@@ -457,8 +462,7 @@ tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
 #[ignore = "nightly direct-minimal-versions proof; run by the runtime-dependencies CI job"]
 fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", BASIC_SPEC);
     let out = temp.path().join("minimum_runtime_client");
     let report = generate_fixture_crate(&spec, &out, "minimum_runtime_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
@@ -542,18 +546,11 @@ fn basic_spec_module(configure: impl FnOnce(Spec) -> Spec) -> String {
 /// [`basic_spec_module`] over any root document, written as `file_name`.
 fn spec_module(file_name: &str, contents: &str, configure: impl FnOnce(Spec) -> Spec) -> String {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join(file_name);
-    std::fs::write(&spec, contents).unwrap();
-    let out = temp.path().join("lib.rs");
-    let spec_path = Utf8PathBuf::from_path_buf(spec).unwrap();
-    let report = spargen::generate(
-        &configure(Spec::new(spec_path.clone()))
-            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
-            .cargo(CargoIntegration::Off),
-    );
+    let spec_path = write_spec(temp.path(), file_name, contents);
+    let (report, written) = generate_to_string(configure(Spec::new(spec_path.clone())));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    let written = std::fs::read_to_string(&out).unwrap();
+    let written = written.expect("a `Generated` run wrote its module");
     let mut lines = written.split_inclusive('\n');
     let mut expect = |prefix: &str, placeholder: &str| -> String {
         let line = lines.next().unwrap_or_default();
@@ -594,17 +591,7 @@ fn basic_spec_module_is_pinned() {
 /// the golden files above normalize away.
 #[test]
 fn the_provenance_header_stamps_this_spargen_version() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
-    let out = temp.path().join("lib.rs");
-    let report = spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())
-            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
-            .cargo(CargoIntegration::Off),
-    );
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-    let written = std::fs::read_to_string(&out).unwrap();
+    let written = generate_text(BASIC_SPEC, |spec| spec);
     let stamp = format!("// @generated by spargen {}", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         written.lines().nth(2),
@@ -641,6 +628,20 @@ const OAS32_SPEC: &str = include_str!("e2e/specs/oas32.yaml");
 /// the four positions a date value can reach the wire from.
 const DATE_SPEC: &str = include_str!("e2e/specs/date.yaml");
 
+/// The mock HTTP server every fixture crate's tests serve their generated client with:
+/// [`write_fixture_test`] writes it beside each test as `tests/common/mod.rs`. It is also this
+/// suite's [`mock_server`] module, so the text written into a fixture is compiled here first.
+const MOCK_SERVER: &str = include_str!("e2e/mock_server.rs");
+
+/// Write `source` as the integration test `tests/{name}.rs` of the fixture crate at `out`, beside
+/// [`MOCK_SERVER`] as `tests/common/mod.rs`, which a test reaches by declaring `mod common;`.
+fn write_fixture_test(out: &std::path::Path, name: &str, source: &str) {
+    let tests = out.join("tests");
+    std::fs::create_dir_all(tests.join("common")).unwrap();
+    std::fs::write(tests.join("common/mod.rs"), MOCK_SERVER).unwrap();
+    std::fs::write(tests.join(format!("{name}.rs")), source).unwrap();
+}
+
 #[path = "e2e/basic_blocking.rs"]
 mod basic_blocking;
 #[path = "e2e/basic_crate.rs"]
@@ -655,6 +656,8 @@ mod collisions;
 mod dependencies;
 #[path = "e2e/manifest_audit.rs"]
 mod manifest_audit;
+#[path = "e2e/mock_server.rs"]
+mod mock_server;
 #[path = "e2e/oas32.rs"]
 mod oas32;
 #[path = "e2e/open_narrowing.rs"]

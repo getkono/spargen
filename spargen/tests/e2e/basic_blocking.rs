@@ -3,30 +3,17 @@
 
 pub(super) const BLOCKING_TEST: &str = r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
+mod common;
+
+use common::{serve_no_content, serve_once};
+use std::io::Read;
 use std::net::TcpListener;
 
 // Prove the BlockingClient performs an actual HTTP round-trip: a blocking method drives the async
 // dispatch to completion on the owned current-thread runtime and returns the decoded, typed body.
 #[test]
 fn blocking_method_round_trips_against_a_mock() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 2048];
-        let _ = stream.read(&mut buf);
-        let body = r#"{"ok":"yes"}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.flush().unwrap();
-    });
-
-    let base = format!("http://{addr}");
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"ok":"yes"}"#);
     let client = basic_client::BlockingClient::new(&base).unwrap();
     let response = client.get_multi().expect("blocking get_multi round-trips");
     assert_eq!(response.status(), 200);
@@ -47,19 +34,7 @@ fn blocking_method_round_trips_against_a_mock() {
 // alternative over real HTTP, and the request carries that alternative's credential alone.
 #[test]
 fn without_credential_falls_through_to_a_later_alternative() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        request
-    });
+    let (base, server) = serve_no_content();
     let failing_bearer = basic_client::Credential::Provider(std::sync::Arc::new(|| {
         Box::pin(async { Err(basic_client::AuthError::new("idp down")) })
             as basic_client::TokenFuture
@@ -67,7 +42,7 @@ fn without_credential_falls_through_to_a_later_alternative() {
     // `getConjunction` is `tenant + bearer`, or `apiKey`, or `mtls + tenant`: all three registered
     // selects the first, whose bearer provider fails before anything is sent — so the mock sees
     // no connection from this call.
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}"))
+    let client = basic_client::BlockingClient::new(&base)
         .unwrap()
         .with_credential("tenant", basic_client::Credential::ApiKey(basic_client::SecretString::from("acme")))
         .with_credential("bearer", failing_bearer)
@@ -82,7 +57,7 @@ fn without_credential_falls_through_to_a_later_alternative() {
     let client = client.without_credential("bearer");
     let response = client.get_conjunction().expect("the apiKey alternative is selected and sent");
     assert_eq!(response.status(), 204);
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text().to_ascii_lowercase();
     // The second alternative is `apiKey` alone: the still-registered `tenant` belongs only to
     // alternatives that were not selected, so it must not ride along, and neither may a bearer.
     assert!(request.contains("x-api-key: k3y\r\n"), "{request}");
@@ -153,31 +128,7 @@ fn an_elapsed_total_timeout_is_classified_as_total() {
 
 #[test]
 fn typed_parameters_follow_openapi_wire_rules() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-
-        let request_line = request.lines().next().unwrap();
-        assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
-        assert!(request_line.contains("workflow_id=build.yml"), "{request}");
-        assert!(request_line.contains("labels=bug&labels=api"), "{request}");
-        // A non-exploded array joins with a literal `,`: the delimiter must stay distinguishable
-        // from a comma inside a value, which `%2C` would not be.
-        assert!(request_line.contains("compact=one,two"), "{request}");
-        assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
-        assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
+    let (base, server) = serve_no_content();
 
     let workflow_id: basic_client::types::WorkflowId =
         serde_json::from_str(r#""build.yml""#).unwrap();
@@ -185,7 +136,7 @@ fn typed_parameters_follow_openapi_wire_rules() {
         .labels(vec!["bug".to_owned(), "api".to_owned()])
         .compact(vec!["one".to_owned(), "two".to_owned()])
         .session(vec!["a".to_owned(), "b".to_owned()]);
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .serialize_params(
             vec![1, 2],
@@ -195,7 +146,16 @@ fn typed_parameters_follow_openapi_wire_rules() {
         )
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    let request_line = request.lines().next().unwrap();
+    assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
+    assert!(request_line.contains("workflow_id=build.yml"), "{request}");
+    assert!(request_line.contains("labels=bug&labels=api"), "{request}");
+    // A non-exploded array joins with a literal `,`: the delimiter must stay distinguishable
+    // from a comma inside a value, which `%2C` would not be.
+    assert!(request_line.contains("compact=one,two"), "{request}");
+    assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
+    assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
 }
 
 /// The full RFC 6570 style table on one request line, plus path-value encoding.
@@ -205,50 +165,7 @@ fn typed_parameters_follow_openapi_wire_rules() {
 /// change the route it is spliced into.
 #[test]
 fn every_parameter_style_serializes_onto_the_wire() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-        let request_line = request.lines().next().unwrap().to_owned();
-        let (target, _) = request_line
-            .trim_start_matches("GET ")
-            .split_once(" HTTP/1.1")
-            .unwrap();
-        let (path, query) = target.split_once('?').unwrap();
-
-        // matrix, `explode: false`: `;name=v1,v2` — the `;`/`=`/`,` are structure, so the `,`
-        // inside the value `a,b` must be `%2C` or the two are indistinguishable.
-        // label, `explode: false`: a single `.` prefix and comma-joined members (`.x,y`);
-        // `explode: true` would be `.x.y`.
-        // The `raw` segment carries a `/`, `?`, `#`, and a stray `%`: all four must be encoded, or
-        // the request would address a different route entirely.
-        assert_eq!(
-            path,
-            "/styles/;matrix=one,a%2Cb/.x,y/a%2Fb%3Fc%23d%25e",
-            "{request_line}"
-        );
-
-        let pairs: Vec<&str> = query.split('&').collect();
-        // spaceDelimited/pipeDelimited join with a literal `%20`/`%7C`; RFC 6570 has no bare-space
-        // or bare-pipe form, so the delimiter is the encoded triple and data bytes are encoded too.
-        assert!(pairs.contains(&"space=one%20a%20b"), "{query}");
-        assert!(pairs.contains(&"pipe=one%7Ca%7Cb"), "{query}");
-        // deepObject: one `name[property]=value` pair per member, brackets literal.
-        assert!(pairs.contains(&"deep%5Bkind%5D=wide"), "{query}");
-        assert!(pairs.contains(&"deep%5Blimit%5D=3"), "{query}");
-        // `allowReserved: true` is the one place a `/` in a query value survives unencoded.
-        assert!(pairs.contains(&"reserved=a/b?c"), "{query}");
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
+    let (base, server) = serve_no_content();
 
     let params = basic_client::SerializeStylesParams::default()
         .space(vec!["one".to_owned(), "a b".to_owned()])
@@ -258,7 +175,7 @@ fn every_parameter_style_serializes_onto_the_wire() {
             limit: Some(3),
         })
         .reserved("a/b?c".to_owned());
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .serialize_styles(
             vec!["one".to_owned(), "a,b".to_owned()],
@@ -268,7 +185,36 @@ fn every_parameter_style_serializes_onto_the_wire() {
         )
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    let request_line = request.lines().next().unwrap();
+    let (target, _) = request_line
+        .trim_start_matches("GET ")
+        .split_once(" HTTP/1.1")
+        .unwrap();
+    let (path, query) = target.split_once('?').unwrap();
+
+    // matrix, `explode: false`: `;name=v1,v2` — the `;`/`=`/`,` are structure, so the `,`
+    // inside the value `a,b` must be `%2C` or the two are indistinguishable.
+    // label, `explode: false`: a single `.` prefix and comma-joined members (`.x,y`);
+    // `explode: true` would be `.x.y`.
+    // The `raw` segment carries a `/`, `?`, `#`, and a stray `%`: all four must be encoded, or
+    // the request would address a different route entirely.
+    assert_eq!(
+        path,
+        "/styles/;matrix=one,a%2Cb/.x,y/a%2Fb%3Fc%23d%25e",
+        "{request_line}"
+    );
+
+    let pairs: Vec<&str> = query.split('&').collect();
+    // spaceDelimited/pipeDelimited join with a literal `%20`/`%7C`; RFC 6570 has no bare-space
+    // or bare-pipe form, so the delimiter is the encoded triple and data bytes are encoded too.
+    assert!(pairs.contains(&"space=one%20a%20b"), "{query}");
+    assert!(pairs.contains(&"pipe=one%7Ca%7Cb"), "{query}");
+    // deepObject: one `name[property]=value` pair per member, brackets literal.
+    assert!(pairs.contains(&"deep%5Bkind%5D=wide"), "{query}");
+    assert!(pairs.contains(&"deep%5Blimit%5D=3"), "{query}");
+    // `allowReserved: true` is the one place a `/` in a query value survives unencoded.
+    assert!(pairs.contains(&"reserved=a/b?c"), "{query}");
 }
 
 /// `content:`-typed path and header parameters on the wire.
@@ -279,40 +225,13 @@ fn every_parameter_style_serializes_onto_the_wire() {
 /// client's base path. Header values are sent verbatim, as every header value is.
 #[test]
 fn content_typed_path_and_header_parameters_reach_the_wire() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-        let request_line = request.lines().next().unwrap();
-
-        assert_eq!(
-            request_line,
-            "GET /v1/content-params/x%2F..%2F..%2Fadmin/\
-             %7B%22kind%22%3A%22a%2F..%2Fb%3Fc%23d%22%2C%22limit%22%3A3%7D HTTP/1.1",
-            "{request}"
-        );
-        assert!(request.contains("x-text: x/../../admin\r\n"), "{request}");
-        assert!(
-            request.contains("x-json: {\"kind\":\"a/../b?c#d\",\"limit\":3}\r\n"),
-            "{request}"
-        );
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
+    let (base, server) = serve_no_content();
 
     let filter = || basic_client::types::DeepFilter {
         kind: "a/../b?c#d".to_owned(),
         limit: Some(3),
     };
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}/v1")).unwrap();
+    let client = basic_client::BlockingClient::new(&format!("{base}/v1")).unwrap();
     client
         .serialize_content_params(
             "x/../../admin".to_owned(),
@@ -322,7 +241,19 @@ fn content_typed_path_and_header_parameters_reach_the_wire() {
         )
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    let request_line = request.lines().next().unwrap();
+    assert_eq!(
+        request_line,
+        "GET /v1/content-params/x%2F..%2F..%2Fadmin/\
+         %7B%22kind%22%3A%22a%2F..%2Fb%3Fc%23d%22%2C%22limit%22%3A3%7D HTTP/1.1",
+        "{request}"
+    );
+    assert!(request.contains("x-text: x/../../admin\r\n"), "{request}");
+    assert!(
+        request.contains("x-json: {\"kind\":\"a/../b?c#d\",\"limit\":3}\r\n"),
+        "{request}"
+    );
 }
 
 /// The exact bytes of an `application/x-www-form-urlencoded` body built from an Encoding Object.
@@ -331,38 +262,9 @@ fn content_typed_path_and_header_parameters_reach_the_wire() {
 /// one that does not stays in media-type mode and is rendered by its declared content type.
 #[test]
 fn form_urlencoded_body_bytes_follow_the_encoding_object() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+    let (base, server) = serve_no_content();
 
-        assert!(
-            request.contains("content-type: application/x-www-form-urlencoded\r\n"),
-            "{request}"
-        );
-        // `name` is a plain text property; `tags` declared `pipeDelimited` so it joins with `%7C`;
-        // `blob` declared `application/json` and is therefore a JSON document, form-encoded.
-        // A space is `%20`, not `+`: the specification defers to query-parameter serialization
-        // (RFC 6570), and every urlencoded parser decodes `%20` and `+` alike.
-        assert_eq!(
-            body,
-            "name=Ada%20Lovelace&tags=a%7Cb&blob=%7B%22kind%22%3A%22wide%22%2C%22limit%22%3A3%7D",
-            "{request}"
-        );
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
-
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .submit_form(&basic_client::types::RequestBody75618f63 {
             name: "Ada Lovelace".to_owned(),
@@ -374,7 +276,21 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
         })
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+    assert!(
+        request.contains("content-type: application/x-www-form-urlencoded\r\n"),
+        "{request}"
+    );
+    // `name` is a plain text property; `tags` declared `pipeDelimited` so it joins with `%7C`;
+    // `blob` declared `application/json` and is therefore a JSON document, form-encoded.
+    // A space is `%20`, not `+`: the specification defers to query-parameter serialization
+    // (RFC 6570), and every urlencoded parser decodes `%20` and `+` alike.
+    assert_eq!(
+        body,
+        "name=Ada%20Lovelace&tags=a%7Cb&blob=%7B%22kind%22%3A%22wide%22%2C%22limit%22%3A3%7D",
+        "{request}"
+    );
 }
 
 /// Every multipart part carries a resolved `Content-Type`: the specification's defaulting table
@@ -383,48 +299,9 @@ fn form_urlencoded_body_bytes_follow_the_encoding_object() {
 /// part beside that `Content-Type`.
 #[test]
 fn multipart_parts_carry_their_resolved_content_types() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 8192];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
+    let (base, server) = serve_no_content();
 
-        assert!(
-            request.contains("content-type: multipart/form-data; boundary="),
-            "{request}"
-        );
-        for (part, content_type) in [
-            ("file", "application/octet-stream"),
-            ("caption", "text/plain"),
-            ("tags", "application/json"),
-        ] {
-            let name = format!("name=\"{part}\"");
-            let position = request.find(&name).unwrap_or_else(|| panic!("{request}"));
-            let rest = &request[position..];
-            let header = rest.split("\r\n\r\n").next().unwrap();
-            assert!(
-                header.contains(&format!("Content-Type: {content_type}")),
-                "part `{part}` must declare {content_type}: {header}"
-            );
-            // The one pinned encoding header rides on its own part and on no other.
-            assert_eq!(
-                header.contains("x-part-kind: caption text"),
-                part == "caption",
-                "part `{part}`: {header}"
-            );
-        }
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
-
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .upload_file(&basic_client::types::RequestBodyE12d70b5 {
             file: bytes::Bytes::from_static(b"\x00\x01binary"),
@@ -434,7 +311,31 @@ fn multipart_parts_carry_their_resolved_content_types() {
         })
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    assert!(
+        request.contains("content-type: multipart/form-data; boundary="),
+        "{request}"
+    );
+    for (part, content_type) in [
+        ("file", "application/octet-stream"),
+        ("caption", "text/plain"),
+        ("tags", "application/json"),
+    ] {
+        let name = format!("name=\"{part}\"");
+        let position = request.find(&name).unwrap_or_else(|| panic!("{request}"));
+        let rest = &request[position..];
+        let header = rest.split("\r\n\r\n").next().unwrap();
+        assert!(
+            header.contains(&format!("Content-Type: {content_type}")),
+            "part `{part}` must declare {content_type}: {header}"
+        );
+        // The one pinned encoding header rides on its own part and on no other.
+        assert_eq!(
+            header.contains("x-part-kind: caption text"),
+            part == "caption",
+            "part `{part}`: {header}"
+        );
+    }
 }
 
 /// The members of a typed `additionalProperties` overflow reach the wire on form-urlencoded and
@@ -444,7 +345,7 @@ fn multipart_parts_carry_their_resolved_content_types() {
 /// a second time, and on both media the declared property's value is the one sent.
 #[test]
 fn additional_properties_reach_form_and_multipart_bodies() {
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .submit_form_additional(&basic_client::types::RequestBody3c5761a3 {
@@ -458,11 +359,11 @@ fn additional_properties_reach_form_and_multipart_bodies() {
             .collect(),
         })
         .unwrap();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert!(request.starts_with("POST /forms/additional HTTP/1.1"), "{request}");
     assert!(request.ends_with("\r\n\r\na=x&b%20c=y%26z&z=last"), "{request}");
 
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .upload_additional(&basic_client::types::RequestBody1654af29 {
@@ -475,7 +376,7 @@ fn additional_properties_reach_form_and_multipart_bodies() {
             .collect(),
         })
         .unwrap();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert!(request.starts_with("POST /upload/additional HTTP/1.1"), "{request}");
     assert_eq!(request.matches("name=\"caption\"").count(), 1, "{request}");
     let caption = &request[request.find("name=\"caption\"").unwrap()..];
@@ -497,97 +398,37 @@ fn additional_properties_reach_form_and_multipart_bodies() {
 /// must go out under its own name rather than the generic one.
 #[test]
 fn a_byte_request_body_declares_its_content_type() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 8192];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
+    let (base, server) = common::serve_one(common::response(
+        "206 Partial Content",
+        &[
+            ("Content-Type", "application/octet-stream"),
+            ("Content-Range", "bytes 0-2/3"),
+        ],
+        b"abc",
+    ));
 
-        assert!(request.starts_with("PUT /ranged HTTP/1.1"), "{request}");
-        assert!(
-            request.contains("content-type: application/octet-stream"),
-            "{request}"
-        );
-
-        stream
-            .write_all(
-                b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
-                  Content-Range: bytes 0-2/3\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
-
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .put_ranged(&bytes::Bytes::from_static(b"abc"))
         .unwrap();
 
-    server.join().unwrap();
+    let request = server.join().unwrap().text();
+    assert!(request.starts_with("PUT /ranged HTTP/1.1"), "{request}");
+    assert!(
+        request.contains("content-type: application/octet-stream"),
+        "{request}"
+    );
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 8192];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
+    let (base, server) = serve_no_content();
 
-        assert!(request.starts_with("PUT /artwork/poster HTTP/1.1"), "{request}");
-        assert!(request.contains("content-type: image/png"), "{request}");
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
-
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .put_artwork("poster", &bytes::Bytes::from_static(b"\x89PNG"))
         .unwrap();
 
-    server.join().unwrap();
-}
-
-/// Serve one request with a `204`, handing the whole request (head and `Content-Length` body) back
-/// through the join handle.
-fn capture_one_request() -> (String, std::thread::JoinHandle<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            let read = stream.read(&mut buf).unwrap();
-            request.extend_from_slice(&buf[..read]);
-            let text = String::from_utf8_lossy(&request).into_owned();
-            let Some(head_end) = text.find("\r\n\r\n") else {
-                assert_ne!(read, 0, "connection closed before the request head: {text}");
-                continue;
-            };
-            let length = text[..head_end]
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .map_or(0, |value| value.trim().parse::<usize>().unwrap());
-            if request.len() >= head_end + 4 + length || read == 0 {
-                break;
-            }
-        }
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-        String::from_utf8(request).unwrap()
-    });
-    (format!("http://{addr}"), server)
+    let request = server.join().unwrap().text();
+    assert!(request.starts_with("PUT /artwork/poster HTTP/1.1"), "{request}");
+    assert!(request.contains("content-type: image/png"), "{request}");
 }
 
 /// The `content-type` header lines of a captured request.
@@ -603,7 +444,7 @@ fn content_type_lines(request: &str) -> Vec<&str> {
 /// `text/xml` body as XML, and the canonical `application/json` / `application/xml` keys unchanged.
 #[test]
 fn a_json_or_xml_request_body_declares_its_content_type() {
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .patch_merge_document(
@@ -615,7 +456,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
             },
         )
         .unwrap();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert!(request.starts_with("PATCH /merge-patch/d1 HTTP/1.1"), "{request}");
     assert_eq!(
         content_type_lines(&request),
@@ -624,7 +465,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
     );
     assert!(request.ends_with(r#"{"id":7,"sku":"S"}"#), "{request}");
 
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .post_json_meta(&basic_client::types::JsonMeta {
@@ -633,14 +474,14 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
             note: None,
         })
         .unwrap_err();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert_eq!(
         content_type_lines(&request),
         ["content-type: application/json"],
         "{request}"
     );
 
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .submit_legacy_order(&basic_client::types::XmlOrder {
@@ -648,12 +489,12 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
             sku: "ABC".to_owned(),
         })
         .unwrap();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert!(request.starts_with("POST /xml/legacy-order HTTP/1.1"), "{request}");
     assert_eq!(content_type_lines(&request), ["content-type: text/xml"], "{request}");
     assert!(request.contains("<sku>ABC</sku>"), "{request}");
 
-    let (base, server) = capture_one_request();
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .submit_order(&basic_client::types::XmlOrder {
@@ -661,7 +502,7 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
             sku: "ABC".to_owned(),
         })
         .unwrap_err();
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
     assert_eq!(
         content_type_lines(&request),
         ["content-type: application/xml"],
@@ -671,54 +512,19 @@ fn a_json_or_xml_request_body_declares_its_content_type() {
 
 #[test]
 fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 2048];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
+    let (base, server) = serve_no_content();
 
-        assert_eq!(
-            request.lines().next(),
-            Some("GET /files?path=%2Ftmp%2Fexample.txt HTTP/1.1"),
-            "{request}"
-        );
-
-        stream
-            .write_all(
-                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        stream.flush().unwrap();
-    });
-
-    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = basic_client::BlockingClient::new(&base).unwrap();
     client
         .read_file("/tmp/example.txt".to_owned())
         .expect("read_file sends the caller-provided path query value");
 
-    server.join().unwrap();
-}
-
-fn serve_once(content_type: &str, status: &str, body: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let content_type = content_type.to_owned();
-    let status = status.to_owned();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0u8; 2048];
-        let _ = stream.read(&mut request).unwrap();
-        let headers = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(headers.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
-    });
-    (format!("http://{addr}"), server)
+    let request = server.join().unwrap().text();
+    assert_eq!(
+        request.lines().next(),
+        Some("GET /files?path=%2Ftmp%2Fexample.txt HTTP/1.1"),
+        "{request}"
+    );
 }
 
 #[test]
@@ -1358,20 +1164,7 @@ fn a_range_only_operation_decodes_every_status_in_its_class() {
 // the method takes the `…Params` bundle, and the URL accessor takes no argument at all.
 #[test]
 fn an_accessor_whose_optional_parameters_shape_no_url_takes_no_bundle() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        request
-    });
-    let base = format!("http://{addr}");
+    let (base, server) = serve_no_content();
     let client = basic_client::BlockingClient::new(&base).unwrap();
     assert_eq!(client.get_traced_url().unwrap().as_str(), format!("{base}/traced"));
 
@@ -1379,7 +1172,7 @@ fn an_accessor_whose_optional_parameters_shape_no_url_takes_no_bundle() {
         .x_trace_id("t-1".to_owned())
         .session("s-1".to_owned());
     assert_eq!(client.get_traced(params).unwrap().status(), 204);
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text().to_ascii_lowercase();
     assert!(request.starts_with("get /traced http/1.1\r\n"), "{request}");
     assert!(request.contains("x-trace-id: t-1\r\n"), "{request}");
     assert!(request.contains("cookie: session=s-1\r\n"), "{request}");
