@@ -42,7 +42,36 @@ pub(crate) fn rust_sources(dir: &Path) -> Vec<PathBuf> {
 }
 
 mod tests {
-    use super::read_repo_file;
+    use super::{read_repo_file, repo_root};
+
+    /// The self-reading tests skip when [`repo_root`] is `None`, so a `repo_root` that stopped
+    /// finding the workspace would turn every one of them into a silent pass. The checkout is
+    /// recognised here by markers `repo_root` does not read, the Git metadata and `AGENTS.md`
+    /// beside the crate, and wherever either is present the root must be found and must carry the
+    /// documents those tests read.
+    #[test]
+    fn the_repository_root_is_found_whenever_the_checkout_is_present() {
+        let parent = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
+        if !parent.join(".git").exists() && !parent.join("AGENTS.md").is_file() {
+            // A packaged `.crate`: no checkout surrounds it.
+            return;
+        }
+        let root = repo_root().expect(
+            "the checkout is present, so repo_root must find it; every self-reading test would \
+             otherwise skip",
+        );
+        for document in [
+            "docs/errors.md",
+            "docs/support-matrix.md",
+            "corpus/manifest.toml",
+        ] {
+            assert!(
+                root.join(document).is_file(),
+                "repo_root returned {}, which does not carry {document}",
+                root.display()
+            );
+        }
+    }
 
     /// Once the workspace gate has passed, a missing input is a failure, so a renamed
     /// `corpus/manifest.toml` or `tests/diff.rs` fails rather than passes silently (#409).
