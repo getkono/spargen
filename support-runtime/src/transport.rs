@@ -14,27 +14,20 @@
 //! taxonomy ([`crate::Error::from_reqwest`]) so timeout/redirect/protocol classification is
 //! identical to executing directly on a `reqwest::Client`.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use reqwest::{Request, Response};
 
+use crate::wasm::BoxFuture;
 use crate::{MaybeSend, MaybeSync, TransportError};
 
 /// The boxed future [`HttpBackend::execute`] returns: an executed [`Response`] or a
-/// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, but a backend is
-/// free to return a `'static` future (as [`ReqwestBackend`] does) — a longer lifetime coerces to
-/// the shorter one the trait requires.
+/// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, so a backend may
+/// borrow its own fields while the request runs (as [`ReqwestBackend`] borrows its client); a
+/// `'static` future fits too, since a longer lifetime coerces to the shorter one the trait
+/// requires.
 ///
-/// The future is `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm`
-/// module explains.
-#[cfg(not(target_arch = "wasm32"))]
-pub type ExecuteFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Response, TransportError>> + Send + 'a>>;
-/// The boxed future [`HttpBackend::execute`] returns (the wasm variant: no `Send`, since reqwest's
-/// `fetch`-backed futures are `!Send` on the single-threaded browser target).
-#[cfg(target_arch = "wasm32")]
-pub type ExecuteFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, TransportError>> + 'a>>;
+/// The future is `Send` off `wasm32` and not on it, since reqwest's `fetch`-backed futures are
+/// `!Send` on the single-threaded browser target; the `wasm` module explains the gating.
+pub type ExecuteFuture<'a> = BoxFuture<'a, Result<Response, TransportError>>;
 
 /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
 /// [`reqwest::Response`].
@@ -76,10 +69,12 @@ impl ReqwestBackend {
 
 impl HttpBackend for ReqwestBackend {
     fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-        // Clone the (cheaply Arc-backed) client so the returned future is self-contained (`'static`)
-        // and free of any borrow of `&self`; this keeps the seam trivially object-safe.
-        let client = self.client.clone();
-        Box::pin(async move { client.execute(request).await.map_err(TransportError::new) })
+        Box::pin(async move {
+            self.client
+                .execute(request)
+                .await
+                .map_err(TransportError::new)
+        })
     }
 }
 

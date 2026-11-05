@@ -1,11 +1,10 @@
 use std::convert::Infallible;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use reqwest::header::HeaderValue;
 use reqwest::RequestBuilder;
 
+use crate::wasm::BoxFuture;
 use crate::{ClientCore, Error, RequestError};
 
 // Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
@@ -35,13 +34,9 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-/// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, through a
-/// `cfg`-gated alias, as the `wasm` module explains.
-#[cfg(not(target_arch = "wasm32"))]
-pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>>;
-/// The future returned by a [`TokenProvider`] (the wasm variant: no `Send`).
-#[cfg(target_arch = "wasm32")]
-pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>>>>;
+/// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, as the `wasm`
+/// module explains.
+pub type TokenFuture = BoxFuture<'static, Result<SecretString, AuthError>>;
 
 /// An async callback that yields a fresh credential, for rotating tokens. `Send + Sync` on native
 /// (the provider is shared across tasks); vacuous on `wasm32`, matching [`TokenFuture`].

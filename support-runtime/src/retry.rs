@@ -44,8 +44,6 @@
 //! let client = Client::with_backend(backend, "https://api.example.com")?;
 //! ```
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,16 +51,13 @@ use reqwest::{Request, Response, StatusCode};
 
 use crate::error::is_transient_status;
 use crate::transport::{ExecuteFuture, HttpBackend};
+use crate::wasm::BoxFuture;
 use crate::{MaybeSend, MaybeSync, TransportError};
 
 /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
 ///
-/// `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm` module explains.
-#[cfg(not(target_arch = "wasm32"))]
-pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-/// The boxed backoff future a [`RetryPolicy`] returns (the wasm variant: no `Send`).
-#[cfg(target_arch = "wasm32")]
-pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+/// `Send` off `wasm32` and not on it, as the `wasm` module explains.
+pub type RetryWait<'a> = BoxFuture<'a, ()>;
 
 /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
 /// whether to retry. It is either the raw [`Response`] the inner backend returned (any status —
@@ -175,10 +170,8 @@ impl std::fmt::Debug for RetryBackend {
 
 impl HttpBackend for RetryBackend {
     fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-        // Own clones of the `Arc`s so the returned future is self-contained (`'static`) — no borrow
-        // of `&self`, matching the seam's object-safety expectations.
-        let inner = self.inner.clone();
-        let policy = self.policy.clone();
+        // The future borrows `self` for the `'_` the seam's `ExecuteFuture` allows, so the inner
+        // backend and the policy are reached through that borrow rather than cloned per request.
         Box::pin(async move {
             let mut attempt: u32 = 0;
             loop {
@@ -186,18 +179,18 @@ impl HttpBackend for RetryBackend {
                 // one-shot streaming body cannot be replayed (`try_clone` is `None`): execute the
                 // original exactly once and return, never retrying a body we cannot resend intact.
                 let Some(replay) = request.try_clone() else {
-                    return inner.execute(request).await;
+                    return self.inner.execute(request).await;
                 };
-                let result = inner.execute(replay).await;
+                let result = self.inner.execute(replay).await;
                 // Ask the policy within a scope that ends the `outcome` borrow of `result` before we
-                // await the wait or return the result. The returned wait future borrows `policy`
+                // await the wait or return the result. The returned wait future borrows the policy
                 // (which outlives the loop), not `outcome`, so it escapes the scope cleanly.
                 let decision = {
                     let outcome = match &result {
                         Ok(response) => RetryOutcome::Response(response),
                         Err(error) => RetryOutcome::Transport(error),
                     };
-                    policy.retry(attempt, &outcome)
+                    self.policy.retry(attempt, &outcome)
                 };
                 match decision {
                     Some(wait) => {

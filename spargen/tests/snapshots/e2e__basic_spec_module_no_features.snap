@@ -28,11 +28,10 @@ pub use support::{
 mod support {
     mod auth {
         use std::convert::Infallible;
-        use std::future::Future;
-        use std::pin::Pin;
         use std::sync::Arc;
         use reqwest::header::HeaderValue;
         use reqwest::RequestBuilder;
+        use super::wasm::BoxFuture;
         use super::{ClientCore, Error, RequestError};
         pub use secrecy::{ExposeSecret, SecretString};
         /// A failure from an async token provider.
@@ -52,17 +51,9 @@ mod support {
             }
         }
         impl std::error::Error for AuthError {}
-        /// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, through a
-        /// `cfg`-gated alias, as the `wasm` module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type TokenFuture = Pin<
-            Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>,
-        >;
-        /// The future returned by a [`TokenProvider`] (the wasm variant: no `Send`).
-        #[cfg(target_arch = "wasm32")]
-        pub type TokenFuture = Pin<
-            Box<dyn Future<Output = Result<SecretString, AuthError>>>,
-        >;
+        /// The future returned by a [`TokenProvider`]. `Send` off `wasm32` and not on it, as the `wasm`
+        /// module explains.
+        pub type TokenFuture = BoxFuture<'static, Result<SecretString, AuthError>>;
         /// An async callback that yields a fresh credential, for rotating tokens. `Send + Sync` on native
         /// (the provider is shared across tasks); vacuous on `wasm32`, matching [`TokenFuture`].
         #[cfg(not(target_arch = "wasm32"))]
@@ -2965,22 +2956,17 @@ mod support {
         //! let backend: Arc<dyn HttpBackend> = Arc::new(RetryBackend::new(inner, Arc::new(Backoff)));
         //! let client = Client::with_backend(backend, "https://api.example.com")?;
         //! ```
-        use std::future::Future;
-        use std::pin::Pin;
         use std::sync::Arc;
         use std::time::Duration;
         use reqwest::{Request, Response, StatusCode};
         use super::error::is_transient_status;
         use super::transport::{ExecuteFuture, HttpBackend};
+        use super::wasm::BoxFuture;
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
         ///
-        /// `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm` module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-        /// The boxed backoff future a [`RetryPolicy`] returns (the wasm variant: no `Send`).
-        #[cfg(target_arch = "wasm32")]
-        pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+        /// `Send` off `wasm32` and not on it, as the `wasm` module explains.
+        pub type RetryWait<'a> = BoxFuture<'a, ()>;
         /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
         /// whether to retry. It is either the raw [`Response`] the inner backend returned (any status —
         /// success or error), or the [`TransportError`] it failed with (DNS, connect, timeout, …).
@@ -3087,21 +3073,19 @@ mod support {
         }
         impl HttpBackend for RetryBackend {
             fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-                let inner = self.inner.clone();
-                let policy = self.policy.clone();
                 Box::pin(async move {
                     let mut attempt: u32 = 0;
                     loop {
                         let Some(replay) = request.try_clone() else {
-                            return inner.execute(request).await;
+                            return self.inner.execute(request).await;
                         };
-                        let result = inner.execute(replay).await;
+                        let result = self.inner.execute(replay).await;
                         let decision = {
                             let outcome = match &result {
                                 Ok(response) => RetryOutcome::Response(response),
                                 Err(error) => RetryOutcome::Transport(error),
                             };
-                            policy.retry(attempt, &outcome)
+                            self.policy.retry(attempt, &outcome)
                         };
                         match decision {
                             Some(wait) => {
@@ -3144,27 +3128,18 @@ mod support {
         //! wrapping the underlying `reqwest::Error`; [`super::send`] reclassifies that error through the
         //! taxonomy ([`super::Error::from_reqwest`]) so timeout/redirect/protocol classification is
         //! identical to executing directly on a `reqwest::Client`.
-        use std::future::Future;
-        use std::pin::Pin;
         use reqwest::{Request, Response};
+        use super::wasm::BoxFuture;
         use super::{MaybeSend, MaybeSync, TransportError};
         /// The boxed future [`HttpBackend::execute`] returns: an executed [`Response`] or a
-        /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, but a backend is
-        /// free to return a `'static` future (as [`ReqwestBackend`] does) — a longer lifetime coerces to
-        /// the shorter one the trait requires.
+        /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, so a backend may
+        /// borrow its own fields while the request runs (as [`ReqwestBackend`] borrows its client); a
+        /// `'static` future fits too, since a longer lifetime coerces to the shorter one the trait
+        /// requires.
         ///
-        /// The future is `Send` off `wasm32` and not on it, through a `cfg`-gated alias, as the `wasm`
-        /// module explains.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type ExecuteFuture<'a> = Pin<
-            Box<dyn Future<Output = Result<Response, TransportError>> + Send + 'a>,
-        >;
-        /// The boxed future [`HttpBackend::execute`] returns (the wasm variant: no `Send`, since reqwest's
-        /// `fetch`-backed futures are `!Send` on the single-threaded browser target).
-        #[cfg(target_arch = "wasm32")]
-        pub type ExecuteFuture<'a> = Pin<
-            Box<dyn Future<Output = Result<Response, TransportError>> + 'a>,
-        >;
+        /// The future is `Send` off `wasm32` and not on it, since reqwest's `fetch`-backed futures are
+        /// `!Send` on the single-threaded browser target; the `wasm` module explains the gating.
+        pub type ExecuteFuture<'a> = BoxFuture<'a, Result<Response, TransportError>>;
         /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
         /// [`reqwest::Response`].
         ///
@@ -3201,9 +3176,8 @@ mod support {
         }
         impl HttpBackend for ReqwestBackend {
             fn execute(&self, request: Request) -> ExecuteFuture<'_> {
-                let client = self.client.clone();
                 Box::pin(async move {
-                    client.execute(request).await.map_err(TransportError::new)
+                    self.client.execute(request).await.map_err(TransportError::new)
                 })
             }
         }
@@ -3225,10 +3199,20 @@ mod support {
         //! `Send`/`Sync` ones — the abstraction collapses away off wasm.
         //!
         //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
-        //! boxed future, stream, and callback alias in the runtime, public or private, is instead
-        //! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
-        //! source that builds on both targets.
+        //! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so a boxed
+        //! trait object is instead `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm.
+        //! Every boxed future alias in the runtime, public or private, is a [`BoxFuture`], the one gated
+        //! future type; the stream module's body stream and the token-provider callback are gated the same
+        //! way where they are defined. The two mechanisms compose to one set of source that builds on both
+        //! targets.
+        use std::future::Future;
+        use std::pin::Pin;
+        /// A boxed future yielding `T` that may borrow for `'a`: `Send` off `wasm32`, and not on it.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+        /// A boxed future yielding `T` that may borrow for `'a` (the wasm variant: no `Send`).
+        #[cfg(target_arch = "wasm32")]
+        pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
         /// `Send` on native targets; a vacuous marker on `wasm32`.
         ///
         /// On native it has `Send` as a supertrait with a blanket impl for every `Send` type, so a bound of
@@ -3265,7 +3249,6 @@ mod support {
         //! Framing is a pure function ([`next_frame`]) over an owned byte buffer, with no network IO and
         //! no async runtime.
         use std::convert::Infallible;
-        use std::future::Future;
         use std::marker::PhantomData;
         use std::pin::Pin;
         use std::sync::Arc;
@@ -3277,6 +3260,7 @@ mod support {
         use reqwest::{Request, Response, StatusCode};
         use serde::de::DeserializeOwned;
         use super::dispatch::cap_body;
+        use super::wasm::BoxFuture;
         use super::{
             send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend,
             MaybeSync, TransportError,
@@ -3289,20 +3273,10 @@ mod support {
         >;
         #[cfg(target_arch = "wasm32")]
         type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
-        /// The caller-provided wait before an automatic reconnect attempt.
-        #[cfg(not(target_arch = "wasm32"))]
-        pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-        /// The caller-provided wait before an automatic reconnect attempt (wasm variant).
-        #[cfg(target_arch = "wasm32")]
-        pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + 'static>>;
-        #[cfg(not(target_arch = "wasm32"))]
-        type ReconnectFuture = Pin<
-            Box<dyn Future<Output = Result<Response, StreamError>> + Send>,
-        >;
-        #[cfg(target_arch = "wasm32")]
-        type ReconnectFuture = Pin<
-            Box<dyn Future<Output = Result<Response, StreamError>>>,
-        >;
+        /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
+        /// it, as the `wasm` module explains.
+        pub type ReconnectWait = BoxFuture<'static, ()>;
+        type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
         /// Why an automatic SSE reconnect is being considered.
         #[derive(Debug)]
         pub enum ReconnectReason<'a> {

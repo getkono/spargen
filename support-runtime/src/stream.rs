@@ -11,7 +11,6 @@
 //! no async runtime.
 
 use std::convert::Infallible;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,6 +24,7 @@ use reqwest::{Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
 use crate::dispatch::cap_body;
+use crate::wasm::BoxFuture;
 use crate::{
     send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend, MaybeSync, TransportError,
 };
@@ -37,17 +37,11 @@ type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Sen
 #[cfg(target_arch = "wasm32")]
 type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
 
-/// The caller-provided wait before an automatic reconnect attempt.
-#[cfg(not(target_arch = "wasm32"))]
-pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-/// The caller-provided wait before an automatic reconnect attempt (wasm variant).
-#[cfg(target_arch = "wasm32")]
-pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + 'static>>;
+/// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
+/// it, as the `wasm` module explains.
+pub type ReconnectWait = BoxFuture<'static, ()>;
 
-#[cfg(not(target_arch = "wasm32"))]
-type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>> + Send>>;
-#[cfg(target_arch = "wasm32")]
-type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>>>>;
+type ReconnectFuture = BoxFuture<'static, Result<Response, StreamError>>;
 
 /// Why an automatic SSE reconnect is being considered.
 #[derive(Debug)]

@@ -14,10 +14,22 @@
 //! `Send`/`Sync` ones — the abstraction collapses away off wasm.
 //!
 //! These relax *supertrait* and *generic* bounds. The boxed trait-object futures the seam returns
-//! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so every
-//! boxed future, stream, and callback alias in the runtime, public or private, is instead
-//! `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm. The two mechanisms compose to one set of
-//! source that builds on both targets.
+//! (`Pin<Box<dyn Future + Send>>`) cannot use a non-auto trait as an extra object bound, so a boxed
+//! trait object is instead `cfg`-gated to carry `+ Send`/`+ Sync` off wasm and drop it on wasm.
+//! Every boxed future alias in the runtime, public or private, is a [`BoxFuture`], the one gated
+//! future type; the stream module's body stream and the token-provider callback are gated the same
+//! way where they are defined. The two mechanisms compose to one set of source that builds on both
+//! targets.
+
+use std::future::Future;
+use std::pin::Pin;
+
+/// A boxed future yielding `T` that may borrow for `'a`: `Send` off `wasm32`, and not on it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// A boxed future yielding `T` that may borrow for `'a` (the wasm variant: no `Send`).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// `Send` on native targets; a vacuous marker on `wasm32`.
 ///
