@@ -21,16 +21,17 @@ mod file_length;
 mod packaging;
 mod runtime_embed;
 
+#[path = "../shared/repo.rs"]
+mod repo;
+
+/// [`repo::workspace_root`] as the `std` path these gates walk with.
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the crate directory has a parent")
-        .to_path_buf()
+    repo::workspace_root().into_std_path_buf()
 }
 
+/// [`repo::read_file`]: the file at `path`, which must be readable.
 fn read(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("{path:?} must be readable: {error}"))
+    repo::read_file(path)
 }
 
 /// The names of the top-level variants of `header`'s enum body in `source`: every identifier that
