@@ -8,7 +8,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::diag::Provenance;
 use crate::ir::{AdditionalProps, Docs, Field, FieldDefault, Struct, Ty, TypeKind};
-use crate::oas31::{JsonType, Schema, SchemaOr};
+use crate::oas31::{JsonType, Resolver, Schema, SchemaOr};
 use crate::source::is_remote_ref;
 
 use super::all_of::real_union;
@@ -19,8 +19,8 @@ use super::shape::{
     schema_has_shape_constraint, schema_has_union, schema_imposes_scalar, schema_is_object_like,
 };
 use super::{
-    all_of_entry_provenance, resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach,
-    ScopedRefiners, MAX_SCHEMA_DEPTH,
+    resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach, ScopedRefiners,
+    MAX_SCHEMA_DEPTH,
 };
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -1140,4 +1140,19 @@ struct RefMember<'r> {
     provenance: &'r Provenance,
     /// The `E013` wording for a target still being lowered.
     recursive: &'r str,
+}
+
+/// The provenance of entry `index` of the `allOf` of the schema at `holder`, for a member that
+/// carries no provenance of its own (a boolean schema): the entry's pointer, in the file `holder`
+/// is written in, with the span of the node written there when the file holds one.
+fn all_of_entry_provenance(
+    resolver: &Resolver<'_>,
+    holder: &Provenance,
+    index: usize,
+) -> Provenance {
+    let pointer = holder.pointer.push("allOf").index(index);
+    let span = resolver
+        .node_at(resolver.written_in(holder), &pointer)
+        .map(|node| node.span);
+    Provenance::new(pointer, span)
 }

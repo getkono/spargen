@@ -12,7 +12,8 @@ use super::combine::{objects_met_as_their_unions, take_refiners, Contribution};
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::refiner::implied_applicator_category;
 use super::shape::schema_has_union;
-use super::{HeldUntypedWarning, LowerCtx, MetUnion, Refiner};
+use super::union::HeldUntypedWarning;
+use super::{LowerCtx, MetUnion, Refiner};
 
 /// A union an `allOf` meet met with its other members, for
 /// [`LowerCtx::warn_excluded_union_member_branches`].

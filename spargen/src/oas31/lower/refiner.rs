@@ -12,7 +12,7 @@ use super::shape::{
     ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union, schema_is_object_like,
 };
 use super::strategy::retain_strategy;
-use super::{CategoryMask, LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling};
+use super::{LowerCtx, Refiner, ScopeReach, ScopedRefiners, UnionSibling};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` (the schema without its union and
@@ -768,4 +768,48 @@ pub(super) fn split_union_sibling(sibling: &Schema) -> (Schema, Schema) {
         provenance: sibling.provenance.clone(),
     };
     (keywords, union)
+}
+
+/// A set of JSON categories, the non-null members of a `type` array. `integer` and `number` both
+/// admit [`JsonCategory::Number`], the category a lowered numeric branch reports.
+#[derive(Clone, Copy)]
+pub(super) struct CategoryMask(u8);
+
+impl CategoryMask {
+    fn of(types: &[JsonType]) -> Self {
+        Self(types.iter().fold(0, |mask, kind| {
+            mask | match kind {
+                JsonType::Null => 0,
+                JsonType::Boolean => Self::bit(JsonCategory::Boolean),
+                JsonType::Object => Self::bit(JsonCategory::Object),
+                JsonType::Array => Self::bit(JsonCategory::Array),
+                JsonType::Number | JsonType::Integer => Self::bit(JsonCategory::Number),
+                JsonType::String => Self::bit(JsonCategory::String),
+            }
+        }))
+    }
+
+    fn bit(category: JsonCategory) -> u8 {
+        match category {
+            JsonCategory::String => 1,
+            JsonCategory::Number => 2,
+            JsonCategory::Boolean => 4,
+            JsonCategory::Array => 8,
+            JsonCategory::Object => 16,
+        }
+    }
+
+    fn admits(self, category: JsonCategory) -> bool {
+        self.0 & Self::bit(category) != 0
+    }
+
+    /// Whether the set admits a category other than `category`.
+    fn admits_besides(self, category: JsonCategory) -> bool {
+        self.0 & !Self::bit(category) != 0
+    }
+
+    /// Whether the set names a category, and only categories `outer` admits too.
+    fn is_within(self, outer: Self) -> bool {
+        self.0 != 0 && self.0 & !outer.0 == 0
+    }
 }

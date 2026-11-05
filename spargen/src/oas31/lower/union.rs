@@ -9,6 +9,7 @@ use crate::oas31::discriminator::is_schema_component_name;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
+use super::discriminator::DiscriminatorMembers;
 use super::meet::NoMeet;
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
@@ -16,9 +17,7 @@ use super::refiner::{
     multi_category_types, union_sibling_is_categories_alone, unreached_halves, unreached_message,
 };
 use super::shape::ref_siblings_bear_shape;
-use super::{
-    DiscriminatorMembers, HeldUntypedWarning, LowerCtx, Refiner, ScopeReach, UnionSibling,
-};
+use super::{LowerCtx, Refiner, ScopeReach, UnionSibling};
 
 /// A union's members, sorted before any is lowered: what [`LowerCtx::lower_union_with_sibling`]
 /// hands the sole-member collapse and the variant path alike.
@@ -1285,4 +1284,19 @@ fn retain_variants(
     retain(variants, &kept);
     retain(ref_names, &kept);
     retain(variant_members, &kept);
+}
+
+/// A `W001` an inline `oneOf` raised for its variants that lower to `serde_json::Value`
+/// ([`LowerCtx::warn_untyped_one_of_variants`]), held back while an `allOf` gathers its members
+/// ([`LowerCtx::held_untyped_warnings`]): where the union is a member the `allOf`'s scalar meet
+/// replaces, the warning names only the variants the meet carries as `Value` (#660, #675). It is
+/// reported as raised where the gathering or the meet fails, where the meet does not replace the
+/// union (its lowering is still named, or the meet is a reservation), and for every warning a
+/// union other than such a member raised.
+#[derive(Clone, Debug)]
+pub(super) struct HeldUntypedWarning {
+    /// The union the warning is raised at.
+    pub(super) provenance: Provenance,
+    /// Each `Value` variant's hint, beside its member position for the message.
+    pub(super) untyped: Vec<(String, usize)>,
 }

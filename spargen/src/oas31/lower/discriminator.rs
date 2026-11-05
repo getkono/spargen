@@ -12,7 +12,7 @@ use crate::oas31::discriminator::{
 use crate::oas31::{Resolver, Schema, SchemaOr};
 
 use super::shape::schema_has_union;
-use super::{DiscriminatorMembers, LowerCtx};
+use super::LowerCtx;
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Resolve every schema a union's Discriminator Object names — each `mapping` value, then
@@ -437,4 +437,14 @@ pub(super) fn member_component_name<'m>(
         .as_deref()?
         .strip_prefix("#/components/schemas/")
         .filter(|name| in_sub_file || !name.contains('/'))
+}
+
+/// A union's Discriminator Object resolved against the union's own members: every `mapping`
+/// entry's tag with the index (into the union's real, non-null members) of the member it names, in
+/// document order, and the member `defaultMapping` names. Built by
+/// [`LowerCtx::discriminator_members`], which rejects any entry naming a schema that does not
+/// exist or is not a member, so every index here is a member.
+pub(super) struct DiscriminatorMembers {
+    pub(super) mapping: Vec<(String, usize)>,
+    pub(super) default: Option<usize>,
 }

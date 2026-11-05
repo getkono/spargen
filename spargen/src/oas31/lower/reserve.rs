@@ -11,7 +11,7 @@ use super::cycle::{Opening, Via};
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
 use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
-use super::{append_doc_note, resolved_hint, resolved_identity, LowerCtx, Reservation};
+use super::{append_text, resolved_hint, resolved_identity, LowerCtx, Reservation};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower the schema `$ref` `reference`, written at `at`, to its shared, cycle-safe type through
@@ -300,7 +300,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // so the last-insert invariant asserted above still holds.
         if let Some(raw) = &schema.default {
             let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
-            append_doc_note(&mut def.docs, note);
+            append_text(&mut def.docs.description, note);
         }
         self.graph.fill(root_id, def);
         if let Some(members) = variant_members {
