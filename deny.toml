@@ -1,17 +1,10 @@
-# cargo-deny configuration — supply-chain gate run on every PR.
-# Licenses, security advisories, and duplicate/banned dependencies.
-#
-# One policy for every committed lockfile: `mise run deny` audits the root workspace and, with
-# `--config deny.toml`, each example workspace under `examples/` (#184). The examples are
-# compiled by gating jobs (for `wasm32-unknown-unknown` too), and their resolves carry crates the
-# root one never reaches, so a sibling policy per example would be a second copy that can drift.
+# cargo-deny policy for every committed lockfile, the examples' included; AGENTS.md's "Lockfiles
+# and advisories" says how `mise run deny` applies it.
 
 [advisories]
 version = 2
 yanked = "deny"
-# The RustSec checkout, inside the workspace's gitignored `target/` (relative to the working
-# directory, which is the root for every gate); the comment on `[tasks.deny]` in mise.toml says
-# how the audit reads it. cargo-deny clones into `advisory-db-<hash of the URL>` below it.
+# Inside the gitignored `target/`; cargo-deny clones into `advisory-db-<hash of the URL>` below it.
 db-path = "target/advisory-dbs"
 
 [licenses]
@@ -23,8 +16,6 @@ allow = [
     # resolver, uses MIT No Attribution. It is OSI-approved and does not enter generated output.
     "MIT-0",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
@@ -39,16 +30,12 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# A path dependency without a `version` is a wildcard, and every example reaches `spargen` (or
-# `spargen-macro`) that way on purpose: it builds against this checkout's generator. This exempts
-# path dependencies of `publish = false` crates only; a published crate's still fails, as `cargo
-# publish` would.
+# Every example reaches `spargen` through a version-less path dependency on purpose; this exempts
+# path dependencies of `publish = false` crates only.
 allow-wildcard-paths = true
-# Advisory floors. Each mirrors a direct requirement at the same release in `spargen/Cargo.toml`,
-# which is what the resolver enforces here and in every consumer's resolve; this entry names the
-# advisory and still fails once the database stops carrying it. Use the `name` + `version` form:
-# cargo-deny reads `crate = "name@<X"` as the exact release `X`. `advisory_floors_are_manifest_requirements`
-# in `spargen/tests/repo_gates/supply_chain.rs` holds both.
+# Advisory floors, each paired with a requirement in `spargen/Cargo.toml` (AGENTS.md, "Lockfiles
+# and advisories"). Keep the `name` + `version` form: cargo-deny reads `crate = "name@<X"` as the
+# exact release `X`.
 deny = [
     { name = "rustls", version = "<0.23.46", reason = "RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, RUSTSEC-2026-0349" },
     { name = "rustls-webpki", version = "<0.103.16", reason = "RUSTSEC-2026-0382" },
