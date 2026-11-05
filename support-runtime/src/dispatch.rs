@@ -199,11 +199,11 @@ where
 /// binary variant keeps it without a copy.
 pub async fn decode_success_with<T>(
     core: &ClientCore,
-    response: Response,
+    mut response: Response,
     decode: impl FnOnce(&Bytes) -> Result<T, String>,
 ) -> Result<ResponseValue<T>, Error<Infallible>> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let headers = std::mem::take(response.headers_mut());
     let body = response.bytes().await.map_err(Error::from_reqwest)?;
     match decode(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
@@ -258,10 +258,10 @@ where
 /// The `E` parameter only threads the taxonomy through a transport failure while reading.
 pub async fn read_error_body<E>(
     core: &ClientCore,
-    response: Response,
+    mut response: Response,
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let headers = std::mem::take(response.headers_mut());
     let (body, truncated) = read_capped(core, response).await?;
     Ok((status, headers, body, truncated))
 }
@@ -332,12 +332,12 @@ where
 /// a raw binary error body keeps it without a copy.
 pub(crate) async fn classify_with<E>(
     core: &ClientCore,
-    response: Response,
+    mut response: Response,
     documented: &[StatusSpec],
     decode: impl FnOnce(&Bytes) -> Result<E, String>,
 ) -> Error<E> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let headers = std::mem::take(response.headers_mut());
     match read_capped(core, response).await {
         Ok((body, truncated)) => {
             if documented.iter().any(|spec| spec.matches(status)) {

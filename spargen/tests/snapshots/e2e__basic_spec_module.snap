@@ -702,11 +702,11 @@ mod support {
         /// binary variant keeps it without a copy.
         pub async fn decode_success_with<T>(
             core: &ClientCore,
-            response: Response,
+            mut response: Response,
             decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
             let status = response.status();
-            let headers = response.headers().clone();
+            let headers = std::mem::take(response.headers_mut());
             let body = response.bytes().await.map_err(Error::from_reqwest)?;
             match decode(&body) {
                 Ok(value) => Ok(ResponseValue::new(status, headers, value)),
@@ -757,13 +757,13 @@ mod support {
         /// The `E` parameter only threads the taxonomy through a transport failure while reading.
         pub async fn read_error_body<E>(
             core: &ClientCore,
-            response: Response,
+            mut response: Response,
         ) -> Result<
             (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool),
             Error<E>,
         > {
             let status = response.status();
-            let headers = response.headers().clone();
+            let headers = std::mem::take(response.headers_mut());
             let (body, truncated) = read_capped(core, response).await?;
             Ok((status, headers, body, truncated))
         }
@@ -840,12 +840,12 @@ mod support {
         /// a raw binary error body keeps it without a copy.
         pub(crate) async fn classify_with<E>(
             core: &ClientCore,
-            response: Response,
+            mut response: Response,
             documented: &[StatusSpec],
             decode: impl FnOnce(&Bytes) -> Result<E, String>,
         ) -> Error<E> {
             let status = response.status();
-            let headers = response.headers().clone();
+            let headers = std::mem::take(response.headers_mut());
             match read_capped(core, response).await {
                 Ok((body, truncated)) => {
                     if documented.iter().any(|spec| spec.matches(status)) {
@@ -3279,6 +3279,7 @@ mod support {
         use reqwest::header::HeaderMap;
         use reqwest::{Request, Response, StatusCode};
         use serde::de::DeserializeOwned;
+        use super::dispatch::cap_body;
         use super::{
             send, unexpected_status, ClientConfig, ClientCore, Error, MaybeSend,
             MaybeSync, TransportError,
@@ -3406,11 +3407,11 @@ mod support {
             /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
             /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
             /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
-            pub(crate) fn new(response: Response, framing: Framing) -> Self {
+            pub(crate) fn new(mut response: Response, framing: Framing) -> Self {
                 let config = ClientConfig::default();
                 Self {
                     status: response.status(),
-                    headers: response.headers().clone(),
+                    headers: std::mem::take(response.headers_mut()),
                     state: StreamState::Body(Box::pin(response.bytes_stream())),
                     buffer: Vec::new(),
                     max_frame: config.max_stream_frame,
@@ -3597,9 +3598,9 @@ mod support {
                                     this.state = StreamState::Connecting(future);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Ok(response)) => {
+                                Poll::Ready(Ok(mut response)) => {
                                     this.status = response.status();
-                                    this.headers = response.headers().clone();
+                                    this.headers = std::mem::take(response.headers_mut());
                                     this.state = StreamState::Body(
                                         Box::pin(response.bytes_stream()),
                                     );
@@ -3624,9 +3625,10 @@ mod support {
             /// reconnect is attempted: the server that sent the item is likely to send it again.
             fn frame_overflow(&mut self) -> StreamError {
                 self.state = StreamState::Done;
-                let retained = self.buffer.len().min(self.max_error_body);
-                let body = Bytes::copy_from_slice(&self.buffer[..retained]);
-                self.buffer = Vec::new();
+                let (body, _) = cap_body(
+                    Bytes::from(std::mem::take(&mut self.buffer)),
+                    self.max_error_body,
+                );
                 Error::Decode {
                     status: self.status,
                     headers: self.headers.clone(),
