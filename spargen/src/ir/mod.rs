@@ -54,7 +54,31 @@ pub(crate) struct Api {
     pub(crate) security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
 }
 
+/// The conditionally embedded runtime modules a generated module carries, decided once by
+/// [`Api::runtime_features`] for both the embed (`codegen`) and the dependencies it implies
+/// (`runtime_contract`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeFeatures {
+    /// The XML codec: [`Api::uses_xml`].
+    pub(crate) xml: bool,
+    /// The sequential-response `stream` module: [`Api::uses_streams`].
+    pub(crate) streams: bool,
+    /// The RFC 3339 `Date`/`DateTime` newtypes: [`Api::uses_time`], with the `time` mapping on.
+    pub(crate) time: bool,
+}
+
 impl Api {
+    /// The conditional runtime modules the module generated from this API embeds, with the `time`
+    /// mapping on or off as `time_mapping` says. With it off, the date primitives stay `String` and
+    /// the newtypes would be dead weight.
+    pub(crate) fn runtime_features(&self, time_mapping: bool) -> RuntimeFeatures {
+        RuntimeFeatures {
+            xml: self.uses_xml(),
+            streams: self.uses_streams(),
+            time: time_mapping && self.uses_time(),
+        }
+    }
+
     /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
     /// the `quick-xml` row of the consumer requirements table (`runtime_contract`) and the
     /// conditional embedding of the XML runtime helpers — both deterministic functions of the API.

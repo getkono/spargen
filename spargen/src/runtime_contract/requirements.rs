@@ -73,6 +73,7 @@ pub(crate) struct RuntimeRequirements {
 
 impl RuntimeRequirements {
     pub(crate) fn for_api(api: &Api, spec: &Spec) -> Self {
+        let features = api.runtime_features(spec.time);
         Self {
             reqwest_multipart: api.operations.iter().any(|operation| {
                 operation
@@ -81,13 +82,13 @@ impl RuntimeRequirements {
                     .is_some_and(|body| body.media == MediaType::Multipart)
             }),
             bytes_serde: api.uses_bytes_serde(),
-            streams: api.uses_streams(),
-            xml: api.uses_xml(),
+            streams: features.streams,
+            xml: features.xml,
             uuid: spec.uuid
                 && api.types.emitted().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
-            time: spec.time && api.uses_time(),
+            time: features.time,
         }
     }
 }

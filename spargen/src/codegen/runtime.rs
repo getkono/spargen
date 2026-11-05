@@ -9,12 +9,17 @@ use super::blocking::blocking_cfg;
 /// Emit the private `support` module, one submodule per freestanding runtime source: each file's
 /// text up to its `#[cfg(test)]` module, with `crate::` rewritten to `super::`, re-parsed as
 /// tokens. The module carries an outer `#[forbid(unsafe_code)]`: an inner `#![…]` attribute would
-/// make the output unusable via `include!`. When `uses_xml` is set (the API has an
+/// make the output unusable via `include!`. When `features.xml` is set (the API has an
 /// `application/xml` / `text/xml` body), the XML codec module is embedded and its helpers
 /// re-exported; otherwise it is omitted entirely, so a non-XML output carries no `quick-xml`
-/// reference. `uses_streams` embeds the sequential-response `stream` module, and `uses_time` the
-/// RFC 3339 `DateTime`/`Date` newtypes, on the same terms.
-pub(super) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) -> TokenStream {
+/// reference. `features.streams` embeds the sequential-response `stream` module, and
+/// `features.time` the RFC 3339 `DateTime`/`Date` newtypes, on the same terms.
+pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream {
+    let crate::ir::RuntimeFeatures {
+        xml: uses_xml,
+        streams: uses_streams,
+        time: uses_time,
+    } = features;
     let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
         let ident = format_ident!("{}", stem);

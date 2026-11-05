@@ -100,12 +100,9 @@ pub(crate) fn generate(
     names: &Names,
     options: &CodegenOptions,
 ) -> Result<GeneratedCode, CodegenError> {
-    let uses_streams = api.uses_streams();
-    // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
-    // and the newtypes would be dead weight.
-    let uses_time = options.feature_time && api.uses_time();
-    let support = runtime::emit_support(api.uses_xml(), uses_streams, uses_time);
-    let models = models::emit_models(api, names, options, uses_time);
+    let features = api.runtime_features(options.feature_time);
+    let support = runtime::emit_support(features);
+    let models = models::emit_models(api, names, options, features.time);
     let signatures = operation::signatures(api, names);
     let client = client::emit_client(api, &signatures, names, options);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
@@ -122,8 +119,12 @@ pub(crate) fn generate(
         }
     };
     let root_exports = root_reexport(crate::name::ROOT_REEXPORTS);
-    let stream_exports = uses_streams.then(|| root_reexport(crate::name::STREAM_ROOT_REEXPORTS));
-    let datetime_exports = uses_time.then(|| root_reexport(crate::name::DATETIME_ROOT_REEXPORTS));
+    let stream_exports = features
+        .streams
+        .then(|| root_reexport(crate::name::STREAM_ROOT_REEXPORTS));
+    let datetime_exports = features
+        .time
+        .then(|| root_reexport(crate::name::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
         #root_exports
         #stream_exports
