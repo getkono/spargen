@@ -9,6 +9,7 @@ use super::*;
 /// branch of a category it omits is excluded with `W011`, and an `items` branch beside
 /// `[string, integer, 'null']` meets it in `null` alone, so `Pick` is `()`. The union the array
 /// synthesizes for the meet is no type of the output.
+// W011 case: excluded-union-branch
 #[test]
 fn a_multi_category_type_array_beside_a_union_excludes_the_branches_it_omits() {
     let excluded = |index: usize| {

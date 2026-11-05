@@ -4,6 +4,7 @@
 
 use super::*;
 
+// E009 case: undefined-rfc6570
 #[test]
 fn e009_multipart_deep_object_encoding_rejected() {
     // `deepObject` builds `name[key]=value` query fragments. A multipart part carries its name in

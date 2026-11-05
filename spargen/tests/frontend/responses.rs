@@ -393,6 +393,7 @@ fn dispatch_arms(code: &str, name: &str) -> (Vec<String>, Vec<String>) {
     (arms(&dispatch.then_branch), arms(&otherwise.block))
 }
 
+// W011 case: response-content-type
 #[test]
 fn documented_response_headers_get_typed_accessors() {
     // A response's documented `headers` each get a typed accessor on the generated response.
@@ -657,6 +658,7 @@ paths:
     }
 }
 
+// W011 case: response-header-untyped
 #[test]
 fn w011_a_response_header_schema_simple_serialization_cannot_express_is_reported() {
     // The `schema:` spelling's own raise site: `simple` serializes a scalar, an array or an object,

@@ -528,6 +528,7 @@ components:
 /// keep the rule to what it says: one union beside a `$ref` to a plain object component, a
 /// union of one real branch beside `null` (no union once lowered), and two unions with no object
 /// member (met as scalars) still generate.
+// E013 case: several-unions
 #[test]
 fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
     let one = "{ oneOf: [ { required: [a] }, { required: [b] } ] }";

@@ -13,6 +13,7 @@ use super::*;
 /// were written beside it.
 ///
 /// Both spellings are driven: the bare union, and the union carrying its own sibling keywords.
+// E007 case: resolves-to-itself
 #[test]
 fn a_union_whose_sole_member_is_its_own_reservation_is_rejected() {
     let bare = r##"

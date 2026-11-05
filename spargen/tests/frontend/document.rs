@@ -523,6 +523,7 @@ components:
     );
 }
 
+// E016 case: path-item-ref-siblings
 #[test]
 fn e016_path_item_ref_with_a_structural_sibling() {
     // The specification leaves `$ref` plus adjacent fields undefined, so either guess would ship a
@@ -593,6 +594,7 @@ components:
     );
 }
 
+// E004 case: declined-hop
 #[test]
 fn e004_a_chained_path_item_ref_is_rejected_at_the_path() {
     // One hop is what the specification requires and what spargen follows

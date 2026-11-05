@@ -831,6 +831,7 @@ components:
     );
 }
 
+// E020 case: no-root-member
 #[test]
 fn omitting_the_last_root_collection_is_still_rejected() {
     // The other half of the `anyOf`: strip the only surviving member and the document really is
@@ -856,11 +857,55 @@ paths:
         spargen::omit! { pointers { "/paths"; } },
     ));
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
+    assert_eq!(
+        e020_messages(&report),
+        [
+            "omit profile left no `paths`, `components`, or `webhooks`; an OpenAPI root requires \
+             at least one of the three"
+        ],
+        "{report:#?}"
+    );
+}
+
+/// The messages of every `E020` in `report`.
+fn e020_messages(report: &Report) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::OmitCreatedInvalidDocument)
+        .map(|d| d.message.as_str())
+        .collect()
+}
+
+/// `openapi` and `info` are the root fields both official schemas require, so a profile that
+/// removes one leaves no valid document, and `E020` names the field it removed.
+// E020 case: required-root-field
+#[test]
+fn omitting_a_required_root_field_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: No Content } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { pointers { "/info"; } },
+    ));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        e020_messages(&report),
+        ["omit profile removed required OpenAPI root fields: info"],
         "{report:#?}"
     );
 }

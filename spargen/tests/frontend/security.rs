@@ -188,6 +188,7 @@ components:
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
+// W011 case: mutual-tls
 #[test]
 fn w011_mutual_tls_is_satisfied_by_the_transport() {
     let spec = r##"

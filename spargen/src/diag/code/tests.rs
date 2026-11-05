@@ -1074,33 +1074,193 @@ fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The codes the frontend cannot produce, each with the suite under `spargen/tests/` that asserts
+/// it instead. [`every_code_is_asserted_by_the_suite_that_owns_it`] holds each to its suite.
+const OWNED_ELSEWHERE: &[(&str, &str)] = &[
+    // `compat` rules: the frontend never sees an omit rule.
+    ("InvalidOmitRule", "carve.rs"),
+    ("OmitCreatedInvalidDocument", "carve.rs"),
+    ("OmittedConstruct", "carve.rs"),
+    // The runtime-dependency contract needs a real consumer manifest to audit.
+    ("RuntimeDependencyContract", "e2e/manifest_audit.rs"),
+    ("RuntimeAuditSkipped", "e2e/manifest_audit.rs"),
+    // The Cargo-integration policy is a property of the build environment, not of the
+    // spec; `frontend/` deliberately runs every fixture with the integration off.
+    ("CargoIntegrationDegraded", "config.rs"),
+    ("CargoIntegrationRequired", "config.rs"),
+    // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
+    // run over the real fetcher can produce it. Its one positive assertion is the
+    // `fetch_failure` helper, which `vendor_remote.rs` and `tls_strictness.rs` both call.
+    ("RemoteFetchFailed", "shared/remote.rs"),
+];
+
+/// Every source file of the frontend suite under `tests`, sorted. The suite is a directory test
+/// crate: `main.rs` holds the harness and each family module beside it holds fixtures. A missing
+/// module would let a code or a case pass unasserted, so the scan must find `main.rs` and at least
+/// one module beside it.
+fn frontend_files(tests: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(tests.join("frontend"))
+        .unwrap_or_else(|error| panic!("spargen/tests/frontend/ must be readable: {error}"))
+        .map(|entry| entry.expect("readable directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+    assert!(
+        files.len() > 1 && files.iter().any(|path| path.ends_with("main.rs")),
+        "spargen/tests/frontend/ holds {files:?}; expected main.rs and its family modules"
+    );
+    files
+}
+
+/// The source of the top-level `fn` declared at `lines[at]`, through its closing `}`.
+fn fn_source(lines: &[&str], at: usize) -> String {
+    let end = lines[at..]
+        .iter()
+        .position(|line| *line == "}")
+        .map_or(lines.len(), |offset| at + offset + 1);
+    lines[at..end].join("\n")
+}
+
+/// The name of the top-level `fn` a source line declares, if it declares one.
+fn declared_fn(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("fn ")?;
+    rest.split(['(', '<']).next()
+}
+
+/// Every case an enumerating explain body lists (see
+/// [`every_emission_site_falls_into_a_case_its_explain_text_lists`]) has a fixture that names it:
+/// a `// E### case: <tag>` marker directly above the attributes of a `#[test]` in the suite that
+/// owns the code — `spargen/tests/frontend/`, or the one [`OWNED_ELSEWHERE`] names. The fixture,
+/// read together with the functions of its own file that it calls, must assert the code
+/// ([`asserts_variant`]) and, where the case reserves a wording, say it. A case added to an
+/// explain body fails until a fixture is marked for it, and a marker naming a tag its code does not
+/// list, or sitting on a fixture that does not assert its code, fails too.
+#[test]
+fn every_enumerated_case_has_a_frontend_fixture() {
+    let Some(root) = repo_root() else {
+        return;
+    };
+    let tests = root.join("spargen/tests");
+    let frontend_dir = tests.join("frontend");
+    let owner = |code: Code| {
+        OWNED_ELSEWHERE
+            .iter()
+            .find(|(variant, _)| *variant == variant_name(code))
+            .map_or_else(|| frontend_dir.clone(), |(_, suite)| tests.join(suite))
+    };
+    let mut files = frontend_files(&tests);
+    files.extend(ENUMERATED_CASES.iter().map(|(code, _)| owner(*code)));
+    files.retain(|path| path.is_file());
+    files.sort();
+    files.dedup();
+
+    let mut failures = Vec::new();
+    let mut fixtures = std::collections::BTreeSet::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+        let lines: Vec<&str> = text.lines().collect();
+        let shown = path
+            .strip_prefix(&tests)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let functions: Vec<(&str, String)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(at, line)| declared_fn(line).map(|name| (name, fn_source(&lines, at))))
+            .collect();
+
+        for (at, line) in lines.iter().enumerate() {
+            let Some((code, tags)) = case_marker(line) else {
+                continue;
+            };
+            let place = format!("tests/{shown}:{}", at + 1);
+            let Some((declared, cases)) = ENUMERATED_CASES
+                .iter()
+                .find(|(declared, _)| declared.as_str() == code)
+            else {
+                failures.push(format!("{place}: {code} is not in ENUMERATED_CASES"));
+                continue;
+            };
+            let owning = owner(*declared);
+            if path != &owning && path.parent() != Some(owning.as_path()) {
+                failures.push(format!(
+                    "{place}: a {code} fixture belongs in {}",
+                    owning.strip_prefix(&tests).unwrap_or(&owning).display()
+                ));
+            }
+            let attributes: Vec<&str> = lines[at + 1..]
+                .iter()
+                .copied()
+                .take_while(|below| below.starts_with("#[") || case_marker(below).is_some())
+                .collect();
+            let fn_at = at + 1 + attributes.len();
+            let Some(name) = lines.get(fn_at).and_then(|line| declared_fn(line)) else {
+                failures.push(format!("{place}: a {code} marker that sits above no `fn`"));
+                continue;
+            };
+            if !attributes.contains(&"#[test]") {
+                failures.push(format!(
+                    "{place}: `{name}` carries a {code} marker but no #[test]"
+                ));
+            }
+            let own = fn_source(&lines, fn_at);
+            let mut fixture = own.clone();
+            for (callee, source) in &functions {
+                if *callee != name && own.contains(&format!("{callee}(")) {
+                    fixture.push('\n');
+                    fixture.push_str(source);
+                }
+            }
+            if !asserts_variant(&fixture, variant_name(*declared)) {
+                failures.push(format!(
+                    "{place}: `{name}` is marked as a {code} fixture but never asserts \
+                     `Code::{}`",
+                    variant_name(*declared)
+                ));
+            }
+            for tag in &tags {
+                let Some(case) = cases.iter().find(|case| case.tag == *tag) else {
+                    failures.push(format!("{place}: {code} has no case `{tag}`"));
+                    continue;
+                };
+                if let Some(wording) = case.reserved_wording.filter(|w| !fixture.contains(w)) {
+                    failures.push(format!(
+                        "{place}: `{name}` is marked as {code} case `{tag}` but never mentions \
+                         {wording:?}, the wording reserved to that case"
+                    ));
+                }
+                fixtures.insert((declared.as_str(), case.tag));
+            }
+        }
+    }
+
+    for (code, cases) in ENUMERATED_CASES {
+        for case in cases.iter() {
+            if !fixtures.contains(&(code.as_str(), case.tag)) {
+                failures.push(format!(
+                    "{code} case `{}` has no fixture: mark a `#[test]` that reaches it with \
+                     `// {code} case: {}`",
+                    case.tag, case.tag
+                ));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend/`", enforced by tests
 /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
 /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
-/// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce them, and each
-/// must say so here. A new code that lands in neither place fails, which is the point. The
+/// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce
+/// them, and each must say so in [`OWNED_ELSEWHERE`]. A new code that lands in neither place fails,
+/// which is the point. The
 /// owning suite must assert the code in a positive form ([`asserts_variant`]); the frontend
 /// suite must not name an elsewhere-owned code at all, not even negatively.
 #[test]
 fn every_code_is_asserted_by_the_suite_that_owns_it() {
-    const OWNED_ELSEWHERE: &[(&str, &str)] = &[
-        // `compat` rules: the frontend never sees an omit rule.
-        ("InvalidOmitRule", "carve.rs"),
-        ("OmitCreatedInvalidDocument", "carve.rs"),
-        ("OmittedConstruct", "carve.rs"),
-        // The runtime-dependency contract needs a real consumer manifest to audit.
-        ("RuntimeDependencyContract", "e2e/manifest_audit.rs"),
-        ("RuntimeAuditSkipped", "e2e/manifest_audit.rs"),
-        // The Cargo-integration policy is a property of the build environment, not of the
-        // spec; `frontend/` deliberately runs every fixture with the integration off.
-        ("CargoIntegrationDegraded", "config.rs"),
-        ("CargoIntegrationRequired", "config.rs"),
-        // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
-        // run over the real fetcher can produce it. Its one positive assertion is the
-        // `fetch_failure` helper, which `vendor_remote.rs` and `tls_strictness.rs` both call.
-        ("RemoteFetchFailed", "shared/remote.rs"),
-    ];
-
     let Some(root) = repo_root() else {
         return;
     };
@@ -1110,23 +1270,7 @@ fn every_code_is_asserted_by_the_suite_that_owns_it() {
             .unwrap_or_else(|error| panic!("spargen/tests/{name} must be readable: {error}"))
     };
 
-    // The frontend suite is a directory test crate: `main.rs` holds the harness and each
-    // family module beside it holds fixtures, so every source file in it is read. A missing
-    // module would let a code pass unasserted, so the scan must find `main.rs` and at least
-    // one module beside it.
-    let frontend_dir = tests.join("frontend");
-    let mut frontend_files: Vec<_> = std::fs::read_dir(&frontend_dir)
-        .unwrap_or_else(|error| panic!("spargen/tests/frontend/ must be readable: {error}"))
-        .map(|entry| entry.expect("readable directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
-    frontend_files.sort();
-    assert!(
-        frontend_files.len() > 1 && frontend_files.iter().any(|path| path.ends_with("main.rs")),
-        "spargen/tests/frontend/ holds {frontend_files:?}; expected main.rs and its family \
-             modules"
-    );
-    let frontend = frontend_files
+    let frontend = frontend_files(&tests)
         .iter()
         .map(|path| {
             std::fs::read_to_string(path)

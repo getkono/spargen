@@ -5,6 +5,7 @@
 
 use super::*;
 
+// E009 case: no-codec
 #[test]
 fn e009_a_media_type_naming_no_codec_is_unsupported() {
     // A genuinely unsupported media (`application/pdf`) still rejects with E009 — the narrowing only
@@ -70,6 +71,7 @@ paths:
     assert!(!has_code(&generated, Code::UnsupportedMediaType));
 }
 
+// E009 case: raw-schema
 #[test]
 fn e009_an_html_response_with_an_object_schema_is_a_raw_schema_mismatch() {
     let report = generate(
@@ -95,6 +97,7 @@ paths:
     );
 }
 
+// E009 case: form-response
 #[test]
 fn e009_a_form_urlencoded_response_body_is_request_only_media() {
     let report = generate(

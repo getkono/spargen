@@ -135,6 +135,7 @@ paths:
     );
 }
 
+// W011 case: extra-servers
 #[test]
 fn w011_server_override_past_the_first_has_no_effect() {
     // The specification defines no rule for a client to choose among several per-operation servers,
@@ -281,6 +282,7 @@ paths:
     }
 }
 
+// W011 case: unused-server-variable
 #[test]
 fn w011_server_variable_absent_from_its_url_has_no_effect() {
     let spec = r##"

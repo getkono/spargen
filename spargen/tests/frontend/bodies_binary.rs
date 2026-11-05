@@ -823,6 +823,7 @@ paths:
     }
 }
 
+// E009 case: request-range
 #[test]
 fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
     // With no concrete key at all every candidate is a range, so the ladder and then source order
@@ -1323,6 +1324,7 @@ fn assert_rejected_as_nullable_raw_body(spec: &str) {
     }
 }
 
+// E009 case: raw-null
 #[test]
 fn e009_a_nullable_raw_request_body_is_rejected() {
     // A raw request body is sent verbatim as octets, and octets carry no `null`: an

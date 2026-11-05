@@ -101,6 +101,7 @@ components:
 /// reported ``unresolved parameter reference `cycle` `` — naming a reference nobody wrote, and calling
 /// a declared-but-circular target unresolved — and a non-component reference the bundle could not
 /// follow read as a plain `unresolved`, indistinguishable from an undeclared component.
+// E004 case: cycle
 #[test]
 fn e004_alias_walkers_name_a_cycle_and_an_unclassifiable_reference_as_what_they_are() {
     let valid = r##"

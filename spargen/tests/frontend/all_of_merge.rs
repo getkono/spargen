@@ -229,6 +229,7 @@ components:
 /// `ALL_OF_CONFLICT_SPEC` types `Conflict.x` `string` in one `allOf` member and `integer` in the
 /// other, which requires it: the meet is empty and `x` cannot be omitted, so the conflict is the
 /// required-property case of `E013`, at the composition.
+// E013 case: required-property
 #[test]
 fn e013_a_required_property_the_all_of_members_type_apart_is_irreconcilable() {
     let report = generate(ALL_OF_CONFLICT_SPEC);
@@ -251,6 +252,7 @@ fn e013_a_required_property_the_all_of_members_type_apart_is_irreconcilable() {
 }
 
 /// Mixing an object member with a scalar member has no single representable type → E013.
+// E013 case: object-scalar-mix
 #[test]
 fn e013_all_of_object_scalar_mix_rejected() {
     let spec = r##"
@@ -268,12 +270,52 @@ components:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfIrreconcilable));
+    assert_eq!(
+        messages_for(&report, Code::AllOfIrreconcilable),
+        ["an `allOf` mixes object and scalar members, which cannot form one type"],
+        "{report:#?}"
+    );
+}
+
+/// Scalar `allOf` members that share no value — two types, or two enums with no member in
+/// common — have no intersection to generate, so the composition is `E013` at the schema.
+// E013 case: scalar-members
+#[test]
+fn e013_all_of_scalar_members_with_no_common_value_are_irreconcilable() {
+    for members in [
+        "[{ type: string }, { type: integer }]",
+        "[{ type: string, enum: [a] }, { type: string, enum: [b] }]",
+    ] {
+        let report = generate(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Scalar:\n      allOf: {members}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{members}: {report:#?}"
+        );
+        let e013: Vec<(&str, &str)> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::AllOfIrreconcilable)
+            .map(|diagnostic| (diagnostic.pointer.as_str(), diagnostic.message.as_str()))
+            .collect();
+        assert_eq!(
+            e013,
+            [(
+                "/components/schemas/Scalar",
+                "`allOf` scalar members have an empty or unrepresentable intersection"
+            )],
+            "{members}: {report:#?}"
+        );
+    }
 }
 
 /// The boolean schema `false` admits no value, so an `allOf` holding it admits none either. It is
 /// rejected as the empty composition it is, at a component root and inside a property alike, and
 /// located at the `false` entry itself: its pointer and the span of the `false` it names (#832).
+// E013 case: false-member
 #[test]
 fn e013_an_all_of_member_that_is_false() {
     for (place, schemas, pointer) in [
@@ -700,6 +742,7 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
 /// pins the three in-loop rejections: an `additionalProperties` conflict, a reference cycle
 /// through an `additionalProperties` value schema, and a repeated property whose types share
 /// values no single Rust type represents.
+// E013 case: additional-values, unrepresentable-meet
 #[test]
 fn an_all_of_merge_rejected_inside_its_member_loop_reports_no_default_it_read() {
     let base = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \

@@ -246,6 +246,7 @@ components:
     }
 }
 
+// W001 case: content-annotation
 #[test]
 fn content_schema_outside_sse_remains_an_explicit_warning() {
     let spec = r##"
@@ -297,6 +298,7 @@ paths:
     assert!(code.contains("Framing::JsonSequence"), "{code}");
 }
 
+// E009 case: sequence-schema
 #[test]
 fn oas32_sequential_schema_is_not_misread_as_an_item_schema() {
     let spec = r##"
@@ -567,6 +569,7 @@ paths:
     }
 }
 
+// E009 case: streaming-request
 #[test]
 fn e009_streaming_request_body_rejected() {
     // Streaming media is response-only: a `text/event-stream` REQUEST body has no representation and
@@ -615,6 +618,7 @@ fn assert_stream_position_rejected(spec: &str) {
     );
 }
 
+// E009 case: streaming-response-position
 #[test]
 fn e009_streaming_default_that_is_also_the_error_body_is_rejected() {
     // #120: a lone streaming `default` is the operation's success source (so the method returns

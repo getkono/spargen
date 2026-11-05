@@ -12,6 +12,7 @@ use super::*;
 /// vacuously satisfied by an instance of another category, so it refines exactly the branches of
 /// its own category and leaves the rest as they are; where no branch has its category it reaches
 /// nothing the union accepts, which is the contradiction the `$ref` spelling already rejects.
+// W011 case: unreached-union-sibling
 #[test]
 fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
     const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
@@ -420,6 +421,7 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
 /// variant, and would inherit the same unsatisfiability claim `intersect_types` cannot support.
 /// This pins the sole-member wording, the empty-or-unrepresentable hedge, and that the message does
 /// not name some other cause entirely.
+// E007 case: no-branch-left
 #[test]
 fn the_single_member_union_rejection_names_its_own_cause() {
     let spec = r##"

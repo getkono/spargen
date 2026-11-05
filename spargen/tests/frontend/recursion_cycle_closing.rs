@@ -236,6 +236,7 @@ components:
 ///
 /// The guard's local message used to say the reference closed a cycle back to "the component that
 /// encloses it", naming a construct this document does not contain.
+// E013 case: cycle
 #[test]
 fn a_cycle_closing_ref_to_a_non_component_schema_names_no_component() {
     const LIB: &str = r##"

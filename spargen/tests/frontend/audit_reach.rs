@@ -43,6 +43,7 @@ const HEAD: &str = "openapi: 3.1.0\n\
 /// The issue's reproducer: a response header, inline and through `$ref` into
 /// `components.headers`, and a header described by `content` rather than `schema`. A component
 /// header two responses reference is audited once.
+// W001 case: validation-keyword
 #[test]
 fn a_response_header_schema_gets_the_audit_a_parameter_schema_does() {
     let spec = format!(

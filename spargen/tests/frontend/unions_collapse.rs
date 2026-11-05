@@ -11,6 +11,7 @@ use super::*;
 /// an `allOf`'s sole member, and after the meet beside a `$ref` or an `allOf`, whose merge is held
 /// back until then. The variant's position is named, as a member before a meet and a variant
 /// after one.
+// W001 case: untyped-one-of-variant
 #[test]
 fn a_one_of_member_accepting_every_value_warns() {
     let cases = [
@@ -262,6 +263,7 @@ components:
 /// distinctions are reported (`W001`) rather than generating a union nothing can decode. Where only
 /// some branches share a type, they become one variant and the others stand. `null` follows the
 /// collapse's `oneOf` rule: two branches that both accept it fail exactly-one, so it is invalid.
+// W001 case: indistinguishable-branches
 #[test]
 fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
     let props = "properties: { a: { type: string }, b: { type: string } }";

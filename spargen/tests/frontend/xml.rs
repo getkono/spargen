@@ -507,6 +507,7 @@ components:
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
+// E009 case: xml-multi-body
 #[test]
 fn xml_body_in_multi_status_enum_is_rejected() {
     // XML decode is scoped to single-body success/error. An XML body that would land in a
@@ -892,6 +893,7 @@ paths:
 
 /// The issue's reproduction: a root namespace the codec cannot write, on a type an XML body
 /// serializes. Ignoring it would put un-namespaced XML on the wire while reporting success.
+// E009 case: xml-hint
 #[test]
 fn e009_root_xml_namespace_on_an_xml_body_is_rejected() {
     let spec = r##"
