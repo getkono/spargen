@@ -12,15 +12,14 @@
 //! [`body`], and [`dispatch`] (the method's parameter, request-body, and status-dispatch code),
 //! [`responses`] (response enums, error types, and header structs), [`blocking`] (the synchronous
 //! facade), [`runtime`] (the embedded `support` module and the root re-exports), the shared
-//! [`docs`] and [`ty`] renderers, [`idents`] (the status variant names the response and dispatch
-//! emitters read), and [`format`](mod@format) (the `prettyplease` pass over the assembled tokens).
+//! [`docs`] and [`ty`] renderers, and [`idents`] (the status variant names the response and
+//! dispatch emitters read).
 
 mod blocking;
 mod body;
 mod client;
 mod dispatch;
 mod docs;
-mod format;
 mod idents;
 mod models;
 mod operation;
@@ -33,8 +32,6 @@ mod union;
 use crate::ir::Api;
 use crate::name::Names;
 use quote::{format_ident, quote};
-
-use format::format_tokens;
 
 /// Options controlling code generation. The `uuid`/`time` flags carry the `Spec::uuid` /
 /// `Spec::time` knobs into the one generated module: when off, the corresponding `format`
@@ -138,11 +135,14 @@ pub(crate) fn generate(
     render(tokens)
 }
 
-/// Format the assembled module into the one generated file, or the [`CodegenError`] its tokens
-/// raise when they are not a parseable Rust file.
+/// Format the assembled module into the one generated file, deterministic and rustfmt-clean via
+/// `prettyplease`, or the [`CodegenError`] its tokens raise when they are not a parseable Rust
+/// file.
 fn render(tokens: proc_macro2::TokenStream) -> Result<GeneratedCode, CodegenError> {
-    let contents = format_tokens(tokens).map_err(CodegenError)?;
-    Ok(GeneratedCode { contents })
+    let file = syn::parse2(tokens).map_err(CodegenError)?;
+    Ok(GeneratedCode {
+        contents: prettyplease::unparse(&file),
+    })
 }
 
 #[cfg(test)]

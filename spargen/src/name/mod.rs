@@ -17,10 +17,10 @@ use std::collections::HashMap;
 
 use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind};
 
-pub(crate) use casing::{to_pascal_case, to_snake_case};
+use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
-pub(crate) use scope::{RankedRequest, Scope};
+use scope::{RankedRequest, Scope};
 pub(crate) use synth::synth_operation_id;
 
 /// The identifiers allocated for a whole [`Api`]: one record per operation, and one name per type,
