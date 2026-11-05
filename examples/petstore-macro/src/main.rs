@@ -9,10 +9,16 @@
 //! consumer matches on (a documented error body, a missing credential), so the macro expansion's
 //! copies are matched at runtime too.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-
 use secrecy::SecretString;
+
+#[path = "../../mock_http.rs"]
+#[expect(
+    dead_code,
+    reason = "shared with examples/petstore, which uses all of it; this example uses a subset"
+)]
+mod mock_http;
+
+use mock_http::{Request, Response};
 
 // The entire client, generated at compile time from the spec beside this crate's Cargo.toml.
 // The expansion carries no inner attributes, so it drops straight into a module.
@@ -34,7 +40,7 @@ const TOKEN: &str = "let-me-in";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let addr = spawn_mock_server();
+    let addr = mock_http::spawn(route);
     let base_url = format!("http://{addr}");
     println!("mock petstore listening on {base_url}");
 
@@ -89,85 +95,31 @@ async fn main() {
     println!("petstore-macro example: all checks passed");
 }
 
-/// A deliberately tiny HTTP/1.1 mock on an ephemeral localhost port — no external service.
-fn spawn_mock_server() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            std::thread::spawn(move || handle(stream));
-        }
-    });
-    addr
-}
-
-fn handle(mut stream: TcpStream) {
-    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
+/// The petstore routes the mock serves.
+fn route(request: Request) -> Response {
+    if request.header("authorization") != Some(format!("Bearer {TOKEN}").as_str()) {
+        return Response::new("401 Unauthorized", r#"{"message":"unauthorized"}"#);
     }
-    let mut parts = request_line.split_whitespace();
-    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
-        return;
-    };
-    let path = target.split('?').next().unwrap_or(target);
-
-    let mut authorization = String::new();
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-            break;
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/pets") => Response::new(
+            "200 OK",
+            r#"[{"id":"1","name":"Rex","status":"available"}]"#,
+        ),
+        ("POST", "/pets") => {
+            let new: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let name = new["name"].as_str().unwrap_or("unnamed");
+            Response::new(
+                "201 Created",
+                format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
+            )
         }
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        match name.to_ascii_lowercase().as_str() {
-            "authorization" => authorization = value.trim().to_owned(),
-            "content-length" => content_length = value.trim().parse().unwrap_or(0),
-            _ => {}
+        ("GET", "/pets/1") => {
+            Response::new("200 OK", r#"{"id":"1","name":"Rex","status":"available"}"#)
         }
+        ("GET", _) => Response::new("404 Not Found", r#"{"message":"no such pet"}"#),
+        _ => Response::new(
+            "500 Internal Server Error",
+            r#"{"message":"unhandled route"}"#,
+        ),
     }
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 && reader.read_exact(&mut body).is_err() {
-        return;
-    }
-
-    let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
-        (
-            "401 Unauthorized",
-            r#"{"message":"unauthorized"}"#.to_owned(),
-        )
-    } else {
-        match (method, path) {
-            ("GET", "/pets") => (
-                "200 OK",
-                r#"[{"id":"1","name":"Rex","status":"available"}]"#.to_owned(),
-            ),
-            ("POST", "/pets") => {
-                let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                let name = new["name"].as_str().unwrap_or("unnamed");
-                (
-                    "201 Created",
-                    format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
-                )
-            }
-            ("GET", "/pets/1") => (
-                "200 OK",
-                r#"{"id":"1","name":"Rex","status":"available"}"#.to_owned(),
-            ),
-            ("GET", _) => ("404 Not Found", r#"{"message":"no such pet"}"#.to_owned()),
-            _ => (
-                "500 Internal Server Error",
-                r#"{"message":"unhandled route"}"#.to_owned(),
-            ),
-        }
-    };
-
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-        response_body.len(),
-    );
 }
