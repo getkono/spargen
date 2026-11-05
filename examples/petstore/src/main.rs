@@ -344,6 +344,12 @@ async fn main() {
         })),
     );
     let requests_before = mock_http::requests_read();
+    // The calls above reached the mock, so a counter that never counts fails here rather than
+    // passing the unchanged-count check below.
+    assert!(
+        requests_before > 0,
+        "the mock counts the requests the earlier calls sent"
+    );
     let error = failing
         .get_pet("1")
         .await
