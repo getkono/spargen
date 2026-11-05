@@ -19,18 +19,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     let mut operations = BTreeMap::new();
     for operation in &api.operations {
         let key = format!("{} {}", method_label(&operation.method), operation.path.raw);
-        let method_name = names
-            .operations
-            .get(&operation.id)
-            .expect("operation name allocated")
-            .as_str()
-            .to_owned();
-        let url_accessor_name = names
-            .operation_urls
-            .get(&operation.id)
-            .expect("operation URL accessor name allocated")
-            .as_str()
-            .to_owned();
+        let operation_names = names.operation(&operation.id);
+        let method_name = operation_names.method.as_str().to_owned();
+        let url_accessor_name = operation_names.url_accessor.as_str().to_owned();
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
@@ -235,22 +226,13 @@ fn response_headers(
             continue;
         }
         let label = crate::name::status_label(status);
-        let name = names
-            .response_header_structs
-            .get(&(operation.id.clone(), label.clone()))
-            .expect("response header struct name allocated")
-            .as_str()
-            .to_owned();
+        let header_names = names.operation(&operation.id).response_headers(&label);
+        let name = header_names.ty.as_str().to_owned();
         let fields = response
             .headers
             .iter()
             .map(|header| {
-                let field = names
-                    .response_header_fields
-                    .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                    .expect("response header field allocated")
-                    .as_str()
-                    .to_owned();
+                let field = header_names.field(&header.name).as_str().to_owned();
                 let surface = FieldSurface {
                     ty: canon_ty(header.ty, api, names),
                     required: header.required,

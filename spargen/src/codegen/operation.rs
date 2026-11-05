@@ -12,10 +12,6 @@ use super::dispatch::{
     attach_auth_tokens, error_branch_tokens, success_decode_tokens, success_type,
 };
 use super::docs::{doc_tokens, normalize_rustdoc};
-use super::idents::{
-    error_type_ident, operation_bindings, operation_method_ident, operation_url_ident, param_ident,
-    params_struct_ident,
-};
 use super::params::{
     cookie_param_tokens, json_querystring_tokens, location_statements, param_value_tokens,
     query_param_tokens, querystring_param_tokens,
@@ -32,12 +28,13 @@ use super::ty::{reqwest_method, ty_tokens};
 /// The operation's URL accessor (`emit_operation_url`) is emitted after it, from the same
 /// URL-building statements.
 pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let bindings = operation_bindings(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let bindings = &operation_names.bindings;
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
     let cookies_binding = &bindings.cookies;
-    let method_ident = operation_method_ident(operation, names);
-    let error_ident = error_type_ident(operation, names);
+    let method_ident = &operation_names.method;
+    let error_ident = &operation_names.error;
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names);
     let error_ty = quote! { #error_ident };
@@ -57,8 +54,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
 
     let headers = location_statements(
         operation,
-        names,
-        bindings,
+        operation_names,
         ParamLoc::Header,
         |param, value| {
             let name = &param.name;
@@ -74,8 +70,7 @@ pub(super) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         has_cookies.then(|| quote! { let mut #cookies_binding: Vec<String> = Vec::new(); });
     let cookies = location_statements(
         operation,
-        names,
-        bindings,
+        operation_names,
         ParamLoc::Cookie,
         |param, value| cookie_param_tokens(param, &param.name, value, cookies_binding),
     );
@@ -169,7 +164,7 @@ pub(super) fn operation_url_args(
     let (args, forwards) = operation_args(operation, api, names);
     let required = operation.params.iter().filter(|param| param.required);
     let mut keep: Vec<bool> = required.map(|param| shapes_url(param.location)).collect();
-    if operation_bindings(operation, names).params.is_some() {
+    if names.operation(&operation.id).bindings.params.is_some() {
         keep.push(url_takes_params(operation));
     }
     // The body argument, last when present, is never kept.
@@ -187,8 +182,9 @@ pub(super) fn operation_url_args(
 /// Emit one operation's URL accessor on `Client`, built by the same [`url_building`] statements as
 /// the operation method and documented by [`url_accessor_doc`].
 fn emit_operation_url(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let url_ident = operation_url_ident(operation, names);
-    let method_ident = operation_method_ident(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let url_ident = &operation_names.url_accessor;
+    let method_ident = &operation_names.method;
     let (args, _) = operation_url_args(operation, api, names);
     let normalizations = operation_arg_normalizations(
         operation,
@@ -240,18 +236,17 @@ struct UrlBuilding {
 
 /// Build an operation's [`UrlBuilding`] over the bindings `name` allocated for it.
 fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
-    let bindings = operation_bindings(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let bindings = &operation_names.bindings;
     let path_binding = &bindings.path;
     let query_binding = &bindings.query;
     let raw_query_binding = &bindings.raw_query;
     let path_init = operation.path.raw.clone();
-    let path_replacements = operation
-        .params
-        .iter()
-        .filter(|param| param.location == ParamLoc::Path)
-        .map(|param| {
+    let path_replacements = operation_names
+        .params(operation)
+        .filter(|(param, _)| param.location == ParamLoc::Path)
+        .map(|(param, ident)| {
             let placeholder = format!("{{{}}}", param.name);
-            let ident = param_ident(names, operation, param);
             let value = param_value_tokens(param, quote! { &#ident });
             quote! {
                 #path_binding = #path_binding.replace(#placeholder, &#value);
@@ -259,8 +254,7 @@ fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
         });
     let query = location_statements(
         operation,
-        names,
-        bindings,
+        operation_names,
         ParamLoc::Query,
         |param, value| query_param_tokens(param, &param.name, value, query_binding),
     );
@@ -269,7 +263,7 @@ fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
         .iter()
         .any(|parameter| parameter.location == ParamLoc::QueryString);
     // Lowering admits at most one `in: querystring` parameter per operation, so this is that one.
-    let json_querystring = operation.params.iter().find(|parameter| {
+    let json_querystring = operation_names.params(operation).find(|(parameter, _)| {
         parameter.location == ParamLoc::QueryString
             && matches!(
                 &parameter.style,
@@ -280,8 +274,7 @@ fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
     // binding's initializer rather than an assignment: a `None` it always overwrites would be an
     // `unused_assignments` warning in every consumer's build.
     let raw_query_init = uses_querystring.then(|| match json_querystring {
-        Some(parameter) if parameter.required => {
-            let ident = param_ident(names, operation, parameter);
+        Some((parameter, ident)) if parameter.required => {
             let encoded = json_querystring_tokens(quote! { &#ident });
             quote! { let #raw_query_binding: Option<String> = Some(#encoded); }
         }
@@ -290,8 +283,7 @@ fn url_building(operation: &Operation, names: &Names) -> UrlBuilding {
     });
     let querystring = location_statements(
         operation,
-        names,
-        bindings,
+        operation_names,
         ParamLoc::QueryString,
         |parameter, value| {
             // A required JSON whole-query value is already the raw query's initializer.
@@ -372,16 +364,15 @@ fn operation_arg_normalizations(
     takes_required: impl Fn(ParamLoc) -> bool,
     takes_bundle: bool,
 ) -> Vec<TokenStream> {
-    let bindings = operation_bindings(operation, names);
-    let params_ident = params_struct_ident(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let bindings = &operation_names.bindings;
+    let params_ident = &operation_names.params_struct;
     let mut statements = Vec::new();
-    let required = operation
-        .params
-        .iter()
-        .filter(|param| param.required && takes_required(param.location));
-    for param in required {
+    let required = operation_names
+        .params(operation)
+        .filter(|(param, _)| param.required && takes_required(param.location));
+    for (param, ident) in required {
         if takes_into_string(api, param.ty) {
-            let ident = param_ident(names, operation, param);
             let ty = ty_tokens(param.ty, names, true);
             statements.push(quote! { let #ident: #ty = #ident.into(); });
         }
@@ -406,12 +397,15 @@ pub(super) fn operation_args(
     api: &Api,
     names: &Names,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
-    let bindings = operation_bindings(operation, names);
-    let params_ident = params_struct_ident(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let bindings = &operation_names.bindings;
+    let params_ident = &operation_names.params_struct;
     let mut args = Vec::new();
     let mut forwards = Vec::new();
-    for param in operation.params.iter().filter(|param| param.required) {
-        let ident = param_ident(names, operation, param);
+    for (param, ident) in operation_names
+        .params(operation)
+        .filter(|(param, _)| param.required)
+    {
         // A plain `String` parameter accepts anything that converts, so a call site passes a
         // literal without `.to_owned()`. Narrowed to exactly `String`: every other generated type
         // keeps its concrete position, where `impl Into<T>` would buy nothing and cost inference.
@@ -459,7 +453,7 @@ pub(super) fn operation_return_ty(
     operation: &Operation,
     names: &Names,
 ) -> (TokenStream, TokenStream) {
-    let error_ident = error_type_ident(operation, names);
+    let error_ident = &names.operation(&operation.id).error;
     let success_ty = success_type(operation, names);
     let return_ok_ty = match operation.responses.stream_success() {
         Some(_) => quote! { support::EventStream<#success_ty> },

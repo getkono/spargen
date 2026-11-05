@@ -9,7 +9,7 @@ use crate::ir::{
 };
 use crate::name::{Names, OperationBindings};
 
-use super::idents::{status_variant_ident, success_enum_ident};
+use super::idents::status_variant_ident;
 use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
@@ -214,7 +214,7 @@ pub(super) fn success_decode_tokens(
         // variant is an unexpected-status error — there is no untyped fallback. Every body an
         // error keeps goes through a runtime helper that caps it at `max_error_body`.
         SuccessShape::Enum(entries) => {
-            let enum_ident = success_enum_ident(operation, names);
+            let enum_ident = names.operation(&operation.id).success_enum();
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
@@ -355,7 +355,7 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
-            let ident = success_enum_ident(operation, names);
+            let ident = names.operation(&operation.id).success_enum();
             quote! { #ident }
         }
     }

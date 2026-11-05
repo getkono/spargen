@@ -508,10 +508,11 @@ mod tests {
                 .expect("the emitted blocking client parses");
 
         // Each operation's method and its URL accessor.
-        let operation_methods: std::collections::BTreeSet<String> = names
+        let operation_methods: std::collections::BTreeSet<String> = api
             .operations
-            .values()
-            .chain(names.operation_urls.values())
+            .iter()
+            .map(|operation| names.operation(&operation.id))
+            .flat_map(|names| [&names.method, &names.url_accessor])
             .map(|ident| ident.as_str().to_owned())
             .collect();
         let mut fixed = std::collections::BTreeSet::new();

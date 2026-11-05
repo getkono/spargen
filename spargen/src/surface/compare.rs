@@ -68,7 +68,7 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     } else if old.url_accessor_name != new.url_accessor_name {
-        // The accessor was renamed although its method was not (see `Names::operation_urls`):
+        // The accessor was renamed although its method was not (see `OperationNames::url_accessor`):
         // its callers break just as a method's would.
         changes.push(Change::new(
             ChangeKind::MethodRenamed,

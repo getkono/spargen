@@ -5,10 +5,9 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::ir::{MediaType, Operation, ParamLoc, Ty};
-use crate::name::{Names, OperationBindings};
+use crate::name::{Names, OperationBindings, OperationNames};
 
 use super::docs::normalize_rustdoc;
-use super::idents::{param_ident, params_struct_ident};
 use super::ty::ty_tokens;
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
@@ -53,24 +52,18 @@ fn encoding_variant_tokens(variant: &str) -> TokenStream {
 /// optional-parameters bundle.
 pub(super) fn location_statements(
     operation: &Operation,
-    names: &Names,
-    bindings: &OperationBindings,
+    names: &OperationNames,
     location: ParamLoc,
     serialize: impl Fn(&crate::ir::Parameter, TokenStream) -> TokenStream,
 ) -> Vec<TokenStream> {
     let at_location = |required: bool| {
-        operation
-            .params
-            .iter()
-            .filter(move |param| param.required == required && param.location == location)
+        names
+            .params(operation)
+            .filter(move |(param, _)| param.required == required && param.location == location)
     };
-    let required = at_location(true).map(|param| {
-        let ident = param_ident(names, operation, param);
-        serialize(param, quote! { &#ident })
-    });
-    let optional = at_location(false).map(|param| {
-        let ident = param_ident(names, operation, param);
-        optional_param_guard(bindings, ident, serialize(param, quote! { value }))
+    let required = at_location(true).map(|(param, ident)| serialize(param, quote! { &#ident }));
+    let optional = at_location(false).map(|(param, ident)| {
+        optional_param_guard(&names.bindings, ident, serialize(param, quote! { value }))
     });
     required.chain(optional).collect()
 }
@@ -299,16 +292,14 @@ const EXPLICIT_NULL_SETTER_DOC: &str =
 /// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
 /// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
 pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenStream {
-    let ident = params_struct_ident(operation, names);
-    let optional: Vec<&crate::ir::Parameter> = operation
-        .params
-        .iter()
-        .filter(|param| !param.required)
-        .collect();
+    let operation_names = names.operation(&operation.id);
+    let ident = &operation_names.params_struct;
     // The setter method reuses the field ident verbatim, so the two can never disagree.
-    let field_ident = |param: &crate::ir::Parameter| param_ident(names, operation, param);
-    let fields = optional.iter().map(|param| {
-        let ident = field_ident(param);
+    let optional: Vec<(&crate::ir::Parameter, &crate::name::Ident)> = operation_names
+        .params(operation)
+        .filter(|(param, _)| !param.required)
+        .collect();
+    let fields = optional.iter().map(|(param, ident)| {
         let wire = &param.name;
         // Every struct param is optional, so the field is always an `Option`, and a `None` field
         // is omitted. `ty_tokens` already wraps a nullable param (`"null"` in its type array) in
@@ -347,8 +338,7 @@ pub(super) fn emit_params_struct(operation: &Operation, names: &Names) -> TokenS
     // whose field is a single `Option<T>`, nullable or not, and `Option<T>` for one that sends an
     // explicit `null`, where the setter's `None` is that `null`. By value (not `impl Into<T>`)
     // keeps inference/coherence trivial for every generated field type.
-    let setters = optional.iter().map(|param| {
-        let ident = field_ident(param);
+    let setters = optional.iter().map(|(param, ident)| {
         let inner = ty_tokens(
             Ty {
                 nullable: param.sends_explicit_null(),

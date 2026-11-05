@@ -23,43 +23,14 @@ pub(crate) use keyword::{escape, IdentRole};
 pub(crate) use scope::{RankedRequest, Scope};
 pub(crate) use synth::synth_operation_id;
 
-/// The identifiers allocated for a whole [`Api`]: one per operation, params struct, type, field,
-/// and variant. Codegen looks these names up rather than deriving them; the status-selector
-/// labels are the exception, derived on demand through [`status_label`], which is itself pure and
-/// deterministic.
+/// The identifiers allocated for a whole [`Api`]: one record per operation, and one name per type,
+/// field, variant and server item. Codegen looks these names up rather than deriving them; the
+/// status-selector labels are the exception, derived on demand through [`status_label`], which is
+/// itself pure and deterministic.
 #[derive(Debug, Default)]
 pub(crate) struct Names {
-    /// Method name per operation, allocated first-come with [`Scope::alloc`] in operation order, as
-    /// are [`Names::operation_urls`], [`Names::params_structs`] and
-    /// [`Names::response_header_structs`]; the type, error, success-enum and parameter names are
-    /// allocated with [`Scope::alloc_ranked`].
-    pub(crate) operations: HashMap<OperationId, Ident>,
-    /// URL-accessor method name per operation, `{method}_url`. Allocated in the method scope after
-    /// every operation's own method, so an operation whose method already spells `{method}_url`
-    /// keeps that name and the accessor takes a pointer-seeded suffix instead.
-    pub(crate) operation_urls: HashMap<OperationId, Ident>,
-    /// Optional-parameters `…Params` struct name per operation.
-    pub(crate) params_structs: HashMap<OperationId, Ident>,
-    /// Error type name per operation: `{Method}Error`, or `{Method}OperationError` where the first
-    /// form would shadow a root re-export. Allocated as one ranked batch in the root scope, which
-    /// the `…Params` structs and the success enums share, so two operations whose methods
-    /// PascalCase alike (`get_v2` and `get_v_2`), or whose plain and widened forms meet (`request`
-    /// and `requestOperation`), get distinct types.
-    pub(crate) operation_errors: HashMap<OperationId, Ident>,
-    /// `{Method}Response` success-enum name per operation whose
-    /// [`Responses::success`](crate::ir::Responses::success) is an enum, allocated in the root
-    /// scope beside [`Names::operation_errors`].
-    pub(crate) success_enums: HashMap<OperationId, Ident>,
-    /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
-    /// parameters are allocated in the same scope first, so these identifiers can never shadow
-    /// caller-provided values.
-    pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
-    /// Identifier per operation parameter, in `Operation::params` order: a method argument for a
-    /// required parameter, a `…Params` field (and setter) for an optional one. Each kind shares
-    /// one scope per operation, so two parameters whose names escape to the same spelling (a path
-    /// and a query `id`, a query `page-size` and a header `page_size`) are disambiguated instead
-    /// of emitting a duplicate argument or field.
-    pub(crate) parameters: HashMap<OperationId, Vec<Ident>>,
+    /// The names of each operation, read through [`Names::operation`].
+    operations: HashMap<OperationId, OperationNames>,
     /// Type name per type.
     pub(crate) types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -83,10 +54,101 @@ pub(crate) struct Names {
     pub(crate) server_variable_variants: HashMap<(usize, String, String), Ident>,
     /// Setter/field name per `(server index, variable name)`.
     pub(crate) server_variable_fields: HashMap<(usize, String), Ident>,
-    /// Header-struct type name per `(operation, status label)`.
-    pub(crate) response_header_structs: HashMap<(OperationId, String), Ident>,
-    /// Field name per `(operation, status label, header name)`.
-    pub(crate) response_header_fields: HashMap<(OperationId, String, String), Ident>,
+}
+
+impl Names {
+    /// The names allocated for the operation `id`, which every operation of the allocated [`Api`]
+    /// has.
+    pub(crate) fn operation(&self, id: &OperationId) -> &OperationNames {
+        self.operations
+            .get(id)
+            .expect("every operation of the allocated API has its names")
+    }
+}
+
+/// The identifiers allocated for one operation.
+///
+/// The method, URL-accessor and `…Params` names are allocated first-come with [`Scope::alloc`] in
+/// operation order, as are the response-header structs; the error, success-enum and parameter
+/// names are allocated with [`Scope::alloc_ranked`].
+#[derive(Debug)]
+pub(crate) struct OperationNames {
+    /// The method on `Client` and `BlockingClient`.
+    pub(crate) method: Ident,
+    /// The URL-accessor method, `{method}_url`. Allocated in the method scope after every
+    /// operation's own method, so an operation whose method already spells `{method}_url` keeps
+    /// that name and the accessor takes a pointer-seeded suffix instead.
+    pub(crate) url_accessor: Ident,
+    /// The optional-parameters `…Params` struct.
+    pub(crate) params_struct: Ident,
+    /// The error type: `{Method}Error`, or `{Method}OperationError` where the first form would
+    /// shadow a root re-export. Allocated as one ranked batch in the root scope, which the
+    /// `…Params` structs and the success enums share, so two operations whose methods PascalCase
+    /// alike (`get_v2` and `get_v_2`), or whose plain and widened forms meet (`request` and
+    /// `requestOperation`), get distinct types.
+    pub(crate) error: Ident,
+    /// The `{Method}Response` success enum, present exactly when
+    /// [`Responses::success`](crate::ir::Responses::success) is an enum, and allocated in the root
+    /// scope beside the error types.
+    success_enum: Option<Ident>,
+    /// Generator-owned signature and request-building bindings. Required OpenAPI parameters are
+    /// allocated in the same scope first, so these identifiers can never shadow caller-provided
+    /// values.
+    pub(crate) bindings: OperationBindings,
+    /// Identifier per parameter, in `Operation::params` order: a method argument for a required
+    /// parameter, a `…Params` field (and setter) for an optional one. Each kind shares one scope
+    /// per operation, so two parameters whose names escape to the same spelling (a path and a
+    /// query `id`, a query `page-size` and a header `page_size`) are disambiguated instead of
+    /// emitting a duplicate argument or field.
+    parameters: Vec<Ident>,
+    /// The header struct per status label whose response documents a header.
+    response_headers: HashMap<String, ResponseHeaderNames>,
+}
+
+impl OperationNames {
+    /// The `{Method}Response` success enum of an operation whose
+    /// [`Responses::success`](crate::ir::Responses::success) is an enum.
+    pub(crate) fn success_enum(&self) -> &Ident {
+        self.success_enum
+            .as_ref()
+            .expect("a success enum is allocated for every enum-shaped success")
+    }
+
+    /// Each parameter of `operation`, the operation these names were allocated for, beside its
+    /// identifier, in `Operation::params` order.
+    pub(crate) fn params<'a>(
+        &'a self,
+        operation: &'a crate::ir::Operation,
+    ) -> impl Iterator<Item = (&'a crate::ir::Parameter, &'a Ident)> {
+        debug_assert_eq!(operation.params.len(), self.parameters.len());
+        operation.params.iter().zip(&self.parameters)
+    }
+
+    /// The header struct of the response under the status `label`, which documents a header.
+    pub(crate) fn response_headers(&self, label: &str) -> &ResponseHeaderNames {
+        self.response_headers
+            .get(label)
+            .expect("a header struct is allocated for every response that documents a header")
+    }
+}
+
+/// The identifiers of one response-header struct: its type, allocated in the `types` module's
+/// scope so it can never collide with a generated model, and one field per header.
+#[derive(Debug)]
+pub(crate) struct ResponseHeaderNames {
+    /// The struct's type name.
+    pub(crate) ty: Ident,
+    /// Field name per header name.
+    fields: HashMap<String, Ident>,
+}
+
+impl ResponseHeaderNames {
+    /// The field of the header `name`, which the response documents.
+    pub(crate) fn field(&self, name: &str) -> &Ident {
+        self.fields
+            .get(name)
+            .expect("a field is allocated for every documented header")
+    }
 }
 
 /// The fixed inherent methods codegen emits on `Client` and `BlockingClient`, beside one method
@@ -319,30 +381,11 @@ pub(crate) fn allocate(api: &Api) -> Names {
     // Response-header structs are allocated in the model type scope above (the `types` module's),
     // so a documented header's struct can never collide with a generated model. The `…Params`
     // structs, error types and success enums take the module root's scope below.
-    for operation in &api.operations {
-        let responses = operation
-            .responses
-            .entries()
-            .map(|(spec, response)| (status_label(spec), response));
-        for (label, response) in responses {
-            if response.headers.is_empty() {
-                continue;
-            }
-            let hint = format!("{} {label} headers", operation.id.0);
-            let pointer = crate::diag::JsonPointer::root();
-            names.response_header_structs.insert(
-                (operation.id.clone(), label.clone()),
-                type_scope.alloc(&hint, IdentRole::Type, &pointer),
-            );
-            let mut field_scope = Scope::default();
-            for header in &response.headers {
-                names.response_header_fields.insert(
-                    (operation.id.clone(), label.clone(), header.name.clone()),
-                    field_scope.alloc(&header.name, IdentRole::Field, &pointer),
-                );
-            }
-        }
-    }
+    let response_headers: Vec<HashMap<String, ResponseHeaderNames>> = api
+        .operations
+        .iter()
+        .map(|operation| allocate_response_headers(operation, &mut type_scope))
+        .collect();
 
     // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
     // those spellings are taken before any operation asks for one.
@@ -366,22 +409,17 @@ pub(crate) fn allocate(api: &Api) -> Names {
     {
         root_scope.reserve(name, IdentRole::Type);
     }
+    let mut signatures = Vec::with_capacity(api.operations.len());
     for operation in &api.operations {
-        names.operations.insert(
-            operation.id.clone(),
-            operation_scope.alloc(
-                &operation.id.0,
-                IdentRole::Method,
-                &operation.provenance.pointer,
-            ),
+        let method = operation_scope.alloc(
+            &operation.id.0,
+            IdentRole::Method,
+            &operation.provenance.pointer,
         );
-        names.params_structs.insert(
-            operation.id.clone(),
-            root_scope.alloc(
-                &format!("{} params", operation.id.0),
-                IdentRole::Type,
-                &operation.provenance.pointer,
-            ),
+        let params_struct = root_scope.alloc(
+            &format!("{} params", operation.id.0),
+            IdentRole::Type,
+            &operation.provenance.pointer,
         );
 
         // Required parameters are fixed by the generated public surface. Allocate them first, then
@@ -391,10 +429,7 @@ pub(crate) fn allocate(api: &Api) -> Names {
         let pointer = &operation.provenance.pointer;
         let mut binding_scope = Scope::default();
         let mut field_scope = Scope::default();
-        names.parameters.insert(
-            operation.id.clone(),
-            allocate_parameters(operation, &mut binding_scope, &mut field_scope),
-        );
+        let parameters = allocate_parameters(operation, &mut binding_scope, &mut field_scope);
         let params = operation
             .params
             .iter()
@@ -405,41 +440,60 @@ pub(crate) fn allocate(api: &Api) -> Names {
             .as_ref()
             .and_then(|request_body| request_body.ty)
             .map(|_| binding_scope.alloc("body", IdentRole::Param, pointer));
-        names.operation_bindings.insert(
-            operation.id.clone(),
-            OperationBindings {
-                params,
-                body,
-                path: binding_scope.alloc("path", IdentRole::Param, pointer),
-                query: binding_scope.alloc("query", IdentRole::Param, pointer),
-                raw_query: binding_scope.alloc("raw_query", IdentRole::Param, pointer),
-                url: binding_scope.alloc("url", IdentRole::Param, pointer),
-                request: binding_scope.alloc("request", IdentRole::Param, pointer),
-                reconnect_request: binding_scope.alloc(
-                    "reconnect_request",
-                    IdentRole::Param,
-                    pointer,
-                ),
-                cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
-            },
-        );
+        let bindings = OperationBindings {
+            params,
+            body,
+            path: binding_scope.alloc("path", IdentRole::Param, pointer),
+            query: binding_scope.alloc("query", IdentRole::Param, pointer),
+            raw_query: binding_scope.alloc("raw_query", IdentRole::Param, pointer),
+            url: binding_scope.alloc("url", IdentRole::Param, pointer),
+            request: binding_scope.alloc("request", IdentRole::Param, pointer),
+            reconnect_request: binding_scope.alloc("reconnect_request", IdentRole::Param, pointer),
+            cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
+        };
+        signatures.push((method, params_struct, parameters, bindings));
     }
-    // After every method, so the accessor yields (see `Names::operation_urls`).
-    for operation in &api.operations {
-        let method = names
-            .operations
-            .get(&operation.id)
-            .expect("operation name allocated");
-        names.operation_urls.insert(
-            operation.id.clone(),
+    // After every method, so the accessor yields (see `OperationNames::url_accessor`).
+    let url_accessors: Vec<Ident> = api
+        .operations
+        .iter()
+        .zip(&signatures)
+        .map(|(operation, (method, ..))| {
             operation_scope.alloc(
                 &format!("{}_url", method.unraw()),
                 IdentRole::Method,
                 &operation.provenance.pointer,
-            ),
+            )
+        })
+        .collect();
+    let methods: Vec<&Ident> = signatures.iter().map(|(method, ..)| method).collect();
+    let (errors, success_enums) = allocate_operation_types(api, &methods, &mut root_scope);
+    let records = api
+        .operations
+        .iter()
+        .zip(signatures)
+        .zip(url_accessors)
+        .zip(errors)
+        .zip(success_enums)
+        .zip(response_headers);
+    for (((((operation, signature), url_accessor), error), success_enum), response_headers) in
+        records
+    {
+        let (method, params_struct, parameters, bindings) = signature;
+        names.operations.insert(
+            operation.id.clone(),
+            OperationNames {
+                method,
+                url_accessor,
+                params_struct,
+                error,
+                success_enum,
+                bindings,
+                parameters,
+                response_headers,
+            },
         );
     }
-    allocate_operation_types(api, &mut names, &mut root_scope);
 
     for (id, def) in api.types.iter() {
         match &def.kind {
@@ -510,7 +564,8 @@ pub(crate) fn allocate(api: &Api) -> Names {
 }
 
 /// Allocate each operation's error type and, where its success is an enum, its success enum, in the
-/// root `scope`, after every operation's method name is allocated.
+/// root `scope`, from `methods`, every operation's allocated method in operation order. Both are
+/// returned in operation order.
 ///
 /// Each name is derived from the operation's method, which is unique, but two methods can
 /// PascalCase alike (`get_v2` and `get_v_2` both give `GetV2`), and the widened error form of one
@@ -523,17 +578,16 @@ pub(crate) fn allocate(api: &Api) -> Names {
 /// The widening reads the *union* of the root re-exports, the conditional ones included, so an
 /// operation's type name never changes because an unrelated part of the spec started or stopped
 /// using streams or dates.
-fn allocate_operation_types(api: &Api, names: &mut Names, scope: &mut Scope) {
+fn allocate_operation_types(
+    api: &Api,
+    methods: &[&Ident],
+    scope: &mut Scope,
+) -> (Vec<Ident>, Vec<Option<Ident>>) {
     let methods: Vec<(&crate::ir::Operation, &str)> = api
         .operations
         .iter()
-        .map(|operation| {
-            let method = names
-                .operations
-                .get(&operation.id)
-                .expect("every operation's method is allocated before its types");
-            (operation, method.unraw())
-        })
+        .zip(methods)
+        .map(|(operation, method)| (operation, method.unraw()))
         .collect();
 
     let reexported = |name: &str| {
@@ -565,43 +619,69 @@ fn allocate_operation_types(api: &Api, names: &mut Names, scope: &mut Scope) {
             rank: (*widened, *method),
         })
         .collect();
-    let allocated = scope.alloc_ranked(&requests, IdentRole::Type);
-    names.operation_errors.extend(
-        methods
-            .iter()
-            .map(|(operation, _)| operation.id.clone())
-            .zip(allocated),
-    );
+    let errors = scope.alloc_ranked(&requests, IdentRole::Type);
 
-    let enums: Vec<(&crate::ir::Operation, &str)> = methods
-        .into_iter()
-        .filter(|(operation, _)| {
+    let enums: Vec<(usize, &crate::ir::Operation, &str)> = methods
+        .iter()
+        .enumerate()
+        .filter(|(_, (operation, _))| {
             matches!(
                 operation.responses.success(),
                 crate::ir::SuccessShape::Enum(_)
             )
         })
+        .map(|(index, (operation, method))| (index, *operation, *method))
         .collect();
     let hints: Vec<String> = enums
         .iter()
-        .map(|(_, method)| format!("{method} response"))
+        .map(|(_, _, method)| format!("{method} response"))
         .collect();
     let requests: Vec<_> = enums
         .iter()
         .zip(&hints)
-        .map(|((operation, method), hint)| RankedRequest {
+        .map(|((_, operation, method), hint)| RankedRequest {
             hint,
             provenance: &operation.provenance.pointer,
             rank: *method,
         })
         .collect();
-    let allocated = scope.alloc_ranked(&requests, IdentRole::Type);
-    names.success_enums.extend(
-        enums
-            .iter()
-            .map(|(operation, _)| operation.id.clone())
-            .zip(allocated),
-    );
+    let mut success_enums = vec![None; methods.len()];
+    for ((index, _, _), ident) in enums
+        .iter()
+        .zip(scope.alloc_ranked(&requests, IdentRole::Type))
+    {
+        success_enums[*index] = Some(ident);
+    }
+    (errors, success_enums)
+}
+
+/// Allocate the header struct of each of `operation`'s responses that documents a header, in
+/// `scope`, the `types` module's, and each struct's fields in a scope of its own.
+fn allocate_response_headers(
+    operation: &crate::ir::Operation,
+    scope: &mut Scope,
+) -> HashMap<String, ResponseHeaderNames> {
+    let pointer = crate::diag::JsonPointer::root();
+    operation
+        .responses
+        .entries()
+        .filter(|(_, response)| !response.headers.is_empty())
+        .map(|(spec, response)| {
+            let label = status_label(spec);
+            let hint = format!("{} {label} headers", operation.id.0);
+            let ty = scope.alloc(&hint, IdentRole::Type, &pointer);
+            let mut field_scope = Scope::default();
+            let fields = response
+                .headers
+                .iter()
+                .map(|header| {
+                    let field = field_scope.alloc(&header.name, IdentRole::Field, &pointer);
+                    (header.name.clone(), field)
+                })
+                .collect();
+            (label, ResponseHeaderNames { ty, fields })
+        })
+        .collect()
 }
 
 /// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required

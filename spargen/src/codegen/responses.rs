@@ -8,7 +8,7 @@ use crate::ir::{Api, ErrorShape, Operation, SuccessShape, Ty};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
-use super::idents::{error_type_ident, status_variant_ident, success_enum_ident};
+use super::idents::status_variant_ident;
 use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// Emit one typed header struct per documented status that declares response headers.
@@ -26,16 +26,9 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
         if response.headers.is_empty() {
             return None;
         }
-        let ident = names
-            .response_header_structs
-            .get(&(operation.id.clone(), label.clone()))
-            .expect("response header struct allocated");
-        let field_ident = |header: &crate::ir::ResponseHeader| {
-            names
-                .response_header_fields
-                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                .expect("response header field allocated")
-        };
+        let header_names = names.operation(&operation.id).response_headers(&label);
+        let ident = &header_names.ty;
+        let field_ident = |header: &crate::ir::ResponseHeader| header_names.field(&header.name);
         let fields = response.headers.iter().map(|header| {
             let field = field_ident(header);
             // Header structs live beside `Client`, not inside `types`, so the type path must be
@@ -110,7 +103,7 @@ pub(super) fn emit_response_headers(operation: &Operation, names: &Names) -> Tok
 pub(super) fn emit_response_enum(operation: &Operation, names: &Names) -> TokenStream {
     match operation.responses.success() {
         SuccessShape::Enum(entries) => {
-            let ident = success_enum_ident(operation, names);
+            let ident = names.operation(&operation.id).success_enum();
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names));
@@ -143,7 +136,7 @@ fn response_variant_def(spec: crate::ir::StatusSpec, ty: Option<Ty>, names: &Nam
 /// entries of which at least one is bodied (several bodies, or one body beside a bodyless status),
 /// a transparent newtype for a lone bodied entry, and the uninhabited alias for no error body.
 pub(super) fn emit_error_enum(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let error_ident = error_type_ident(operation, names);
+    let error_ident = &names.operation(&operation.id).error;
     let shape = operation.responses.error();
     let api_error_body = shape.api_error_body(&api.types);
     match shape {

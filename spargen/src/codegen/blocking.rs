@@ -7,7 +7,6 @@ use crate::ir::{Api, Operation};
 use crate::name::Names;
 
 use super::docs::doc_tokens;
-use super::idents::{operation_method_ident, operation_url_ident};
 use super::operation::{
     operation_args, operation_return_ty, operation_url_args, param_default_docs_tokens,
     url_accessor_doc,
@@ -144,13 +143,14 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 /// arguments and return types (see [`operation_args`]). Its URL
 /// accessor follows it, forwarding to the async client's, which sends nothing and needs no runtime.
 fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
-    let method_ident = operation_method_ident(operation, names);
+    let operation_names = names.operation(&operation.id);
+    let method_ident = &operation_names.method;
     let docs = doc_tokens(&operation.docs);
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
     let (args, forwards) = operation_args(operation, api, names);
     let (return_ok_ty, error_ty) = operation_return_ty(operation, names);
-    let url_ident = operation_url_ident(operation, names);
+    let url_ident = &operation_names.url_accessor;
     let url_doc = url_accessor_doc(method_ident);
     let (url_args, url_forwards) = operation_url_args(operation, api, names);
     quote! {

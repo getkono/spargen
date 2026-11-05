@@ -101,7 +101,7 @@ fn names(params: Vec<Parameter>, body: bool) -> Names {
 /// The allocated identifier of every parameter, keyed by what identifies a parameter in
 /// OpenAPI (`(in, name)`), so allocations of differently ordered lists compare directly.
 fn by_parameter(params: &[Parameter], names: &Names) -> Vec<((u8, String), Ident)> {
-    let idents = &names.parameters[&OperationId("getItem".to_owned())];
+    let idents = &names.operations[&OperationId("getItem".to_owned())].parameters;
     assert_eq!(idents.len(), params.len(), "one identifier per parameter");
     let mut keyed: Vec<_> = params
         .iter()
@@ -135,7 +135,7 @@ fn colliding() -> Vec<Parameter> {
 }
 
 fn assert_distinct_per_scope(params: &[Parameter], names: &Names) {
-    let idents = &names.parameters[&OperationId("getItem".to_owned())];
+    let idents = &names.operations[&OperationId("getItem".to_owned())].parameters;
     for required in [true, false] {
         let scope: Vec<&str> = params
             .iter()
@@ -220,14 +220,14 @@ fn generator_bindings_yield_to_every_parameter() {
     params.push(parameter("limit", ParamLoc::Query, false));
     let names = names(params.clone(), true);
     let operation = OperationId("getItem".to_owned());
-    let idents = &names.parameters[&operation];
+    let idents = &names.operations[&operation].parameters;
 
     // Every required parameter keeps its bare spelling.
     for (parameter, ident) in params.iter().zip(idents) {
         assert_eq!(ident.as_str(), parameter.name);
     }
 
-    let allocated = &names.operation_bindings[&operation];
+    let allocated = &names.operations[&operation].bindings;
     let generated = [
         allocated.params.as_ref().expect("an optional parameter"),
         allocated.body.as_ref().expect("a typed request body"),
@@ -285,8 +285,16 @@ fn an_operation_method_keeps_a_spelling_a_url_accessor_wants() {
             api.operations.push(spelled);
         }
         let names = allocate(&api);
-        let method = |id: &str| names.operations[&OperationId(id.to_owned())].as_str();
-        let accessor = |id: &str| names.operation_urls[&OperationId(id.to_owned())].as_str();
+        let method = |id: &str| {
+            names.operations[&OperationId(id.to_owned())]
+                .method
+                .as_str()
+        };
+        let accessor = |id: &str| {
+            names.operations[&OperationId(id.to_owned())]
+                .url_accessor
+                .as_str()
+        };
         assert_eq!(method("getItem"), "get_item");
         assert_eq!(method("getItemUrl"), "get_item_url");
         assert_eq!(accessor("getItemUrl"), "get_item_url_url");
@@ -303,8 +311,8 @@ fn a_keyword_operations_url_accessor_drops_the_raw_prefix() {
     api.operations[0].id = OperationId("type".to_owned());
     let names = allocate(&api);
     let id = OperationId("type".to_owned());
-    assert_eq!(names.operations[&id].as_str(), "r#type");
-    assert_eq!(names.operation_urls[&id].as_str(), "type_url");
+    assert_eq!(names.operations[&id].method.as_str(), "r#type");
+    assert_eq!(names.operations[&id].url_accessor.as_str(), "type_url");
 }
 
 /// Two operations contending for one error type name: the plain `{Method}Error` form beats a
@@ -338,7 +346,7 @@ fn a_plain_error_form_beats_a_widened_one_and_the_smaller_method_wins() {
                 api.operations.reverse();
             }
             let names = allocate(&api);
-            let error = |id: &str| names.operation_errors[&OperationId(id.to_owned())].as_str();
+            let error = |id: &str| names.operations[&OperationId(id.to_owned())].error.as_str();
             assert_eq!(
                 error(second),
                 winner,
@@ -714,22 +722,31 @@ proptest::proptest! {
             .values()
             .map(|operation| operation.headers.values().filter(|h| !h.is_empty()).count())
             .sum();
-        prop_assert_eq!(names.response_header_structs.len(), header_structs);
+        let records: Vec<&super::OperationNames> = names.operations.values().collect();
+        prop_assert_eq!(
+            records.iter().map(|record| record.response_headers.len()).sum::<usize>(),
+            header_structs
+        );
         assert_scope(
             "types module",
-            names.types.values().chain(names.response_header_structs.values()),
+            names.types.values().chain(
+                records
+                    .iter()
+                    .flat_map(|record| record.response_headers.values())
+                    .map(|headers| &headers.ty),
+            ),
             super::TYPES_MODULE_NAMES,
         )?;
 
-        prop_assert_eq!(names.operations.len(), operations.len());
-        prop_assert_eq!(names.operation_urls.len(), operations.len());
+        prop_assert_eq!(records.len(), operations.len());
         assert_scope(
             "client methods",
-            names.operations.values().chain(names.operation_urls.values()),
+            records
+                .iter()
+                .map(|record| &record.method)
+                .chain(records.iter().map(|record| &record.url_accessor)),
             super::CLIENT_METHODS,
         )?;
-        prop_assert_eq!(names.params_structs.len(), operations.len());
-        prop_assert_eq!(names.operation_errors.len(), operations.len());
         let enum_successes = api
             .operations
             .iter()
@@ -737,7 +754,16 @@ proptest::proptest! {
                 matches!(operation.responses.success(), crate::ir::SuccessShape::Enum(_))
             })
             .count();
-        prop_assert_eq!(names.success_enums.len(), enum_successes);
+        prop_assert_eq!(
+            records.iter().filter(|record| record.success_enum.is_some()).count(),
+            enum_successes
+        );
+        for operation in &api.operations {
+            prop_assert_eq!(
+                names.operations[&operation.id].success_enum.is_some(),
+                matches!(operation.responses.success(), crate::ir::SuccessShape::Enum(_))
+            );
+        }
         let reexported = [
             super::ROOT_REEXPORTS,
             super::STREAM_ROOT_REEXPORTS,
@@ -746,11 +772,11 @@ proptest::proptest! {
         .concat();
         assert_scope(
             "module root",
-            names
-                .params_structs
-                .values()
-                .chain(names.operation_errors.values())
-                .chain(names.success_enums.values()),
+            records
+                .iter()
+                .map(|record| &record.params_struct)
+                .chain(records.iter().map(|record| &record.error))
+                .chain(records.iter().filter_map(|record| record.success_enum.as_ref())),
             &reexported,
         )?;
 
@@ -800,9 +826,9 @@ proptest::proptest! {
         }
 
         for operation in &api.operations {
-            let idents = &names.parameters[&operation.id];
+            let idents = &names.operations[&operation.id].parameters;
             prop_assert_eq!(idents.len(), operation.params.len());
-            let bindings = &names.operation_bindings[&operation.id];
+            let bindings = &names.operations[&operation.id].bindings;
             prop_assert_eq!(
                 bindings.params.is_some(),
                 operation.params.iter().any(|parameter| !parameter.required)
@@ -838,10 +864,8 @@ proptest::proptest! {
                     continue;
                 }
                 let label = super::status_label(*status);
-                let fields = response.headers.iter().map(|header| {
-                    &names.response_header_fields
-                        [&(operation.id.clone(), label.clone(), header.name.clone())]
-                });
+                let headers = &names.operations[&operation.id].response_headers[&label];
+                let fields = response.headers.iter().map(|header| &headers.fields[&header.name]);
                 assert_scope(&format!("{label} headers of {}", operation.id.0), fields, &[])?;
             }
         }
@@ -870,7 +894,7 @@ proptest::proptest! {
     /// Type names and the operation error and success-enum names do not depend on the order
     /// the definitions or the operations are listed in: listing both in reverse renames
     /// nothing. Operations whose ids escape to one method spelling are dropped first, because
-    /// method names are allocated first-come (see [`Names::operations`]).
+    /// method names are allocated first-come (see [`OperationNames`](super::OperationNames)).
     #[test]
     fn allocation_does_not_depend_on_definition_or_operation_order(
         definitions in proptest::collection::vec(definition(), 0..10),
@@ -898,11 +922,20 @@ proptest::proptest! {
                 .map(|(id, def)| (def.provenance.pointer.to_string(), names.types[&id].clone()))
                 .collect()
         };
+        // The method, error and success-enum names of each operation, by operation.
+        let operation_types = |names: &Names| -> std::collections::BTreeMap<_, _> {
+            names
+                .operations
+                .iter()
+                .map(|(id, record)| {
+                    let types = (record.method.clone(), record.error.clone());
+                    (id.0.clone(), (types, record.success_enum.clone()))
+                })
+                .collect()
+        };
         let (forward, backward) = (allocate(&api), allocate(&reversed));
         proptest::prop_assert_eq!(type_names(&api, &forward), type_names(&reversed, &backward));
-        proptest::prop_assert_eq!(&forward.operations, &backward.operations);
-        proptest::prop_assert_eq!(&forward.operation_errors, &backward.operation_errors);
-        proptest::prop_assert_eq!(&forward.success_enums, &backward.success_enums);
+        proptest::prop_assert_eq!(operation_types(&forward), operation_types(&backward));
     }
 
     /// The parameter scopes alone, over the space the parameter collisions came from: names
@@ -925,8 +958,8 @@ proptest::proptest! {
             .collect();
         let names = names(params.clone(), body);
         let operation = OperationId("getItem".to_owned());
-        let idents = &names.parameters[&operation];
-        let bindings = &names.operation_bindings[&operation];
+        let idents = &names.operations[&operation].parameters;
+        let bindings = &names.operations[&operation].bindings;
         let arguments = params
             .iter()
             .zip(idents)
