@@ -26,9 +26,11 @@ The exact tested version floors and conditional Cargo features are the
 and audits it during compilation.
 
 The capabilities are layered around a single seam so the generated `Client` stays non-generic and
-each capability is opt-in. Several sections below summarize one module of the embedded runtime and
-link to its source; that module's own documentation, which every generated client carries as doc
-comments on its private `support` module, is the full account.
+a caller adds retry or middleware by wrapping the backend. Several sections below summarize one
+module of the embedded runtime and link to its source; that module's own documentation, carried
+as doc comments in the private `support` module of every generated client that embeds the module,
+is the full account. The `stream`, `xml` and `datetime` modules are embedded only when the
+compiled API uses them; the rest are in every client.
 
 ## The transport seam
 
@@ -147,9 +149,9 @@ body internally; the stream API and framing remain the same.
 A synchronous `BlockingClient` for callers without an async runtime: `BlockingRuntime` drives the
 async operation futures on a current-thread `tokio` runtime, so it adds only tokio's `rt` feature.
 It compiles only under the `blocking` feature on a non-wasm32 target, so a wasm32 build never
-carries it. The feature resolves against the consumer crate: leaving `blocking` undeclared compiles
-the facade out, and opting in means declaring `blocking = ["dep:tokio"]` and a native-only optional `tokio`,
-as `spargen deps` prints them. A `BlockingRuntime` must not be built inside another async runtime;
+carries it. The feature resolves against the consumer crate, so leaving `blocking` undeclared
+compiles the facade out; [`spargen deps`](./cli.md#spargen-deps) prints the opt-in. A
+`BlockingRuntime` must not be built inside another async runtime;
 the [`blocking` module](https://github.com/getkono/spargen/blob/master/support-runtime/src/blocking.rs)
 says where to drive one instead.
 

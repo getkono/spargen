@@ -108,7 +108,7 @@ fn cited_codes(markdown: &str) -> Vec<(String, usize)> {
 ///
 /// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten
 /// to say the opposite of what the generator does keeps every assertion green, so the prose is
-/// reviewed by hand, as `docs/support-matrix.md` itself says. A matrix cell names its
+/// reviewed by hand. A matrix cell names its
 /// constructs and defers the cases reaching a code to `spargen explain`, the one copy of that
 /// list, rather than restating an `explain()` body in words no test compares with it; the
 /// clauses `E023`'s row does quote are held

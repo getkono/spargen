@@ -2,11 +2,8 @@
 
 This walkthrough installs spargen, generates a client from a spec, and shows the shape of the
 generated API. The complete, runnable version is
-[`examples/petstore`](https://github.com/getkono/spargen/tree/master/examples/petstore) — it
-drives the generated client against a local mock server: path, query, header and `deepObject`
-parameters, JSON and multipart bodies, a multi-status response enum, typed servers and response
-headers, bearer auth, typed and undocumented error statuses, RFC 9457 problems, and the retry
-adapter. Its README lists exactly what each step exercises.
+[`examples/petstore`](https://github.com/getkono/spargen/tree/master/examples/petstore), which
+drives the generated client against a local mock server; its README lists what it exercises.
 
 ## Install
 
@@ -27,7 +24,8 @@ never ask for an output path they would not use. Both types have private fields 
 setters, so a new knob is additive rather than breaking.
 
 `Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
-and `open_narrowing` (see [problem details](./runtime.md#problem-details)). They can equally be read from a `spargen.toml` (`Spec::config_file`,
+and `open_narrowing`. They can equally be read from a
+[`spargen.toml`](./cli.md#spargentoml-reference) (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
 authoritative. `generate` names each applied file as a `cargo:rerun-if-changed` path, so editing
@@ -77,11 +75,6 @@ audit reads (see the [CLI reference](./cli.md#spargen-deps)). You may choose a h
 floor; spargen rejects a requirement that could resolve below a floor or beyond the next semver
 breaking line, and `reqwest` must have its default features off.
 
-The blocking client's `tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
-`build.rs` audit evaluates those tables for the target being built, as Cargo does (a wasm32 build
-needs none), while `generate_api!`, which cannot see the target, requires them to jointly cover
-every non-wasm target.
-
 The audit happens during both `build.rs` and proc-macro expansion and fails compilation with
 `E023` before generated output is accepted. Cargo cannot add spec-derived features after it has
 resolved dependencies: build scripts and proc macros run later in the compilation. Spargen
@@ -124,13 +117,12 @@ mod api {
 }
 ```
 
-It accepts a positional schema path or `spec = "..."`, plus the switches `uuid`, `time`,
-`carve` and `open_narrowing` (each `= true` or `= false`, alone meaning `true`, with `no_uuid` /
-`no_time` for `false`), `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }` profile. The
-`spargen.toml` beside the spec is always discovered and applied first; the switches and caps
-override it in either direction, and `omit { ... }` adds rules to its `[[omit]]` rules. Cargo and rustc track the root schema, every transitive source file,
-`spargen.lock`, and the `spargen.toml` it applied through the expansion. See the
-[`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
+The `spargen.toml` beside the spec is always discovered and applied first; the macro's switches
+override it in either direction, its caps replace the file's values, and its `omit { ... }` adds
+rules to the file's `[[omit]]` rules. Cargo and rustc track the root schema, every transitive
+source file, `spargen.lock`, and the `spargen.toml` it applied through the expansion. The
+[`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro) gives
+every argument the macro accepts.
 
 ## The generated client API
 

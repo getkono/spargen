@@ -35,15 +35,17 @@ stay honest.
 
 ## Wiring the generate step (applies to all frameworks)
 
-Once you have exported and committed the spec, generate during compilation from `build.rs`.
-Choose an `OUT_DIR` path for ephemeral output or a source path for output you also commit:
+Once you have exported and committed the spec as `openapi.json`, generate during compilation from
+`build.rs` (to commit the generated client as well, see
+[Getting Started](https://github.com/getkono/spargen/blob/master/docs/book/src/getting-started.md#buildrs-mode)):
 
 ```rust
 // build.rs
 fn main() {
-    let build = spargen::Spec::new("openapi.json").build("src/api.rs");
-    let report = spargen::generate(&build);
-    report.emit_cargo_diagnostics();
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let build = spargen::Spec::new("openapi.json").build(format!("{out_dir}/api.rs"));
+    // `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
+    spargen::generate(&build).expect_success();
 }
 ```
 
@@ -163,12 +165,12 @@ assembled into an `OpenApiService`.
 use poem_openapi::OpenApiService;
 
 let service = OpenApiService::new(Api, "My API", "1.0");
-std::fs::write("openapi-3.0.json", service.spec()).unwrap();     // JSON
+std::fs::write("openapi.json", service.spec()).unwrap();     // JSON
 // service.spec_yaml() gives YAML.
 ```
 
-**Upgrade 3.0.0 → 3.1.** Convert the document with an off-the-shelf converter, then feed the 3.1
-result to spargen. Any of these works:
+**Upgrade 3.0.0 → 3.1.** Convert `openapi.json` to 3.1 in place before spargen reads it. Any of
+these works:
 
 - run the spec through a 3.0→3.1 upgrade tool (for example the LinkML `oas30-to-31` /
   `openapi-3-0-3-to-3-1` style converters, or an editor that round-trips to 3.1);
@@ -176,7 +178,7 @@ result to spargen. Any of these works:
   on a schema of type `T` with the 3.1 form `type: ["T", "null"]` (or, for a `$ref`,
   `oneOf: [{ "type": "null" }, { "$ref": … }]`).
 
-Then point the shared `build.rs` at `openapi-3.1.json` and compile.
+Then compile the crate containing the shared `build.rs` above.
 
 **Why the hard stop?** OpenAPI 3.0 and 3.1 differ in their schema model (3.1 adopts JSON Schema
 2020-12; 3.0 uses its own dialect with `nullable`). Spargen targets the 3.1 dialect and refuses to
@@ -198,9 +200,10 @@ island rejects the **whole** document.
 referenced a carved schema) and stays deterministic.
 
 ```rust
+let out_dir = std::env::var("OUT_DIR").unwrap();
 let build = spargen::Spec::new("openapi.json")
     .carve(true)
-    .build("src/api.rs");
+    .build(format!("{out_dir}/api.rs"));
 // `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
 spargen::generate(&build).expect_success();
 ```

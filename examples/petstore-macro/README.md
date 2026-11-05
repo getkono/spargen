@@ -9,8 +9,10 @@ cargo run --manifest-path examples/petstore-macro/Cargo.toml
 ```
 
 It spins up a local mock server and drives the generated client through a few typed calls
-(list, create, fetch, a typed 404). The broader feature surface (auth failure modes, retry,
-undocumented statuses, …) lives in the `petstore` example; this one exists to exercise the macro.
+(list, create, fetch, a typed 404), then checks that a client with no registered credential fails
+before sending anything, as `RequestError::MissingCredential`. The broader feature surface (the
+other auth failure modes, retry, undocumented statuses, …) lives in the `petstore` example; this
+one exists to exercise the macro.
 Its invocation exercises `no_uuid`, `no_time`, `carve`, `error_body_cap`, `batch_cap`, and an
 `omit` block with a `components` rule; [spargen-macro's README](../../spargen-macro/README.md)
 shows the rest. The expansion names, through `include_bytes!`, the spec, each file its `$ref`s

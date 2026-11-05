@@ -25,6 +25,8 @@ spargen = { version = "0.5", features = ["remote-fetch"] }
 `reqwest` is an optional dependency of the crate, and `remote-fetch` is the only feature that
 enables it (`cli` reaches it through `remote-fetch`).
 
+## Commands and shared options
+
 `spargen --help` prints the subcommands (a test holds this copy to the binary's output):
 
 ```text
@@ -49,10 +51,10 @@ Options:
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
 `--open-narrowing`/`--no-open-narrowing`, `--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the
-setter list on `spargen::Spec`, and the `spargen.toml` it reads is parsed by the library, the same
-file `build.rs` and `generate_api!` read. `lock` fetches every remote `$ref` the spec reaches
-whatever the omit rules and switches say, so of the group it reads only `--config` and
-`--batch-cap` (and the file's `batch_cap`); the rest are accepted there and have no effect.
+setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
+fetches every remote `$ref` the spec reaches whatever the omit rules and switches say, so of the
+group it reads only `--config` and `--batch-cap` (and the file's `batch_cap`); the rest are
+accepted there and have no effect.
 
 ### Flags and `spargen.toml`
 
@@ -61,9 +63,31 @@ file beside the spec when there is one), then the flags. `--error-body-cap` and 
 replace the file's value. The `--omit-*` flags add rules to the file's `[[omit]]` rules rather
 than replacing them. Each switch pair sets its setting in either direction, so `--no-carve`
 overrides `carve = true` in the file and `--uuid` overrides `uuid = false`; with neither flag of a
-pair given, the file's value stands, and giving both is a usage error (exit status `2`). `diff` resolves each of its two
-specs this way on its own: absent `--config`, each side discovers the `spargen.toml` beside it,
-while `--config` applies its one file to both sides.
+pair given, the file's value stands, and giving both is rejected by argument parsing (exit status
+`2`). `diff` resolves each of its two specs this way on its own: absent `--config`, each side
+discovers the `spargen.toml` beside it, while `--config` applies its one file to both sides.
+
+### `spargen.toml` reference
+
+The same file is read by `build.rs` (`Spec::config_file`, `Spec::discover_config_file`), by
+`generate_api!` (always, from beside the spec), and by these subcommands. Every key is optional:
+
+```toml
+uuid = true             # default true; map `format: uuid` to `uuid::Uuid`
+time = true             # default true; map `format: date-time`/`date` to `time`
+carve = false           # default false; auto-carve unsupported constructs
+batch_cap = 100         # default 100; diagnostics collected before the report is truncated
+error_body_cap = 65536  # default 64 KiB
+open_narrowing = false  # default false; open a response body's string `enum`/`const` narrowings
+```
+
+`error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
+([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
+one statement of what it bounds on each target and which paths it does not cap. `carve` is
+described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
+[problem details](./runtime.md#problem-details), and the `[[omit]]` rules the file may also
+carry under [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
+An unknown key is a configuration error (exit status `3`).
 
 ### Exit status
 
@@ -71,7 +95,7 @@ while `--config` applies its one file to both sides.
 | --- | --- |
 | `0` | Success, including a run that reported only warnings, and `--help` / `--version`. |
 | `1` | An error-severity diagnostic was reported (`check`, `deps`, `lock`, or a `diff` spec that cannot lower), or `diff --exit-code` found a breaking (`major`) change. |
-| `2` | The command line did not parse: an unknown subcommand or flag, or a missing argument. |
+| `2` | The command line did not parse: an unknown subcommand or flag, a missing argument, or two conflicting flags. |
 | `3` | A configuration or flag value was rejected (a missing `--config` target, a malformed `spargen.toml`, bad `--omit-*` syntax), or `explain` was given an unknown code. |
 
 ## `spargen check`
@@ -85,9 +109,9 @@ spargen check <SPEC> [OPTIONS]
 It accepts `--format <human|json>` plus the shared spec options above. A diagnostic whose location
 is known renders as `--> <file>:<line>:<col>` in human output, naming the file it lies in, a
 `$ref`'d file included, by the path the spec's references resolved to; under `--format json` the
-same path is the diagnostic's `file`, beside its `span`. Run from a build script it
-also audits the consuming package's `Cargo.toml` (`E023`); elsewhere there is no consuming package,
-and `spargen deps` covers that ground instead.
+same path is the diagnostic's `file`, beside its `span`. When spawned from a build script, whose
+environment it inherits, it also audits the consuming package's `Cargo.toml` (`E023`); elsewhere
+there is no consuming package, and `spargen deps` covers that ground instead.
 
 ## `spargen deps`
 
@@ -110,14 +134,10 @@ into it, since TOML rejects a table or key defined twice. `--format json` emits 
 same set structurally. A spec that lowers with warnings still prints the block on stdout, and
 prints its report (outcome `clean`, with those warnings) on stderr, in the same format.
 
-The block is written for the package's own tables, but a workspace member may inherit it instead:
-move each entry, `default-features = false` included, into the root's `[workspace.dependencies]`,
-and declare it `{ workspace = true }` in the member under the table the block names, keeping
-`optional = true` on the member's line (Cargo refuses it in `[workspace.dependencies]`). The audit
-follows that inheritance, and a test drives both layouts through it. A member's
-`default-features = false` does not turn off defaults the root leaves on; the
+The block is written for the package's own tables. A workspace member may inherit its entries from
+`[workspace.dependencies]` instead; the
 [runtime dependency contract](getting-started.md#workspace-inheritance-and-the-full-contract)
-carries the full rules.
+states how the audit reads that.
 
 ## `spargen lock`
 
@@ -128,9 +148,9 @@ step; compilation-time generation and `check` never reach the network.
 spargen lock <SPEC> [OPTIONS]
 ```
 
-It accepts `--format <human|json>` plus the shared spec options, so one option set serves every
-subcommand, but of the settings they resolve it reads only `batch_cap`. The configuration is still
-resolved, so a malformed `spargen.toml` or a bad flag value exits `3` here as well.
+It accepts `--format <human|json>` plus the [shared spec options](#commands-and-shared-options).
+The configuration is resolved in full, so a malformed `spargen.toml` or a bad flag value exits `3`
+here as well.
 
 Commit `.spargen/vendor/`, `spargen.lock`, the root document, and all relative source files.
 

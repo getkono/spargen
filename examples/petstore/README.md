@@ -9,6 +9,9 @@ network access, no API key, and cannot spam a real service no matter how often i
 cargo run
 ```
 
+From the repository root, `mise run example` runs this example and
+[`petstore-macro`](../petstore-macro) the way CI does.
+
 What it exercises:
 
 - **Generation** — the whole spargen pipeline (`source` → `oas31` → `ir`/`name` → `codegen` →
@@ -32,12 +35,19 @@ What it exercises:
   `RequestError::CredentialProvider`, naming the scheme with the provider's `AuthError` as its
   `source()`, and nothing reaches the mock.
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an
-  undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient.
+  undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient; a
+  refused connection is `Error::Transport` and classified transient.
+- **Retry** — a `RetryBackend` installed with `Client::with_backend`, driven by a hand-written
+  exponential-backoff `RetryPolicy` on a tokio timer, recovers a route that answers `503` once and
+  then `200`, replaying the request exactly once.
 - **Problem details** — `createPet` and `deletePet` document RFC 9457 problems whose `type` each
   status narrows to one value. `build.rs` turns on `open_narrowing`, so when the mock answers with
   a problem type the description does not list, the call still fails as the typed `409` body
   (without the option it would be `Error::Decode`), and one `Error::problem()` reader, generic over
   the operation, reads `type` and `detail` from both operations' problems.
+
+Streams, XML, pagination, the blocking client, and apiKey and basic auth are not exercised here;
+spargen's own test suite compile-checks and drives them.
 
 To review and commit the generated client, change the `build.rs` output to `src/petstore.rs` and
 include it as a normal module. Generation remains a compilation-time step.
