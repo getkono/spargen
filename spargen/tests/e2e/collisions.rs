@@ -3,11 +3,25 @@
 
 use super::*;
 
-/// One operation per runtime name that a `{Operation}Error` could shadow. Each documents an error
-/// body, so each emits an error type into the same module as the runtime `pub use`.
-const PRELUDE_COLLISION_SPEC: &str = r#"
+/// Every spelling the generated module already uses, taken by the spec in one document, so one
+/// fixture crate compiles them together:
+///
+/// - One operation per runtime name that a `{Operation}Error` could shadow. Each documents an
+///   error body, so each emits an error type into the same module as the runtime `pub use`.
+/// - Issue #356: the inline schema of the path parameter `date` is given the hint name `Date`, and
+///   the response's `format: date-time` makes the `types` module import the runtime `Date` and
+///   `DateTime`, so the alias otherwise lands beside `use super::{Date, DateTime};` (`E0255`). The
+///   named components exercise every other spelling the `types` module brings into scope by `use`
+///   or names bare from the prelude.
+/// - One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The
+///   spec declares a server, so `with_default_server` is emitted too, and the fixture is checked
+///   with the `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are
+///   compiled.
+const RESERVED_SPELLINGS_SPEC: &str = r#"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
 paths:
   /request:
     get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
@@ -23,43 +37,6 @@ paths:
     get: { operationId: auth, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
   /stream:
     get: { operationId: stream, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
-"#;
-
-/// An `operationId` that collides with a runtime re-export must still produce a module that
-/// compiles. `operationId: request` otherwise emits `pub struct RequestError` beside
-/// `pub use support::{… RequestError …}` in the same module, which is `E0255`.
-#[test]
-fn an_operation_named_after_a_runtime_type_still_compiles() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(temp.path(), "openapi.yaml", PRELUDE_COLLISION_SPEC);
-    let out = temp.path().join("client");
-
-    let report = generate_fixture_crate(&spec, &out, "collide_client");
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-
-    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
-    assert!(
-        generated.contains("pub struct RequestOperationError"),
-        "a colliding error type must be widened, not shadowed:\n{generated}"
-    );
-
-    let status = fixture_cargo(&out).arg("check").status().unwrap();
-    assert!(
-        status.success(),
-        "an operationId matching a runtime re-export must still generate compiling code"
-    );
-}
-
-/// Issue #356: the inline schema of the path parameter `date` is given the hint name `Date`, and
-/// the response's `format: date-time` makes the `types` module import the runtime `Date` and
-/// `DateTime`, so the alias otherwise lands beside `use super::{Date, DateTime};` (`E0255`). The
-/// named components exercise every other spelling the `types` module brings into scope by `use`
-/// or names bare from the prelude.
-const TYPES_SCOPE_COLLISION_SPEC: &str = r#"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
-paths:
   /terms/{date}:
     parameters:
       - name: date
@@ -100,6 +77,22 @@ paths:
                   day: { type: string, format: date }
                   tags: { type: array, items: { type: string } }
                   extra: { type: object, additionalProperties: { type: string } }
+  /new:
+    get: { operationId: new, responses: { "204": { description: ok } } }
+  /with-default-server:
+    get: { operationId: withDefaultServer, responses: { "204": { description: ok } } }
+  /with-client:
+    get: { operationId: withClient, responses: { "204": { description: ok } } }
+  /with-backend:
+    get: { operationId: withBackend, responses: { "204": { description: ok } } }
+  /core:
+    get: { operationId: core, responses: { "204": { description: ok } } }
+  /with-credential:
+    get: { operationId: withCredential, responses: { "204": { description: ok } } }
+  /without-credential:
+    get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
+  /inner:
+    get: { operationId: inner, responses: { "204": { description: ok } } }
 components:
   schemas:
     DateTime: { type: string }
@@ -113,18 +106,32 @@ components:
     Result: { type: object, properties: { name: { type: string } } }
 "#;
 
-/// A schema whose name the `types` module already uses must be disambiguated like any other clash
-/// rather than emitted beside the import or prelude item of that name (issue #356).
+/// A spelling the generated module already uses, taken by the spec, must be disambiguated like any
+/// other clash and still produce a module that compiles and lints clean:
+///
+/// - an `operationId` that collides with a runtime re-export: `operationId: request` otherwise
+///   emits `pub struct RequestError` beside `pub use support::{… RequestError …}` in the same
+///   module, which is `E0255`;
+/// - a schema whose name the `types` module already uses, rather than being emitted beside the
+///   import or prelude item of that name (issue #356);
+/// - an `operationId` spelling one of the client's own inherent methods: operation methods share
+///   `impl Client` (and `impl BlockingClient`) with the constructors and accessors, so
+///   `operationId: withCredential` otherwise emits a second `pub fn with_credential`, which is
+///   `E0592`.
 #[test]
-fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
+fn reserved_spellings_compile_together() {
     let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(temp.path(), "openapi.yaml", TYPES_SCOPE_COLLISION_SPEC);
+    let spec = write_spec(temp.path(), "openapi.yaml", RESERVED_SPELLINGS_SPEC);
     let out = temp.path().join("client");
 
-    let report = generate_fixture_crate(&spec, &out, "types_scope_collide");
+    let report = generate_fixture_crate(&spec, &out, "reserved_spellings");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct RequestOperationError"),
+        "a colliding error type must be widened, not shadowed:\n{generated}"
+    );
     assert!(
         generated.contains("use super::{Date, DateTime};"),
         "the fixture must make the `types` module import the runtime date types:\n{generated}"
@@ -148,66 +155,6 @@ fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
             );
         }
     }
-
-    let status = fixture_cargo(&out)
-        .args([
-            "clippy",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-            "-W",
-            "clippy::expect-used",
-        ])
-        .status()
-        .unwrap();
-    assert!(
-        status.success(),
-        "a schema named after a name the `types` module uses must still generate compiling code"
-    );
-}
-
-/// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
-/// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
-/// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
-const CLIENT_METHOD_COLLISION_SPEC: &str = r#"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers:
-  - url: https://api.example.com
-paths:
-  /new:
-    get: { operationId: new, responses: { "204": { description: ok } } }
-  /with-default-server:
-    get: { operationId: withDefaultServer, responses: { "204": { description: ok } } }
-  /with-client:
-    get: { operationId: withClient, responses: { "204": { description: ok } } }
-  /with-backend:
-    get: { operationId: withBackend, responses: { "204": { description: ok } } }
-  /core:
-    get: { operationId: core, responses: { "204": { description: ok } } }
-  /with-credential:
-    get: { operationId: withCredential, responses: { "204": { description: ok } } }
-  /without-credential:
-    get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
-  /inner:
-    get: { operationId: inner, responses: { "204": { description: ok } } }
-"#;
-
-/// An `operationId` spelling one of the client's own inherent methods must still produce a module
-/// that compiles. Operation methods share `impl Client` (and `impl BlockingClient`) with the
-/// constructors and accessors, so `operationId: withCredential` otherwise emits a second
-/// `pub fn with_credential`, which is `E0592`.
-#[test]
-fn an_operation_named_after_a_client_method_still_compiles() {
-    let temp = tempfile::tempdir().unwrap();
-    let spec = write_spec(temp.path(), "openapi.yaml", CLIENT_METHOD_COLLISION_SPEC);
-    let out = temp.path().join("client");
-
-    let report = generate_fixture_crate(&spec, &out, "client_method_collide");
-    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
-
-    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     for method in [
         "new",
         "with_default_server",
@@ -224,6 +171,11 @@ fn an_operation_named_after_a_client_method_still_compiles() {
         );
     }
 
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
+    assert!(
+        status.success(),
+        "reserved spellings must still generate code that compiles under the default features"
+    );
     let status = fixture_cargo(&out)
         .args([
             "clippy",
@@ -238,7 +190,7 @@ fn an_operation_named_after_a_client_method_still_compiles() {
         .unwrap();
     assert!(
         status.success(),
-        "an operationId matching a fixed client method must still generate compiling code"
+        "reserved spellings must still generate compiling, lint-clean code with every feature on"
     );
 }
 
