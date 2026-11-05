@@ -12,6 +12,11 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 camino = "1"
+# What `spargen/tests/oracles/`, which the target includes by `#[path]`, reads with: the same
+# requirements the root `Cargo.toml` gives the workspace.
+serde_json = "1.0.151"
+syn = { version = "2.0", features = ["full"] }
+yaml-rust2 = "0.11"
 # The generator under test, with no features: the frontend needs none, and the target drives only
 # `spargen::check`.
 spargen = { path = "../spargen" }
