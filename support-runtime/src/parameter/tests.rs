@@ -224,6 +224,23 @@ fn deep_object_rejects_non_objects() {
     ));
 }
 
+/// A form-encoded `in: querystring` value is serialized under an empty name, exploded, as the
+/// whole query. An empty object there (every optional member absent) has no name to keep as
+/// undefined, so it renders no fragment and the request carries no query, not `?=`.
+#[test]
+fn an_empty_whole_query_value_renders_no_fragment() {
+    for empty in [serde_json::json!({}), serde_json::json!([])] {
+        assert!(
+            serialize_form("", &empty, true, F).unwrap().is_empty(),
+            "{empty}"
+        );
+    }
+    assert_eq!(
+        serialize_form("", &serde_json::json!({ "term": "a b" }), true, F).unwrap(),
+        ["term=a%20b"]
+    );
+}
+
 /// Empty composites and composites holding `null`. RFC 6570 §2.3 counts an empty list or map as
 /// undefined, so an empty composite renders as the 3.2 table's `undefined` column: `;c` for both
 /// `matrix` rows, `c=` for both `form` rows, `.` for `label` and an empty value for `simple`.

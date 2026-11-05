@@ -2275,7 +2275,9 @@ mod support {
         /// With `explode: true`, arrays repeat the parameter name and objects use each property name.
         /// With `explode: false`, either shape is flattened into one comma-separated value under `name`.
         /// An empty array or object is undefined (RFC 6570 §2.3), like `null`: it renders as `name=`
-        /// under either `explode`.
+        /// under either `explode`. An empty `name` is a form-encoded `in: querystring` value, the whole
+        /// query rather than one parameter, so an empty composite there has no name to keep and renders
+        /// no fragment.
         /// `style: cookie` is exactly this function with [`PercentEncoding::Passthrough`] — the two rows
         /// of the specification's serialization table are otherwise identical.
         pub fn serialize_form<T: Serialize>(
@@ -2284,8 +2286,10 @@ mod support {
             explode: bool,
             encoding: PercentEncoding,
         ) -> Result<Vec<String>, ParameterError> {
+            let value = serde_json::to_value(value)?;
+            let value = if name.is_empty() { value } else { empty_as_undefined(value) };
             let name = encode(name, encoding);
-            match empty_as_undefined(serde_json::to_value(value)?) {
+            match value {
                 Value::Null => Ok(vec![format!("{name}=")]),
                 Value::Array(values) if explode => {
                     values
