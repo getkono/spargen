@@ -1,16 +1,9 @@
-# release-plz drives releases: it maintains a version-bump PR, and merging that PR tags the
-# release and publishes to crates.io. Never bump the version or tag manually.
-#
-# CHANGELOG.md is written by release-plz's embedded git-cliff from Conventional Commits — do
-# NOT add a separate cliff.toml.
+# AGENTS.md's Releases section says how release-plz drives releases; its defaults tag each published
+# crate and create a GitHub release. CHANGELOG.md is written by release-plz's embedded git-cliff;
+# do not add a cliff.toml.
 
-[workspace]
-# Merging the release pull request creates a GitHub release and a tag for each published crate.
-git_release_enable = true
-git_tag_enable = true
-
-# The freestanding runtime is embedded via include_str! and never published as its own crate.
+# The freestanding runtime is embedded via include_str! and never released as its own crate
+# (`publish = false` in its manifest keeps it off crates.io too).
 [[package]]
 name = "support-runtime"
-publish = false
 release = false
