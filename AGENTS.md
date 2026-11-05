@@ -226,12 +226,12 @@ Releases are driven by release-plz: merging its version-bump pull request tags t
 publishes to crates.io. Never bump the version or tag manually. The semver surface is the public
 API of generated output.
 
-release-plz edits no Markdown, so a release pull request that moves the minor fails its `test`
-job on `every_install_line_names_the_released_minor` (`spargen/tests/docs.rs`), which holds every
-`spargen`/`spargen-macro` install line to the workspace's minor. Before merging that pull request,
-push one `docs:` commit to its release-plz branch that bumps every line the test's failure lists to
-the new minor (at present `docs/book/src/cli.md` and `spargen-macro/README.md`), and merge only
-once its `test` job is green. That commit touches nothing else; the version and the changelog
+release-plz edits no Markdown besides the changelogs, so a release pull request that moves the
+minor fails its `test` job on `every_install_line_names_the_released_minor`
+(`spargen/tests/docs.rs`), which holds every `spargen`/`spargen-macro` install line to the
+workspace's minor. Before merging that pull request, push one `docs:` commit to its release-plz
+branch that bumps every line the test's failure lists to the new minor (at present
+`docs/book/src/cli.md` and `spargen-macro/README.md`), and merge only once its `test` job is green. That commit touches nothing else; the version and the changelog
 stay release-plz's.
 
 Publishing runs only in CI, via crates.io Trusted Publishing (OIDC, no `CARGO_REGISTRY_TOKEN`):
