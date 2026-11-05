@@ -775,6 +775,137 @@ item:
     }
 }
 
+/// Only the vendored 3.1 schema keeps the 3.2 Path Item fields out of a 3.1 document (the parser
+/// reads them for every version), so this pins that rejection and its message naming the field and
+/// the version that introduces it.
+#[test]
+fn e011_an_oas31_path_item_with_query_is_rejected_as_needing_oas32() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    query:
+      operationId: searchItems
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        invalid_input_at(&report),
+        [(
+            "/paths/~1search",
+            "OpenAPI structure violation: Unevaluated properties are not allowed ('query' was \
+             unexpected); `query` is an OpenAPI 3.2 Path Item field, and this document declares \
+             3.1"
+        )],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn e011_an_oas31_path_item_with_additional_operations_is_rejected_as_needing_oas32() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200': { description: ok }
+    additionalOperations:
+      COPY:
+        operationId: copyPets
+        responses:
+          '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        invalid_input_at(&report),
+        [(
+            "/paths/~1pets",
+            "OpenAPI structure violation: Unevaluated properties are not allowed \
+             ('additionalOperations' was unexpected); `additionalOperations` is an OpenAPI 3.2 \
+             Path Item field, and this document declares 3.1"
+        )],
+        "{report:#?}"
+    );
+}
+
+/// A document with no `openapi` field is validated against the 3.1 schema, and the message says
+/// so rather than claiming a declaration the document does not make.
+#[test]
+fn e011_a_path_item_with_query_in_a_document_declaring_no_version_names_no_declaration() {
+    let spec = r##"
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    query:
+      operationId: searchItems
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let path_item: Vec<_> = invalid_input_at(&report)
+        .into_iter()
+        .filter(|(pointer, _)| *pointer == "/paths/~1search")
+        .collect();
+    assert_eq!(
+        path_item,
+        [(
+            "/paths/~1search",
+            "OpenAPI structure violation: Unevaluated properties are not allowed ('query' was \
+             unexpected); `query` is an OpenAPI 3.2 Path Item field, and this document declares \
+             no `openapi` version, so it is validated as 3.1"
+        )],
+        "{report:#?}"
+    );
+}
+
+/// A Path Item in another file is held to the root's 3.1 schema, and is told the same.
+#[test]
+fn e011_an_oas31_path_item_reached_by_ref_with_both_oas32_fields_names_both() {
+    let (generated, checked, _) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            &ADDITIONAL_OPERATIONS_ROOT.replace("openapi: 3.2.0", "openapi: 3.1.0"),
+        ),
+        (
+            "sub.yaml",
+            r##"
+item:
+  query:
+    operationId: searchItems
+    responses:
+      '200': { description: ok }
+  additionalOperations:
+    COPY:
+      operationId: copyIt
+      responses:
+        '204': { description: ok }
+"##,
+        ),
+    ]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let [(pointer, message)] = invalid_input_at(report)[..] else {
+            panic!("one E011: {report:#?}");
+        };
+        assert_eq!(pointer, "/item", "{report:#?}");
+        assert!(
+            message.contains(
+                "; `additionalOperations` and `query` are OpenAPI 3.2 Path Item fields, and this \
+                 document declares 3.1 (reached through `$ref: ./sub.yaml#/item`"
+            ),
+            "{message}"
+        );
+    }
+}
+
 /// A root document whose Responses map carries `entries` verbatim, written inline: the twin of a
 /// [`generate_and_check_refd_path_item`] fixture, so the two placements can be compared.
 fn inline_spec_with_response_entries(entries: &str) -> String {
