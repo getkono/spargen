@@ -1071,6 +1071,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+  # Range selectors alone, one per side, each with its own body: every status in a class decodes
+  # through that class's arm, and a status in neither class is undocumented.
+  /range-only:
+    get:
+      operationId: getRangeOnly
+      responses:
+        "2XX":
+          description: Any success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "5XX":
+          description: Any server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+  # Optional parameters only in a header and a cookie: the method takes a `…Params` bundle, but
+  # neither parameter shapes the URL, so the URL accessor takes none.
+  /traced:
+    get:
+      operationId: getTraced
+      parameters:
+        - { name: X-Trace-Id, in: header, schema: { type: string } }
+        - { name: session, in: cookie, schema: { type: string } }
+      responses:
+        "204":
+          description: No Content
 components:
   securitySchemes:
     bearer:

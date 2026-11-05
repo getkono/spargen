@@ -6398,6 +6398,8 @@ pub mod types {
     }
     pub type HeaderXTraceIds = Vec<Mode>;
     pub type ResponseBody2a32723f = String;
+    pub type XTraceId = String;
+    pub type Session977138f7 = String;
 }
 #[allow(dead_code, deprecated)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -6558,6 +6560,29 @@ impl SerializeStylesParams {
     #[must_use]
     pub fn reserved(mut self, value: types::Reserved) -> Self {
         self.reserved = Some(value);
+        self
+    }
+}
+#[allow(dead_code, deprecated)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GetTracedParams {
+    #[serde(rename = "X-Trace-Id", skip_serializing_if = "Option::is_none")]
+    pub x_trace_id: Option<types::XTraceId>,
+    #[serde(rename = "session", skip_serializing_if = "Option::is_none")]
+    pub session: Option<types::Session977138f7>,
+}
+#[allow(dead_code, deprecated, clippy::wrong_self_convention)]
+impl GetTracedParams {
+    ///Set the `X-Trace-Id` parameter.
+    #[must_use]
+    pub fn x_trace_id(mut self, value: types::XTraceId) -> Self {
+        self.x_trace_id = Some(value);
+        self
+    }
+    ///Set the `session` parameter.
+    #[must_use]
+    pub fn session(mut self, value: types::Session977138f7) -> Self {
+        self.session = Some(value);
         self
     }
 }
@@ -7418,6 +7443,63 @@ impl support::ApiErrorProblem for GetErrorRangedError {
         }
     }
 }
+///The documented error body of this operation, wrapped so `Error<GetRangeOnlyError>` is a `std::error::Error`. Derefs and converts to the inner type.
+#[allow(dead_code, deprecated)]
+#[derive(Debug, Clone)]
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+pub struct GetRangeOnlyError(pub types::NotFoundError);
+#[allow(dead_code, deprecated)]
+impl GetRangeOnlyError {
+    /// Unwrap to the documented error body.
+    pub fn into_inner(self) -> types::NotFoundError {
+        self.0
+    }
+}
+#[allow(deprecated)]
+impl std::ops::Deref for GetRangeOnlyError {
+    type Target = types::NotFoundError;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for GetRangeOnlyError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+#[allow(deprecated)]
+impl From<types::NotFoundError> for GetRangeOnlyError {
+    fn from(inner: types::NotFoundError) -> Self {
+        Self(inner)
+    }
+}
+#[allow(deprecated)]
+impl From<GetRangeOnlyError> for types::NotFoundError {
+    fn from(outer: GetRangeOnlyError) -> Self {
+        outer.0
+    }
+}
+impl std::fmt::Display for GetRangeOnlyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("documented error response")
+    }
+}
+impl std::error::Error for GetRangeOnlyError {}
+#[allow(deprecated)]
+impl support::ApiErrorBody for GetRangeOnlyError {
+    type Body = types::NotFoundError;
+    fn body(&self) -> Option<&types::NotFoundError> {
+        Some(&self.0)
+    }
+}
+impl support::ApiErrorProblem for GetRangeOnlyError {
+    fn problem(&self) -> Option<support::ProblemDetails> {
+        support::ProblemDetails::of(&self.0)
+    }
+}
+#[allow(dead_code)]
+pub type GetTracedError = std::convert::Infallible;
 #[allow(dead_code, deprecated)]
 #[derive(Debug, Clone)]
 pub enum GetMultiResponse {
@@ -11625,6 +11707,111 @@ Response `409`: Conflict*/
         let mut query: Vec<String> = Vec::new();
         support::build_url_on(&self.core, None, &path, &query)
     }
+    /**Response `2XX`: Any success
+
+Response `5XX`: Any server error*/
+    #[inline]
+    pub async fn get_range_only(
+        &self,
+    ) -> Result<
+        support::ResponseValue<types::MultiOk>,
+        support::Error<GetRangeOnlyError>,
+    > {
+        let mut path = "/range-only".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            support::decode_success::<types::MultiOk>(&self.core, response)
+                .await
+                .map_err(support::Error::widen)
+        } else {
+            Err(
+                support::classify_error::<
+                    GetRangeOnlyError,
+                >(&self.core, response, &[support::StatusSpec::Range(5u8)])
+                    .await,
+            )
+        }
+    }
+    ///The URL `get_range_only` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_range_only_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/range-only".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
+    ///Response `204`: No Content
+    #[inline]
+    pub async fn get_traced(
+        &self,
+        params: impl Into<Option<GetTracedParams>>,
+    ) -> Result<support::ResponseValue<()>, support::Error<GetTracedError>> {
+        let params: Option<GetTracedParams> = params.into();
+        let mut path = "/traced".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        let url = support::build_url_on(&self.core, None, &path, &query)
+            .map_err(support::Error::widen)?;
+        let mut request = self.core.http().request(reqwest::Method::GET, url);
+        if let Some(value) = params
+            .as_ref()
+            .and_then(|params| params.x_trace_id.as_ref())
+        {
+            request = request
+                .header(
+                    "X-Trace-Id",
+                    support::serialize_simple(
+                            value,
+                            false,
+                            support::PercentEncoding::Passthrough,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        let mut cookies: Vec<String> = Vec::new();
+        if let Some(value) = params.as_ref().and_then(|params| params.session.as_ref()) {
+            cookies
+                .extend(
+                    support::serialize_form(
+                            "session",
+                            value,
+                            true,
+                            support::PercentEncoding::Form,
+                        )
+                        .map_err(support::Error::request_construction)?,
+                );
+        }
+        if !cookies.is_empty() {
+            request = request.header(reqwest::header::COOKIE, cookies.join("; "));
+        }
+        let request = request.build().map_err(support::Error::request_construction)?;
+        let response = support::send(&self.core, request)
+            .await
+            .map_err(support::Error::widen)?;
+        if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            Ok(support::ResponseValue::new(status, headers, ()))
+        } else {
+            Err(support::unexpected_status::<GetTracedError>(&self.core, response).await)
+        }
+    }
+    ///The URL `get_traced` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+    #[inline]
+    pub fn get_traced_url(
+        &self,
+    ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+        let mut path = "/traced".to_owned();
+        let mut query: Vec<String> = Vec::new();
+        support::build_url_on(&self.core, None, &path, &query)
+    }
 }
 #[allow(unexpected_cfgs, unused_imports)]
 mod __spargen_blocking {
@@ -12688,6 +12875,40 @@ Response `409`: Conflict*/
             &self,
         ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
             self.inner.get_error_ranged_url()
+        }
+        /**Response `2XX`: Any success
+
+Response `5XX`: Any server error*/
+        #[inline]
+        pub fn get_range_only(
+            &self,
+        ) -> Result<
+            support::ResponseValue<types::MultiOk>,
+            support::Error<GetRangeOnlyError>,
+        > {
+            self.runtime.block_on(self.inner.get_range_only())
+        }
+        ///The URL `get_range_only` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_range_only_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_range_only_url()
+        }
+        ///Response `204`: No Content
+        #[inline]
+        pub fn get_traced(
+            &self,
+            params: impl Into<Option<GetTracedParams>>,
+        ) -> Result<support::ResponseValue<()>, support::Error<GetTracedError>> {
+            self.runtime.block_on(self.inner.get_traced(params))
+        }
+        ///The URL `get_traced` sends its request to, less any `apiKey` query credential, with the same path and query encoding, resolved against the client's base URL or the operation's server override. Nothing is sent and no credential is attached: this is for a URL handed to something that fetches it itself.
+        #[inline]
+        pub fn get_traced_url(
+            &self,
+        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
+            self.inner.get_traced_url()
         }
     }
 }
