@@ -809,7 +809,8 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
 /// hermetic. Gated behind the `remote-fetch` feature (implied by `cli`).
 ///
 /// Every diagnostic this step emits is an error, so a run that succeeds has nothing to report
-/// beside its [`VendorReport`], and a failed one returns them all in its [`Report`].
+/// beside its [`VendorReport`], and a failed one returns its errors, up to the spec's
+/// `batch_cap`, in its [`Report`].
 #[cfg(feature = "remote-fetch")]
 pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
