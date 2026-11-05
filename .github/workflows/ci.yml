@@ -4,9 +4,12 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
+# A push to `master` gets a group of its own commit, so the next merge never cancels the slow gates
+# pull requests skip; a pull request's newer push still cancels its older run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -49,6 +52,18 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+
+  bench-build:
+    name: Benchmarks compile
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
       # Compile (do not run) the benchmarks so they cannot silently rot; the timed run and its
       # artifact live in benchmarks.yml.
       - run: cargo bench --no-run --workspace
@@ -64,6 +79,10 @@ jobs:
 
   msrv:
     name: MSRV
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -89,6 +108,10 @@ jobs:
 
   powerset:
     name: Feature combinations
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,6 +170,10 @@ jobs:
 
   corpus-smoke:
     name: Corpus smoke
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -180,6 +207,10 @@ jobs:
 
   github-api:
     name: GitHub API generated client
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -196,6 +227,10 @@ jobs:
 
   example:
     name: Petstore example
+    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
+    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
+    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

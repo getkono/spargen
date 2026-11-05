@@ -88,6 +88,21 @@ step inside the `docs` CI job, not a job of its own) — never run in a hook;
 they are too slow, so a green pre-push is not a green CI. `msrv` needs
 `rustup toolchain install 1.88.0`, and `package` a clean tree.
 
+Nor is a green pull request a green `master`. The slow gates in `ci.yml` — `msrv`, `powerset`,
+`corpus-smoke`, `github-api`, `example` and `bench-build` — carry one pinned `if:` (`SLOW_GATE_IF`
+in `repo_gates/pairing.rs`): they run on every push to `master`, on `workflow_dispatch`, and on
+release-plz's release pull request (once a maintainer approves that pull request's runs), and
+every other pull request skips them, which keeps its wall-clock to the `test` job's. No status
+check is required, so nothing but review holds the release pull request until they are green; do
+not merge it while `master` or its own run is red. Each push to `master` runs in a concurrency
+group of its own commit, so no merge's slow gates are cancelled by the next one. A change that
+risks one of them (a toolchain or dependency bump, a codegen change) runs the full suite on its
+branch first with `gh workflow run ci.yml --ref <branch>`; that run tests the branch head rather
+than the merge, and its `package` job skips its macro dry-run step, whose pinned `if:` admits only
+pushes and pull requests. A slow gate that goes red on `master` is the maintainers' to fix, the
+day it is seen, in a pull request of its own. `deny` stays on every pull request: its license,
+bans and sources checks fail on what a diff adds.
+
 CI spells the commands out itself rather than calling `mise`, and a `mise` task and its CI job are
 **identical**: the same commands with the same flags, in the same order, under the same
 environment, and neither stricter nor narrower than the other. Change both sides together.
@@ -99,7 +114,7 @@ tag it pushes with `GITHUB_TOKEN` starts no workflow); an unclassified workflow 
 workflow's `on:`, `concurrency:` and `permissions:`, and every other step of each job (checkout, toolchain, cache,
 tool install), are pinned literally, and task keys such as `dir` or a mise config file beside
 `mise.toml`, which would change what a task runs without appearing in its command, are rejected.
-CI's `test` job runs the same two commands as `mise run test` and `mise run bench-build`; `bench`
+CI's `test` job runs `mise run test`'s command and its `bench-build` job `mise run bench-build`'s; `bench`
 pairs with `benchmarks.yml`, `mutants` with `mutants.yml`, and `deny` and `deny-published` with
 `deny.yml`'s jobs of those names. The only differences are named exceptions in that test's `PAIRINGS` table, each pinned
 literally on both sides:
@@ -109,6 +124,8 @@ literally on both sides:
 - The `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only.
 - `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact.
 - The `deny-published` job's pinned `if:` runs it only on the schedule and on `workflow_dispatch`.
+- The slow gates' pinned `if:` (`SLOW_GATE_IF`, above) skips them on pull requests other than
+  release-plz's.
 - CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `cargo-mutants`, `mdbook`, `convco` and
   `release-plz` itself, at the versions mise's `[tools]` pins; `release-plz.yml`'s action is held
   to the `release-plz` pin through its `version:` input. Every pin but `hk`, which CI never runs,
