@@ -990,3 +990,66 @@ fn moving_a_parameter_to_another_location_compares_it_as_one_parameter() {
     );
     assert_eq!(report.bump, Impact::Major);
 }
+
+/// A 3.2 spec whose one path, `/items`, declares each `(method, operationId)` pair as an
+/// `additionalOperations` entry answering `204`.
+fn additional_operations(methods: &[(&str, &str)]) -> String {
+    let mut spec = String::from(
+        "openapi: 3.2.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /items:\n    additionalOperations:\n",
+    );
+    for (method, operation_id) in methods {
+        spec.push_str(&format!(
+            "      {method}:\n        operationId: {operation_id}\n        responses:\n          '204': {{ description: ok }}\n"
+        ));
+    }
+    spec
+}
+
+#[test]
+fn additional_operations_differing_only_in_case_are_distinct_operations() {
+    // An `additionalOperations` key is sent with the capitalization it is declared with, so
+    // `purge` and `PURGE` are two methods and two client methods: neither may shadow the other.
+    let both = additional_operations(&[("purge", "purgeLower"), ("PURGE", "purgeUpper")]);
+    let lower = additional_operations(&[("purge", "purgeLower")]);
+    let upper = additional_operations(&[("PURGE", "purgeUpper")]);
+    let rows = [
+        (
+            &both,
+            &upper,
+            ChangeKind::OperationRemoved,
+            "purge /items",
+            Impact::Major,
+        ),
+        (
+            &upper,
+            &both,
+            ChangeKind::OperationAdded,
+            "purge /items",
+            Impact::Minor,
+        ),
+        (
+            &both,
+            &lower,
+            ChangeKind::OperationRemoved,
+            "PURGE /items",
+            Impact::Major,
+        ),
+        (
+            &lower,
+            &both,
+            ChangeKind::OperationAdded,
+            "PURGE /items",
+            Impact::Minor,
+        ),
+    ];
+    for (old, new, kind, location, impact) in rows {
+        let report = diff(old, new);
+        assert_eq!(
+            kinds_at(&report),
+            vec![(kind, location)],
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, impact);
+    }
+}
