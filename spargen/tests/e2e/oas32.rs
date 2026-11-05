@@ -164,6 +164,36 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
     }
 }
 
+/// The fixed 3.2 `QUERY` method on the wire: the method token travels as `QUERY`, the request
+/// carries its serialized JSON body, and the `200` array decodes into the typed records.
+#[test]
+fn a_query_operation_sends_its_method_and_body() {
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"[{"id":"r1","name":"first"},{"id":"r2"}]"#,
+    );
+
+    let client = oas32_client::BlockingClient::new(&base).unwrap();
+    let records: Vec<oas32_client::types::Record> = client
+        .search_records(&oas32_client::types::Query { term: Some("find me".to_owned()) })
+        .unwrap()
+        .into_inner();
+
+    let request = server.join().unwrap().text();
+    assert!(
+        request.starts_with("QUERY /records "),
+        "the QUERY method must reach the wire unchanged: {request}"
+    );
+    assert!(request.contains(r#"{"term":"find me"}"#), "{request}");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id, "r1");
+    assert_eq!(records[0].name.as_deref(), Some("first"));
+    assert_eq!(records[1].id, "r2");
+    assert_eq!(records[1].name, None);
+}
+
 /// `additionalOperations` on the wire, plus the two constructs its operation is built from: a
 /// `components.mediaTypes` reference supplying the request body, and a discriminated union whose
 /// `defaultMapping` catches an unrecognized tag.
