@@ -1594,7 +1594,7 @@ fn explain_clause_owner_failures(owner: &ExplainClauseOwner) -> Vec<String> {
     }
     let (module, source) = owner.module;
     for fixture in owner.fixtures {
-        if !crate::diag::is_test_fn(source, fixture) {
+        if !crate::test_support::is_test_fn(source, fixture) {
             failures.push(format!(
                 "{code}'s {:?} names `{fixture}` as a fixture that enforces it, and no \
                      `#[test]` of that name exists in {module}",

@@ -43,7 +43,7 @@ const TEST_SOURCES: &[(&str, &str)] = &[
 fn is_test_fn(name: &str) -> bool {
     TEST_SOURCES
         .iter()
-        .any(|(_, source)| crate::diag::is_test_fn(source, name))
+        .any(|(_, source)| crate::test_support::is_test_fn(source, name))
 }
 
 #[test]

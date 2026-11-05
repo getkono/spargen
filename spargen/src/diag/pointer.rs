@@ -16,12 +16,11 @@ impl JsonPointer {
 
     /// Append an object-member reference token, escaping `~` and `/` per RFC 6901.
     pub fn push(&self, token: &str) -> Self {
-        let escaped = escape_token(token);
-        if self.0.is_empty() {
-            Self(format!("/{escaped}"))
-        } else {
-            Self(format!("{}/{escaped}", self.0))
-        }
+        let mut pointer = String::with_capacity(self.0.len() + 1 + token.len());
+        pointer.push_str(&self.0);
+        pointer.push('/');
+        push_escaped(&mut pointer, token);
+        Self(pointer)
     }
 
     /// Append an array-index reference token.
@@ -62,10 +61,24 @@ impl JsonPointer {
     }
 }
 
-/// Escape one RFC 6901 reference token: `~` to `~0` first, then `/` to `~1`, so a literal `~1`
-/// stays two characters and never decodes to `/`.
+/// Escape one RFC 6901 reference token: `~` to `~0` and `/` to `~1`, so a literal `~1` becomes
+/// `~01` and never decodes to `/`.
 pub(crate) fn escape_token(token: &str) -> String {
-    token.replace('~', "~0").replace('/', "~1")
+    let mut escaped = String::with_capacity(token.len());
+    push_escaped(&mut escaped, token);
+    escaped
+}
+
+/// Append `token` to `into` escaped as [`escape_token`] escapes it, in one pass: each `~` and `/`
+/// is replaced where it stands, so no replacement reads another's output.
+fn push_escaped(into: &mut String, token: &str) {
+    for character in token.chars() {
+        match character {
+            '~' => into.push_str("~0"),
+            '/' => into.push_str("~1"),
+            other => into.push(other),
+        }
+    }
 }
 
 /// Unescape one RFC 6901 reference token, the inverse of [`escape_token`]: `~1` to `/` first, then
@@ -108,7 +121,7 @@ mod tests {
             "/paths/~1pets~1{id}"
         );
         assert_eq!(root.push("a~b").as_str(), "/a~0b");
-        // `~` is escaped first, so a literal `~1` stays two characters and never decodes to `/`.
+        // A literal `~1` escapes its `~`, so it never decodes to `/`.
         assert_eq!(root.push("~1").as_str(), "/~01");
         assert_eq!(root.push("~/").as_str(), "/~0~1");
         // The empty token is a real member name, not a no-op.
