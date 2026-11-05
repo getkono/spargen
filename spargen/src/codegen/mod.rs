@@ -8,13 +8,12 @@
 //! One module per emitted construct, each producing a deterministically-ordered token fragment
 //! that [`generate`] assembles and formats: [`models`] (the `types` module) and [`union`] (its
 //! union enums), [`client`] (the `Client`, its servers, and the per-operation items beside it),
-//! [`operation`] (one async method), [`params`], [`body`], and [`dispatch`] (the method's
-//! parameter, request-body, and status-dispatch code), [`responses`] (response enums, error types,
-//! and header structs), [`blocking`] (the synchronous facade), [`runtime`] (the embedded `support`
-//! module and the root re-exports), the shared [`docs`] and [`ty`] renderers, [`idents`] (the
-//! allocated-name lookups and status variant names the operation, blocking-client, parameter,
-//! response and dispatch emitters read), and [`format`](mod@format) (the `prettyplease` pass over
-//! the assembled tokens).
+//! [`operation`] (one async method, and the signature its blocking twin shares), [`params`],
+//! [`body`], and [`dispatch`] (the method's parameter, request-body, and status-dispatch code),
+//! [`responses`] (response enums, error types, and header structs), [`blocking`] (the synchronous
+//! facade), [`runtime`] (the embedded `support` module and the root re-exports), the shared
+//! [`docs`] and [`ty`] renderers, [`idents`] (the status variant names the response and dispatch
+//! emitters read), and [`format`](mod@format) (the `prettyplease` pass over the assembled tokens).
 
 mod blocking;
 mod body;
@@ -107,9 +106,10 @@ pub(crate) fn generate(
     let uses_time = options.feature_time && api.uses_time();
     let support = runtime::emit_support(api.uses_xml(), uses_streams, uses_time);
     let models = models::emit_models(api, names, options, uses_time);
-    let client = client::emit_client(api, names, options);
+    let signatures = operation::signatures(api, names);
+    let client = client::emit_client(api, &signatures, names, options);
     // The synchronous facade is always emitted; `blocking::blocking_cfg` compiles its items out.
-    let blocking = blocking::emit_blocking_client(api, names);
+    let blocking = blocking::emit_blocking_client(api, &signatures, names);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
     // The root surface is emitted from the lists `name` owns, whose root scope reserves them before

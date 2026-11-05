@@ -6,11 +6,7 @@ use quote::quote;
 use crate::ir::{Api, Operation};
 use crate::name::Names;
 
-use super::docs::doc_tokens;
-use super::operation::{
-    operation_args, operation_return_ty, operation_url_args, param_default_docs_tokens,
-    url_accessor_doc,
-};
+use super::operation::{url_accessor_tokens, Arg, OperationSig};
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
 /// `BlockingRuntime` beside it: the consumer crate's `blocking` feature, on a non-`wasm32` target.
@@ -30,11 +26,16 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the
 /// standard shape for a non-async caller.
-pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
+pub(super) fn emit_blocking_client(
+    api: &Api,
+    signatures: &[OperationSig],
+    names: &Names,
+) -> TokenStream {
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_blocking_operation(operation, api, names));
+        .zip(signatures)
+        .map(|(operation, sig)| emit_blocking_operation(operation, sig, names));
     let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
         and `block_on`s each operation. Enable the crate's `blocking` feature to use it; it \
         compiles only on a non-wasm32 target.\n\n\
@@ -139,40 +140,37 @@ pub(super) fn emit_blocking_client(api: &Api, names: &Names) -> TokenStream {
 }
 
 /// Emit one blocking operation method: the async method's signature minus `async`, whose body drives
-/// the async method to completion on the owned runtime, with the async method's docs, deprecation,
-/// arguments and return types (see [`operation_args`]). Its URL
-/// accessor follows it, forwarding to the async client's, which sends nothing and needs no runtime.
-fn emit_blocking_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
+/// the async method to completion on the owned runtime, declared from the async method's own
+/// [`OperationSig`]. Its URL accessor follows it, forwarding to the async client's, which sends
+/// nothing and needs no runtime.
+fn emit_blocking_operation(
+    operation: &Operation,
+    sig: &OperationSig,
+    names: &Names,
+) -> TokenStream {
     let operation_names = names.operation(&operation.id);
     let method_ident = &operation_names.method;
-    let docs = doc_tokens(&operation.docs);
-    let param_default_docs = param_default_docs_tokens(operation);
-    let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
-    let (args, forwards) = operation_args(operation, api, names);
-    let (return_ok_ty, error_ty) = operation_return_ty(operation, names);
     let url_ident = &operation_names.url_accessor;
-    let url_doc = url_accessor_doc(method_ident);
-    let (url_args, url_forwards) = operation_url_args(operation, api, names);
+    let attrs = sig.attrs();
+    let decls = sig.decls();
+    let forwards = sig.forwards();
+    let (return_ok_ty, error_ty) = sig.return_tys();
+    let url_forwards = sig.url_args().map(Arg::forward);
+    let url_accessor = url_accessor_tokens(
+        operation_names,
+        sig,
+        quote! { self.inner.#url_ident(#(#url_forwards),*) },
+    );
     quote! {
-        #docs
-        #(#param_default_docs)*
-        #deprecated
+        #attrs
         #[inline]
         pub fn #method_ident(
             &self,
-            #(#args),*
+            #(#decls),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             self.runtime.block_on(self.inner.#method_ident(#(#forwards),*))
         }
 
-        #[doc = #url_doc]
-        #deprecated
-        #[inline]
-        pub fn #url_ident(
-            &self,
-            #(#url_args),*
-        ) -> Result<reqwest::Url, support::Error<std::convert::Infallible>> {
-            self.inner.#url_ident(#(#url_forwards),*)
-        }
+        #url_accessor
     }
 }

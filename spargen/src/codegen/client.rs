@@ -8,7 +8,7 @@ use crate::ir::Api;
 use crate::name::Names;
 
 use super::docs::normalize_rustdoc;
-use super::operation::emit_operation;
+use super::operation::{emit_operation, OperationSig};
 use super::params::emit_params_struct;
 use super::responses::{emit_error_enum, emit_response_enum, emit_response_headers};
 use super::CodegenOptions;
@@ -40,8 +40,14 @@ fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
 /// is declared, `with_client`, `with_backend`), `core`, the credential registration methods, and
-/// one async method per operation.
-pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
+/// one async method per operation, declared from its entry in `signatures`, which runs parallel to
+/// `api.operations`.
+pub(super) fn emit_client(
+    api: &Api,
+    signatures: &[OperationSig],
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
     let scheme_docs = scheme_doc_lines(api);
     let params = api
         .operations
@@ -59,7 +65,8 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_operation(operation, api, names));
+        .zip(signatures)
+        .map(|(operation, sig)| emit_operation(operation, sig, api, names));
     let response_headers = api
         .operations
         .iter()
@@ -501,11 +508,16 @@ mod tests {
         };
         let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
-        let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
-            .expect("the emitted client parses");
-        let blocking: syn::File =
-            syn::parse2(super::super::blocking::emit_blocking_client(&api, &names))
-                .expect("the emitted blocking client parses");
+        let signatures = super::super::operation::signatures(&api, &names);
+        let client: syn::File =
+            syn::parse2(super::emit_client(&api, &signatures, &names, &options))
+                .expect("the emitted client parses");
+        let blocking: syn::File = syn::parse2(super::super::blocking::emit_blocking_client(
+            &api,
+            &signatures,
+            &names,
+        ))
+        .expect("the emitted blocking client parses");
 
         // Each operation's method and its URL accessor.
         let operation_methods: std::collections::BTreeSet<String> = api
