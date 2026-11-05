@@ -13,6 +13,35 @@ use super::params::emit_params_struct;
 use super::responses::{emit_error_enum, emit_response_enum, emit_response_headers};
 use super::CodegenOptions;
 
+/// The rustdoc of `with_default_server`, which `Client` and `BlockingClient` both emit when the
+/// specification declares a server.
+pub(super) fn default_server_docs() -> TokenStream {
+    quote! {
+        /// Build a client on the first server the specification declares, with every server
+        /// variable at its declared default.
+    }
+}
+
+/// The rustdoc of `with_credential`, which `Client` and `BlockingClient` both carry: what
+/// registration checks and how an operation fails on it, followed by the declared schemes.
+pub(super) fn with_credential_docs(api: &Api) -> TokenStream {
+    let scheme_docs = scheme_doc_lines(api);
+    quote! {
+        /// Register a credential for a named security scheme (a `securitySchemes` key).
+        ///
+        /// Registration checks nothing; each operation matches its `security` requirement
+        /// against the registered credentials when it is called, and fails before anything is
+        /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
+        /// registered (`RequestError::MissingCredential`), when the selected alternative has a
+        /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
+        /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
+        /// `Credential::Basic`), or when its token provider fails
+        /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+        /// variant each kind of scheme accepts.
+        #(#scheme_docs)*
+    }
+}
+
 /// The declared security schemes, rendered as rustdoc for `with_credential`, for the reason
 /// [`crate::ir::SecuritySchemeDef`] gives.
 fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
@@ -48,7 +77,7 @@ pub(super) fn emit_client(
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
-    let scheme_docs = scheme_doc_lines(api);
+    let credential_docs = with_credential_docs(api);
     let params = api
         .operations
         .iter()
@@ -75,9 +104,9 @@ pub(super) fn emit_client(
     let error_body_cap = options.error_body_cap;
     let servers = emit_servers(api, names);
     let default_server = (!api.servers.is_empty()).then(|| {
+        let docs = default_server_docs();
         quote! {
-            /// Build a client on the first server the specification declares, with every server
-            /// variable at its declared default.
+            #docs
             pub fn with_default_server() -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::new(&servers::default_url())
             }
@@ -139,18 +168,7 @@ pub(super) fn emit_client(
                 &self.core
             }
 
-            /// Register a credential for a named security scheme (a `securitySchemes` key).
-            ///
-            /// Registration checks nothing; each operation matches its `security` requirement
-            /// against the registered credentials when it is called, and fails before anything is
-            /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
-            /// registered (`RequestError::MissingCredential`), when the selected alternative has a
-            /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
-            /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
-            /// `Credential::Basic`), or when its token provider fails
-            /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
-            /// variant each kind of scheme accepts.
-            #(#scheme_docs)*
+            #credential_docs
             #[must_use]
             pub fn with_credential(
                 mut self,
@@ -417,8 +435,9 @@ mod tests {
     use super::CodegenOptions;
     use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
-        Api, Docs, Info, Method, Operation, OperationId, PathSegment, PathTemplate, Response,
-        Responses, Server, StatusSpec, TypeGraph, UrlSegment,
+        Api, Docs, HttpScheme, Info, Method, Operation, OperationId, PathSegment, PathTemplate,
+        Response, Responses, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
+        TypeGraph, UrlSegment,
     };
 
     /// The name of every `fn` in each inherent `impl <self_ty>` block among `items`, nested modules
@@ -523,8 +542,18 @@ mod tests {
             .flat_map(|names| [&names.method, &names.url_accessor])
             .map(|ident| ident.as_str().to_owned())
             .collect();
-        let mut fixed = std::collections::BTreeSet::new();
-        for (file, self_ty) in [(&client, "Client"), (&blocking, "BlockingClient")] {
+        let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect();
+        // Issue #1119: each client emits every reserved method but the other client's own, so
+        // `BlockingClient` carries `with_default_server` too; only `inner` is `BlockingClient`'s.
+        let mut client_only = reserved.clone();
+        client_only.remove("inner");
+        for (file, self_ty, expected) in [
+            (&client, "Client", &client_only),
+            (&blocking, "BlockingClient", &reserved),
+        ] {
             let mut methods = Vec::new();
             inherent_methods(&file.items, self_ty, &mut methods);
             let unique: std::collections::BTreeSet<&String> = methods.iter().collect();
@@ -539,25 +568,130 @@ mod tests {
                     "`impl {self_ty}` lacks operation method `{method}`: {methods:?}"
                 );
             }
-            fixed.extend(
-                methods
-                    .into_iter()
-                    .filter(|method| !operation_methods.contains(method)),
+            let fixed: std::collections::BTreeSet<String> = methods
+                .into_iter()
+                .filter(|method| !operation_methods.contains(method))
+                .collect();
+            assert_eq!(
+                &fixed, expected,
+                "`impl {self_ty}`'s fixed methods must be `name::CLIENT_METHODS`, less `inner` on \
+                 `Client`"
             );
         }
-        let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
-            .iter()
-            .map(|method| (*method).to_owned())
-            .collect();
-        assert_eq!(
-            fixed, reserved,
-            "`name::CLIENT_METHODS` must list exactly the fixed methods of `Client` and \
-             `BlockingClient`"
-        );
         for method in crate::name::CLIENT_METHODS {
             assert!(
                 !operation_methods.contains(*method),
                 "operation `{method}` kept the bare spelling of a fixed client method"
+            );
+        }
+    }
+
+    /// The `#[doc]` text of `method` in the inherent `impl <self_ty>` among `items`, nested modules
+    /// included, or `None` where that impl does not define it.
+    fn method_docs(items: &[syn::Item], self_ty: &str, method: &str) -> Option<Vec<String>> {
+        items.iter().find_map(|item| match item {
+            syn::Item::Impl(block) if block.trait_.is_none() => {
+                let syn::Type::Path(path) = &*block.self_ty else {
+                    return None;
+                };
+                if !path.path.is_ident(self_ty) {
+                    return None;
+                }
+                block.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Fn(function) if function.sig.ident == method => Some(
+                        function
+                            .attrs
+                            .iter()
+                            .filter(|attr| attr.path().is_ident("doc"))
+                            .map(|attr| quote::ToTokens::to_token_stream(&attr.meta).to_string())
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+            }
+            syn::Item::Mod(module) => module
+                .content
+                .as_ref()
+                .and_then(|(_, items)| method_docs(items, self_ty, method)),
+            _ => None,
+        })
+    }
+
+    /// Issue #1119: `BlockingClient` emits `with_default_server` exactly when `Client` does (a
+    /// declared server), and its `with_credential` carries `Client`'s documentation, declared
+    /// schemes included, as does its `with_default_server`.
+    #[test]
+    fn blocking_client_mirrors_default_server_and_credential_docs() {
+        for declares_server in [false, true] {
+            let servers = if declares_server {
+                vec![Server {
+                    name: None,
+                    url: "https://api.example.com".to_owned(),
+                    segments: vec![UrlSegment::Literal("https://api.example.com".to_owned())],
+                    variables: IndexMap::new(),
+                    description: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            let api = Api {
+                info: Info {
+                    title: "T".to_owned(),
+                    version: "1".to_owned(),
+                    description: None,
+                },
+                servers,
+                operations: Vec::new(),
+                types: TypeGraph::default(),
+                security_schemes: IndexMap::from([(
+                    SchemeId("bearerAuth".to_owned()),
+                    SecuritySchemeDef {
+                        kind: SecurityScheme::Http(HttpScheme::Bearer),
+                        docs: vec!["`bearerAuth`: a short-lived service token.".to_owned()],
+                    },
+                )]),
+            };
+            let names = crate::name::allocate(&api);
+            let signatures = super::super::operation::signatures(&api, &names);
+            let client: syn::File = syn::parse2(super::emit_client(
+                &api,
+                &signatures,
+                &names,
+                &CodegenOptions::default(),
+            ))
+            .expect("the emitted client parses");
+            let blocking: syn::File = syn::parse2(super::super::blocking::emit_blocking_client(
+                &api,
+                &signatures,
+                &names,
+            ))
+            .expect("the emitted blocking client parses");
+
+            let credential = method_docs(&client.items, "Client", "with_credential")
+                .expect("`Client::with_credential` is emitted");
+            assert!(
+                credential
+                    .iter()
+                    .any(|doc| doc.contains("a short-lived service token")),
+                "`Client::with_credential` lists the declared schemes: {credential:?}"
+            );
+            assert_eq!(
+                method_docs(&blocking.items, "BlockingClient", "with_credential"),
+                Some(credential),
+                "`BlockingClient::with_credential` carries `Client`'s documentation"
+            );
+
+            let default_server = method_docs(&client.items, "Client", "with_default_server");
+            assert_eq!(
+                default_server.is_some(),
+                declares_server,
+                "`Client::with_default_server` is emitted exactly when a server is declared"
+            );
+            assert_eq!(
+                method_docs(&blocking.items, "BlockingClient", "with_default_server"),
+                default_server,
+                "`BlockingClient::with_default_server` is emitted exactly when `Client`'s is, \
+                 with its documentation"
             );
         }
     }

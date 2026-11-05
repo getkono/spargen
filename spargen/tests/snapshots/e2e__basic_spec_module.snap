@@ -11966,6 +11966,16 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
             let runtime = new_runtime()?;
             Ok(Self { inner, runtime })
         }
+        /// Build a client on the first server the specification declares, with every server
+        /// variable at its declared default.
+        pub fn with_default_server() -> Result<
+            Self,
+            support::Error<std::convert::Infallible>,
+        > {
+            let inner = Client::with_default_server()?;
+            let runtime = new_runtime()?;
+            Ok(Self { inner, runtime })
+        }
         /// Build a blocking client over a caller-supplied `reqwest::Client`.
         pub fn with_client(
             client: reqwest::Client,
@@ -11992,7 +12002,27 @@ Must NOT be constructed or called from inside another async runtime — tokio's 
         pub fn core(&self) -> &support::ClientCore {
             self.inner.core()
         }
-        /// Register a credential for a named security scheme (mirrors the async client).
+        /// Register a credential for a named security scheme (a `securitySchemes` key).
+        ///
+        /// Registration checks nothing; each operation matches its `security` requirement
+        /// against the registered credentials when it is called, and fails before anything is
+        /// sent, as `Error::RequestConstruction`, when no alternative has every scheme
+        /// registered (`RequestError::MissingCredential`), when the selected alternative has a
+        /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
+        /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
+        /// `Credential::Basic`), or when its token provider fails
+        /// (`RequestError::CredentialProvider`). `Credential`'s documentation lists which
+        /// variant each kind of scheme accepts.
+        ///
+        ///# Declared schemes
+        ///
+        ///- `bearer` — `http` (`bearer`).
+        ///- `apiKey` — `apiKey`.
+        ///- `tenant` — `apiKey`.
+        ///- `mtls` — `mutualTLS`.
+        ///- `basic` — `http` (`basic`).
+        ///- `queryKey` — `apiKey`.
+        ///- `cookieKey` — `apiKey`.
         #[must_use]
         pub fn with_credential(
             mut self,

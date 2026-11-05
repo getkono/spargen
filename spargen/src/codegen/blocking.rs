@@ -6,6 +6,7 @@ use quote::quote;
 use crate::ir::{Api, Operation};
 use crate::name::Names;
 
+use super::client::{default_server_docs, with_credential_docs};
 use super::operation::{url_accessor_tokens, Arg, OperationSig};
 
 /// The `cfg` every blocking item is emitted under, the facade here and the embedded
@@ -21,7 +22,8 @@ pub(super) fn blocking_cfg() -> TokenStream {
 /// current-thread tokio runtime and drives each async operation to completion with `block_on`,
 /// compiled under [`blocking_cfg`]. Each method is a shim over the async client's method, so the
 /// request building and dispatch are the async client's. Its constructors are the async client's
-/// `new`, `with_client` and `with_backend`.
+/// `new`, `with_default_server` (when a server is declared), `with_client` and `with_backend`, and
+/// its `with_credential` carries the async client's documentation, declared schemes included.
 ///
 /// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
 /// `block_on` panics when nested); the constructor building its own current-thread runtime is the
@@ -43,6 +45,18 @@ pub(super) fn emit_blocking_client(
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";
     let cfg = blocking_cfg();
+    let credential_docs = with_credential_docs(api);
+    let default_server = (!api.servers.is_empty()).then(|| {
+        let docs = default_server_docs();
+        quote! {
+            #docs
+            pub fn with_default_server() -> Result<Self, support::Error<std::convert::Infallible>> {
+                let inner = Client::with_default_server()?;
+                let runtime = new_runtime()?;
+                Ok(Self { inner, runtime })
+            }
+        }
+    });
     quote! {
         // In module/include!/macro output, `feature = "blocking"` resolves against the consumer
         // crate. Keep the cfgs inside an ungated lexical lint scope so crates that do not declare
@@ -82,6 +96,8 @@ pub(super) fn emit_blocking_client(
                 Ok(Self { inner, runtime })
             }
 
+            #default_server
+
             /// Build a blocking client over a caller-supplied `reqwest::Client`.
             pub fn with_client(
                 client: reqwest::Client,
@@ -112,7 +128,7 @@ pub(super) fn emit_blocking_client(
                 self.inner.core()
             }
 
-            /// Register a credential for a named security scheme (mirrors the async client).
+            #credential_docs
             #[must_use]
             pub fn with_credential(
                 mut self,
