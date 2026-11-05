@@ -20,25 +20,17 @@ pub(super) fn body_send_tokens(
     // A body the specification marks `required: false` arrives as `Option<&T>`, so the whole send
     // block runs only when the caller supplied one. Only a body that lowered to a type takes an
     // argument at all, so an untyped body is never wrapped.
-    let optional_body_binding = operation
-        .request_body
-        .as_ref()
-        .filter(|body| !body.required && body.ty.is_some())
+    let typed_body = operation.typed_body();
+    let optional_body_binding = typed_body
+        .filter(|(body, _)| !body.required)
         .and(bindings.body.as_ref());
-    let body_send = if let Some((ty, media, encoding)) = operation
-        .request_body
-        .as_ref()
-        .and_then(|body| body.ty.map(|ty| (ty, body.media, body.encoding.clone())))
-    {
+    let body_send = if let Some((body, ty)) = typed_body {
         let body_binding = bindings
             .body
             .as_ref()
             .expect("request body argument allocated");
-        let content_type = &operation
-            .request_body
-            .as_ref()
-            .expect("request body exists")
-            .content_type;
+        let content_type = &body.content_type;
+        let encoding = &body.encoding;
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
         // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
         // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
@@ -55,7 +47,7 @@ pub(super) fn body_send_tokens(
         ) {
             raw_bytes_send
         } else {
-            match media {
+            match body.media {
                 // JSON: serialized here rather than through `RequestBuilder::json`, which labels the
                 // body `application/json` whatever the media key says (on wasm it overwrites a
                 // header set before it), so an `application/*+json` body such as JSON Merge Patch
@@ -82,7 +74,7 @@ pub(super) fn body_send_tokens(
                     // Rendered property by property through the resolved Encoding Object rather
                     // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
                     // runtime and cannot express a per-property content type.
-                    let properties = form_properties_tokens(&encoding);
+                    let properties = form_properties_tokens(encoding);
                     // The typed `additionalProperties` members, rendered in their type's default
                     // mode, with the overflow map's length, which tells the runtime how many of
                     // the serialized members are overflow; `None` when the body has no typed
@@ -131,7 +123,7 @@ pub(super) fn body_send_tokens(
                 // header.
                 MediaType::OctetStream => raw_bytes_send,
                 MediaType::Multipart => {
-                    emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
+                    emit_multipart_body(ty, api, names, request_binding, body_binding, encoding)
                 }
                 // Streaming media are response-only; a streaming request body is rejected during
                 // lowering (narrowed `E009`), so this arm is unreachable for any emitted operation.

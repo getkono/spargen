@@ -431,14 +431,10 @@ pub(crate) fn allocate(api: &Api) -> Names {
         let mut field_scope = Scope::default();
         let parameters = allocate_parameters(operation, &mut binding_scope, &mut field_scope);
         let params = operation
-            .params
-            .iter()
-            .any(|parameter| !parameter.required)
+            .has_optional_params()
             .then(|| binding_scope.alloc("params", IdentRole::Param, pointer));
         let body = operation
-            .request_body
-            .as_ref()
-            .and_then(|request_body| request_body.ty)
+            .typed_body()
             .map(|_| binding_scope.alloc("body", IdentRole::Param, pointer));
         let bindings = OperationBindings {
             params,

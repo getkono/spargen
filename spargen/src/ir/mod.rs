@@ -149,16 +149,16 @@ impl Api {
                 operation.params.iter().any(|parameter| {
                     matches!(&parameter.style, ParamStyle::Content(MediaType::Json))
                         && contains_bytes(&self.types, parameter.ty.id, &mut BTreeSet::new())
-                }) || operation.request_body.as_ref().is_some_and(|body| {
-                    body.ty
-                        .is_some_and(|ty| self.typed_body_needs_bytes_serde(body.media, ty.id))
-                }) || operation.responses.entries().any(|(_, response)| {
-                    response.body.is_some_and(|ty| {
-                        response
-                            .media
-                            .is_some_and(|media| self.typed_body_needs_bytes_serde(media, ty.id))
+                }) || operation
+                    .typed_body()
+                    .is_some_and(|(body, ty)| self.typed_body_needs_bytes_serde(body.media, ty.id))
+                    || operation.responses.entries().any(|(_, response)| {
+                        response.body.is_some_and(|ty| {
+                            response.media.is_some_and(|media| {
+                                self.typed_body_needs_bytes_serde(media, ty.id)
+                            })
+                        })
                     })
-                })
             })
     }
 

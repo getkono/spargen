@@ -93,6 +93,22 @@ pub(crate) struct Operation {
     pub(crate) provenance: Provenance,
 }
 
+impl Operation {
+    /// The request body beside the type it lowered to, when it lowered to one: the only body the
+    /// operation's method takes an argument for and sends.
+    pub(crate) fn typed_body(&self) -> Option<(&RequestBody, Ty)> {
+        self.request_body
+            .as_ref()
+            .and_then(|body| body.ty.map(|ty| (body, ty)))
+    }
+
+    /// Whether any parameter is optional, so the method takes an optional-parameters `…Params`
+    /// bundle.
+    pub(crate) fn has_optional_params(&self) -> bool {
+        self.params.iter().any(|param| !param.required)
+    }
+}
+
 /// A single operation parameter (matrix: Parameters). Only S-class styles reach the IR;
 /// unsupported styles are rejected in the frontend.
 #[derive(Debug, Clone)]

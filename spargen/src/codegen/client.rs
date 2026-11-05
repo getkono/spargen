@@ -52,7 +52,7 @@ pub(super) fn emit_client(
     let params = api
         .operations
         .iter()
-        .filter(|operation| operation.params.iter().any(|param| !param.required))
+        .filter(|operation| operation.has_optional_params())
         .map(|operation| emit_params_struct(operation, names));
     let errors = api
         .operations

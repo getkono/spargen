@@ -449,17 +449,15 @@ impl OperationSig {
                 shapes_url: url_takes_params(operation),
             });
         }
-        if let Some((ty, required)) = operation.request_body.as_ref().and_then(|body| {
-            body.ty
-                .map(|ty| (ty_tokens(ty, names, true), body.required))
-        }) {
+        if let Some((body, ty)) = operation.typed_body() {
+            let ty = ty_tokens(ty, names, true);
             let body_binding = bindings
                 .body
                 .as_ref()
                 .expect("request body argument allocated");
             // A body the specification marks `required: false` may legitimately be omitted, so
             // the caller says so in the type rather than inventing an empty value.
-            let decl = if required {
+            let decl = if body.required {
                 quote! { #body_binding: &#ty }
             } else {
                 quote! { #body_binding: Option<&#ty> }

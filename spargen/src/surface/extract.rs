@@ -42,11 +42,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             );
         }
 
-        let request_body = operation.request_body.as_ref().and_then(|body| {
-            body.ty.map(|ty| BodySurface {
-                ty: canon_ty(ty, api, names),
-                required: body.required,
-            })
+        let request_body = operation.typed_body().map(|(body, ty)| BodySurface {
+            ty: canon_ty(ty, api, names),
+            required: body.required,
         });
 
         operations.insert(
