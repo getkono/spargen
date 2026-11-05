@@ -1,15 +1,34 @@
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
 use reqwest::Method;
 
 use super::{
-    next_frame, EventStream, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
+    EventStream, FrameBuffer, FramePoll, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,
     SseMetadata,
 };
 use crate::tests::{
     core, poll_ready, poll_to_completion, Chunk, Chunks, PendingOnce, Reply, SequenceBackend,
 };
 use crate::{ClientCore, Error};
+
+/// A [`FrameBuffer`] holding `bytes`, with nothing searched yet.
+fn frame_buffer(bytes: &[u8]) -> FrameBuffer {
+    FrameBuffer {
+        bytes: BytesMut::from(bytes),
+        ..FrameBuffer::default()
+    }
+}
+
+/// Frame one item out of `buffer` through a [`FrameBuffer`] built afresh from its bytes, writing
+/// back what it leaves. Each call starts its search from the front: the tests below pin what is
+/// framed, and the ones on [`FrameBuffer`] itself pin what a buffer carried between calls saves.
+fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll {
+    let mut framer = frame_buffer(buffer);
+    let poll = super::next_frame(&mut framer, framing, at_eof);
+    *buffer = framer.bytes.to_vec();
+    poll
+}
 
 /// Frame every item currently extractable from `buffer` under `framing`, stopping at the first
 /// `NeedMore` (partial frame retained) or `Done` (terminated). Returns the framed payloads as
@@ -320,6 +339,78 @@ fn an_sse_cr_at_the_buffer_end_waits_for_the_next_byte() {
     assert!(buf.is_empty());
 }
 
+/// A buffer carried between calls resumes where the last call stopped: after a `NeedMore` every
+/// buffered byte has been searched (an SSE CR held for the byte after it excepted), and every
+/// complete SSE line has been read into the event in progress, so the next call reads only the
+/// bytes appended since. Without that, an item arriving in many chunks is searched from its start
+/// on every chunk, which is quadratic in its size.
+#[test]
+fn a_carried_frame_buffer_resumes_where_it_stopped() {
+    let mut buffer = frame_buffer(b"{\"a\":");
+    let poll = super::next_frame(&mut buffer, Framing::Ndjson, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!(buffer.scanned, 5);
+    buffer.extend_from_slice(b"1}\n");
+    let poll = super::next_frame(&mut buffer, Framing::Ndjson, false);
+    assert_eq!(poll, super::frame_item(b"{\"a\":1}".to_vec()));
+    assert_eq!((buffer.len(), buffer.scanned), (0, 0));
+
+    // A JSON text sequence searches junk for its first separator once, then the record.
+    let mut buffer = frame_buffer(b"junk");
+    let poll = super::next_frame(&mut buffer, Framing::JsonSequence, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!(buffer.scanned, 4);
+    buffer.extend_from_slice(b"\x1e{\"a\":");
+    let poll = super::next_frame(&mut buffer, Framing::JsonSequence, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!(&buffer.bytes[..], b"\x1e{\"a\":");
+    assert_eq!(buffer.scanned, 6);
+    buffer.extend_from_slice(b"1}\n\x1e");
+    let poll = super::next_frame(&mut buffer, Framing::JsonSequence, false);
+    assert_eq!(poll, super::frame_item(b"{\"a\":1}".to_vec()));
+    assert_eq!(&buffer.bytes[..], b"\x1e");
+
+    // SSE reads each line into the event as it completes, keeping its raw bytes buffered.
+    let mut buffer = frame_buffer(b"id: 7\ndata: 1\ndata: ");
+    let poll = super::next_frame(&mut buffer, Framing::Sse, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!(
+        (buffer.line_start, buffer.scanned, buffer.len()),
+        (14, 20, 20)
+    );
+    assert_eq!(buffer.event.data, b"1\n");
+    assert_eq!(buffer.event.id.as_deref(), Some(&b"7"[..]));
+    // A final CR is searched again once the byte after it arrives.
+    buffer.extend_from_slice(b"2\r");
+    let poll = super::next_frame(&mut buffer, Framing::Sse, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!((buffer.line_start, buffer.scanned), (14, 21));
+    buffer.extend_from_slice(b"\n\n");
+    assert_eq!(
+        super::next_frame(&mut buffer, Framing::Sse, false),
+        FramePoll::Item {
+            payload: b"1\n2".to_vec(),
+            metadata: SseMetadata {
+                id: Some("7".to_owned()),
+                retry: None,
+            },
+        }
+    );
+    assert_eq!((buffer.len(), buffer.line_start, buffer.scanned), (0, 0, 0));
+
+    // Stripping a byte order mark moves every offset, so the search restarts at the front.
+    let mut buffer = frame_buffer(b"\xEF\xBB");
+    let poll = super::next_frame(&mut buffer, Framing::Sse, false);
+    assert_eq!(poll, FramePoll::NeedMore);
+    assert_eq!(buffer.scanned, 2);
+    buffer.extend_from_slice(b"\xBF\n");
+    assert!(!buffer.strip_leading_bom());
+    assert_eq!((buffer.line_start, buffer.scanned), (0, 0));
+    buffer.extend_from_slice(b"data: 1\n\n");
+    let poll = super::next_frame(&mut buffer, Framing::Sse, false);
+    assert_eq!(poll, super::frame_item(b"1".to_vec()));
+}
+
 /// A body that opens with a UTF-8 byte order mark has it stripped, once, at the start only; the
 /// decision waits while the buffer is still a proper prefix of the mark.
 #[test]
@@ -335,7 +426,7 @@ fn strip_leading_bom_removes_one_opening_mark() {
         (b"data: 1\n", false, b"data: 1\n"),
         (b"d\xEF\xBB\xBF", false, b"d\xEF\xBB\xBF"),
     ] {
-        let mut buffer = input.to_vec();
+        let mut buffer = BytesMut::from(input);
         assert_eq!(super::strip_leading_bom(&mut buffer), pending, "{input:?}");
         assert_eq!(buffer, rest, "{input:?}");
     }
