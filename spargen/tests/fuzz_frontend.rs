@@ -36,6 +36,9 @@
 //!   * components whose root is a `$ref` beside random sibling keywords, over a random ref graph
 //!     (the release-mode assertion abort of issue #148).
 //!
+//! Beyond `check`, `spargen::vendor` and the macro's preview each parse a document nested to the
+//! cap from a caller thread with a small stack, which holds them to parsing on the frontend stack.
+//!
 //! Every document a `check_never_panics_*` test draws is fed through BOTH the JSON and the YAML
 //! parser (by file extension; JSON is a subset of YAML), except the block-style YAML of
 //! `check_never_panics_on_deeply_nested_yaml`, which is not JSON and goes through the YAML parser
@@ -1006,4 +1009,66 @@ fn check_never_panics_on_deeply_nested_yaml() {
         "no document stayed within the nesting cap"
     );
     assert!(past.get() > 0, "no document crossed the nesting cap");
+}
+
+// Every entry point parses on the frontend stack
+
+/// A caller stack too small for a parse that recurses to [`MAX_NESTING_DEPTH`]: a parse an entry
+/// point ran on its caller's stack overflows it and aborts the test process.
+const SMALL_CALLER_STACK: usize = 128 * 1024;
+
+/// Run `f` on a thread whose stack is [`SMALL_CALLER_STACK`], as a caller with a small stack would.
+fn on_small_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(SMALL_CALLER_STACK)
+            .spawn_scoped(scope, f)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+/// A skeleton JSON document at `dir/spec.json` whose `x-deep` nests arrays to the cap: its
+/// innermost scalar sits at depth [`MAX_NESTING_DEPTH`], so every parse accepts it and recurses
+/// all the way down.
+fn write_deepest_accepted(dir: &TempDir) -> Utf8PathBuf {
+    let arrays = MAX_NESTING_DEPTH - 1;
+    let text = format!(
+        "{{\"openapi\":\"3.1.0\",\"info\":{{\"title\":\"t\",\"version\":\"1.0.0\"}},\
+         \"paths\":{{}},\"x-deep\":{}0{}}}",
+        "[".repeat(arrays),
+        "]".repeat(arrays)
+    );
+    let spec = Utf8PathBuf::from_path_buf(dir.path().join("spec.json")).unwrap();
+    std::fs::write(&spec, text).unwrap();
+    spec
+}
+
+/// The macro's preview reads the input files of a generated module after the run, and that read
+/// parses every document again: it must run on the frontend stack like the run itself.
+#[test]
+fn the_macro_preview_parses_on_the_frontend_stack() {
+    let dir = TempDir::new().unwrap();
+    let spec = Spec::new(write_deepest_accepted(&dir));
+    let preview = on_small_stack(|| spargen::__private::preview(&spec));
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    assert_eq!(preview.source_files, [spec.path()]);
+}
+
+/// `spargen::vendor` parses the spec to find its remote references: it must do so on the frontend
+/// stack like every other entry point.
+#[cfg(feature = "remote-fetch")]
+#[test]
+fn vendor_parses_on_the_frontend_stack() {
+    let dir = TempDir::new().unwrap();
+    let spec = Spec::new(write_deepest_accepted(&dir));
+    let vendored = on_small_stack(|| spargen::vendor(&spec));
+    let vendored = vendored.unwrap_or_else(|report| panic!("{report:#?}"));
+    assert!(vendored.refs.is_empty(), "{vendored:#?}");
 }

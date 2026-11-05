@@ -178,7 +178,9 @@ pub mod __private {
         // fixed.
         let mut source_files = vec![spec.path.clone()];
         if report.outcome == Outcome::Generated {
-            source_files.extend(cache::input_paths(spec).unwrap_or_default());
+            source_files.extend(
+                pipeline::run_on_frontend_stack(|| cache::input_paths(spec)).unwrap_or_default(),
+            );
             source_files.extend(manifests);
             source_files.sort();
             source_files.dedup();
@@ -229,12 +231,14 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
 /// `batch_cap`, in its [`Report`].
 #[cfg(feature = "remote-fetch")]
 pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
-    let mut diags = diag::Diagnostics::new(spec.batch_cap);
-    let fetcher = source::ReqwestFetcher;
-    match source::vendor(&spec.path, &fetcher, &mut diags) {
-        Ok(vendored) if !diags.has_errors() => Ok(vendored),
-        _ => Err(Report::new(diags, Outcome::Rejected)),
-    }
+    pipeline::run_on_frontend_stack(|| {
+        let mut diags = diag::Diagnostics::new(spec.batch_cap);
+        let fetcher = source::ReqwestFetcher;
+        match source::vendor(&spec.path, &fetcher, &mut diags) {
+            Ok(vendored) if !diags.has_errors() => Ok(vendored),
+            _ => Err(Report::new(diags, Outcome::Rejected)),
+        }
+    })
 }
 
 #[cfg(test)]
