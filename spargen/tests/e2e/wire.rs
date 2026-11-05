@@ -1,6 +1,6 @@
 //! Values on the wire: dates, a per-operation server override, an operation's URL accessor against
 //! the request it describes, RFC 6570 multipart parts, CBOR bodies, and an explicit `null` content
-//! parameter.
+//! parameter, and the mock server's reading of a chunked request body.
 
 use super::*;
 
@@ -679,4 +679,56 @@ fn absent_null_and_a_value_are_three_requests() {
         status.success(),
         "the explicit-null wire round-trip must pass"
     );
+}
+
+/// The mock server ends a chunked request body at its zero-size chunk's trailer section, read
+/// through every chunk-size line, and not where the bytes received so far happen to end in
+/// `0\r\n\r\n`.
+#[test]
+fn the_mock_server_ends_a_chunked_body_at_its_zero_size_chunk() {
+    // A chunk whose data ends in `0\r\n`, followed by its own CRLF: the bytes end in `0\r\n\r\n`
+    // with the body still open.
+    let first = b"5\r\nab0\r\n\r\n";
+    assert_eq!(mock_server::chunked_body_end(first), None);
+    assert_eq!(mock_server::chunked_body_end(b"5\r\nab0"), None);
+
+    let mut whole = first.to_vec();
+    whole.extend_from_slice(b"0\r\n\r\n");
+    assert_eq!(mock_server::chunked_body_end(&whole), Some(whole.len()));
+
+    // A trailer section after the zero-size chunk, and a chunk extension on a size line.
+    let trailers = b"3;name=value\r\nabc\r\n0\r\nX-Checksum: 1\r\n";
+    assert_eq!(mock_server::chunked_body_end(trailers), None);
+    let mut trailers = trailers.to_vec();
+    trailers.extend_from_slice(b"\r\n");
+    assert_eq!(
+        mock_server::chunked_body_end(&trailers),
+        Some(trailers.len())
+    );
+}
+
+/// A chunked request with a trailer section reaches the mock server's join handle whole, framing
+/// included, and is answered.
+#[test]
+fn the_mock_server_reads_a_chunked_request_through_its_trailers() {
+    use std::io::{Read, Write};
+
+    let (base, server) = mock_server::serve_no_content();
+    let body = b"5\r\nab0\r\n\r\n0\r\nX-Checksum: 1\r\n\r\n";
+    let mut stream = std::net::TcpStream::connect(base.strip_prefix("http://").unwrap()).unwrap();
+    stream
+        .write_all(b"POST /upload HTTP/1.1\r\nHost: mock\r\nTransfer-Encoding: chunked\r\n\r\n")
+        .unwrap();
+    stream.write_all(body).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 204 No Content"),
+        "{response}"
+    );
+
+    let request = server.join().unwrap();
+    assert_eq!(request.line(), "POST /upload HTTP/1.1");
+    assert_eq!(request.header("transfer-encoding"), ["chunked"]);
+    assert_eq!(request.body, body);
 }

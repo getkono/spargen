@@ -5,8 +5,9 @@
 //!
 //! Each server binds a fresh loopback port and accepts one connection per response it is given, in
 //! order. It reads each request whole (the head up to its blank line, then the body its
-//! `Content-Length` declares, or every chunk of a chunked body), answers with that response's
-//! bytes, and hands back every request it read through its join handle.
+//! `Content-Length` declares, or a chunked body through its zero-size chunk and trailer section),
+//! answers with that response's bytes, and hands back every request it read through its join
+//! handle.
 
 #![allow(
     dead_code,
@@ -127,7 +128,8 @@ fn answer(listener: &TcpListener, response: &[u8]) -> Request {
 }
 
 /// Read one request from `stream`: its head, then the body its `Content-Length` declares or, for a
-/// chunked body, every chunk through the last.
+/// chunked body, every chunk through the zero-size one and its trailer section
+/// ([`chunked_body_end`]).
 fn read_request(stream: &mut TcpStream) -> Request {
     let mut received = Vec::new();
     let mut buf = [0u8; 8192];
@@ -156,7 +158,7 @@ fn read_request(stream: &mut TcpStream) -> Request {
         .map_or(0, |value| value.parse::<usize>().unwrap());
     let complete = |body: &[u8]| {
         if chunked {
-            body.ends_with(b"0\r\n\r\n")
+            chunked_body_end(body).is_some()
         } else {
             body.len() >= length
         }
@@ -165,4 +167,36 @@ fn read_request(stream: &mut TcpStream) -> Request {
         read_more(&mut body);
     }
     Request { head, body }
+}
+
+/// Where the chunked body that `body` starts with ends: after the blank line closing the trailer
+/// section that follows its zero-size chunk. `None` while any of it is still to arrive. Each
+/// chunk-size line is read, so a chunk whose data holds `0\r\n\r\n` does not end the body.
+pub fn chunked_body_end(body: &[u8]) -> Option<usize> {
+    let line_end = |from: usize| {
+        body.get(from..)?
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .map(|offset| from + offset)
+    };
+    let mut at = 0;
+    loop {
+        let end = line_end(at)?;
+        let line = String::from_utf8_lossy(&body[at..end]);
+        let size = line.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size, 16)
+            .unwrap_or_else(|_| panic!("a malformed chunk-size line: {line:?}"));
+        at = end + 2;
+        if size == 0 {
+            loop {
+                let end = line_end(at)?;
+                let blank = end == at;
+                at = end + 2;
+                if blank {
+                    return Some(at);
+                }
+            }
+        }
+        at += size + 2;
+    }
 }
