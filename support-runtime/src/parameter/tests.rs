@@ -830,7 +830,7 @@ fn form_body_rejects_a_non_object() {
     let properties: [FormProperty; 0] = [];
     assert!(matches!(
         serialize_form_body(&serde_json::json!("scalar"), &properties, None),
-        Err(ParameterError::ExpectedObject)
+        Err(ParameterError::FormBodyNotObject)
     ));
 }
 
@@ -910,7 +910,7 @@ fn multipart_rejects_object_values_rather_than_dropping_their_keys() {
     // `deepObject` is defined only for `in: query`.
     assert!(matches!(
         serialize_multipart_values(&object(), FormStyle::DeepObject, false),
-        Err(ParameterError::ExpectedObject)
+        Err(ParameterError::DeepObjectInMultipart)
     ));
 }
 
@@ -946,6 +946,14 @@ fn every_parameter_error_displays_its_rule_and_only_serialize_has_a_source() {
         (
             ParameterError::ExpectedObject,
             "`style: deepObject` requires an object parameter value",
+        ),
+        (
+            ParameterError::FormBodyNotObject,
+            "an `application/x-www-form-urlencoded` request body requires an object value",
+        ),
+        (
+            ParameterError::DeepObjectInMultipart,
+            "`style: deepObject` is defined only for query parameters, not multipart part values",
         ),
         (
             ParameterError::ExpectedComposite,
