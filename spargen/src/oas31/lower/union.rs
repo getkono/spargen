@@ -884,7 +884,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             merged_members.truncate(1);
         }
         if variants.len() == 1 {
-            let inner = variants[0].ty;
+            let mut inner = variants[0].ty;
+            // The one variant left is some type's still-open reservation: a `oneOf` that lists
+            // the same cycle-closing `$ref` more than once, merged above (#1152). Its kind may
+            // not be read, for the reason [`Self::lower_sole_union_member`] gives, so the
+            // position is answered as that path answers its reservation: the member's own `Ty`,
+            // boxed so the cycle has a finite size, with no def of its own. Where this union is
+            // itself the body of a reserved root, the caller lifts the last insert into that
+            // root, so a foreign id cannot be handed back, and the shape is refused as that path
+            // refuses it.
+            if self.is_reservation(inner.id) {
+                if self.reservation_at(&schema.provenance).is_some() {
+                    return self.reject_self_referential_union(
+                        schema,
+                        "this schema's whole body is a union whose members all lower to one \
+                         `$ref` that closes a reference cycle, so the schema names no shape of \
+                         its own and cannot be given a generated type",
+                    );
+                }
+                // Nothing names whatever the members' own lowerings or meets inserted.
+                self.elide_unreached(
+                    meet_inserts.into_iter().flatten().map(TypeId),
+                    &HashSet::new(),
+                );
+                for lowered in member_lowerings {
+                    self.elide_unused_union_lowering(lowered);
+                }
+                inner.nullable = inner.nullable || nullable;
+                inner.boxed = true;
+                return Some(inner);
+            }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
             // The sole variant is re-emitted under this schema's name, so the meets' inserts —
             // the surviving variant's `…Constrained` def, and whatever an excluded member's meet

@@ -588,6 +588,166 @@ components:
     );
 }
 
+/// A `oneOf` that lists the same cycle-closing `$ref` twice merges its two members under `W001`
+/// like any repeated member, and the one variant left is the component's own open reservation.
+/// That variant's kind could not be read: re-emitting it cloned a `TypeKind::Reserved` into a
+/// second reservation nothing filled, and `check_invariants` refused the document with `E011`
+/// (#1152). The position is the component itself, boxed, as the direct `$ref` spelling is.
+#[test]
+fn a_one_of_repeating_a_cycle_closing_ref_merges_to_the_boxed_component() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      properties:
+        a: { oneOf: [{ $ref: '#/components/schemas/S2' }, { $ref: '#/components/schemas/S2' }] }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{entry}: the merged self-reference must raise no error: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                    && d.message.contains("same generated type")
+            }),
+            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("Option<Box<S2>>"),
+        "`S2.a` must be the boxed component itself: {types}"
+    );
+    assert!(
+        !types.contains("S2a"),
+        "the merged union must not be re-emitted as a type of its own: {types}"
+    );
+}
+
+/// The same merge with a `null` member beside the repeated cycle-closing `$ref`, at a required
+/// property, an array's items and a map's values: each position is the component itself taking
+/// the union's `null` (`Option<Box<S2>>` although the property is required, `Option<S2>` inside
+/// the `Vec` and the map), and no type is emitted for any of the merged unions (#1152).
+#[test]
+fn a_nullable_one_of_repeating_a_cycle_closing_ref_merges_to_the_optional_boxed_component() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      required: [a]
+      properties:
+        a:
+          oneOf:
+            - { $ref: '#/components/schemas/S2' }
+            - { $ref: '#/components/schemas/S2' }
+            - { type: 'null' }
+        b:
+          type: array
+          items:
+            oneOf:
+              - { $ref: '#/components/schemas/S2' }
+              - { $ref: '#/components/schemas/S2' }
+              - { type: 'null' }
+        c:
+          type: object
+          additionalProperties:
+            oneOf:
+              - { $ref: '#/components/schemas/S2' }
+              - { $ref: '#/components/schemas/S2' }
+              - { type: 'null' }
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{entry}: the merged nullable self-reference must raise no error: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                    && d.message.contains("same generated type")
+            }),
+            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub a: Option<Box<S2>>"),
+        "the required `S2.a` must be the nullable boxed component itself: {types}"
+    );
+    assert!(
+        types.contains("pub type S2b = Vec<Option<S2>>;"),
+        "`S2.b`'s items must be the nullable component itself: {types}"
+    );
+    assert!(
+        types.contains("pub additional: BTreeMap<String, Option<S2>>,"),
+        "`S2.c`'s values must be the nullable component itself: {types}"
+    );
+    for merged in ["S2a", "S2bItem", "S2cAdditional", "Variant"] {
+        assert!(
+            !types.contains(merged),
+            "no merged union may be re-emitted as a type of its own (`{merged}`): {types}"
+        );
+    }
+}
+
+/// The same merge where the union is a component's whole body and its one member closes a cycle
+/// through another component (`A = B | B`, `B.x -> A`) has no def to hand back as `A`'s root, so
+/// it is refused as `E007` with its own wording rather than failing the IR invariant as `E011`
+/// (#1152).
+#[test]
+fn a_component_body_repeating_a_cycle_closing_ref_is_refused_not_an_invariant_failure() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    B:
+      type: object
+      properties:
+        x: { $ref: '#/components/schemas/A' }
+    A:
+      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/B' }]
+"##;
+    for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let errors: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.severity == spargen::Severity::Error)
+            .collect();
+        assert!(
+            errors.iter().all(|d| d.code == Code::NonDisjointUnion
+                && d.pointer.as_str() == "/components/schemas/A"
+                && d.message.contains("members all lower to one `$ref`")),
+            "{entry}: the only error must be `E007` at `A`: {report:#?}"
+        );
+        assert!(!errors.is_empty(), "{entry}: {report:#?}");
+    }
+}
+
 /// Mutually-recursive components (`A -> B -> A`) must also generate, directly and through an
 /// array. Directly, exactly one back-edge in the cycle is boxed; through an array, the array's
 /// `Vec` already puts the cycle behind a pointer, so neither edge is.
