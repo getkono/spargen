@@ -13,8 +13,9 @@ on:
     - cron: "17 6 * * *"
   workflow_dispatch:
 
+# Grouped per event too, so a push to `master` never cancels the scheduled `deny-published`.
 concurrency:
-  group: deny-${{ github.ref }}
+  group: deny-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:

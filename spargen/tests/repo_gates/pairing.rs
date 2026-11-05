@@ -113,7 +113,9 @@ const GATE_WORKFLOWS: [GateWorkflow; 4] = [
     GateWorkflow {
         file: "deny.yml",
         on: "push:\n  branches: [master]\npull_request:\nschedule:\n  - cron: \"17 6 * * *\"\nworkflow_dispatch:",
-        concurrency: Some("group: deny-${{ github.ref }}\ncancel-in-progress: true"),
+        concurrency: Some(
+            "group: deny-${{ github.ref }}-${{ github.event_name }}\ncancel-in-progress: true",
+        ),
         permissions: None,
     },
     // On demand only as far as GitHub's triggers go: the release run is a dispatch from
@@ -234,7 +236,7 @@ const PAIRINGS: &[Pairing] = &[
             STABLE,
             CACHE,
             CiOnly {
-                step: "if: >-\n  (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||\n  (github.event_name == 'push' && !contains(github.event.head_commit.message, 'release-plz-'))\nrun: cargo publish --dry-run -p spargen-macro --config 'patch.crates-io.spargen.path=\"spargen\"'",
+                step: "if: >-\n  (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||\n  (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore: release'))\nrun: cargo publish --dry-run -p spargen-macro --config 'patch.crates-io.spargen.path=\"spargen\"'",
                 why: "runs only outside release-plz PRs, a condition that exists only in CI; on a \
                       release PR the macro's registry dependency is not published yet",
             },
