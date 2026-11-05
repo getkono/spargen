@@ -827,8 +827,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     out.push(Contribution::Scalar(ty));
                     return Some(());
                 };
-                let scoped = self
-                    .closed_narrowing(|ctx| ctx.lower_scoped_refiners(&target, true, None, hint))?;
+                let scoped =
+                    self.closed_narrowing(|ctx| ctx.lower_untyped_refiners(&target, hint))?;
                 out.push(Contribution::Refiner {
                     scoped,
                     member: Box::new(target),
@@ -905,7 +905,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // diagnostic (#607). In 2020-12 they constrain only arrays, so they refine the merge's
             // array members and
             // leave the rest, as the same member does beside a union.
-            let scoped = self.lower_scoped_refiners(schema, true, None, hint)?;
+            let scoped = self.lower_untyped_refiners(schema, hint)?;
             out.push(Contribution::Refiner {
                 scoped,
                 member: Box::new(schema.clone()),

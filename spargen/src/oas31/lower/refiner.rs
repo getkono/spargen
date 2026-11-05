@@ -84,12 +84,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }))
     }
 
+    /// [`Self::lower_scoped_refiners`] for a `sibling` no multi-type array was deleted from: both
+    /// halves admit `null`, and every category is allowed.
+    pub(super) fn lower_untyped_refiners(
+        &mut self,
+        sibling: &Schema,
+        hint: &str,
+    ) -> Option<ScopedRefiners> {
+        self.lower_scoped_refiners(sibling, true, None, hint)
+    }
+
     /// Lower a sibling of untyped object or array applicators (one [`implied_applicator_category`]
     /// answers for) into the [`ScopedRefiners`] its two halves refine. Each half is the sibling
     /// with the other half's keywords removed and its own category as `type`, with `null` admitted
     /// where `admits_null` says the sibling does not deny it. `allowed` is the categories of a
     /// multi-type array deleted for lowering, where there was one.
-    pub(super) fn lower_scoped_refiners(
+    fn lower_scoped_refiners(
         &mut self,
         sibling: &Schema,
         admits_null: bool,
@@ -270,7 +280,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union: &Union,
         sibling: &Schema,
     ) -> Option<Ty> {
-        let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
+        let scoped = self.lower_untyped_refiners(sibling, hint)?;
         let refiner = Refiner::Scoped(scoped);
         let mark = self.graph_mark();
         let met_hint = format!("{hint}ReferenceIntersection");

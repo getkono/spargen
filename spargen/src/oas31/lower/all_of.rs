@@ -731,10 +731,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // takes it: an untyped object member admits `null` and decides nothing, so a
             // composition no member decides leaves `null` to the union.
             let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
-            let has_object = contributions
-                .iter()
-                .any(|contribution| matches!(contribution, Contribution::Object { .. }));
-            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
+            Some(self.composition_takes_union_null(composed, &contributions, schema))
         };
         let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
@@ -1050,7 +1047,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 composed = met;
             }
-            Some(self.composition_takes_union_null(composed, has_object, &contributions, schema))
+            Some(self.composition_takes_union_null(composed, &contributions, schema))
         };
         let composed_lowered = composed_from..self.graph_mark();
         let mut refiners = self.lower_all_of_refiners(&scoped, hint)?;
@@ -1085,8 +1082,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let SchemaOr::Schema(member) = member else {
                 continue;
             };
-            let scoped =
-                self.lower_scoped_refiners(member, true, None, &format!("{hint}Member{index}"))?;
+            let scoped = self.lower_untyped_refiners(member, &format!("{hint}Member{index}"))?;
             refiners.push((member.as_ref(), Refiner::Scoped(scoped)));
         }
         Some(refiners)
@@ -1155,7 +1151,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let keywords_hint = format!("{hint}Constraint");
         let keywords_mark = self.graph_mark();
         let (composed, refiners) = if implied_applicator_category(keywords).is_some() {
-            let scoped = self.lower_scoped_refiners(keywords, true, None, &keywords_hint)?;
+            let scoped = self.lower_untyped_refiners(keywords, &keywords_hint)?;
             (referenced, vec![(keywords, Refiner::Scoped(scoped))])
         } else {
             let keywords_schema = keywords;

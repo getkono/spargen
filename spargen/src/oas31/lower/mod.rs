@@ -51,7 +51,7 @@ use refiner::CategoryMask;
 use security::{lower_security_schemes, resolve_external_security_schemes};
 use server::lower_server;
 use union::HeldUntypedWarning;
-use xml::{gate_xml_field_renames, RootXml, XmlSite};
+use xml::{gate_xml_field_renames, XmlRecords, XmlSite};
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
 /// `allOf`/`oneOf`/`anyOf` member, and resolved `$ref` target descends one level through
@@ -255,10 +255,8 @@ fn lower_pass(
         narrowing_opens: false,
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
-        root_xml: HashMap::new(),
-        field_xml_sites: HashSet::new(),
+        xml: XmlRecords::default(),
         xml_holders: Vec::new(),
-        xml_mergers: HashMap::new(),
         unmerged_union: None,
         unmerged_union_meets_null: false,
         held_untyped_warnings: None,
@@ -318,9 +316,7 @@ fn lower_pass(
         &mut ctx.graph,
         &operations,
         &ctx.meet_locations,
-        &ctx.root_xml,
-        &ctx.field_xml_sites,
-        &ctx.xml_mergers,
+        &ctx.xml,
         document.is_oas32,
         ctx.diags,
     );
@@ -636,22 +632,12 @@ struct LowerCtx<'a, 'doc> {
     /// provenance, which ranks it after every declared schema when type names collide; this is
     /// where `W005` and `W006` raised against it point instead of that root (#454).
     meet_locations: HashMap<TypeId, Provenance>,
-    /// The `xml` object of every schema a definition was lowered from, read as that schema's root
-    /// ([`Self::record_root_xml`]), by the site it was written at. The definitions keep the site,
-    /// so [`gate_xml_field_renames`] finds each one from the types it produced once ids are final.
-    root_xml: HashMap<XmlSite, RootXml>,
-    /// The sites of the `xml` objects a field reads instead ([`Self::claim_field_xml`]): a
-    /// property's own and its array items'. Their [`Self::root_xml`] entries are skipped.
-    field_xml_sites: HashSet<XmlSite>,
+    /// The XML hints recorded for [`gate_xml_field_renames`] to settle once ids are final.
+    xml: XmlRecords,
     /// The sites of the compositions being gathered, innermost last
     /// ([`Self::with_xml_holder`]): a member [`Self::record_member_xml`] reads is attributed to
     /// the last.
     xml_holders: Vec<XmlSite>,
-    /// For each type a `$ref` member contributed to an `allOf` composition, or a `$ref` target was
-    /// intersected with its shape-bearing siblings as ([`Self::record_ref_sibling_merger`]), the
-    /// sites of the compositions that merged it ([`Self::record_xml_merger`]), that `$ref` schema
-    /// itself counting as one: a member merged into that type is merged into theirs too.
-    xml_mergers: HashMap<TypeId, Vec<XmlSite>>,
     /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
     /// `$ref`'s target — or the union an `allOf` is met with, beside it or as a member of it.
     /// [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged (#402): the

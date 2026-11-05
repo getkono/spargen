@@ -718,7 +718,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     };
                     let Ok(resolved) =
                         self.resolver
-                            .resolve(&reference, from, &mut Diagnostics::default())
+                            .resolve(&reference, from, &mut Diagnostics::new(0))
                     else {
                         return None;
                     };
@@ -825,7 +825,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 || match self.resolver.resolve(
                     reference,
                     &member.provenance,
-                    &mut Diagnostics::default(),
+                    &mut Diagnostics::new(0),
                 ) {
                     Ok(resolved) => {
                         let fresh = resolved_identity(&resolved.schema.provenance)
@@ -863,10 +863,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     pub(super) fn composition_takes_union_null(
         &self,
         mut composed: Ty,
-        has_object: bool,
         contributions: &[Contribution],
         schema: &Schema,
     ) -> Ty {
+        let has_object = contributions
+            .iter()
+            .any(|contribution| matches!(contribution, Contribution::Object { .. }));
         let decided = contributions.iter().any(|contribution| {
             matches!(
                 contribution,
