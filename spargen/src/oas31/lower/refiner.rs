@@ -689,8 +689,8 @@ impl LowerCtx<'_, '_> {
     }
 
     /// The category of the struct, `Vec` or tuple `schema`, which names no `type`, lowers to, as
-    /// [`Self::branch_leaves_null_undecided`] reads it: [`JsonType::Object`] or [`JsonType::Array`],
-    /// and `None` for a shape this cannot read.
+    /// [`Self::branch_leaves_null_undecided`] reads it: [`JsonType::Object`] or
+    /// [`JsonType::Array`], and `None` for a shape this cannot read.
     ///
     /// Untyped object or array applicators are their own category. An untyped `allOf` is read by
     /// its members: one counts when it is untyped object keywords, untyped array applicators

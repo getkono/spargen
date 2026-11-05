@@ -524,9 +524,9 @@ struct LowerCtx<'a, 'doc> {
     /// shares the one type recorded here. A remote ref or a bundle ref resolves to a fresh owned
     /// schema each call, so it has no `document`-level identity of its own, and this key gives it
     /// one. Nullability is carried so a `$ref` consumer wraps the type in `Option` when the target
-    /// itself is nullable (a `"null"` in its type array, or a `null` enum/const member); otherwise a
-    /// null-mixed enum used via `$ref` would emit a non-`Option` field that rejects a conforming
-    /// `null` payload.
+    /// itself is nullable (a `"null"` in its type array, or a `null` enum/const member);
+    /// otherwise a null-mixed enum used via `$ref` would emit a non-`Option` field that rejects a
+    /// conforming `null` payload.
     finished: HashMap<Reservation, (TypeId, bool)>,
     /// Reservations whose bodies are being lowered right now, mapped to the id reserved for their
     /// root and their provisional nullability (an earlier pass's settled answer, else a

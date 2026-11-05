@@ -83,10 +83,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// target's id under its resolved `file#pointer` *before* lowering its body, so a re-entry on
     /// the same target — self-recursion, mutual recursion, an alias loop, or a diamond — finds the
     /// reservation and returns a boxed back-edge rather than descending again. Every cycle closes in
-    /// one step, every target is lowered once, and only genuinely new targets consume depth. The two
-    /// memos do not compete for one target: a resolved reference that lands on a root component
-    /// comes straight back here by name, so the component's name stays the single identity for
-    /// those.
+    /// one step, every target is lowered once, and only genuinely new targets consume depth. The
+    /// two kinds of reservation do not compete for one target: a resolved reference that lands on
+    /// a root component comes straight back here by name, so the component's name stays the single
+    /// identity for those.
     pub(super) fn ensure_component(
         &mut self,
         name: &str,
@@ -434,8 +434,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare `$ref` plus any
     /// number of null-only members, carrying no shape, discriminator, sibling `$ref` or `default`
     /// of its own — and only when that reference resolves to a target whose body is currently being
-    /// lowered, whichever kind of [`Reservation`] it is. The question is asked of the resolved *target*, not of
-    /// the reference's spelling: see [`Self::open_reservation_for_ref`].
+    /// lowered, whichever kind of [`Reservation`] it is. The question is asked of the resolved
+    /// *target*, not of the reference's spelling: see [`Self::open_reservation_for_ref`].
     ///
     /// Both halves of that narrowness are load-bearing. Recognising an alias whose target is
     /// **finished** would change what is generated for a document that already generates: the
@@ -498,10 +498,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// A `$ref` is identified by the target it resolves to, not by the characters used to write it.
     /// Each kind of [`Reservation`] is keyed by a different spelling of that identity, so this
     /// mirrors [`Self::lower_schema`]'s own `$ref` dispatch exactly: whichever `ensure_*` the
-    /// reference would be lowered through is the kind of reservation looked up for it. Keying on the literal
-    /// `#/components/schemas/` prefix would make a target's identity depend on the reference
-    /// site's spelling, and one schema could then be both an alias and an unrepresentable shape in
-    /// the same document.
+    /// reference would be lowered through is the kind of reservation looked up for it. Keying on
+    /// the literal `#/components/schemas/` prefix would make a target's identity depend on the
+    /// reference site's spelling, and one schema could then be both an alias and an
+    /// unrepresentable shape in the same document.
     ///
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
     /// which the ordinary lowering path handles and reports for itself. It resolves no node and
@@ -640,9 +640,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// on the same key — self-recursion, mutual recursion, or a diamond — finds it and returns a
     /// boxed back-edge instead of descending again. Every cycle therefore closes in one step. A
     /// chain of bare-`$ref` aliases has no body to reserve against and is guarded separately by
-    /// [`Self::alias_stack`], exactly as the remote one is. Only
-    /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
-    /// nothing repeated can accumulate against it.
+    /// [`Self::alias_stack`], as a remote one is. Only genuinely new targets descend, so the depth
+    /// counter still bounds a real chain (`E014`) and nothing repeated can accumulate against it.
     ///
     /// [`MAX_SCHEMA_DEPTH`]: super::MAX_SCHEMA_DEPTH
     pub(super) fn ensure_resolved(
