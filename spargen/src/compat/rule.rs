@@ -1,7 +1,12 @@
 //! The omit rule grammar: [`OmitRule`] and the method and component kinds it names, how each is
-//! parsed from and displayed as text, and the [`omit!`](crate::omit) macro that writes a profile.
+//! parsed from and displayed as text, what a rule resolves to against a loaded bundle, and the
+//! [`omit!`](crate::omit) macro that writes a profile.
 
 use std::borrow::Cow;
+
+use super::glob::{glob_match, has_glob_meta, unescape_glob};
+use crate::diag::{FileId, JsonPointer};
+use crate::source::{InputBundle, Node, SpannedValue};
 
 /// One compatibility omission (exact or glob).
 /// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
@@ -172,6 +177,154 @@ impl OmitRule {
                 None => format!("pointer {pointer}"),
             },
         }
+    }
+
+    /// The concrete construct(s) the rule targets in `bundle`. A rule whose path, name or pointer
+    /// carries a glob metacharacter matches many constructs ([`RuleMatch::Glob`]); an exact rule
+    /// resolves to a single pointer ([`RuleMatch::Exact`]). A pointer rule that names the
+    /// document root or an unloaded file resolves to nothing, and the error says which.
+    pub(super) fn resolve(&self, bundle: &InputBundle) -> Result<RuleMatch, &'static str> {
+        let root = bundle.root_id();
+        Ok(match self {
+            OmitRule::Path { path } if has_glob_meta(path) => {
+                let base = JsonPointer::root().push("paths");
+                let pointers = matching_child_keys(bundle.root().get("paths"), path)
+                    .map(|key| base.push(&key))
+                    .collect();
+                RuleMatch::Glob {
+                    file: root,
+                    pointers,
+                }
+            }
+            OmitRule::Path { path } => RuleMatch::Exact {
+                file: root,
+                pointer: JsonPointer::root().push("paths").push(&unescape_glob(path)),
+            },
+            OmitRule::Operation { method, path } if has_glob_meta(path) => {
+                let paths = bundle.root().get("paths");
+                let method_key = method.as_oas_key();
+                let pointers = matching_child_keys(paths, path)
+                    .filter_map(|key| {
+                        let item = paths?.get(&key)?;
+                        item.get(method_key)?;
+                        Some(
+                            JsonPointer::root()
+                                .push("paths")
+                                .push(&key)
+                                .push(method_key),
+                        )
+                    })
+                    .collect();
+                RuleMatch::Glob {
+                    file: root,
+                    pointers,
+                }
+            }
+            OmitRule::Operation { method, path } => RuleMatch::Exact {
+                file: root,
+                pointer: JsonPointer::root()
+                    .push("paths")
+                    .push(&unescape_glob(path))
+                    .push(method.as_oas_key()),
+            },
+            OmitRule::Component { kind, name } if has_glob_meta(name) => {
+                let kind_key = kind.as_oas_key();
+                let map = bundle
+                    .root()
+                    .get("components")
+                    .and_then(|components| components.get(kind_key));
+                let base = JsonPointer::root().push("components").push(kind_key);
+                let pointers = matching_child_keys(map, name)
+                    .map(|key| base.push(&key))
+                    .collect();
+                RuleMatch::Glob {
+                    file: root,
+                    pointers,
+                }
+            }
+            OmitRule::Component { kind, name } => RuleMatch::Exact {
+                file: root,
+                pointer: JsonPointer::root()
+                    .push("components")
+                    .push(kind.as_oas_key())
+                    .push(&unescape_glob(name)),
+            },
+            OmitRule::Pointer { file, pointer } => {
+                if pointer.is_empty() {
+                    return Err("omit rules cannot remove the document root");
+                }
+                let file_id = file
+                    .as_deref()
+                    .map(|path| bundle.file_id_for_path(path))
+                    .unwrap_or(Some(root))
+                    .ok_or("omit rule references an unloaded file")?;
+                if has_glob_meta(pointer) {
+                    let mut pointers = Vec::new();
+                    collect_pointers(
+                        bundle.value_at(file_id),
+                        &JsonPointer::root(),
+                        &mut pointers,
+                    );
+                    pointers.retain(|candidate| glob_match(pointer, candidate.as_str()));
+                    RuleMatch::Glob {
+                        file: file_id,
+                        pointers,
+                    }
+                } else {
+                    RuleMatch::Exact {
+                        file: file_id,
+                        pointer: JsonPointer::from(unescape_glob(pointer)),
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// The concrete target(s) an [`OmitRule`] resolves to against a loaded bundle.
+pub(super) enum RuleMatch {
+    /// A single exact pointer (a missing target is an `E019`).
+    Exact { file: FileId, pointer: JsonPointer },
+    /// Every pointer a glob rule matched (an empty match is an `E019`).
+    Glob {
+        file: FileId,
+        pointers: Vec<JsonPointer>,
+    },
+}
+
+/// The immediate object-member keys of `value` (if it is an object) that a glob `pattern` matches,
+/// in source order.
+fn matching_child_keys<'a>(
+    value: Option<&'a SpannedValue>,
+    pattern: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    value
+        .and_then(SpannedValue::as_object)
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(move |(key, _)| glob_match(pattern, &key.name))
+        .map(|(key, _)| key.name.clone())
+}
+
+/// Collect every node pointer reachable from `value` (objects by member, arrays by index),
+/// excluding the root, into `out` in document order.
+fn collect_pointers(value: &SpannedValue, base: &JsonPointer, out: &mut Vec<JsonPointer>) {
+    match &value.node {
+        Node::Object(object) => {
+            for (key, child) in object.iter() {
+                let pointer = base.push(&key.name);
+                collect_pointers(child, &pointer, out);
+                out.push(pointer);
+            }
+        }
+        Node::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let pointer = base.index(index);
+                collect_pointers(child, &pointer, out);
+                out.push(pointer);
+            }
+        }
+        _ => {}
     }
 }
 

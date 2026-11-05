@@ -29,13 +29,11 @@ mod rule;
 
 use std::cmp::Ordering;
 
-use crate::diag::{
-    fnv1a64, Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, Span,
-};
-use crate::source::{InputBundle, Node, SpannedValue};
+use crate::diag::{fnv1a64, Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance, Span};
+use crate::source::InputBundle;
 
 pub(crate) use carve::{carve_rules, MAX_CARVE_ROUNDS};
-use glob::{glob_match, has_glob_meta, unescape_glob};
+use rule::RuleMatch;
 pub use rule::{ComponentKind, OmitMethod, OmitRule, UnknownOmitToken};
 
 /// A compatibility omit profile.
@@ -62,7 +60,7 @@ impl Omit {
         diags: &mut Diagnostics,
     ) -> Result<(), Aborted> {
         for rule in &self.rules {
-            self.apply_rule(rule, bundle, diags);
+            apply_rule(rule, bundle, diags);
         }
         validate_remaining(bundle, diags);
         diags.result(())
@@ -121,181 +119,45 @@ impl Omit {
         }
         out
     }
-
-    fn apply_rule(&self, rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
-        match self.resolve_rule(rule, bundle, diags) {
-            // An invalid pointer/file rule already emitted its own diagnostic.
-            None => {}
-            Some(RuleMatch::Exact { file, pointer }) => {
-                match bundle.value_at_mut(file).remove_pointer(&pointer) {
-                    Some(value) => emit_omitted(diags, &pointer, value.span(), &rule.describe()),
-                    None => emit_invalid_rule(
-                        rule,
-                        bundle,
-                        diags,
-                        "omit rule did not match any source construct",
-                    ),
-                }
-            }
-            Some(RuleMatch::Glob { file, mut pointers }) => {
-                if pointers.is_empty() {
-                    emit_invalid_rule(
-                        rule,
-                        bundle,
-                        diags,
-                        "glob omit rule did not match any source construct",
-                    );
-                    return;
-                }
-                // Remove deepest-first (and, within one array parent, highest-index-first) so a
-                // removal never invalidates a still-pending child/sibling pointer. The order is
-                // total, so the result does not depend on how `sort_by` treats ties.
-                pointers.sort_by(removal_order);
-                let describe = rule.describe();
-                let mut removed_any = false;
-                for pointer in pointers {
-                    if let Some(value) = bundle.value_at_mut(file).remove_pointer(&pointer) {
-                        removed_any = true;
-                        emit_omitted(diags, &pointer, value.span(), &describe);
-                    }
-                }
-                if !removed_any {
-                    emit_invalid_rule(
-                        rule,
-                        bundle,
-                        diags,
-                        "glob omit rule did not match any source construct",
-                    );
-                }
-            }
-        }
-    }
-
-    /// Resolve a rule to the concrete construct(s) it targets. A rule whose path/name/pointer
-    /// carries a glob metacharacter matches many constructs ([`RuleMatch::Glob`]); an exact rule
-    /// resolves to a single pointer ([`RuleMatch::Exact`]). Invalid pointer/file rules emit their
-    /// diagnostic here and return `None`.
-    fn resolve_rule(
-        &self,
-        rule: &OmitRule,
-        bundle: &InputBundle,
-        diags: &mut Diagnostics,
-    ) -> Option<RuleMatch> {
-        let root = bundle.root_id();
-        Some(match rule {
-            OmitRule::Path { path } if has_glob_meta(path) => {
-                let base = JsonPointer::root().push("paths");
-                let pointers = matching_child_keys(bundle.root().get("paths"), path)
-                    .map(|key| base.push(&key))
-                    .collect();
-                RuleMatch::Glob {
-                    file: root,
-                    pointers,
-                }
-            }
-            OmitRule::Path { path } => RuleMatch::Exact {
-                file: root,
-                pointer: JsonPointer::root().push("paths").push(&unescape_glob(path)),
-            },
-            OmitRule::Operation { method, path } if has_glob_meta(path) => {
-                let paths = bundle.root().get("paths");
-                let method_key = method.as_oas_key();
-                let pointers = matching_child_keys(paths, path)
-                    .filter_map(|key| {
-                        let item = paths?.get(&key)?;
-                        item.get(method_key)?;
-                        Some(
-                            JsonPointer::root()
-                                .push("paths")
-                                .push(&key)
-                                .push(method_key),
-                        )
-                    })
-                    .collect();
-                RuleMatch::Glob {
-                    file: root,
-                    pointers,
-                }
-            }
-            OmitRule::Operation { method, path } => RuleMatch::Exact {
-                file: root,
-                pointer: JsonPointer::root()
-                    .push("paths")
-                    .push(&unescape_glob(path))
-                    .push(method.as_oas_key()),
-            },
-            OmitRule::Component { kind, name } if has_glob_meta(name) => {
-                let kind_key = kind.as_oas_key();
-                let map = bundle
-                    .root()
-                    .get("components")
-                    .and_then(|components| components.get(kind_key));
-                let base = JsonPointer::root().push("components").push(kind_key);
-                let pointers = matching_child_keys(map, name)
-                    .map(|key| base.push(&key))
-                    .collect();
-                RuleMatch::Glob {
-                    file: root,
-                    pointers,
-                }
-            }
-            OmitRule::Component { kind, name } => RuleMatch::Exact {
-                file: root,
-                pointer: JsonPointer::root()
-                    .push("components")
-                    .push(kind.as_oas_key())
-                    .push(&unescape_glob(name)),
-            },
-            OmitRule::Pointer { file, pointer } => {
-                if pointer.is_empty() {
-                    emit_invalid_rule(
-                        rule,
-                        bundle,
-                        diags,
-                        "omit rules cannot remove the document root",
-                    );
-                    return None;
-                }
-                let Some(file_id) = file
-                    .as_deref()
-                    .map(|path| bundle.file_id_for_path(path))
-                    .unwrap_or_else(|| Some(bundle.root_id()))
-                else {
-                    emit_invalid_rule(rule, bundle, diags, "omit rule references an unloaded file");
-                    return None;
-                };
-                if has_glob_meta(pointer) {
-                    let mut pointers = Vec::new();
-                    collect_pointers(
-                        bundle.value_at(file_id),
-                        &JsonPointer::root(),
-                        &mut pointers,
-                    );
-                    pointers.retain(|candidate| glob_match(pointer, candidate.as_str()));
-                    RuleMatch::Glob {
-                        file: file_id,
-                        pointers,
-                    }
-                } else {
-                    RuleMatch::Exact {
-                        file: file_id,
-                        pointer: JsonPointer::from(unescape_glob(pointer)),
-                    }
-                }
-            }
-        })
-    }
 }
 
-/// The concrete target(s) an [`OmitRule`] resolves to against a loaded bundle.
-enum RuleMatch {
-    /// A single exact pointer (a missing target is an `E019`).
-    Exact { file: FileId, pointer: JsonPointer },
-    /// Every pointer a glob rule matched (an empty match is an `E019`).
-    Glob {
-        file: FileId,
-        pointers: Vec<JsonPointer>,
-    },
+/// Remove what `rule` matches from `bundle`, emitting a `W009` per removed construct, or the one
+/// `E019` that says why the rule removed nothing.
+fn apply_rule(rule: &OmitRule, bundle: &mut InputBundle, diags: &mut Diagnostics) {
+    let applied = match rule.resolve(bundle) {
+        Err(invalid) => Err(invalid),
+        Ok(RuleMatch::Exact { file, pointer }) => {
+            match bundle.value_at_mut(file).remove_pointer(&pointer) {
+                Some(value) => {
+                    emit_omitted(diags, &pointer, value.span(), &rule.describe());
+                    Ok(())
+                }
+                None => Err("omit rule did not match any source construct"),
+            }
+        }
+        Ok(RuleMatch::Glob { file, mut pointers }) => {
+            // Remove deepest-first (and, within one array parent, highest-index-first) so a
+            // removal never invalidates a still-pending child/sibling pointer. The order is total,
+            // so the result does not depend on how `sort_by` treats ties.
+            pointers.sort_by(removal_order);
+            let describe = rule.describe();
+            let mut removed_any = false;
+            for pointer in pointers {
+                if let Some(value) = bundle.value_at_mut(file).remove_pointer(&pointer) {
+                    removed_any = true;
+                    emit_omitted(diags, &pointer, value.span(), &describe);
+                }
+            }
+            if removed_any {
+                Ok(())
+            } else {
+                Err("glob omit rule did not match any source construct")
+            }
+        }
+    };
+    if let Err(message) = applied {
+        emit_invalid_rule(rule, bundle, diags, message);
+    }
 }
 
 /// Emit the `W009` "construct omitted" warning for one removed construct.
@@ -310,42 +172,6 @@ fn emit_omitted(diags: &mut Diagnostics, pointer: &JsonPointer, span: Span, desc
          hand-written omit rule (auto-carve stops omitting it on its own)",
     )
     .emit(diags);
-}
-
-/// The immediate object-member keys of `value` (if it is an object) that a glob `pattern` matches,
-/// in source order.
-fn matching_child_keys<'a>(
-    value: Option<&'a SpannedValue>,
-    pattern: &'a str,
-) -> impl Iterator<Item = String> + 'a {
-    value
-        .and_then(SpannedValue::as_object)
-        .into_iter()
-        .flat_map(|object| object.iter())
-        .filter(move |(key, _)| glob_match(pattern, &key.name))
-        .map(|(key, _)| key.name.clone())
-}
-
-/// Collect every node pointer reachable from `value` (objects by member, arrays by index),
-/// excluding the root, into `out` in document order.
-fn collect_pointers(value: &SpannedValue, base: &JsonPointer, out: &mut Vec<JsonPointer>) {
-    match &value.node {
-        Node::Object(object) => {
-            for (key, child) in object.iter() {
-                let pointer = base.push(&key.name);
-                collect_pointers(child, &pointer, out);
-                out.push(pointer);
-            }
-        }
-        Node::Array(items) => {
-            for (index, child) in items.iter().enumerate() {
-                let pointer = base.index(index);
-                collect_pointers(child, &pointer, out);
-                out.push(pointer);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Deterministic, removal-safe total order: deepest pointers first, then grouped by parent
@@ -448,10 +274,10 @@ mod tests {
     use std::borrow::Cow;
 
     use super::carve::omittable_enclosing;
-    use super::glob::escape_glob_meta;
+    use super::glob::{escape_glob_meta, glob_match, has_glob_meta, unescape_glob};
     use super::{
-        carve_rules, glob_match, has_glob_meta, removal_order, unescape_glob, ComponentKind,
-        Diagnostic, JsonPointer, Omit, OmitMethod, OmitRule, Provenance,
+        carve_rules, removal_order, ComponentKind, Diagnostic, JsonPointer, Omit, OmitMethod,
+        OmitRule, Provenance,
     };
     use crate::diag::{Code, Diagnostics};
     use crate::source::InputBundle;
