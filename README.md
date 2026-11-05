@@ -148,7 +148,8 @@ the version it emits, and the idioms spargen handles.
   `String`) takes a disambiguated name; all three are reserved whether or not the module writes
   them, so adding a free-form server variable never renames a server. A disambiguated name's
   suffix is a hash of the item's JSON Pointer with the type and subtype of each media key on it
-  lowercased, so respelling a media key's letter case renames nothing.
+  lowercased, so respelling a media key's type or subtype in another letter case renames nothing;
+  its parameters are hashed as written, so a respelled parameter (`Charset` for `charset`) does.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees
