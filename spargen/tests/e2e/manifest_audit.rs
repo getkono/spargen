@@ -1145,6 +1145,157 @@ paths:
     );
 }
 
+/// A consumer crate whose manifest declares every dependency the `/ping` spec needs, with
+/// `build_rs` as its build script, ready for [`fixture_cargo`]. The build script asserts its
+/// expectations itself: the consumer manifest is reached only from a real build script, because
+/// the facade reads it from the environment Cargo gives one.
+fn build_script_consumer(name: &str, build_rs: &str) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+[build-dependencies]
+spargen = {{ path = {spargen_path:?}, default-features = false }}
+
+[workspace]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("build.rs"), build_rs).unwrap();
+    std::fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /ping:
+    get: { operationId: ping, responses: { "204": { description: OK } } }
+"#,
+    )
+    .unwrap();
+    temp
+}
+
+/// The build-script helpers both fixtures below share: the consumer manifest, the edit that drops
+/// `secrecy` from it, and the assertion that a report is rejected by `E023` alone, naming the
+/// dropped crate.
+const BUILD_SCRIPT_HELPERS: &str = r#"
+fn manifest() -> std::path::PathBuf {
+    std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml")
+}
+
+/// Run `body` with `secrecy` dropped from the consumer manifest, restoring it afterwards.
+fn without_secrecy<T>(body: impl FnOnce() -> T) -> T {
+    let complete = std::fs::read_to_string(manifest()).unwrap();
+    let missing = complete.replace("secrecy = \"0.10.3\"\n", "");
+    assert_ne!(missing, complete, "the fixture manifest must declare `secrecy`");
+    std::fs::write(manifest(), missing).unwrap();
+    let result = body();
+    std::fs::write(manifest(), complete).unwrap();
+    result
+}
+
+fn assert_rejected_for_secrecy(report: &spargen::Report) {
+    assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
+    let errors: Vec<_> = report.errors().collect();
+    assert!(
+        !errors.is_empty()
+            && errors
+                .iter()
+                .all(|d| d.code == spargen::Code::RuntimeDependencyContract),
+        "only E023 may reject: {report:#?}"
+    );
+    assert!(
+        errors.iter().any(|d| d.message.contains("secrecy")),
+        "E023 must name the dropped crate: {report:#?}"
+    );
+}
+"#;
+
+/// A cache hit replays the recorded run but audits the consumer manifest afresh, because the
+/// manifest is no fingerprint input: a dependency dropped since the module was generated rejects
+/// the replay. The build script generates, shows the next run is a cache hit, drops `secrecy` from
+/// its own manifest and runs again over unchanged inputs, which is the same cache hit, and so only
+/// the rerun audit can reject it. With the manifest restored, the record still hits.
+#[test]
+fn a_cache_hit_rejects_when_the_consumer_manifest_no_longer_satisfies_the_audit() {
+    let build_rs = format!(
+        r#"fn main() {{
+    let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"))
+        .build(concat!(env!("OUT_DIR"), "/generated.rs"));
+    let first = spargen::generate(&build);
+    assert_eq!(first.outcome(), spargen::Outcome::Generated, "{{first:#?}}");
+    let hit = spargen::generate(&build);
+    assert_eq!(hit.outcome(), spargen::Outcome::Cached, "{{hit:#?}}");
+
+    let replayed = without_secrecy(|| spargen::generate(&build));
+    assert_rejected_for_secrecy(&replayed);
+
+    let restored = spargen::generate(&build);
+    assert_eq!(restored.outcome(), spargen::Outcome::Cached, "{{restored:#?}}");
+}}
+{BUILD_SCRIPT_HELPERS}"#
+    );
+    let temp = build_script_consumer("cache-hit-audit-consumer", &build_rs);
+
+    let output = fixture_cargo(&temp.path().join("consumer"))
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the build script's assertions failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `check` from a build script audits the consumer manifest, so a missing runtime dependency is an
+/// `E023` rejection before any code is generated. The same `check` over the complete manifest is
+/// clean, so the rejection is the dropped dependency's.
+#[test]
+fn check_in_a_build_script_rejects_a_consumer_missing_a_runtime_dependency() {
+    let build_rs = format!(
+        r#"fn main() {{
+    let spec = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"));
+    let complete = spargen::check(&spec);
+    assert_eq!(complete.outcome(), spargen::Outcome::Clean, "{{complete:#?}}");
+
+    let missing = without_secrecy(|| spargen::check(&spec));
+    assert_rejected_for_secrecy(&missing);
+}}
+{BUILD_SCRIPT_HELPERS}"#
+    );
+    let temp = build_script_consumer("check-audit-consumer", &build_rs);
+
+    let output = fixture_cargo(&temp.path().join("consumer"))
+        .arg("check")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the build script's assertions failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// The `[dependencies]` block `spargen deps` prints for an inline spec.
 fn manifest_block(spec: &str) -> String {
     let temp = tempfile::tempdir().unwrap();
