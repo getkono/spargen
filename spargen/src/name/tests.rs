@@ -199,6 +199,30 @@ fn parameter_identifiers_do_not_depend_on_listing_order() {
     }
 }
 
+/// `OperationNames::params`, the lookup codegen and the surface read parameter identifiers
+/// through, pairs each of the operation's own parameters, in `Operation::params` order, with the
+/// identifier allocated for it.
+#[test]
+fn params_pairs_each_parameter_with_its_allocated_identifier() {
+    let api = api(colliding(), false);
+    let names = allocate(&api);
+    let operation = &api.operations[0];
+    let allocated = &names.operations[&operation.id].parameters;
+    let paired: Vec<_> = names.operation(&operation.id).params(operation).collect();
+    assert_eq!(
+        paired.len(),
+        operation.params.len(),
+        "one pair per parameter"
+    );
+    for (index, (parameter, ident)) in paired.into_iter().enumerate() {
+        assert!(
+            std::ptr::eq(parameter, &operation.params[index]),
+            "pair {index} borrows the operation's own parameter"
+        );
+        assert_eq!(ident, &allocated[index], "pair {index}'s identifier");
+    }
+}
+
 #[test]
 fn generator_bindings_yield_to_every_parameter() {
     let bindings = [
