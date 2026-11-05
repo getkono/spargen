@@ -2,22 +2,30 @@
 //! fixture suite (`frontend/`), the fuzz harness (`fuzz_frontend.rs`) and the lowering
 //! properties (`lowering_props.rs`), so each holds every run it makes to the same bar (#475):
 //!
+//! * [`internal_failures`]: no run reports a spargen bug as an `E011`, an IR that fails its
+//!   invariants or codegen tokens that do not parse;
 //! * [`location_violations`]: every diagnostic names a real location (#454);
 //! * [`indistinguishable_variants`]: every union's variants can be told apart (#402), unless a
 //!   `W001` at the union says why ([`unexplained_variants`]);
 //! * [`unreferenced_types`]: every emitted type is a component or something names it (#928);
-//! * [`relocate`] and [`shape`]: moving a document's schemas into a referenced file changes no
-//!   verdict, code or shape (#446).
+//! * [`run_violations`]: all of the above for one run, and a module that parses as Rust;
+//! * [`parity_violations`]: `check` reaches `generate`'s verdict and reports the identical
+//!   diagnostics;
+//! * [`relocate`] and [`relocation_differences`]: moving a document's schemas into a referenced
+//!   file changes no verdict, code or [`shape`] (#446).
 //!
 //! Each oracle returns the defects it finds, one reason each; a caller fails on any of them.
+//! [`readers`] holds the readers over a report and a module that the suites share.
+//!
+//! Each test crate that declares this module uses the part of it its runs need, so an item one of
+//! them leaves unused carries `#[allow(dead_code)]` of its own.
 
-// Each test crate that declares this module uses the part of it its runs need.
-#![allow(dead_code)]
+pub mod readers;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use spargen::{Code, Diagnostic, Report};
+use spargen::{Code, Diagnostic, Outcome, Report};
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
 use yaml_rust2::scanner::Marker;
 use yaml_rust2::{Yaml, YamlLoader};
@@ -179,6 +187,103 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Strin
     violations
 }
 
+/// The prefix `ir::check_invariants` gives every diagnostic it emits, an `E011`. `ir::invariant`'s
+/// own `INVARIANT_FAILURE` is the prefix the messages are built from, and a test beside it holds
+/// this declaration to that value.
+pub const INVARIANT_FAILURE: &str = "IR invariant failed";
+
+/// The prefix of the `E011` the pipeline reports when codegen's own tokens do not parse as a Rust
+/// file. `codegen`'s own `CODEGEN_FAILURE` is the prefix the message is built from, and a test
+/// beside it holds this declaration to that value.
+pub const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
+
+/// Each `E011` in `diagnostics` that reports a spargen bug rather than a rejection: an IR that
+/// fails its invariants ([`INVARIANT_FAILURE`]) or codegen tokens that do not parse
+/// ([`CODEGEN_FAILURE`]). Lowering must produce a valid IR, and codegen a parseable module, for
+/// any input.
+pub fn internal_failures(diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == Code::InvalidInput
+                && [INVARIANT_FAILURE, CODEGEN_FAILURE]
+                    .iter()
+                    .any(|prefix| diagnostic.message.starts_with(prefix))
+        })
+        .map(|diagnostic| format!("a spargen bug, not a rejection: {}", diagnostic.message))
+        .collect()
+}
+
+/// Every defect the shared oracles find in one run over the root document `root`:
+/// [`internal_failures`] and [`location_violations`] in its report and, given `module`, the module
+/// a `Generated` run wrote, a module that does not parse as Rust, [`unexplained_variants`] and
+/// [`unreferenced_types`].
+pub fn run_violations(report: &Report, root: &[u8], module: Option<&str>) -> Vec<String> {
+    let mut violations = internal_failures(report.diagnostics());
+    violations.extend(location_violations(report.diagnostics(), root));
+    if let Some(code) = module {
+        if let Err(error) = syn::parse_file(code) {
+            violations.push(format!("the module does not parse as Rust ({error})"));
+        }
+        violations.extend(unexplained_variants(report, code));
+        violations.extend(unreferenced_types(code, &String::from_utf8_lossy(root)));
+    }
+    violations
+}
+
+/// Where `checked`, a `check` run, fails to stand in for `generated`, a `generate` run over the same
+/// document: `check` must be `Rejected` exactly when `generate` is and `Clean` otherwise, since only
+/// `generate` writes a module, and report [the identical diagnostics](diagnostic_differences).
+#[allow(dead_code)]
+pub fn parity_violations(generated: &Report, checked: &Report) -> Vec<String> {
+    let expected = if generated.outcome() == Outcome::Rejected {
+        Outcome::Rejected
+    } else {
+        Outcome::Clean
+    };
+    let mut violations = Vec::new();
+    if checked.outcome() != expected {
+        violations.push(format!(
+            "`generate` is `{}` but `check` is `{}`",
+            generated.outcome(),
+            checked.outcome()
+        ));
+    }
+    violations.extend(diagnostic_differences(
+        generated.diagnostics(),
+        checked.diagnostics(),
+    ));
+    violations
+}
+
+/// Each diagnostic one of `generated` and `checked` reports more often than the other, compared
+/// whole: code, pointer, span, message and every other field, in any order.
+#[allow(dead_code)]
+pub fn diagnostic_differences(generated: &[Diagnostic], checked: &[Diagnostic]) -> Vec<String> {
+    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    for diagnostic in generated {
+        *counts.entry(format!("{diagnostic:?}")).or_default() += 1;
+    }
+    for diagnostic in checked {
+        *counts.entry(format!("{diagnostic:?}")).or_default() -= 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count != 0)
+        .map(|(diagnostic, count)| {
+            let (more, fewer) = if count > 0 {
+                ("generate", "check")
+            } else {
+                ("check", "generate")
+            };
+            format!(
+                "`{more}` reports this {} more time(s) than `{fewer}`: {diagnostic}",
+                count.abs()
+            )
+        })
+        .collect()
+}
+
 /// Everything from the generated `types` module to the end of the file, or nothing when no module
 /// was emitted: the provenance header and the embedded runtime before it are stripped, since they
 /// are not generated from the document.
@@ -316,6 +421,7 @@ impl Declarations {
 /// specific match is selected, so a typed variant still takes every value it accepts, and a
 /// `serde_json::Value` variant, the lowering of an untyped member (`{}`, `true`), takes only the
 /// rest. That is the faithful lowering of what the document says, so it is not reported.
+#[allow(dead_code)]
 pub fn indistinguishable_variants(code: &str) -> Vec<String> {
     union_violations(code)
         .into_iter()
@@ -450,6 +556,7 @@ pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
 /// The shape of the type the module `code` declares as `name`: what it stands for with every name
 /// it reaches expanded, so two modules that lower one schema under different names agree. `name`
 /// itself when the module declares nothing by that name.
+#[allow(dead_code)]
 pub fn shape(code: &str, name: &str) -> String {
     Declarations::read(&types_module(code)).shape_of(name, 8)
 }
@@ -530,6 +637,7 @@ pub const RELOCATED_LIB: &str = "lib.yaml";
 /// root entry becomes a `$ref` to its moved schema, so every schema stays reachable under its name
 /// and every reference the root makes still resolves to it. Both files are written as JSON, which
 /// YAML reads, with every key in its original order.
+#[allow(dead_code)]
 pub fn relocate(spec: &str) -> Option<(String, String)> {
     let mut root = load_yaml(spec)?.into_iter().next()?;
     let schemas = entry(entry(&mut root, "components")?, "schemas")?;
@@ -587,6 +695,7 @@ fn point_into_lib(node: &mut Yaml) {
 
 /// Write [`relocate`]'s two files into `dir`, returning the root's path, or `None` when there is
 /// nothing to move.
+#[allow(dead_code)]
 pub fn write_relocated(dir: &Utf8Path, spec: &str) -> Option<Utf8PathBuf> {
     let (root, lib) = relocate(spec)?;
     let path = dir.join("openapi.yaml");
@@ -596,6 +705,7 @@ pub fn write_relocated(dir: &Utf8Path, spec: &str) -> Option<Utf8PathBuf> {
 }
 
 /// The names `spec` declares under `components.schemas`, in document order.
+#[allow(dead_code)]
 pub fn schema_names(spec: &str) -> Vec<String> {
     let Some(mut root) = load_yaml(spec).and_then(|documents| documents.into_iter().next()) else {
         return Vec::new();
@@ -607,6 +717,44 @@ pub fn schema_names(spec: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Where `moved`, a run over `spec` with its schemas relocated ([`write_relocated`]), differs from
+/// `inline`, the same entry point's run over `spec` itself (#446): another verdict, another code
+/// multiset (so a `W001` raised in the root and not in a referenced file shows as a count), or a
+/// schema of `spec` that lowers to another [`shape`]. Each run is paired with the module it wrote,
+/// empty where it wrote none.
+#[allow(dead_code)]
+pub fn relocation_differences(
+    spec: &str,
+    inline: (&Report, &str),
+    moved: (&Report, &str),
+) -> Vec<String> {
+    let ((inline, inline_code), (moved, moved_code)) = (inline, moved);
+    let mut differences = Vec::new();
+    if moved.outcome() != inline.outcome() {
+        differences.push(format!(
+            "relocated, the run is `{}` where inline it is `{}`",
+            moved.outcome(),
+            inline.outcome()
+        ));
+    }
+    if readers::codes(moved) != readers::codes(inline) {
+        differences.push(format!(
+            "relocated, the run reports {:?} where inline it reports {:?}",
+            readers::codes(moved),
+            readers::codes(inline)
+        ));
+    }
+    for schema in schema_names(spec) {
+        let (inline_shape, moved_shape) = (shape(inline_code, &schema), shape(moved_code, &schema));
+        if moved_shape != inline_shape {
+            differences.push(format!(
+                "relocated, `{schema}` lowers to `{moved_shape}` where inline it is `{inline_shape}`"
+            ));
+        }
+    }
+    differences
 }
 
 /// Whether `text` holds `ident` as a whole identifier, not as part of a longer one.

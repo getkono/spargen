@@ -1,7 +1,6 @@
 //! Type identity across a bundle of files: contested type names, file-referenced `allOf` members,
 //! and root components shadowing sub-file ones.
 
-use super::refs::{generate_two_file_shapes, two_shape_root, SHAPE_ALPHA_YAML, SHAPE_BETA_YAML};
 use super::*;
 
 /// The *file* half of the identity key. Two different files each declaring a schema by the same name

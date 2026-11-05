@@ -75,19 +75,14 @@ components:
             ],
         ),
     ] {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{case}/{entry}: {report:#?}"
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        let messages = messages_for(&report, Code::UnresolvedRef);
+        for message in expected {
+            assert!(
+                messages.contains(&message),
+                "{case}: expected {message:?} in {messages:#?}"
             );
-            let messages = messages_for(&report, Code::UnresolvedRef);
-            for message in expected {
-                assert!(
-                    messages.contains(&message),
-                    "{case}/{entry}: expected {message:?} in {messages:#?}"
-                );
-            }
         }
     }
 }
@@ -288,28 +283,26 @@ components:
     ];
 
     for (what, spec, pointer) in cases {
-        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
-            );
-            let e004: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::UnresolvedRef)
-                .collect();
-            assert!(
-                !e004.is_empty(),
-                "{what} via {entry}: the rejection must carry E004\n{report:#?}"
-            );
-            assert!(
-                e004.iter().any(|d| d.pointer.as_str() == pointer),
-                "{what} via {entry}: E004 must point at the `$ref` site `{pointer}`, not at \
-                 {:?}\n{report:#?}",
-                e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: a `$ref` to an undeclared component must reject\n{report:#?}"
+        );
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(
+            !e004.is_empty(),
+            "{what}: the rejection must carry E004\n{report:#?}"
+        );
+        assert!(
+            e004.iter().any(|d| d.pointer.as_str() == pointer),
+            "{what}: E004 must point at the `$ref` site `{pointer}`, not at {:?}\n{report:#?}",
+            e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -497,30 +490,26 @@ components:
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelope/properties/nope",
     );
-    for (entry, report) in [
-        ("generate", generate(&off_body)),
-        ("check", check(&off_body)),
-    ] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e004: Vec<_> = report
-            .diagnostics()
+    let report = generate(&off_body);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e004: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .collect();
+    assert!(
+        e004.iter().any(|d| d.message.contains(
+            "`#/components/schemas/Envelope/properties/nope` was not found in the input bundle"
+        ) && d.pointer.as_str()
+            == "/paths/~1u/get/responses/200/content/application~1json/schema"),
+        "{report:#?}"
+    );
+    assert!(
+        !e004
             .iter()
-            .filter(|d| d.code == Code::UnresolvedRef)
-            .collect();
-        assert!(
-            e004.iter().any(|d| d.message.contains(
-                "`#/components/schemas/Envelope/properties/nope` was not found in the input bundle"
-            ) && d.pointer.as_str()
-                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
-            "{entry}: {report:#?}"
-        );
-        assert!(
-            !e004
-                .iter()
-                .any(|d| d.message.contains("addresses a subschema")),
-            "{entry}: {report:#?}"
-        );
-    }
+            .any(|d| d.message.contains("addresses a subschema")),
+        "{report:#?}"
+    );
 
     // A deep pointer whose ROOT SEGMENT is not declared is a missing component, and keeps the
     // plain-name wording that names the whole reference. `Envelop` is a typo for `Envelope`; the
@@ -529,21 +518,17 @@ components:
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelop/properties/payload",
     );
-    for (entry, report) in [("generate", generate(&typo)), ("check", check(&typo))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e004: Vec<_> = report
-            .diagnostics()
+    let report = generate(&typo);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnresolvedRef)
             .iter()
-            .filter(|d| d.code == Code::UnresolvedRef)
-            .collect();
-        assert!(
-            e004.iter().any(|d| d.message.contains(
+            .any(|message| message.contains(
                 "unresolved schema reference `#/components/schemas/Envelop/properties/payload`"
             )),
-            "{entry}: an undeclared root segment is an unresolved reference, not a fragment-shape \
-             problem: {report:#?}"
-        );
-    }
+        "an undeclared root segment is an unresolved reference, not a fragment-shape problem: \
+         {report:#?}"
+    );
 
     // A trailing slash is a real pointer into `Envelope`: its final empty reference token
     // addresses a `""`-keyed member, which `Envelope` does not have. So it reaches the resolver,
@@ -1028,56 +1013,4 @@ PetBody:
     // references were genuinely followed rather than merely tolerated.
     assert!(code.contains("x_request_id"), "{code}");
     assert!(code.contains("pub id"), "{code}");
-}
-
-/// A root document whose two operations reach a `Shape` declared in `a.yaml` and another declared
-/// in `b.yaml`, listed `/a` first unless `b_first`; returns the generated client.
-pub(super) fn generate_two_file_shapes(b_first: bool) -> String {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let refs = [
-        ("a", "./a.yaml#/components/schemas/Shape"),
-        ("b", "./b.yaml#/components/schemas/Shape"),
-    ];
-    std::fs::write(dir.join("openapi.yaml"), two_shape_root(refs, b_first)).unwrap();
-    std::fs::write(dir.join("a.yaml"), SHAPE_ALPHA_YAML).unwrap();
-    std::fs::write(dir.join("b.yaml"), SHAPE_BETA_YAML).unwrap();
-    let out = dir.join("client.rs");
-    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    std::fs::read_to_string(&out).unwrap()
-}
-
-/// A document declaring a `Shape` whose one field is `alpha`.
-pub(super) const SHAPE_ALPHA_YAML: &str =
-    "components:\n  schemas:\n    Shape:\n      type: object\n      \
-                                required: [alpha]\n      properties: { alpha: { type: string } }\n";
-/// A document declaring a `Shape` whose one field is `beta`.
-pub(super) const SHAPE_BETA_YAML: &str =
-    "components:\n  schemas:\n    Shape:\n      type: object\n      \
-                               required: [beta]\n      properties: { beta: { type: integer } }\n";
-
-/// A root document with one operation per `(path, $ref)` in `refs`, each answering `200` with the
-/// schema the `$ref` names; the second entry is listed first when `swap`.
-pub(super) fn two_shape_root(refs: [(&str, &str); 2], swap: bool) -> String {
-    let path_item = |(letter, reference): (&str, &str)| {
-        format!(
-            "  /{letter}:\n    get:\n      operationId: get{upper}\n      responses:\n        \
-             '200':\n          description: ok\n          content:\n            \
-             application/json: {{ schema: {{ $ref: '{reference}' }} }}\n",
-            upper = letter.to_uppercase(),
-        )
-    };
-    let [first, second] = refs;
-    let (first, second) = if swap {
-        (second, first)
-    } else {
-        (first, second)
-    };
-    format!(
-        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
-         servers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}",
-        path_item(first),
-        path_item(second),
-    )
 }

@@ -427,7 +427,7 @@ paths:
 "##;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_with_code(&report, Code::UnsupportedMediaType);
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
         assert_eq!(messages.len(), 2, "{report:#?}");
         assert!(
             messages.iter().any(|m| m.contains("Bad Name")),

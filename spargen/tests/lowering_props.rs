@@ -27,10 +27,12 @@
 //!   recursive field is boxed, in every order its `components.schemas` keys are written in, and
 //!   one verdict again moved into a referenced file.
 //!
-//! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
-//! and each generated union's variants are distinguishable by shape unless a `W001` at the union
-//! says why (#402). Each case of the first three properties moved into a
-//! referenced file (`oracles::relocate`) also reaches the same verdict, codes and shapes (#446).
+//! Every run is also held to the shared `oracles` (`oracles::run_violations`): no IR invariant or
+//! codegen failure is reported, each diagnostic names a real location (#454), and a generated
+//! module parses, each of its unions' variants is distinguishable by shape unless a `W001` at the
+//! union says why (#402), and each of its types is a component or something names it (#928). Each
+//! case of the first three properties moved into a referenced file (`oracles::relocate`) also
+//! reaches the same verdict, codes and shapes (#446).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,6 +48,8 @@ mod oracles;
 #[path = "lowering_props/strategies.rs"]
 mod strategies;
 
+use oracles::readers::{codes, has_code};
+
 use strategies::{
     category_strategy, key_set_strategy, member_strategy, Category, Member, PropType, KEYS,
 };
@@ -58,10 +62,10 @@ fn check(spec: &str) -> Report {
     check_at(&spec_path)
 }
 
-/// `check` on the root document at `root`, held to [`oracles::location_violations`].
+/// `check` on the root document at `root`, held to [`oracles::run_violations`].
 fn check_at(root: &Utf8Path) -> Report {
     let report = spargen::check(&Spec::new(root));
-    assert_located(&report, root);
+    hold_run(&report, root, None);
     report
 }
 
@@ -74,10 +78,7 @@ fn generate_module(spec: &str) -> (Report, String) {
 }
 
 /// `generate` on the root document at `root`, writing the module beside it, held to
-/// [`oracles::location_violations`] and, when it generates, to [`oracles::unexplained_variants`]
-/// (a union's variants are told apart by shape, or a `W001` at the union says why) and to
-/// [`oracles::unreferenced_types`] (every emitted type is a component or something names it,
-/// #928).
+/// [`oracles::run_violations`] over the report and the module a `Generated` run wrote.
 fn generate_at(root: &Utf8Path) -> (Report, String) {
     let out = root.with_file_name("client.rs");
     let report = spargen::generate(
@@ -85,49 +86,31 @@ fn generate_at(root: &Utf8Path) -> (Report, String) {
             .build(out.clone())
             .cargo(CargoIntegration::Off),
     );
-    assert_located(&report, root);
     let source = std::fs::read_to_string(&out).unwrap_or_default();
-    if report.outcome() == Outcome::Generated {
-        let unexplained = oracles::unexplained_variants(&report, &source);
-        assert!(
-            unexplained.is_empty(),
-            "a union's variants cannot be told apart and no warning says why: {unexplained:#?}"
-        );
-        let spec = std::fs::read_to_string(root).unwrap_or_default();
-        let unreferenced = oracles::unreferenced_types(&source, &spec);
-        assert!(
-            unreferenced.is_empty(),
-            "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
-        );
-    }
+    let module = (report.outcome() == Outcome::Generated).then_some(source.as_str());
+    hold_run(&report, root, module);
     (report, source)
 }
 
-/// Fail unless every diagnostic in `report` names a real location (#454).
-fn assert_located(report: &Report, root: &Utf8Path) {
+/// Fail unless the shared oracles find no defect in `report`, a run over the root document at
+/// `root`, or in `module`, the module it wrote ([`oracles::run_violations`]): no IR invariant or
+/// codegen failure, every diagnostic at a real location (#454), and a module that parses, whose
+/// unions' variants are told apart by shape or a `W001` at the union says why (#402), and whose
+/// every type is a component or something names it (#928).
+fn hold_run(report: &Report, root: &Utf8Path, module: Option<&str>) {
     let text = std::fs::read(root).unwrap_or_default();
-    let unlocated = oracles::location_violations(report.diagnostics(), &text);
+    let violations = oracles::run_violations(report, &text, module);
     assert!(
-        unlocated.is_empty(),
-        "diagnostics with no real location: {unlocated:#?}"
+        violations.is_empty(),
+        "a `{}` run broke an oracle every run is held to: {violations:#?}",
+        report.outcome()
     );
 }
 
-/// The sorted diagnostic codes of a report, duplicates kept, so a `W001` count is compared too.
-fn codes(report: &Report) -> Vec<&'static str> {
-    let mut codes: Vec<&'static str> = report
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.code.as_str())
-        .collect();
-    codes.sort_unstable();
-    codes
-}
-
-/// Moving `spec`'s schemas into a referenced file ([`oracles::relocate`]) changes nothing (#446):
-/// `check` reaches the same verdict with the same code multiset, and when `inline` (the module
-/// `spec` generated, `None` when the case only checks) was generated, `generate` gives every
-/// schema the same [`oracles::shape`].
+/// Moving `spec`'s schemas into a referenced file ([`oracles::write_relocated`]) changes nothing
+/// (#446, [`oracles::relocation_differences`]): `check` reaches the same verdict with the same code
+/// multiset, and when `inline` (the module `spec` generated, `None` when the case only checks) is
+/// given, so does `generate`, which gives every schema the same shape.
 fn assert_relocation_changes_nothing(
     spec: &str,
     inline: Option<&(Report, String)>,
@@ -135,28 +118,15 @@ fn assert_relocation_changes_nothing(
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     let root = oracles::write_relocated(&dir, spec).expect("every case declares schemas");
-    let inline_checked = check(spec);
-    let moved_checked = check_at(&root);
-    prop_assert_eq!(moved_checked.outcome(), inline_checked.outcome());
-    prop_assert_eq!(codes(&moved_checked), codes(&inline_checked));
+    let checked = oracles::relocation_differences(spec, (&check(spec), ""), (&check_at(&root), ""));
+    prop_assert!(checked.is_empty(), "`check`: {:#?}", checked);
     if let Some((report, source)) = inline {
         let (moved, moved_source) = generate_at(&root);
-        prop_assert_eq!(moved.outcome(), report.outcome());
-        prop_assert_eq!(codes(&moved), codes(report));
-        for schema in oracles::schema_names(spec) {
-            prop_assert_eq!(
-                oracles::shape(&moved_source, &schema),
-                oracles::shape(source, &schema),
-                "relocated, `{}` lowers to another shape",
-                schema
-            );
-        }
+        let generated =
+            oracles::relocation_differences(spec, (report, source), (&moved, &moved_source));
+        prop_assert!(generated.is_empty(), "`generate`: {:#?}", generated);
     }
     Ok(())
-}
-
-fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics().iter().any(|d| d.code == code)
 }
 
 // JSON-type-category disjointness is sound.

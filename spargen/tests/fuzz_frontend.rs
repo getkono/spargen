@@ -5,14 +5,15 @@
 //! input, however malformed, random, or adversarial. It must never `panic!`, `unwrap` on bad input,
 //! overflow the stack, or hang. This harness feeds a wide variety of inputs to `check` and asserts
 //! that every case returns, so no case panicked or aborted. Beyond no-panic it holds these oracles:
-//! no `check` or `generate` report carries an `IR invariant failed` diagnostic (lowering must
-//! produce a valid IR for any input), every diagnostic names a real location
-//! (`oracles::location_violations`, #454), a document that is valid JSON reports the same sorted
-//! codes through the JSON and the YAML parser, and `generate` over the valid-skeleton documents
-//! reaches the verdict and the sorted codes `check` reaches, and writes a module that parses as
-//! Rust whenever it reports `Generated`, whose unions' variants a value can tell apart unless a
-//! `W001` at the union says why (`oracles::unexplained_variants`, #402), and whose every emitted
-//! type is a component or named by another item (`oracles::unreferenced_types`, #928).
+//! no `check` or `generate` report carries an IR invariant or codegen failure
+//! (`oracles::internal_failures`: lowering must produce a valid IR for any input), every
+//! diagnostic names a real location (`oracles::location_violations`, #454), a document that is
+//! valid JSON reports the same sorted codes through the JSON and the YAML parser, and `generate`
+//! over the valid-skeleton documents reaches the verdict `check` reaches with the identical
+//! diagnostics (`oracles::parity_violations`), and writes a module that parses as Rust whenever it
+//! reports `Generated`, whose unions' variants a value can tell apart unless a `W001` at the union
+//! says why (`oracles::unexplained_variants`, #402), and whose every emitted type is a component or
+//! named by another item (`oracles::unreferenced_types`, #928).
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -46,6 +47,8 @@ use spargen::{check, CargoIntegration, Code, Outcome, Report, Spec};
 use tempfile::TempDir;
 
 mod oracles;
+
+use oracles::readers::codes;
 
 /// Keys the frontend interprets — biasing generated objects toward these drives the fuzzer past the
 /// parser and into document assembly, resolution, and lowering.
@@ -141,38 +144,22 @@ fn deterministic_runner(cases: u32) -> TestRunner {
     )
 }
 
-/// The prefix `ir::check_invariants` gives every diagnostic it emits, an `E011`. Lowering must
-/// produce an IR that passes them for any input, so a report carrying one is a lowering bug, not a
-/// rejection. `ir::invariant`'s own `INVARIANT_FAILURE` is the prefix the messages are built from,
-/// and a test beside it holds this declaration to that value.
-const INVARIANT_FAILURE: &str = "IR invariant failed";
-
-/// The prefix of the `E011` message the pipeline reports when codegen's own tokens do not parse as
-/// a Rust file, a codegen bug rather than a rejection. `codegen`'s own `CODEGEN_FAILURE` is the
-/// prefix the message is built from, and a test beside it holds this declaration to that value.
-const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
-
-/// Fail unless `report`, a run over the root document `bytes`, carries no [`INVARIANT_FAILURE`] and
-/// every diagnostic it carries names a real location ([`oracles::location_violations`]). `what`
-/// says which run it was.
-fn hold_report(report: &Report, bytes: &[u8], what: &str) -> Result<(), TestCaseError> {
-    let failed: Vec<&str> = report
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| {
-            diagnostic.code == Code::InvalidInput
-                && diagnostic.message.starts_with(INVARIANT_FAILURE)
-        })
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect();
+/// Fail where the shared oracles find a defect in `report`, a run over the root document `bytes`,
+/// or in `module`, the module a `Generated` run wrote ([`oracles::run_violations`]): an IR
+/// invariant or codegen failure reported as an `E011`, a diagnostic with no real location, or a
+/// module that does not parse, emits a union whose variants a value cannot tell apart and no
+/// `W001` says why, or emits a type that is no component and that nothing names. `what` says which
+/// run it was.
+fn hold_report(
+    report: &Report,
+    bytes: &[u8],
+    module: Option<&str>,
+    what: &str,
+) -> Result<(), TestCaseError> {
+    let violations = oracles::run_violations(report, bytes, module);
     prop_assert!(
-        failed.is_empty(),
-        "lowering produced an IR that fails its invariants ({what}): {failed:#?}"
-    );
-    let unlocated = oracles::location_violations(report.diagnostics(), bytes);
-    prop_assert!(
-        unlocated.is_empty(),
-        "diagnostics with no real location ({what}): {unlocated:#?}"
+        violations.is_empty(),
+        "{what} broke an oracle every run is held to: {violations:#?}"
     );
     Ok(())
 }
@@ -183,19 +170,8 @@ fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) -> Result<Report, TestCaseEr
     let spec = Utf8PathBuf::from_path_buf(dir.path().join(format!("spec.{ext}"))).unwrap();
     std::fs::write(&spec, bytes).unwrap();
     let report = check(&Spec::new(spec));
-    hold_report(&report, bytes, &format!("`check` over `.{ext}`"))?;
+    hold_report(&report, bytes, None, &format!("`check` over `.{ext}`"))?;
     Ok(report)
-}
-
-/// The sorted diagnostic codes of a report.
-fn codes(report: &Report) -> Vec<&'static str> {
-    let mut codes: Vec<&'static str> = report
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.code.as_str())
-        .collect();
-    codes.sort_unstable();
-    codes
 }
 
 /// Run one document through both the JSON and the YAML parser, so a single case covers both
@@ -550,13 +526,10 @@ fn check_never_panics_on_skeleton_documents() {
     );
 }
 
-/// `generate` over the documents that reach lowering. Its report is held to [`hold_report`], as a
-/// `check` report is, and must reach the same verdict and report the same sorted codes as `check`
-/// over the same document, which runs the same frontend without emitting. No run may report a
-/// codegen failure ([`CODEGEN_FAILURE`]), and a `Generated` run must have written a module that
-/// parses as Rust and whose unions a value can tell apart unless a `W001` at the union says why
-/// ([`oracles::unexplained_variants`]), and that emits no type that is no component and that
-/// nothing names ([`oracles::unreferenced_types`]).
+/// `generate` over the documents that reach lowering. Its report and the module a `Generated` run
+/// wrote are held to [`hold_report`], and `check` over the same document, which runs the same
+/// frontend without emitting, must reach the same verdict and report the identical diagnostics
+/// ([`oracles::parity_violations`]).
 #[test]
 fn generate_writes_parseable_rust_for_skeleton_documents() {
     let dir = TempDir::new().unwrap();
@@ -574,52 +547,19 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                     .build(out.clone())
                     .cargo(CargoIntegration::Off),
             );
-            hold_report(&report, text.as_bytes(), "`generate`")?;
-            let failed: Vec<&str> = report
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| {
-                    diagnostic.code == Code::InvalidInput
-                        && diagnostic.message.starts_with(CODEGEN_FAILURE)
-                })
-                .map(|diagnostic| diagnostic.message.as_str())
-                .collect();
-            prop_assert!(
-                failed.is_empty(),
-                "codegen rendered tokens that do not parse as Rust: {:#?}",
-                failed
-            );
-            let checked = check(&Spec::new(spec.clone()));
-            prop_assert_eq!(
-                report.outcome() == Outcome::Rejected,
-                checked.outcome() == Outcome::Rejected,
-                "`check` and `generate` reach different verdicts"
-            );
-            prop_assert_eq!(
-                codes(&report),
-                codes(&checked),
-                "`check` and `generate` report different codes"
-            );
-            if report.outcome() == Outcome::Generated {
+            let module = (report.outcome() == Outcome::Generated)
+                .then(|| std::fs::read_to_string(&out).unwrap());
+            if module.is_some() {
                 generated.set(generated.get() + 1);
-                let code = std::fs::read_to_string(&out).unwrap();
-                if let Err(error) = syn::parse_file(&code) {
-                    return Err(TestCaseError::fail(format!(
-                        "a `Generated` run wrote unparseable Rust ({error})"
-                    )));
-                }
-                let unexplained = oracles::unexplained_variants(&report, &code);
-                prop_assert!(
-                    unexplained.is_empty(),
-                    "a union's variants cannot be told apart and no warning says why: \
-                     {unexplained:#?}"
-                );
-                let unreferenced = oracles::unreferenced_types(&code, &text);
-                prop_assert!(
-                    unreferenced.is_empty(),
-                    "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
-                );
             }
+            hold_report(&report, text.as_bytes(), module.as_deref(), "`generate`")?;
+            let checked = check(&Spec::new(spec.clone()));
+            let disagreements = oracles::parity_violations(&report, &checked);
+            prop_assert!(
+                disagreements.is_empty(),
+                "`check` does not stand in for `generate`: {:#?}",
+                disagreements
+            );
             Ok(())
         })
         .unwrap();
