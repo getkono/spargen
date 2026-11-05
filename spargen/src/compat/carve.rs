@@ -319,9 +319,13 @@ fn enclosing(tokens: &[String]) -> Option<Enclosing> {
 
 #[cfg(test)]
 mod tests {
-    use super::{carve_rules, is_path_item_position, is_prefix, operation_depth};
-    use crate::compat::tests::{bundle_of_files, error_in};
-    use crate::compat::{OmitMethod, OmitRule};
+    use super::{
+        carve_rules, is_path_item_position, is_prefix, omittable_enclosing, operation_depth,
+    };
+    use crate::compat::tests::{bundle_of, MULTI_SPEC};
+    use crate::compat::{ComponentKind, Omit, OmitMethod, OmitRule};
+    use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
+    use crate::source::InputBundle;
 
     fn tokens(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|&token| token.to_owned()).collect()
@@ -447,5 +451,146 @@ mod tests {
                 "/defs/Item/get"
             )]
         );
+    }
+
+    #[test]
+    fn carve_rules_map_pointers_to_enclosing_constructs() {
+        // Operation pointer → operation.
+        assert_eq!(
+            omittable_enclosing(&JsonPointer::from(
+                "/paths/~1pets~1{id}/get/responses/200".to_owned()
+            )),
+            Some(OmitRule::operation(OmitMethod::Get, "/pets/{id}"))
+        );
+        // Path-item-level pointer (not into a method) → path.
+        assert_eq!(
+            omittable_enclosing(&JsonPointer::from("/paths/~1pets/parameters/0".to_owned())),
+            Some(OmitRule::path("/pets"))
+        );
+        // Component pointer → component.
+        assert_eq!(
+            omittable_enclosing(&JsonPointer::from(
+                "/components/schemas/Bad/oneOf/0".to_owned()
+            )),
+            Some(OmitRule::component(ComponentKind::Schemas, "Bad"))
+        );
+        // Root / unmodelled ⇒ not carvable.
+        assert_eq!(omittable_enclosing(&JsonPointer::root()), None);
+        assert_eq!(
+            omittable_enclosing(&JsonPointer::from("/components/callbacks/X".to_owned())),
+            None
+        );
+    }
+
+    #[test]
+    fn carve_rules_are_deduped_sorted_and_error_only() {
+        // Any error code carves the same way; this one is not held to an emission-site marker.
+        let error = |pointer: &str| {
+            Diagnostic::error(
+                Code::DynamicRefRejected,
+                Provenance::new(JsonPointer::from(pointer.to_owned()), None),
+            )
+            .build()
+        };
+        let warning = Diagnostic::warning(
+            Code::OmittedConstruct,
+            Provenance::new(JsonPointer::from("/paths/~1w/get".to_owned()), None),
+        )
+        .build();
+        let diagnostics = vec![
+            error("/paths/~1b/get/responses/200"),
+            error("/paths/~1a/get/responses/200"),
+            // Duplicate of the first (same enclosing operation).
+            error("/paths/~1b/get/responses/404"),
+            warning,
+        ];
+        // No span, so every diagnostic is read against the root document.
+        let rules = carve_rules(&diagnostics, &bundle_of(MULTI_SPEC));
+        // Warnings ignored; duplicates collapsed; sorted deterministically by description.
+        assert_eq!(
+            rules,
+            vec![
+                OmitRule::operation(OmitMethod::Get, "/a"),
+                OmitRule::operation(OmitMethod::Get, "/b"),
+            ]
+        );
+    }
+
+    /// Load a root document plus sub-files, all written beside each other.
+    fn bundle_of_files(root: &str, files: &[(&str, &str)]) -> InputBundle {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).unwrap();
+        }
+        let path = dir.path().join("openapi.yaml");
+        std::fs::write(&path, root).unwrap();
+        let mut diags = Diagnostics::default();
+        InputBundle::load(camino::Utf8Path::from_path(&path).unwrap(), &mut diags).unwrap()
+    }
+
+    /// An error reported at `pointer` in the loaded file named `file`.
+    fn error_in(bundle: &InputBundle, file: &str, pointer: &str) -> Diagnostic {
+        let id = bundle.file_id_for_path(file).unwrap();
+        // Any error code carves the same way; this one is not held to an emission-site marker.
+        Diagnostic::error(
+            Code::DynamicRefRejected,
+            Provenance::new(
+                JsonPointer::from(pointer.to_owned()),
+                Some(bundle.value_at(id).span()),
+            ),
+        )
+        .build()
+    }
+
+    /// A sub-file construct is carved as a pointer into that file, and its name is literal text: a
+    /// `/` is pointer-escaped and a glob metacharacter glob-escaped, so applying the rule removes
+    /// exactly that component and not its sibling a glob `A*B` would also match.
+    #[test]
+    fn a_sub_file_construct_is_carved_by_an_escaped_file_scoped_pointer() {
+        let lib = "components:\n  schemas:\n    \"A*B/C\": { type: object }\n    AxB/C: { type: object }\n";
+        let root = "openapi: 3.1.0\ninfo: { title: t, version: 1.0.0 }\npaths: {}\n\
+                    components: { schemas: { X: { $ref: './lib.yaml#/components/schemas/A*B~1C' } } }\n";
+        let mut bundle = bundle_of_files(root, &[("lib.yaml", lib)]);
+        let rules = carve_rules(
+            &[error_in(
+                &bundle,
+                "lib.yaml",
+                "/components/schemas/A*B~1C/properties/x",
+            )],
+            &bundle,
+        );
+        assert_eq!(
+            rules,
+            vec![OmitRule::pointer(
+                Some("lib.yaml".into()),
+                r"/components/schemas/A\*B~1C"
+            )]
+        );
+
+        let mut diags = Diagnostics::default();
+        Omit { rules }.apply(&mut bundle, &mut diags).unwrap();
+        let lib_id = bundle.file_id_for_path("lib.yaml").unwrap();
+        let remaining: Vec<_> = bundle
+            .value_at(lib_id)
+            .get("components")
+            .and_then(|components| components.get("schemas"))
+            .and_then(|schemas| schemas.as_object())
+            .map(|object| object.iter().map(|(key, _)| key.name.clone()).collect())
+            .unwrap();
+        assert_eq!(remaining, vec!["AxB/C".to_owned()]);
+    }
+
+    /// Two bare sub-files that reference each other form a cycle the referrer walk must leave: it
+    /// expands each site once, and still reaches the root operation that pulled the pair in.
+    #[test]
+    fn the_referrer_walk_terminates_on_a_cycle_between_sub_files() {
+        let a = "type: object\nproperties:\n  b: { $ref: './b.yaml' }\n";
+        let b = "type: object\nproperties:\n  a: { $ref: './a.yaml' }\n  bad: { $ref: '#/nope' }\n";
+        let root = "openapi: 3.1.0\ninfo: { title: t, version: 1.0.0 }\npaths:\n  /x:\n    get:\n      \
+                    responses:\n        \"200\":\n          description: ok\n          content:\n            \
+                    application/json: { schema: { $ref: './a.yaml' } }\n";
+        let bundle = bundle_of_files(root, &[("a.yaml", a), ("b.yaml", b)]);
+        let rules = carve_rules(&[error_in(&bundle, "b.yaml", "/properties/bad")], &bundle);
+        assert_eq!(rules, vec![OmitRule::operation(OmitMethod::Get, "/x")]);
     }
 }
