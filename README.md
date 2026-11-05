@@ -90,8 +90,9 @@ the version it emits, and the idioms spargen handles.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
   `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
   would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_credential`,
-  …) takes a disambiguated name instead. `with_default_server` and `inner` are reserved on both
-  clients whether or not that client emits them, so declaring a server never renames an operation.
+  …) takes a disambiguated name instead. Both clients emit `with_default_server` when the
+  description declares a server, and only `BlockingClient` emits `inner`; both names are reserved
+  on both clients regardless, so declaring a server never renames an operation.
 - Beside each operation method, a `{method}_url` accessor on both clients returns, as
   `Result<reqwest::Url, Error<Infallible>>`, the URL that method sends its request to, less any
   `apiKey` query credential, without sending it: the same path-parameter and query encoding,
