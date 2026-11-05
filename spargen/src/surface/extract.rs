@@ -374,6 +374,12 @@ pub(super) fn prim_label(prim: Prim) -> &'static str {
     }
 }
 
+/// The method half of an operation's `"METHOD /path"` key. A fixed-field method is upper-cased, as
+/// it is sent. An `additionalOperations` method keeps its declared case, which is the spelling it
+/// is sent with, so `purge` and `PURGE` on one path stay two operations.
 fn method_label(method: &crate::ir::Method) -> String {
-    method.as_str().to_uppercase()
+    match method {
+        crate::ir::Method::Custom(token) => token.clone(),
+        fixed => fixed.as_str().to_uppercase(),
+    }
 }
