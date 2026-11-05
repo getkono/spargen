@@ -17,7 +17,7 @@ pub(super) const SERDE_JSON: Dependency = Dependency::new("serde_json", "1.0.151
 pub(super) const QUICK_XML: Dependency = Dependency::new("quick-xml", "0.41.0", 0, 42);
 pub(super) const UUID: Dependency = Dependency::new("uuid", "1.24.0", 2, 0);
 pub(super) const TIME: Dependency = Dependency::new("time", "0.3.55", 0, 4);
-pub(super) const TOKIO: Dependency = Dependency::new("tokio", "1.53.1", 2, 0);
+pub(super) const TOKIO: Dependency = Dependency::new("tokio", "1.53.3", 2, 0);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Dependency {

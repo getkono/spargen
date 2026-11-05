@@ -163,7 +163,7 @@ spargen = {{ path = {spargen_path:?}, default-features = false }}
 "#
         )
     };
-    const TOKIO: &str = r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#;
+    const TOKIO: &str = r#"tokio = { version = "1.53.3", features = ["rt"], optional = true }"#;
     std::fs::write(
         crate_dir.join("Cargo.toml"),
         manifest(&format!(
