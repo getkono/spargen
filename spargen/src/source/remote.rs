@@ -11,6 +11,8 @@
 //! `RemoteFetch` implementation. This is also the anti-SSRF boundary: no spec content can trigger
 //! a network request during a build.
 
+use camino::{Utf8Path, Utf8PathBuf};
+
 use crate::diag::{JsonPointer, Span};
 
 use super::{canonical_pointer, Node, SpannedValue};
@@ -58,6 +60,55 @@ pub(crate) fn is_absolute_ref(reference: &str) -> bool {
 /// Whether `reference` is an `http`/`https` URL.
 pub(crate) fn is_http_url(reference: &str) -> bool {
     reference.starts_with("http://") || reference.starts_with("https://")
+}
+
+/// What a document's OpenAPI 3.2 `$self` makes it. The build (`InputBundle::register_self_identity`)
+/// and `spargen lock`'s walk both read it through [`classify_self`], so `spargen lock` resolves each
+/// relative `$ref` to the document the build will ask for (#426).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelfIdentity {
+    /// An `http`/`https` URL: the base the document's relative references resolve against, and a
+    /// URL a reference reaches the document by.
+    Remote(String),
+    /// A local path: the base the document's relative references resolve against, and a path a
+    /// reference reaches the document by.
+    Local(Utf8PathBuf),
+    /// Any other absolute URI: a reference naming it exactly reaches the document, but it supplies
+    /// no hierarchical base, so the document keeps the one it was reached at.
+    Opaque(String),
+}
+
+/// Classify the `$self` value `self_uri` of a document retrieved from `retrieval_url` (remote), or
+/// read with its relative paths resolving against `base_path` (local), or `None` where it is empty
+/// or fragment-only. A remote document's relative `$self` is resolved against the URL it was
+/// retrieved from, and a local document's against its own path; a non-`http(s)` `$self` with a
+/// scheme is opaque in either. A remote document's `base_path` is not read.
+pub(crate) fn classify_self(
+    self_uri: &str,
+    retrieval_url: Option<&str>,
+    base_path: &Utf8Path,
+) -> Option<SelfIdentity> {
+    let (base, _) = split_fragment(self_uri);
+    if base.is_empty() {
+        return None;
+    }
+    Some(
+        if retrieval_url.is_some() && !is_http_url(base) && has_uri_scheme(base) {
+            // Absolute, so not resolved against the retrieval URL (#718); opaque, so no base.
+            SelfIdentity::Opaque(base.to_owned())
+        } else if let Some(retrieval_url) = retrieval_url {
+            SelfIdentity::Remote(resolve_ref_url(retrieval_url, base))
+        } else if is_http_url(base) {
+            SelfIdentity::Remote(base.to_owned())
+        } else if !base.contains(':') {
+            let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+            SelfIdentity::Local(parent.join(base))
+        } else {
+            // Opaque canonical identities can still resolve exact absolute references back to this
+            // document. They cannot supply a hierarchical base for relative reference resolution.
+            SelfIdentity::Opaque(base.to_owned())
+        },
+    )
 }
 
 /// Whether `reference` opens with an RFC 3986 scheme, `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`
@@ -609,6 +660,166 @@ mod tests {
         ] {
             assert!(!enters_extension(reference), "{reference}");
         }
+    }
+
+    /// `is_http_url` is the one `http`/`https` predicate: the build's `$self` and `$ref` readings,
+    /// the lock walk's, and `spargen.lock`'s `retrieval_url` check all call it.
+    #[test]
+    fn an_http_url_opens_with_a_lowercase_http_or_https_scheme_and_authority() {
+        let rows: &[(&str, bool)] = &[
+            ("http://h.example/x", true),
+            ("https://h.example/x", true),
+            ("HTTP://h.example/x", false),
+            ("Https://h.example/x", false),
+            ("http:/h.example/x", false),
+            ("https:h.example/x", false),
+            ("ftp://h.example/x", false),
+            ("httpx://h.example/x", false),
+            ("//h.example/x", false),
+            (" https://h.example/x", false),
+        ];
+        for (url, want) in rows {
+            assert_eq!(is_http_url(url), *want, "`{url}`");
+        }
+    }
+
+    /// `classify_self` is the one `$self` reading, which the build and `spargen lock`'s walk share,
+    /// held to its answer for a document read locally and for one retrieved from a URL.
+    #[test]
+    fn classifies_every_self_form_in_a_local_and_a_remote_document() {
+        use SelfIdentity::{Local, Opaque, Remote};
+        const RETRIEVED: &str = "https://h.example/v1/root.yaml";
+        let remote = |url: &str| Some(Remote(url.to_owned()));
+        let opaque = |uri: &str| Some(Opaque(uri.to_owned()));
+        let local = |path: &str| Some(Local(Utf8PathBuf::from(path)));
+        // (`$self`, read locally from `specs/root.yaml`, retrieved from `RETRIEVED`)
+        let rows: &[(&str, Option<SelfIdentity>, Option<SelfIdentity>)] = &[
+            // Absent or fragment-only.
+            ("", None, None),
+            ("#/frag", None, None),
+            // Scheme case: only a lowercase `http`/`https` scheme is a URL.
+            (
+                "https://h.example/api.yaml",
+                remote("https://h.example/api.yaml"),
+                remote("https://h.example/api.yaml"),
+            ),
+            (
+                "http://h.example/api.yaml",
+                remote("http://h.example/api.yaml"),
+                remote("http://h.example/api.yaml"),
+            ),
+            (
+                "HTTPS://h.example/api.yaml",
+                opaque("HTTPS://h.example/api.yaml"),
+                opaque("HTTPS://h.example/api.yaml"),
+            ),
+            (
+                "Http://h.example/api.yaml",
+                opaque("Http://h.example/api.yaml"),
+                opaque("Http://h.example/api.yaml"),
+            ),
+            (
+                "https://other.example/api.yaml",
+                remote("https://other.example/api.yaml"),
+                remote("https://other.example/api.yaml"),
+            ),
+            (
+                "HTTPS://other.example/api.yaml",
+                opaque("HTTPS://other.example/api.yaml"),
+                opaque("HTTPS://other.example/api.yaml"),
+            ),
+            // Other schemes, a drive letter, and a colon in a relative path.
+            (
+                "urn:example:api",
+                opaque("urn:example:api"),
+                opaque("urn:example:api"),
+            ),
+            (
+                "C:/specs/api.yaml",
+                opaque("C:/specs/api.yaml"),
+                opaque("C:/specs/api.yaml"),
+            ),
+            (
+                "./a:b.yaml",
+                opaque("./a:b.yaml"),
+                remote("https://h.example/v1/a:b.yaml"),
+            ),
+            // Query strings and fragments.
+            (
+                "self.yaml?v=1",
+                local("specs/self.yaml?v=1"),
+                remote("https://h.example/v1/self.yaml?v=1"),
+            ),
+            (
+                "?v=1",
+                local("specs/?v=1"),
+                remote("https://h.example/v1/?v=1"),
+            ),
+            (
+                "self.yaml#/components",
+                local("specs/self.yaml"),
+                remote("https://h.example/v1/self.yaml"),
+            ),
+            (
+                "https://other.example/api.yaml?v=1#/x",
+                remote("https://other.example/api.yaml?v=1"),
+                remote("https://other.example/api.yaml?v=1"),
+            ),
+            // Path normalization: a URL is normalized, a local path is joined as written.
+            (
+                "lib/self.yaml",
+                local("specs/lib/self.yaml"),
+                remote("https://h.example/v1/lib/self.yaml"),
+            ),
+            (
+                "./lib/../self.yaml",
+                local("specs/./lib/../self.yaml"),
+                remote("https://h.example/v1/self.yaml"),
+            ),
+            (
+                "../self.yaml",
+                local("specs/../self.yaml"),
+                remote("https://h.example/self.yaml"),
+            ),
+            (
+                "../../self.yaml",
+                local("specs/../../self.yaml"),
+                remote("https://h.example/self.yaml"),
+            ),
+            (
+                "/abs/self.yaml",
+                local("/abs/self.yaml"),
+                remote("https://h.example/abs/self.yaml"),
+            ),
+            (
+                "//h.example/self.yaml",
+                local("//h.example/self.yaml"),
+                remote("https://h.example/h.example/self.yaml"),
+            ),
+            (
+                "//other.example/self.yaml",
+                local("//other.example/self.yaml"),
+                remote("https://h.example/other.example/self.yaml"),
+            ),
+            // Extension case.
+            (
+                "Self.JSON",
+                local("specs/Self.JSON"),
+                remote("https://h.example/v1/Self.JSON"),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (self_uri, want_local, want_remote) in rows {
+            let got_local = classify_self(self_uri, None, Utf8Path::new("specs/root.yaml"));
+            let got_remote = classify_self(self_uri, Some(RETRIEVED), Utf8Path::new(""));
+            if (&got_local, &got_remote) != (want_local, want_remote) {
+                failures.push(format!(
+                    "`$self: {self_uri}`: (local, remote) = ({got_local:?}, {got_remote:?}), \
+                     want ({want_local:?}, {want_remote:?})"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

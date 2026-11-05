@@ -1,3 +1,7 @@
+use crate::diag::{Code, Diagnostic, Diagnostics, FileId};
+
+use super::super::{Node, Number, SpannedValue};
+use super::yaml::{yaml_events, ALIAS_EXPANSION_BUDGET_PER_EVENT};
 use super::*;
 
 fn parse_json_ok(text: &str) -> SpannedValue {

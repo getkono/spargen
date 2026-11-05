@@ -26,6 +26,8 @@ use std::collections::HashMap;
 #[cfg(feature = "remote-fetch")]
 use std::fmt::Write as _;
 
+use super::remote::is_http_url;
+
 /// The lock file name, looked up next to the root spec.
 pub(crate) const LOCK_FILE_NAME: &str = "spargen.lock";
 
@@ -250,7 +252,7 @@ impl Lock {
         // the document under a URL no reference names. It is dropped here, as `spargen lock`
         // drops it before writing.
         if let Some(retrieval_url) = &mut entry.retrieval_url {
-            if !(retrieval_url.starts_with("http://") || retrieval_url.starts_with("https://")) {
+            if !is_http_url(retrieval_url) {
                 return Err(LockError(format!(
                     "spargen.lock: retrieval_url `{retrieval_url}` must be an http(s) URL"
                 )));
