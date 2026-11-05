@@ -24,7 +24,7 @@ pub(super) fn has_glob_meta(pattern: &str) -> bool {
 
 /// Resolve the escapes in a pattern with no unescaped metacharacter, so an exact rule compares
 /// against the literal text the author meant. A backslash escapes whatever follows it — `\*` →
-/// `*`, `\?` → `?`, `\\` → `\`, and `\b` → `b` — exactly as [`compile_glob`] reads it, so an exact
+/// `*`, `\?` → `?`, `\\` → `\`, and `\b` → `b` — exactly as [`Glob::compile`] reads it, so an exact
 /// rule and a glob rule never disagree on what a pattern names. A trailing lone backslash escapes
 /// nothing and is kept as itself.
 pub(super) fn unescape_glob(pattern: &str) -> String {
@@ -66,47 +66,65 @@ enum GlobToken {
     DoubleStar,
 }
 
-fn compile_glob(pattern: &str) -> Vec<GlobToken> {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut tokens = Vec::with_capacity(chars.len());
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            // A backslash escapes the next character, so a literal `*`/`?` in a path stays literal.
-            '\\' if i + 1 < chars.len() => {
-                tokens.push(GlobToken::Lit(chars[i + 1]));
-                i += 2;
-            }
-            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                tokens.push(GlobToken::DoubleStar);
-                i += 2;
-            }
-            '*' => {
-                tokens.push(GlobToken::Star);
-                i += 1;
-            }
-            '?' => {
-                tokens.push(GlobToken::Any);
-                i += 1;
-            }
-            other => {
-                tokens.push(GlobToken::Lit(other));
-                i += 1;
-            }
-        }
-    }
-    tokens
+/// A glob pattern compiled once, so a rule matched against every candidate pointer or key reads
+/// its pattern a single time rather than once per candidate.
+///
+/// Matching is `/`-aware: `*` and `?` never cross a `/` segment separator, while `**` matches
+/// across any depth. Polynomial (memoized) so pathological patterns cannot blow up. Used for bulk
+/// omit rules; the module documentation of [`compat`](super) says which rules are read as globs.
+pub(super) struct Glob {
+    tokens: Vec<GlobToken>,
 }
 
-/// Match `text` against a glob `pattern`. `/`-aware: `*` and `?` never cross a `/` segment
-/// separator, while `**` matches across any depth. Polynomial (memoized) so pathological patterns
-/// cannot blow up. Used for bulk omit rules; the module documentation of [`compat`](super) says
-/// which rules are read as globs.
+impl Glob {
+    /// Compile `pattern`. A backslash escapes whatever follows it, and a trailing lone backslash
+    /// is a literal backslash, exactly as [`unescape_glob`] reads it.
+    pub(super) fn compile(pattern: &str) -> Self {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut tokens = Vec::with_capacity(chars.len());
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                // A backslash escapes the next character, so a literal `*`/`?` in a path stays
+                // literal.
+                '\\' if i + 1 < chars.len() => {
+                    tokens.push(GlobToken::Lit(chars[i + 1]));
+                    i += 2;
+                }
+                '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
+                    tokens.push(GlobToken::DoubleStar);
+                    i += 2;
+                }
+                '*' => {
+                    tokens.push(GlobToken::Star);
+                    i += 1;
+                }
+                '?' => {
+                    tokens.push(GlobToken::Any);
+                    i += 1;
+                }
+                other => {
+                    tokens.push(GlobToken::Lit(other));
+                    i += 1;
+                }
+            }
+        }
+        Self { tokens }
+    }
+
+    /// Whether `text` matches the compiled pattern.
+    pub(super) fn matches(&self, text: &str) -> bool {
+        let text: Vec<char> = text.chars().collect();
+        let mut memo = vec![vec![None; text.len() + 1]; self.tokens.len() + 1];
+        glob_match_at(&self.tokens, &text, 0, 0, &mut memo)
+    }
+}
+
+/// Match `text` against a glob `pattern` compiled for this one call: [`Glob::compile`] followed by
+/// [`Glob::matches`]. A rule matching many candidates compiles its [`Glob`] once instead.
+#[cfg(test)]
 pub(super) fn glob_match(pattern: &str, text: &str) -> bool {
-    let tokens = compile_glob(pattern);
-    let text: Vec<char> = text.chars().collect();
-    let mut memo = vec![vec![None; text.len() + 1]; tokens.len() + 1];
-    glob_match_at(&tokens, &text, 0, 0, &mut memo)
+    Glob::compile(pattern).matches(text)
 }
 
 fn glob_match_at(
@@ -144,7 +162,7 @@ fn glob_match_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_glob_meta, glob_match, has_glob_meta, unescape_glob};
+    use super::{escape_glob_meta, glob_match, has_glob_meta, unescape_glob, Glob};
     use proptest::prelude::*;
 
     /// Literals match exactly, `*` within one segment, `**` across any depth, `?` one non-`/`
@@ -176,7 +194,7 @@ mod tests {
     }
 
     /// The escape half of the matcher, pinned against mutation testing: a scoped `cargo mutants`
-    /// run over this file left every arithmetic and guard mutant in `compile_glob` and the
+    /// run over this file left every arithmetic and guard mutant in `Glob::compile` and the
     /// backslash arm of `has_glob_meta` alive, because the integration tests exercise escaping
     /// only through paths where an escaped and an unescaped rule happen to remove the same
     /// construct. These assert the two functions directly.
@@ -241,6 +259,19 @@ mod tests {
             let literal = unescape_glob(&pattern);
             prop_assert!(glob_match(&pattern, &literal), "{pattern:?} vs {literal:?}");
             prop_assert_eq!(glob_match(&pattern, &text), literal == text);
+        }
+
+        /// One compiled glob, matched against many candidates in turn, answers each exactly as a
+        /// pattern compiled for that candidate alone: matching carries no state between calls.
+        #[test]
+        fn a_compiled_glob_reused_across_candidates_matches_like_a_fresh_one(
+            pattern in r"([a-c/*?]|\\[a-c/*?\\]){0,8}\\?",
+            texts in proptest::collection::vec(r"[a-c/*?\\]{0,12}", 0..8),
+        ) {
+            let glob = Glob::compile(&pattern);
+            for text in &texts {
+                prop_assert_eq!(glob.matches(text), glob_match(&pattern, text), "{:?} vs {:?}", pattern, text);
+            }
         }
     }
 }

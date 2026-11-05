@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use super::glob::{glob_match, has_glob_meta, unescape_glob};
+use super::glob::{has_glob_meta, unescape_glob, Glob};
 use crate::diag::{FileId, JsonPointer};
 use crate::source::{InputBundle, Node, SpannedValue};
 
@@ -266,7 +266,8 @@ impl OmitRule {
                         &JsonPointer::root(),
                         &mut pointers,
                     );
-                    pointers.retain(|candidate| glob_match(pointer, candidate.as_str()));
+                    let glob = Glob::compile(pointer);
+                    pointers.retain(|candidate| glob.matches(candidate.as_str()));
                     RuleMatch::Glob {
                         file: file_id,
                         pointers,
@@ -297,13 +298,14 @@ pub(super) enum RuleMatch {
 /// in source order.
 fn matching_child_keys<'a>(
     value: Option<&'a SpannedValue>,
-    pattern: &'a str,
+    pattern: &str,
 ) -> impl Iterator<Item = String> + 'a {
+    let glob = Glob::compile(pattern);
     value
         .and_then(SpannedValue::as_object)
         .into_iter()
         .flat_map(|object| object.iter())
-        .filter(move |(key, _)| glob_match(pattern, &key.name))
+        .filter(move |(key, _)| glob.matches(&key.name))
         .map(|(key, _)| key.name.clone())
 }
 
