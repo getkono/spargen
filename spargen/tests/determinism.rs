@@ -224,6 +224,10 @@ impl Category {
             Category::Number => "{ type: number }",
             Category::Boolean => "{ type: boolean }",
             Category::Array => "{ type: array, items: { type: string } }",
+            Category::Object => {
+                "{ type: object, required: [o], properties: { o: { type: object, required: [p], properties: { p: { type: string } } } } }"
+            }
+            Category::Null => "{ type: 'null' }",
         }
     }
 }
