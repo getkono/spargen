@@ -2,7 +2,6 @@
 //! helper to lay it out in a tempdir with a hand-written lock + vendored file (no network) and run
 //! `generate`/`check`.
 
-use super::refs::two_shape_root;
 use super::*;
 
 // The exact bytes of the vendored remote document and their real SHA-256 (see the module test

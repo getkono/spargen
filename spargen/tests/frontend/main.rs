@@ -1,17 +1,18 @@
 //! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
 //! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
 //! `generate`. Check/generate parity is a property of the harness rather than a remark about one
-//! case: every inline spec `generate` or `generate_with_code` runs is also run through `check`,
-//! which must reach the same accept/reject verdict and report the same sorted codes, and every
-//! `Generated` module must parse as Rust, and no `generate` run may report a codegen failure
-//! (`CODEGEN_FAILURE`, an `E011`). `PARITY_FIXTURES` adds
-//! a named set a companion test keeps spanning rejections, warnings and clean runs.
+//! case: every description `generate`, `generate_with_code` or a multi-file helper runs is also run
+//! through `check`, which must reach the same accept/reject verdict and report the identical
+//! diagnostics, code, pointer and message alike (`oracles::parity_violations`). `PARITY_FIXTURES`
+//! adds a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
-//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413) and to a real location
-//! (#454), hold every union a `Generated` run emits to variants a value can tell apart (#402),
-//! and hold its module to no unused second copy of a type (#926). The last three oracles live in
-//! `oracles/`, shared with `fuzz_frontend.rs` and `lowering_props.rs`.
+//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413), and hold the run to
+//! `oracles::run_violations`: no IR invariant or codegen failure reported as an `E011`, every
+//! diagnostic at a real location (#454), and a `Generated` module that parses as Rust, whose
+//! unions' variants a value can tell apart (#402) and that carries no unused second copy of a type
+//! (#926). Those oracles live in `oracles/`, shared with `fuzz_frontend.rs` and
+//! `lowering_props.rs`.
 //!
 //! This file holds that shared harness; the fixtures sit in one module per construct family or
 //! sub-family beside it (`unions_dispatch`, `ref_sibling_unions`, `bodies_streaming`, ...), each
@@ -25,6 +26,10 @@ use spargen::{
 #[path = "../oracles/mod.rs"]
 mod oracles;
 
+use oracles::readers::{
+    alias_target, codes, declared_fields, declared_types, enum_variants, field_owner, field_type,
+    has_code, messages_for,
+};
 use oracles::types_module;
 
 mod all_of_arrays;
@@ -84,74 +89,35 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
     Spec::new(spec).build(out).cargo(CargoIntegration::Off)
 }
 
-/// `spargen::generate`, then [`assert_claims_hold`] and [`assert_located`] on the report, and
-/// [`assert_distinguishable_variants`] and [`assert_no_unreferenced_type`] on the module a
-/// `Generated` run wrote. Every fixture here reaches `generate` through this function, so every
-/// diagnostic any fixture provokes is held to its run, every union any fixture emits is held to
-/// variants a value can tell apart, and every type any fixture's module emits is a component or
-/// named by another item of the module.
+/// `spargen::generate`, then [`hold_run`] on the report and on the module a `Generated` run wrote.
+/// Every fixture here reaches `generate` through this function, so every run any fixture makes is
+/// held to every oracle.
 fn run_generate(build: &Build) -> Report {
     let report = spargen::generate(build);
-    assert_claims_hold(&report);
-    assert_located(&report, build.spec());
-    if report.outcome() == Outcome::Generated {
-        let code = std::fs::read_to_string(build.output()).unwrap_or_default();
-        assert_distinguishable_variants(&report, &code);
-        assert_no_unreferenced_type(build.spec(), &code);
-    }
+    let module = (report.outcome() == Outcome::Generated)
+        .then(|| std::fs::read_to_string(build.output()).unwrap_or_default());
+    hold_run(&report, build.spec(), module.as_deref());
     report
 }
 
-/// Fail where `code`, the module generated from `spec`, emits a type that is no component and
-/// that nothing names ([`oracles::unreferenced_types`], #928).
-fn assert_no_unreferenced_type(spec: &Spec, code: &str) {
-    let root = std::fs::read_to_string(spec.path()).unwrap_or_default();
-    let unreferenced = oracles::unreferenced_types(code, &root);
-    assert!(
-        unreferenced.is_empty(),
-        "the lowering left a type emitted that nothing uses: {unreferenced:#?}"
-    );
-}
-
-/// `spargen::check`, then [`assert_claims_hold`] and [`assert_located`] on the report, as
-/// [`run_generate`].
+/// `spargen::check`, then [`hold_run`] on the report, as [`run_generate`].
 fn run_check(spec: &Spec) -> Report {
     let report = spargen::check(spec);
-    assert_claims_hold(&report);
-    assert_located(&report, spec);
+    hold_run(&report, spec, None);
     report
 }
 
-/// Fail unless every diagnostic in `report` is held to a real location (#454): see
-/// [`oracles::location_violations`]. The root document is read back from `spec`'s path, so a span
-/// can be compared with the file it lies in.
-fn assert_located(report: &Report, spec: &Spec) {
+/// Fail unless every diagnostic in `report`, a run over `spec`, makes a claim its run's outcome
+/// admits ([`claim_violations`], #413), and the shared oracles find no defect in the run or in
+/// `module`, the module it wrote ([`oracles::run_violations`]). The root document is read back from
+/// `spec`'s path, so a span can be compared with the file it lies in.
+fn hold_run(report: &Report, spec: &Spec, module: Option<&str>) {
+    let mut violations = claim_violations(report.outcome(), report.diagnostics());
     let root = std::fs::read(spec.path()).unwrap_or_default();
-    let violations = oracles::location_violations(report.diagnostics(), &root);
+    violations.extend(oracles::run_violations(report, &root, module));
     assert!(
         violations.is_empty(),
-        "a `{}` run reported diagnostics with no real location: {violations:#?}",
-        report.outcome()
-    );
-}
-
-/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no `W001` at
-/// the union says why: see [`oracles::unexplained_variants`].
-fn assert_distinguishable_variants(report: &Report, code: &str) {
-    let violations = oracles::unexplained_variants(report, code);
-    assert!(
-        violations.is_empty(),
-        "a union's variants cannot be told apart and no warning says why: {violations:#?}\n\
-         {report:#?}"
-    );
-}
-
-/// Fail unless every diagnostic in `report` makes a claim its run's outcome admits (#413).
-fn assert_claims_hold(report: &Report) {
-    let violations = claim_violations(report.outcome(), report.diagnostics());
-    assert!(
-        violations.is_empty(),
-        "a `{}` run reported diagnostics whose claims are false of it: {violations:#?}",
+        "a `{}` run broke an oracle every run is held to: {violations:#?}\n{report:#?}",
         report.outcome()
     );
 }
@@ -218,11 +184,8 @@ fn stated_claim(message: &str) -> Option<OutcomeClaim> {
     })
 }
 
-/// `generate` on an inline spec, holding the run to the two oracles every fixture gets for free:
-/// `check` over the same document reaches the same accept/reject verdict and reports the same
-/// sorted codes ([`assert_check_agrees`]), the run reports no codegen failure
-/// ([`assert_no_codegen_failure`]), and a `Generated` run wrote parseable Rust
-/// ([`assert_parseable`]).
+/// `generate` on an inline spec, holding the run to parity with `check` over the same document
+/// ([`assert_check_agrees`]) on top of the oracles [`run_generate`] holds every run to.
 fn generate(spec: &str) -> Report {
     generate_with_code(spec).0
 }
@@ -240,15 +203,14 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec_path, spec).unwrap();
-    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let report = run_generate(&build(spec_path.clone(), out.clone()));
-    let code = std::fs::read_to_string(out).unwrap_or_default();
-    assert_no_codegen_failure(&report);
-    assert_check_agrees(&report, &run_check(&Spec::new(spec_path)));
-    if report.outcome() == Outcome::Generated {
-        assert_parseable(&code);
-    }
-    (report, code)
+    generate_spec_with_code(Spec::new(spec_path))
+}
+
+/// As [`generate_with_code`], over the description already written at `spec`'s path and with the
+/// options `spec` carries.
+fn generate_spec_with_code(spec: Spec) -> (Report, String) {
+    let (generated, _, code) = generate_and_check_spec(spec);
+    (generated, code)
 }
 
 /// The emitted module below its provenance header, whose digests and spec path differ between
@@ -260,67 +222,15 @@ fn module_body(code: &str) -> String {
         .join("\n")
 }
 
-/// `check` must stand in for `generate`: the same accept/reject decision and the same sorted
-/// diagnostic codes. The outcomes themselves differ by design (`Clean` against `Generated`), since
-/// only one of the two writes a module.
+/// `check` must stand in for `generate`: the same accept/reject decision and the identical
+/// diagnostics ([`oracles::parity_violations`]). The outcomes themselves differ by design (`Clean`
+/// against `Generated`), since only one of the two writes a module.
 fn assert_check_agrees(generated: &Report, checked: &Report) {
-    assert_eq!(
-        checked.outcome() == Outcome::Rejected,
-        generated.outcome() == Outcome::Rejected,
-        "check says {:?} but generate says {:?}: {checked:#?} {generated:#?}",
-        checked.outcome(),
-        generated.outcome()
-    );
-    assert_eq!(
-        codes(checked),
-        codes(generated),
-        "check and generate report different diagnostics"
-    );
-}
-
-/// The prefix of the `E011` message the pipeline reports when codegen's own tokens do not parse as
-/// a Rust file, a codegen bug rather than a rejection. `codegen`'s own `CODEGEN_FAILURE` is the
-/// prefix the message is built from, and a test beside it holds this declaration to that value.
-const CODEGEN_FAILURE: &str = "codegen produced unparseable Rust";
-
-/// No fixture's `generate` run reports a codegen failure: every input either is rejected by the
-/// frontend or renders a module that parses.
-fn assert_no_codegen_failure(report: &Report) {
-    let failed: Vec<&str> = report
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| {
-            diagnostic.code == Code::InvalidInput && diagnostic.message.starts_with(CODEGEN_FAILURE)
-        })
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect();
+    let violations = oracles::parity_violations(generated, checked);
     assert!(
-        failed.is_empty(),
-        "codegen rendered tokens that do not parse as Rust: {failed:#?}"
+        violations.is_empty(),
+        "check does not stand in for generate: {violations:#?}\n{checked:#?}\n{generated:#?}"
     );
-}
-
-/// A `Generated` run's module parses as a Rust file.
-fn assert_parseable(code: &str) {
-    if let Err(error) = syn::parse_file(code) {
-        panic!("a `Generated` run wrote unparseable Rust ({error}):\n{code}");
-    }
-}
-
-fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics().iter().any(|d| d.code == code)
-}
-
-/// Every message a report carries for one code. A code being right is not the same as its message
-/// being true — a diagnostic that fires on the correct construct while asserting something false
-/// about it is still a defect — so the fixtures that pin wording assert on this, not on the code.
-fn messages_for(report: &Report, code: Code) -> Vec<&str> {
-    report
-        .diagnostics()
-        .iter()
-        .filter(|d| d.code == code)
-        .map(|d| d.message.as_str())
-        .collect()
 }
 
 /// Fail if anything from the generated `types` module onward uses `serde_json::Value` as a type:
@@ -349,188 +259,6 @@ fn assert_no_untyped_value(code: &str) {
         degraded.is_empty(),
         "a typed schema degraded to `serde_json::Value`: {degraded:#?}\n{types}"
     );
-}
-
-/// The [`spargen::FileId`]s of a two-file bundle's root document and of the file it references,
-/// in that order, read off the spans of a real run's diagnostics: a `FileId` reaches a caller from
-/// a run, like the `Diagnostic` [`located`] starts from.
-fn bundle_file_ids() -> (spargen::FileId, spargen::FileId) {
-    let (_, checked, _) = generate_and_check_files(&[
-        (
-            "openapi.yaml",
-            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Name: { type: string, pattern: '^a' }\n    Pet: { $ref: 'lib.yaml#/Pet' }\n",
-        ),
-        ("lib.yaml", "Pet: { type: string, pattern: '^b' }\n"),
-    ]);
-    let file_of = |name: &str| {
-        checked
-            .diagnostics()
-            .iter()
-            .find(|diagnostic| {
-                diagnostic
-                    .file
-                    .as_deref()
-                    .is_some_and(|path| path.ends_with(name))
-            })
-            .and_then(|diagnostic| diagnostic.span)
-            .map(|span| span.file)
-            .unwrap_or_else(|| panic!("no diagnostic is located in {name}: {checked:#?}"))
-    };
-    let ids = (file_of("openapi.yaml"), file_of("lib.yaml"));
-    assert_eq!(
-        (ids.0.get(), ids.1.get()),
-        (0, 1),
-        "the root is the first file a bundle loads"
-    );
-    ids
-}
-
-/// A warning for the location oracle's own fixtures, at `pointer` with `span` in file `file`.
-///
-/// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, since
-/// a `Diagnostic` reaches a caller from a run, and overwrites every field: what a fixture asserts
-/// on is the values set here, never the run's own.
-fn located(
-    code: Code,
-    pointer: &str,
-    file: spargen::FileId,
-    span: (u32, usize, usize),
-    message: &str,
-) -> Diagnostic {
-    let (line, start, end) = span;
-    let span = spargen::Span {
-        file,
-        start: spargen::Loc {
-            line,
-            col: 1,
-            offset: start,
-        },
-        end: spargen::Loc {
-            line,
-            col: 1,
-            offset: end,
-        },
-    };
-    let mut diagnostic = check("openapi: 3.0.0\n")
-        .diagnostics()
-        .first()
-        .cloned()
-        .expect("an unsupported version is reported");
-    diagnostic.code = code;
-    diagnostic.severity = Severity::Warning;
-    diagnostic.pointer = spargen::JsonPointer::from(pointer);
-    diagnostic.span = Some(span);
-    diagnostic.file = None;
-    diagnostic.message = message.to_owned();
-    diagnostic.remedy = None;
-    diagnostic.interpretation = None;
-    diagnostic.claim = OutcomeClaim::Independent;
-    diagnostic
-}
-
-/// The name of the `pub struct` that declares the first field line starting with `field`.
-///
-/// A type count plus "both fields exist somewhere" is satisfied by either assignment of two names to
-/// two schemas, so it cannot see a swap. This answers the question the count cannot: which generated
-/// type a given field belongs to.
-fn field_owner(code: &str, field: &str) -> Option<String> {
-    let mut current: Option<String> = None;
-    for line in code.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("pub struct ") {
-            current = rest
-                .split([' ', '<', '{', '(', ';'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned);
-        }
-        if trimmed.starts_with(field) {
-            return current;
-        }
-    }
-    None
-}
-
-/// The declared type of the first field line starting with `field`, trimmed of its trailing comma.
-///
-/// [`field_owner`] says which type *declares* a field; this says which type the field *is*. Asking
-/// only whether a type name appears somewhere in the module cannot tell two same-named schemas
-/// apart, because both are emitted — so a fixture that must pin *which* of them a reference bound
-/// has to read the field's own right-hand side.
-fn field_type(code: &str, field: &str) -> Option<String> {
-    code.lines()
-        .map(str::trim_start)
-        .find(|line| line.starts_with(field))
-        .and_then(|line| line.split_once(':'))
-        .map(|(_, ty)| ty.trim().trim_end_matches(',').to_owned())
-}
-
-/// The field names `pub struct ty` declares, in source order.
-///
-/// The inverse of [`field_owner`], and the answer to "which schema is this type", which a name
-/// alone cannot give when two declarations share a name and the emitter disambiguates one of them —
-/// or when the alias path re-emits a target's *kind* under a third name.
-fn declared_fields(code: &str, ty: &str) -> Vec<String> {
-    let mut lines = code
-        .lines()
-        .map(str::trim_start)
-        .skip_while(|line| !line.starts_with(&format!("pub struct {ty} ")));
-    lines.next();
-    lines
-        .take_while(|line| !line.starts_with('}'))
-        .filter_map(|line| line.strip_prefix("pub "))
-        .filter_map(|rest| rest.split_once(':'))
-        .map(|(name, _)| name.to_owned())
-        .collect()
-}
-
-/// The right-hand side of `pub type ty = …;`, the type an alias names, or `None` when no such alias
-/// is declared.
-fn alias_target(code: &str, ty: &str) -> Option<String> {
-    let head = format!("pub type {ty} = ");
-    code.lines()
-        .map(str::trim_start)
-        .find_map(|line| line.strip_prefix(&head))
-        .map(|rest| rest.trim_end().trim_end_matches(';').to_owned())
-}
-
-/// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
-/// comma.
-///
-/// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
-/// missing. Binding the enum's name says the union was represented; it does not say how many
-/// branches survived, and a collapse that erases one member leaves a type with the right name and
-/// the wrong contents.
-fn enum_variants(code: &str, ty: &str) -> Vec<String> {
-    let mut lines = code
-        .lines()
-        .map(str::trim_start)
-        .skip_while(|line| !line.starts_with(&format!("pub enum {ty} ")));
-    lines.next();
-    lines
-        .take_while(|line| !line.starts_with('}'))
-        .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
-        .map(|line| line.trim_end_matches(',').to_owned())
-        .collect()
-}
-
-/// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
-/// satisfies `suffix_ok`, in source order.
-///
-/// Counting `code.matches("pub struct Foo")` is the obvious thing and is wrong twice over: the
-/// generated module embeds the runtime, whose own items can share a prefix (`pub struct L` also
-/// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
-/// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
-/// impossible to mistake for a bound.
-fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
-    code.lines()
-        .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
-        .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
-        .filter(|name| !name.is_empty())
-        .filter_map(|name| name.strip_prefix(prefix).map(|tail| (name, tail)))
-        .filter(|(_, tail)| suffix_ok(tail))
-        .map(|(name, _)| name.to_owned())
-        .collect()
 }
 
 /// A document whose only component `U` is `body`, reached from one response body.
@@ -713,16 +441,6 @@ paths:
     )
 }
 
-/// The message of every `code` diagnostic in `report`, in report order.
-fn messages_with_code(report: &Report, code: Code) -> Vec<&str> {
-    report
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.code == code)
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect()
-}
-
 /// A document whose `/page` selects `text/plain` over `text/html` and passes every gate of its
 /// own, so it emits `W014`, while `/doc` is rejected (`E009`).
 const W014_REJECTED_ELSEWHERE: &str = r##"
@@ -751,22 +469,10 @@ paths:
 // --- check/generate parity ----------------------------------------------------------------------
 //
 // The module header calls parity a contract, and `spargen check` is sold as telling you what
-// `generate` would do. Every inline fixture that goes through `generate` or `generate_with_code`
-// already gets the verdict-and-codes half of it from `assert_check_agrees`. `PARITY_FIXTURES` keeps
-// ten named specs on top of that: a list a companion test holds to span rejections, warnings and
-// clean runs, and whose labelled names each hold the fixture to the code it is named for.
-
-/// The sorted diagnostic codes a report carries, duplicates kept: a stage that fires the same
-/// warning twice differs from one that fires it once.
-fn codes(report: &Report) -> Vec<&'static str> {
-    let mut codes: Vec<&'static str> = report
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.code.as_str())
-        .collect();
-    codes.sort_unstable();
-    codes
-}
+// `generate` would do. Every fixture that goes through `generate`, `generate_with_code` or a
+// multi-file helper already gets it from `assert_check_agrees`. `PARITY_FIXTURES` keeps ten named
+// specs on top of that: a list a companion test holds to span rejections, warnings and clean runs,
+// and whose labelled names each hold the fixture to the code it is named for.
 
 /// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
 /// both matter: a rejection proves `check` runs the stage that refuses, a warning proves it runs
@@ -841,24 +547,73 @@ fn generate_and_check_files(files: &[(&str, &str)]) -> (Report, Report, String) 
     generate_and_check_dir(&dir, files[0].0)
 }
 
-/// Run both entry points over the multi-file description rooted at `dir/root`, writing the module
-/// to `dir/client.rs`, and hold the pair to the two oracles [`generate`] gives an inline spec:
-/// [`assert_check_agrees`] on the two reports and, for a `Generated` run, [`assert_parseable`] on
-/// the module. Returns `(generate, check, module)`, the module empty when nothing was written.
-///
-/// Every multi-file helper in this file ends here, so a fixture that writes several files gets the
-/// same parity and parseability checks as one written inline.
+/// Run both entry points over the multi-file description rooted at `dir/root`, as
+/// [`generate_and_check_spec`].
 fn generate_and_check_dir(dir: &camino::Utf8Path, root: &str) -> (Report, Report, String) {
-    let root = dir.join(root);
-    let out = dir.join("client.rs");
-    let generated = run_generate(&build(root.clone(), out.clone()));
-    let checked = run_check(&Spec::new(root));
+    generate_and_check_spec(Spec::new(dir.join(root)))
+}
+
+/// Run both entry points over `spec`, writing the module to `client.rs` beside its root document,
+/// and hold the pair to [`assert_check_agrees`]. Returns `(generate, check, module)`, the module
+/// empty when nothing was written.
+///
+/// Every helper in this file that runs `generate` over a description ends here, so a fixture that
+/// writes several files, or sets an option, gets the same parity check as one written inline.
+fn generate_and_check_spec(spec: Spec) -> (Report, Report, String) {
+    let out = spec.path().with_file_name("client.rs");
+    let checked = run_check(&spec);
+    let generated = run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     assert_check_agrees(&generated, &checked);
-    if generated.outcome() == Outcome::Generated {
-        assert_parseable(&code);
-    }
     (generated, checked, code)
+}
+
+/// A root document whose two operations reach a `Shape` declared in `a.yaml` and another declared
+/// in `b.yaml`, listed `/a` first unless `b_first`; returns the generated client.
+fn generate_two_file_shapes(b_first: bool) -> String {
+    let refs = [
+        ("a", "./a.yaml#/components/schemas/Shape"),
+        ("b", "./b.yaml#/components/schemas/Shape"),
+    ];
+    let (report, _, code) = generate_and_check_files(&[
+        ("openapi.yaml", &two_shape_root(refs, b_first)),
+        ("a.yaml", SHAPE_ALPHA_YAML),
+        ("b.yaml", SHAPE_BETA_YAML),
+    ]);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    code
+}
+
+/// A document declaring a `Shape` whose one field is `alpha`.
+const SHAPE_ALPHA_YAML: &str = "components:\n  schemas:\n    Shape:\n      type: object\n      \
+                                required: [alpha]\n      properties: { alpha: { type: string } }\n";
+/// A document declaring a `Shape` whose one field is `beta`.
+const SHAPE_BETA_YAML: &str = "components:\n  schemas:\n    Shape:\n      type: object\n      \
+                               required: [beta]\n      properties: { beta: { type: integer } }\n";
+
+/// A root document with one operation per `(path, $ref)` in `refs`, each answering `200` with the
+/// schema the `$ref` names; the second entry is listed first when `swap`.
+fn two_shape_root(refs: [(&str, &str); 2], swap: bool) -> String {
+    let path_item = |(letter, reference): (&str, &str)| {
+        format!(
+            "  /{letter}:\n    get:\n      operationId: get{upper}\n      responses:\n        \
+             '200':\n          description: ok\n          content:\n            \
+             application/json: {{ schema: {{ $ref: '{reference}' }} }}\n",
+            upper = letter.to_uppercase(),
+        )
+    };
+    let [first, second] = refs;
+    let (first, second) = if swap {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}",
+        path_item(first),
+        path_item(second),
+    )
 }
 
 /// Write `files` into a fresh directory and run both entry points over its `openapi.json`, as

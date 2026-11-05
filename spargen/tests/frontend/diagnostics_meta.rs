@@ -3,6 +3,107 @@
 
 use super::*;
 
+/// The [`spargen::FileId`]s of a two-file bundle's root document and of the file it references,
+/// in that order, read off the spans of a real run's diagnostics: a `FileId` reaches a caller from
+/// a run, like the `Diagnostic` [`located`] starts from.
+fn bundle_file_ids() -> (spargen::FileId, spargen::FileId) {
+    let (_, checked, _) = generate_and_check_files(&[
+        (
+            "openapi.yaml",
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Name: { type: string, pattern: '^a' }\n    Pet: { $ref: 'lib.yaml#/Pet' }\n",
+        ),
+        ("lib.yaml", "Pet: { type: string, pattern: '^b' }\n"),
+    ]);
+    let file_of = |name: &str| {
+        checked
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .file
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with(name))
+            })
+            .and_then(|diagnostic| diagnostic.span)
+            .map(|span| span.file)
+            .unwrap_or_else(|| panic!("no diagnostic is located in {name}: {checked:#?}"))
+    };
+    let ids = (file_of("openapi.yaml"), file_of("lib.yaml"));
+    assert_eq!(
+        (ids.0.get(), ids.1.get()),
+        (0, 1),
+        "the root is the first file a bundle loads"
+    );
+    ids
+}
+
+/// A warning for the oracles' own fixtures, at `pointer` with `span` in file `file`.
+///
+/// It takes the diagnostic a real `check` run reports for an unsupported `openapi` version, since
+/// a `Diagnostic` reaches a caller from a run, and overwrites every field: what a fixture asserts
+/// on is the values set here, never the run's own.
+fn located(
+    code: Code,
+    pointer: &str,
+    file: spargen::FileId,
+    span: (u32, usize, usize),
+    message: &str,
+) -> Diagnostic {
+    let (line, start, end) = span;
+    let span = spargen::Span {
+        file,
+        start: spargen::Loc {
+            line,
+            col: 1,
+            offset: start,
+        },
+        end: spargen::Loc {
+            line,
+            col: 1,
+            offset: end,
+        },
+    };
+    let mut diagnostic = check("openapi: 3.0.0\n")
+        .diagnostics()
+        .first()
+        .cloned()
+        .expect("an unsupported version is reported");
+    diagnostic.code = code;
+    diagnostic.severity = Severity::Warning;
+    diagnostic.pointer = spargen::JsonPointer::from(pointer);
+    diagnostic.span = Some(span);
+    diagnostic.file = None;
+    diagnostic.message = message.to_owned();
+    diagnostic.remedy = None;
+    diagnostic.interpretation = None;
+    diagnostic.claim = OutcomeClaim::Independent;
+    diagnostic
+}
+
+/// [`oracles::internal_failures`] can fail, on an `E011` that carries either prefix a spargen bug
+/// is reported under, and passes an `E011` that rejects the document and another code that quotes
+/// a prefix. Without this an oracle whose prefix matched nothing would pass every run.
+#[test]
+fn the_internal_failure_oracle_sees_an_invariant_and_a_codegen_failure() {
+    let (root_file, _) = bundle_file_ids();
+    let diagnostic = |code: Code, message: &str| located(code, "/x", root_file, (1, 0, 1), message);
+    for prefix in [oracles::INVARIANT_FAILURE, oracles::CODEGEN_FAILURE] {
+        let message = format!("{prefix}: a spargen bug");
+        let found = oracles::internal_failures(&[diagnostic(Code::InvalidInput, &message)]);
+        assert_eq!(found.len(), 1, "{prefix}: {found:#?}");
+        assert!(
+            oracles::internal_failures(&[diagnostic(Code::SchemaDefaultNotApplied, &message)])
+                .is_empty(),
+            "{prefix}"
+        );
+    }
+    assert!(oracles::internal_failures(&[diagnostic(
+        Code::InvalidInput,
+        "OpenAPI structure violation"
+    )])
+    .is_empty());
+}
+
 /// [`assert_no_untyped_value`] can fail: a property with the empty schema, which admits any JSON
 /// value, lowers to `serde_json::Value` by design, and the oracle must see it. Without this a
 /// spelling that never matches (the token stream's `serde_json :: Value`) passes every fixture.
@@ -319,21 +420,56 @@ fn the_unexplained_variant_oracle_excuses_only_the_union_its_warning_is_at() {
     );
 }
 
-/// `check` must run the same lowering as `generate`, so an irreconcilable `allOf` rejects
-/// identically through both entry points (check/generate parity).
+/// `check` stands in for `generate` diagnostic for diagnostic, and the comparison every fixture's
+/// run is held to ([`oracles::parity_violations`]) sees where it does not: a diagnostic whose
+/// message alone or pointer alone differs, one reported once more by either entry point, and a
+/// verdict `check` does not share. The order the two report in does not matter.
 #[test]
-fn e013_check_generate_parity() {
-    let report = check(ALL_OF_CONFLICT_SPEC);
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfIrreconcilable));
-}
+fn check_and_generate_report_identical_diagnostics() {
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", W005_SPEC)]);
+    assert!(
+        oracles::parity_violations(&generated, &checked).is_empty(),
+        "{generated:#?}\n{checked:#?}"
+    );
+    let (generated, checked) = (generated.diagnostics(), checked.diagnostics());
+    assert!(generated.len() >= 2, "{generated:#?}");
+    let differences = |checked: &[Diagnostic]| oracles::diagnostic_differences(generated, checked);
+    let reversed: Vec<Diagnostic> = checked.iter().rev().cloned().collect();
+    assert!(differences(&reversed).is_empty());
+    let mut reworded = checked.to_vec();
+    reworded[0].message.push_str(", reworded");
+    let mut moved = checked.to_vec();
+    moved[0].pointer = spargen::JsonPointer::from("/components/schemas/Elsewhere");
+    for changed in [reworded, moved] {
+        let found = differences(&changed);
+        assert_eq!(found.len(), 2, "{found:#?}");
+        assert!(
+            found
+                .iter()
+                .any(|difference| difference.starts_with("`generate` reports"))
+                && found
+                    .iter()
+                    .any(|difference| difference.starts_with("`check` reports")),
+            "{found:#?}"
+        );
+    }
+    let mut doubled = checked.to_vec();
+    doubled.push(checked[0].clone());
+    let found = differences(&doubled);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].starts_with("`check` reports this 1 more time(s) than `generate`"),
+        "{found:#?}"
+    );
 
-/// `check` runs the same lowering as `generate`, so the W005 disposition fires identically.
-#[test]
-fn w005_check_generate_parity() {
-    let report = check(W005_SPEC);
-    assert_eq!(report.outcome(), Outcome::Clean, "{report:#?}");
-    assert!(has_code(&report, Code::SchemaDefaultNotApplied));
+    let rejected = generate(ALL_OF_CONFLICT_SPEC);
+    let clean = check(W005_SPEC);
+    assert!(
+        oracles::parity_violations(&rejected, &clean)
+            .iter()
+            .any(|violation| violation == "`generate` is `rejected` but `check` is `clean`"),
+        "{rejected:#?}\n{clean:#?}"
+    );
 }
 
 /// [`W014_REJECTED_ELSEWHERE`] without the rejected `/doc`.
@@ -475,45 +611,34 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
     );
 }
 
-/// `check` must reach the same verdict as `generate`: it accepts exactly what `generate` accepts,
-/// and reports exactly the same diagnostics. The two outcomes are deliberately *not* compared for
-/// equality — a successful `check` is `Clean` and a successful `generate` is `Generated`, because
-/// only one of them wrote a module. What must agree is the accept/reject decision.
+/// Run `spec` through [`generate`], which holds `check` to its verdict and to the identical
+/// diagnostics ([`assert_check_agrees`]), and hold a fixture whose name begins with a code to
+/// reporting it, with the verdict its severity gives: an `E###` rejects, and a `W###` generates, so
+/// `check` is `Clean`.
 ///
-/// `check` skips codegen and emit, so any diagnostic the two disagree on is one that only a
-/// generating run reports — which is exactly what would stop `check` standing in for it.
-fn assert_parity(name: &str, spec: &str) {
-    let generated = generate(spec);
-    let checked = check(spec);
-
-    assert_eq!(
-        checked.outcome() == Outcome::Rejected,
-        generated.outcome() == Outcome::Rejected,
-        "`{name}`: check says {:?} but generate says {:?}",
-        checked.outcome(),
-        generated.outcome()
-    );
-    assert_eq!(
-        codes(&checked),
-        codes(&generated),
-        "`{name}`: check and generate report different diagnostics"
-    );
-
-    // A fixture whose name begins with a code must actually report it. Without this the parity
-    // suite is satisfied by both entry points being equally wrong: the `E004 unresolvable ref`
-    // fixture reported `clean` for as long as the bug it was named for existed, and passed, because
-    // parity compares the two reports to each other and the span test only *counts* verdicts.
+/// Without the label check the parity suite is satisfied by both entry points being equally wrong:
+/// the `E004 unresolvable ref` fixture reported `clean` for as long as the bug it was named for
+/// existed, and passed, because parity compares the two reports to each other and the span test
+/// only *counts* verdicts.
+fn assert_labelled_code_fires(name: &str, spec: &str) {
+    let report = generate(spec);
     if let Some(labelled) = parity_label(name) {
         assert!(
-            codes(&checked).contains(&labelled),
+            codes(&report).contains(&labelled),
             "`{name}`: the fixture is named for {labelled} but reports {:?}",
-            codes(&checked)
+            codes(&report)
+        );
+        assert_eq!(
+            report.outcome() == Outcome::Rejected,
+            labelled.starts_with('E'),
+            "`{name}`: a fixture named for {labelled} is `{}`",
+            report.outcome()
         );
     }
 }
 
 /// The `E###`/`W###` code a [`PARITY_FIXTURES`] name is labelled with, if it is labelled at all.
-/// Shared by [`assert_parity`], which holds a labelled fixture to its label, and by
+/// Shared by [`assert_labelled_code_fires`], which holds a labelled fixture to its label, and by
 /// [`every_parity_fixture_that_reports_is_labelled`], which stops the label convention from
 /// quietly becoming optional.
 fn parity_label(name: &str) -> Option<&str> {
@@ -527,7 +652,7 @@ fn parity_label(name: &str) -> Option<&str> {
 #[test]
 fn check_and_generate_agree_on_every_parity_fixture() {
     for (name, spec) in PARITY_FIXTURES {
-        assert_parity(name, spec);
+        assert_labelled_code_fires(name, spec);
     }
 }
 
@@ -584,11 +709,11 @@ fn every_parity_fixture_that_reports_is_labelled() {
     );
 }
 
-/// Hold `spec` to its relocation twin ([`oracles::relocate`]): the same document with its
-/// `components.schemas` moved into a referenced `lib.yaml`. Both entry points must reach the same
-/// verdict with the same code multiset (so a `W001` the audit raises in the root and not in a
-/// referenced file, #446, shows as a count), and a `Generated` run must give each schema the same
-/// [`oracles::shape`]. Returns whether `spec` had schemas to move.
+/// Hold `spec` to its relocation twin ([`oracles::write_relocated`]): the same document with its
+/// `components.schemas` moved into a referenced `lib.yaml` must reach the same verdict with the
+/// same code multiset and give each schema the same shape ([`oracles::relocation_differences`]).
+/// Both runs go through `generate`, which holds `check` to each of them, so `check` agrees across
+/// the move too. Returns whether `spec` had schemas to move.
 fn assert_relocation_changes_nothing(name: &str, spec: &str) -> bool {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
@@ -596,42 +721,10 @@ fn assert_relocation_changes_nothing(name: &str, spec: &str) -> bool {
         return false;
     };
     let (inline, inline_code) = generate_with_code(spec);
-    let inline_checked = check(spec);
-    let out = dir.join("client.rs");
-    let moved = run_generate(&build(root.clone(), out.clone()));
-    let moved_code = std::fs::read_to_string(&out).unwrap_or_default();
-    let moved_checked = run_check(&Spec::new(root));
-    assert_eq!(
-        moved.outcome(),
-        inline.outcome(),
-        "`{name}`: relocated, generate says {:?}: {moved:#?}",
-        moved.outcome()
-    );
-    assert_eq!(
-        codes(&moved),
-        codes(&inline),
-        "`{name}`: relocated, generate reports other codes"
-    );
-    assert_eq!(
-        moved_checked.outcome(),
-        inline_checked.outcome(),
-        "`{name}`: relocated, check says {:?}",
-        moved_checked.outcome()
-    );
-    assert_eq!(
-        codes(&moved_checked),
-        codes(&inline_checked),
-        "`{name}`: relocated, check reports other codes"
-    );
-    if inline.outcome() == Outcome::Generated {
-        for schema in oracles::schema_names(spec) {
-            assert_eq!(
-                oracles::shape(&moved_code, &schema),
-                oracles::shape(&inline_code, &schema),
-                "`{name}`: relocated, `{schema}` lowers to another shape"
-            );
-        }
-    }
+    let (moved, _, moved_code) = generate_and_check_spec(Spec::new(root));
+    let differences =
+        oracles::relocation_differences(spec, (&inline, &inline_code), (&moved, &moved_code));
+    assert!(differences.is_empty(), "`{name}`: {differences:#?}");
     true
 }
 

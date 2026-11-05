@@ -1460,7 +1460,6 @@ fn an_untyped_all_of_member_merges_the_union_branches_it_refines_alike() {
                      {report:#?}"
                 );
             }
-            assert_distinguishable_variants(&report, &code);
             let types = types_module(&code);
             match variants {
                 None => assert!(

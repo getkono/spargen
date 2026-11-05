@@ -158,20 +158,29 @@ mod tests {
         assert!(render(quote! { fn f() {} }).is_ok());
     }
 
-    /// The frontend and fuzz harnesses match this very literal, so their no-codegen-failure
-    /// oracles see each one: renaming the prefix here without them fails this test rather than
+    /// The shared test oracles match this very literal, and every harness that runs `generate`
+    /// holds its runs to them, so each no-codegen-failure oracle sees each one: renaming the prefix
+    /// here without the oracles, or a harness that stops calling them, fails this test rather than
     /// silently blinding them.
     #[test]
     fn the_harnesses_match_the_codegen_failure_prefix() {
-        let declared = format!("const CODEGEN_FAILURE: &str = \"{CODEGEN_FAILURE}\";");
-        for harness in ["tests/frontend/main.rs", "tests/fuzz_frontend.rs"] {
-            let source = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(harness),
-            )
-            .expect("the harness is readable");
+        let read = |path: &str| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap_or_else(|error| panic!("{path} is unreadable: {error}"))
+        };
+        let declared = format!("pub const CODEGEN_FAILURE: &str = \"{CODEGEN_FAILURE}\";");
+        assert!(
+            read("tests/oracles/mod.rs").contains(&declared),
+            "tests/oracles/mod.rs must declare `{declared}`"
+        );
+        for harness in [
+            "tests/frontend/main.rs",
+            "tests/fuzz_frontend.rs",
+            "tests/lowering_props.rs",
+        ] {
             assert!(
-                source.contains(&declared),
-                "{harness} must declare `{declared}`"
+                read(harness).contains("oracles::run_violations("),
+                "{harness} must hold its runs to `oracles::run_violations`"
             );
         }
     }

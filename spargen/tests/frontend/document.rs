@@ -245,7 +245,7 @@ fn e011_an_extensionless_document_neither_parser_accepts_reports_one_e011() {
         generate_and_check_files(&[("spec.txt", "{\n\t\"openapi\": [\n")]);
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_with_code(report, Code::InvalidInput);
+        let messages = messages_for(report, Code::InvalidInput);
         assert_eq!(messages.len(), 1, "{report:#?}");
         assert!(messages[0].starts_with("malformed YAML"), "{report:#?}");
     }
