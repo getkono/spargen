@@ -6,7 +6,8 @@
 //! `runtime-dependencies` gate runs by its exact name. Every `insta::assert_snapshot!` sits in
 //! this file, because insta names a snapshot after the module path and the source file of the
 //! call: from here it is `snapshots/e2e__<name>.snap`. The tests sit in one module per area under
-//! `e2e/`, each reaching the harness through `use super::*`.
+//! `e2e/`, each reaching the harness through `use super::*`; `e2e/mock_server.rs` is the mock HTTP
+//! server written into each fixture crate that serves its client ([`MOCK_SERVER`]).
 
 use std::process::Command;
 
@@ -627,6 +628,20 @@ const OAS32_SPEC: &str = include_str!("e2e/specs/oas32.yaml");
 /// the four positions a date value can reach the wire from.
 const DATE_SPEC: &str = include_str!("e2e/specs/date.yaml");
 
+/// The mock HTTP server every fixture crate's tests serve their generated client with:
+/// [`write_fixture_test`] writes it beside each test as `tests/common/mod.rs`. It is also this
+/// suite's [`mock_server`] module, so the text written into a fixture is compiled here first.
+const MOCK_SERVER: &str = include_str!("e2e/mock_server.rs");
+
+/// Write `source` as the integration test `tests/{name}.rs` of the fixture crate at `out`, beside
+/// [`MOCK_SERVER`] as `tests/common/mod.rs`, which a test reaches by declaring `mod common;`.
+fn write_fixture_test(out: &std::path::Path, name: &str, source: &str) {
+    let tests = out.join("tests");
+    std::fs::create_dir_all(tests.join("common")).unwrap();
+    std::fs::write(tests.join("common/mod.rs"), MOCK_SERVER).unwrap();
+    std::fs::write(tests.join(format!("{name}.rs")), source).unwrap();
+}
+
 #[path = "e2e/basic_blocking.rs"]
 mod basic_blocking;
 #[path = "e2e/basic_crate.rs"]
@@ -641,6 +656,8 @@ mod collisions;
 mod dependencies;
 #[path = "e2e/manifest_audit.rs"]
 mod manifest_audit;
+#[path = "e2e/mock_server.rs"]
+mod mock_server;
 #[path = "e2e/oas32.rs"]
 mod oas32;
 #[path = "e2e/open_narrowing.rs"]

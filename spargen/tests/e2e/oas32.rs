@@ -81,41 +81,20 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
     // Wire-level 3.2 coverage: `in: querystring`, `style: cookie`, typed server variables, and a
     // typed response-header accessor, all against a real socket. Without this the 3.2 constructs
     // are only compile-verified, and a construct can compile while sending the wrong bytes.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/wire.rs"),
+    write_fixture_test(
+        &out,
+        "wire",
         r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 #[test]
 fn oas32_constructs_reach_the_wire() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-        let request_line = request.lines().next().unwrap();
-
-        // `in: querystring` with `content: application/x-www-form-urlencoded` serializes the whole
-        // object into the query string.
-        assert!(request_line.starts_with("GET /records?term="), "{request}");
-        assert!(request_line.contains("term=a%20b"), "{request}");
-        // `style: cookie` sends the value verbatim — the one cookie style that never encodes.
-        assert!(request.contains("cookie: session=a/b\r\n"), "{request}");
-
-        let body = r#"[{"id":"r1"}]"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Total-Count: 42\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.flush().unwrap();
-    });
+    let (base, server) = common::serve_one(common::response(
+        "200 OK",
+        &[("Content-Type", "application/json"), ("X-Total-Count", "42")],
+        br#"[{"id":"r1"}]"#,
+    ));
 
     // A templated server resolves with every variable at its declared default, and the typed enum
     // makes an out-of-enum region unconstructible.
@@ -131,16 +110,23 @@ fn oas32_constructs_reach_the_wire() {
     let params = oas32_client::ListRecordsParams::default()
         .filter(oas32_client::types::Query { term: Some("a b".to_owned()) })
         .session("a/b".to_owned());
-    let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = oas32_client::BlockingClient::new(&base).unwrap();
     let response = client.list_records(Some(params)).unwrap();
+
+    let request = server.join().unwrap().text();
+    let request_line = request.lines().next().unwrap();
+    // `in: querystring` with `content: application/x-www-form-urlencoded` serializes the whole
+    // object into the query string.
+    assert!(request_line.starts_with("GET /records?term="), "{request}");
+    assert!(request_line.contains("term=a%20b"), "{request}");
+    // `style: cookie` sends the value verbatim — the one cookie style that never encodes.
+    assert!(request.contains("cookie: session=a/b\r\n"), "{request}");
 
     // Documented response headers are read through a typed accessor, as an explicit second step —
     // a malformed header can never turn a successful call into a failure.
     let headers = oas32_client::ListRecordsStatus200Headers::from_response(&response).unwrap();
     assert_eq!(headers.x_total_count, 42);
     assert_eq!(response.into_inner()[0].id, "r1");
-
-    server.join().unwrap();
 }
 
 /// `in: querystring` with a JSON `content:` entry owns the whole query string: the serialized
@@ -148,33 +134,10 @@ fn oas32_constructs_reach_the_wire() {
 /// An absent optional value sends no query at all.
 #[test]
 fn a_json_querystring_parameter_is_one_encoded_query() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        for expected in [
-            "GET /lookup?%7B%22term%22%3A%22a%26b%3Dc%23d%22%7D HTTP/1.1",
-            "POST /lookup?%7B%22term%22%3A%22x%20y%22%7D HTTP/1.1",
-            "POST /lookup HTTP/1.1",
-        ] {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let read = stream.read(&mut buf).unwrap();
-            let request = String::from_utf8_lossy(&buf[..read]);
-            let request_line = request.lines().next().unwrap();
-
-            assert_eq!(request_line, expected, "{request}");
-
-            stream
-                .write_all(
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .unwrap();
-            stream.flush().unwrap();
-        }
-    });
+    let (base, server) = common::serve(vec![common::no_content(); 3]);
 
     let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
-    let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = oas32_client::BlockingClient::new(&base).unwrap();
     client.lookup_records(query("a&b=c#d")).unwrap();
     client
         .lookup_records_maybe(Some(
@@ -183,7 +146,15 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
         .unwrap();
     client.lookup_records_maybe(None).unwrap();
 
-    server.join().unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    for (request, expected) in requests.iter().zip([
+        "GET /lookup?%7B%22term%22%3A%22a%26b%3Dc%23d%22%7D HTTP/1.1",
+        "POST /lookup?%7B%22term%22%3A%22x%20y%22%7D HTTP/1.1",
+        "POST /lookup HTTP/1.1",
+    ]) {
+        assert_eq!(request.line(), expected, "{}", request.text());
+    }
 }
 
 /// `additionalOperations` on the wire, plus the two constructs its operation is built from: a
@@ -192,41 +163,27 @@ fn a_json_querystring_parameter_is_one_encoded_query() {
 #[test]
 fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
     for (tag, expect_unknown) in [("purged", false), ("something-else", true)] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let read = stream.read(&mut buf).unwrap();
-            let request = String::from_utf8_lossy(&buf[..read]);
+        let body = if expect_unknown {
+            format!(r#"{{"outcome":"{tag}","detail":"not recognized"}}"#)
+        } else {
+            r#"{"outcome":"purged","entries":7}"#.to_owned()
+        };
+        let (base, server) = common::serve_once("application/json", "200 OK", body.as_bytes());
 
-            // The custom method token travels verbatim; nothing maps it onto a fixed method.
-            assert!(
-                request.starts_with("PURGE /records/cache "),
-                "custom method must reach the wire unchanged: {request}"
-            );
-            // The body came from the reusable `components.mediaTypes` entry, typed as `Query`.
-            assert!(request.contains(r#"{"term":"drop"}"#), "{request}");
-
-            let body = if expect_unknown {
-                format!(r#"{{"outcome":"{tag}","detail":"not recognized"}}"#)
-            } else {
-                r#"{"outcome":"purged","entries":7}"#.to_owned()
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        });
-
-        let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+        let client = oas32_client::BlockingClient::new(&base).unwrap();
         let outcome = client
             .purge_cache(&oas32_client::types::Query { term: Some("drop".to_owned()) })
             .unwrap()
             .into_inner();
+
+        let request = server.join().unwrap().text();
+        // The custom method token travels verbatim; nothing maps it onto a fixed method.
+        assert!(
+            request.starts_with("PURGE /records/cache "),
+            "custom method must reach the wire unchanged: {request}"
+        );
+        // The body came from the reusable `components.mediaTypes` entry, typed as `Query`.
+        assert!(request.contains(r#"{"term":"drop"}"#), "{request}");
 
         match outcome {
             // An unmapped discriminator value decodes into the `defaultMapping` branch rather
@@ -240,13 +197,10 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
                 assert_eq!(purged.entries, 7);
             }
         }
-
-        server.join().unwrap();
     }
 }
 "##,
-    )
-    .unwrap();
+    );
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "wire"])

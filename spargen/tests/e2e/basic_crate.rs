@@ -349,14 +349,12 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // A real round-trip driven by a blocking method against a std-thread mock server (the generated
     // crate is not inside an async runtime, so building a `BlockingClient` here is valid). Gated on
     // the `blocking` feature so the default `cargo test` compiles it to nothing.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/blocking.rs"), basic_blocking::BLOCKING_TEST).unwrap();
+    write_fixture_test(&out, "blocking", basic_blocking::BLOCKING_TEST);
 
     // Prove the wired serde defaults actually deserialize: an absent optional field with a
     // representable scalar default fills in the default instead of `None`, while a required field
     // (default rustdoc-only) still comes from the payload.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/defaults.rs"), basic_defaults::DEFAULTS_TEST).unwrap();
+    write_fixture_test(&out, "defaults", basic_defaults::DEFAULTS_TEST);
     let status = fixture_cargo(&out).arg("test").status().unwrap();
     assert!(status.success());
 
@@ -385,7 +383,7 @@ fn generated_module_compiles_in_basic_oas31_crate() {
     // satisfy, so `?` into `Box<dyn Error>` (the pattern the book's own snippet uses), `anyhow`,
     // `thiserror`'s `#[from]`, and `to_string()` were all unavailable on a client with a
     // documented error body.
-    std::fs::write(out.join("tests/errors.rs"), basic_errors::ERRORS_TEST).unwrap();
+    write_fixture_test(&out, "errors", basic_errors::ERRORS_TEST);
     let status = fixture_cargo(&out)
         .args(["test", "--test", "errors"])
         .status()

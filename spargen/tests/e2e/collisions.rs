@@ -427,36 +427,18 @@ fn parameters_whose_names_escape_alike_get_distinct_identifiers() {
     );
 
     // Positional arguments follow the listing order: the query `id` first, then the path `id`.
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/collide.rs"),
-        r##"#![cfg(feature = "blocking")]
+    write_fixture_test(
+        &out,
+        "collide",
+        &r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 #[test]
 fn each_colliding_parameter_reaches_its_own_location() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let read = stream.read(&mut buf).unwrap();
-            requests.push(String::from_utf8_lossy(&buf[..read]).into_owned());
-            stream
-                .write_all(
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .unwrap();
-            stream.flush().unwrap();
-        }
-        requests
-    });
+    let (base, server) = common::serve(vec![common::no_content(); 2]);
 
-    let client = params_collide::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let client = params_collide::BlockingClient::new(&base).unwrap();
     client
         .get_item(
             8,
@@ -474,7 +456,7 @@ fn each_colliding_parameter_reaches_its_own_location() {
         )
         .expect("search round-trips");
 
-    let requests = server.join().unwrap();
+    let requests: Vec<String> = server.join().unwrap().iter().map(|request| request.text()).collect();
     assert_eq!(
         requests[0].lines().next(),
         Some("GET /items/7?id=8&page-size=10 HTTP/1.1"),
@@ -497,8 +479,7 @@ fn each_colliding_parameter_reaches_its_own_location() {
 }
 "##
         .replace("HEADER_SETTER", &suffixed),
-    )
-    .unwrap();
+    );
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "collide"])
         .status()

@@ -43,8 +43,7 @@ fn date_and_date_time_reach_the_wire_as_rfc3339() {
         "the RFC 3339 newtype module must be embedded for a spec that uses dates"
     );
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/dates.rs"), DATE_WIRE_TEST).unwrap();
+    write_fixture_test(&out, "dates", DATE_WIRE_TEST);
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "dates"])
@@ -55,50 +54,15 @@ fn date_and_date_time_reach_the_wire_as_rfc3339() {
 
 const DATE_WIRE_TEST: &str = r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 #[test]
 fn dates_are_rfc3339_on_the_wire_in_both_directions() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 4096];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]);
-        let request_line = request.lines().next().unwrap();
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-
-        // Query parameters: RFC 3339 text, percent-encoded as query data (`:` -> `%3A`). A
-        // sequence-serialized datetime could not appear here at all.
-        assert!(
-            request_line.contains("since=2023-11-14T22%3A13%3A20Z"),
-            "date-time query parameter must be RFC 3339: {request_line}"
-        );
-        assert!(
-            request_line.contains("on=2023-11-14"),
-            "date query parameter must be a full-date: {request_line}"
-        );
-
-        // Request body: JSON strings, not the nine- and two-element integer arrays `time`'s own
-        // `Serialize` produces without `serde-human-readable`.
-        assert_eq!(
-            body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#,
-            "date fields must serialize as RFC 3339 strings: {body}"
-        );
-
-        let payload = r#"{"at":"2024-02-29T01:02:03.5+05:30","day":"2024-02-29"}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            payload.len(),
-            payload
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.flush().unwrap();
-    });
-
-    let base = format!("http://{addr}");
+    let (base, server) = common::serve_once(
+        "application/json",
+        "200 OK",
+        br#"{"at":"2024-02-29T01:02:03.5+05:30","day":"2024-02-29"}"#,
+    );
     let client = dates_client::BlockingClient::new(&base).unwrap();
 
     let at = dates_client::DateTime(
@@ -116,14 +80,32 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
         .create_event(Some(params), &event)
         .expect("create_event round-trips");
 
+    let request = server.join().unwrap();
+    let request_line = request.line();
+    // Query parameters: RFC 3339 text, percent-encoded as query data (`:` -> `%3A`). A
+    // sequence-serialized datetime could not appear here at all.
+    assert!(
+        request_line.contains("since=2023-11-14T22%3A13%3A20Z"),
+        "date-time query parameter must be RFC 3339: {request_line}"
+    );
+    assert!(
+        request_line.contains("on=2023-11-14"),
+        "date query parameter must be a full-date: {request_line}"
+    );
+    // Request body: JSON strings, not the nine- and two-element integer arrays `time`'s own
+    // `Serialize` produces without `serde-human-readable`.
+    let body = String::from_utf8_lossy(&request.body);
+    assert_eq!(
+        body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#,
+        "date fields must serialize as RFC 3339 strings: {body}"
+    );
+
     // Decoding: an offset and a subsecond survive the round trip as the server wrote them.
     let decoded = response.into_inner();
     assert_eq!(decoded.day.to_string(), "2024-02-29");
     assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
     // The newtype is transparent: `time`'s API is one deref away.
     assert_eq!(decoded.at.year(), 2024);
-
-    server.join().unwrap();
 }
 "##;
 
@@ -135,25 +117,11 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
 /// and silently went to the wrong server. Only a second listener can tell the two apart.
 #[test]
 fn a_server_override_sends_the_operation_to_another_host() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
     // Bound before generation: the override URL is baked into the generated code, so the port has
-    // to be known first. This listener is served from *this* process while the generated crate's
-    // test process drives the client against it.
-    let override_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let override_addr = override_listener.local_addr().unwrap();
-    let override_server = std::thread::spawn(move || {
-        let (mut stream, _) = override_listener.accept().unwrap();
-        let mut buf = [0u8; 2048];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]).to_string();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        request
-    });
+    // to be known first. This server runs in *this* process while the generated crate's test
+    // process drives the client against it.
+    let (override_base, override_server) = mock_server::serve_no_content();
+    let override_addr = override_base.strip_prefix("http://").unwrap();
 
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(
@@ -185,38 +153,23 @@ paths:
     let report = generate_fixture_crate(&spec, &out, "servers_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/servers.rs"),
+    write_fixture_test(
+        &out,
+        "servers",
         r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 // The base-URL operation must reach the client's own base, proving the override is scoped to the
 // path item that declares it rather than applied to the whole client.
 #[test]
 fn the_unoverridden_operation_still_uses_the_client_base_url() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base_server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 2048];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]).to_string();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        request
-    });
-
-    let base = format!("http://{addr}");
+    let (base, base_server) = common::serve_no_content();
     let client = servers_client::BlockingClient::new(&base).unwrap();
 
     // Goes to the client's base URL.
     client.list_pets().expect("list_pets round-trips");
-    let seen = base_server.join().unwrap();
+    let seen = base_server.join().unwrap().text();
     assert!(
         seen.starts_with("GET /pets "),
         "the base server should have served /pets: {seen}"
@@ -227,8 +180,7 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
     client.upload_item().expect("upload_item round-trips");
 }
 "##,
-    )
-    .unwrap();
+    );
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "servers"])
@@ -236,7 +188,7 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
         .unwrap();
     assert!(status.success(), "the server-override round-trip must pass");
 
-    let seen = override_server.join().unwrap();
+    let seen = override_server.join().unwrap().text();
     assert!(
         seen.starts_with("POST /upload "),
         "the override host should have served /upload: {seen}"
@@ -304,8 +256,7 @@ components:
     let report = generate_fixture_crate(&spec, &out, "urls_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(out.join("tests/urls.rs"), URL_ACCESSOR_TEST).unwrap();
+    write_fixture_test(&out, "urls", URL_ACCESSOR_TEST);
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "urls"])
         .status()
@@ -315,32 +266,17 @@ components:
 
 const URL_ACCESSOR_TEST: &str = r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 /// Serve `count` requests on a fresh port, answering each with `204`, and return the base URL,
 /// with a path prefix, and the request lines in the order they arrived.
 fn serve(count: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}/api", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        (0..count)
-            .map(|_| {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 4096];
-                let read = stream.read(&mut buf).unwrap();
-                let request = String::from_utf8_lossy(&buf[..read]).to_string();
-                stream
-                    .write_all(
-                        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .unwrap();
-                stream.flush().unwrap();
-                request.lines().next().unwrap().to_owned()
-            })
-            .collect()
+    let (base, server) = common::serve(vec![common::no_content(); count]);
+    let lines = std::thread::spawn(move || {
+        let requests = server.join().unwrap();
+        requests.iter().map(|request| request.line().to_owned()).collect()
     });
-    (base, server)
+    (format!("{base}/api"), lines)
 }
 
 /// The request line a request to `url` carries.
@@ -467,31 +403,16 @@ paths:
     let report = generate_fixture_crate(&spec, &out, "multipart_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/multipart.rs"),
+    write_fixture_test(
+        &out,
+        "multipart",
         r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
 
 #[test]
 fn rfc6570_multipart_parts_are_not_percent_encoded() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buf = [0u8; 8192];
-        let read = stream.read(&mut buf).unwrap();
-        let request = String::from_utf8_lossy(&buf[..read]).to_string();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        request
-    });
-
-    let base = format!("http://{addr}");
+    let (base, server) = common::serve_no_content();
     let client = multipart_client::BlockingClient::new(&base).unwrap();
     let body = multipart_client::types::RequestBody {
         tags: vec!["blue".into(), "black".into()],
@@ -500,7 +421,7 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
     };
     client.upload(&body).expect("upload round-trips");
 
-    let request = server.join().unwrap();
+    let request = server.join().unwrap().text();
 
     // `spaceDelimited` joins with a literal space, `pipeDelimited` with a literal `|`.
     assert!(
@@ -534,8 +455,7 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
     );
 }
 "##,
-    )
-    .unwrap();
+    );
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "multipart"])
@@ -607,57 +527,12 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/cbor.rs"),
+    write_fixture_test(
+        &out,
+        "cbor",
         r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-
-/// Serve one request, answering `body` under `content_type`, and return the request as received:
-/// its lowercased head and its body.
-fn serve_once(
-    content_type: &'static str,
-    body: &'static [u8],
-) -> (String, std::thread::JoinHandle<(String, Vec<u8>)>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut received = Vec::new();
-        let mut buf = [0u8; 4096];
-        let (head, length) = loop {
-            let read = stream.read(&mut buf).unwrap();
-            assert!(read > 0, "the request ended before its head did");
-            received.extend_from_slice(&buf[..read]);
-            if let Some(end) = received.windows(4).position(|window| window == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
-                let length = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length: "))
-                    .map_or(0, |length| length.trim().parse::<usize>().unwrap());
-                received.drain(..end + 4);
-                break (head, length);
-            }
-        };
-        while received.len() < length {
-            let read = stream.read(&mut buf).unwrap();
-            assert!(read > 0, "the request ended before its body did");
-            received.extend_from_slice(&buf[..read]);
-        }
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
-        (head, received)
-    });
-    (format!("http://{addr}"), server)
-}
+mod common;
 
 /// A CBOR map whose bytes no re-encoding would preserve: a non-canonical length prefix.
 const SIGNED: &[u8] = b"\xb9\x00\x01\x61k\x42\x00\xff";
@@ -673,45 +548,36 @@ fn cbor_is_sent_and_asked_for_under_its_own_media_type() {
         ),
         ("application/cose+cbor", |client, body| client.fetch_receipt(body)),
     ] {
-        let (base, server) = serve_once(media, SIGNED);
+        let (base, server) = common::serve_once(media, "200 OK", SIGNED);
         let client = cbor_client::BlockingClient::new(&base).unwrap();
         let returned = call(&client, &bytes::Bytes::from_static(SIGNED))
             .expect("the CBOR call round-trips")
             .into_inner();
-        let (head, body) = server.join().unwrap();
-        assert_eq!(header(&head, "content-type"), [media], "{head}");
+        let request = server.join().unwrap();
+        let head = &request.head;
+        assert_eq!(request.header("content-type"), [media], "{head}");
         // The declared type replaces the HTTP stack's default `*/*`, rather than joining it.
-        assert_eq!(header(&head, "accept"), [media], "{head}");
-        assert_eq!(body, SIGNED, "the request body must be the caller's exact bytes");
+        assert_eq!(request.header("accept"), [media], "{head}");
+        assert_eq!(request.body, SIGNED, "the request body must be the caller's exact bytes");
         assert_eq!(&returned[..], SIGNED, "the response must be the server's exact bytes");
     }
 }
 
-/// Every value of the header `name` in a lowercased request head, in order.
-fn header<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
-    head.lines()
-        .skip(1)
-        .filter_map(|line| line.split_once(':'))
-        .filter(|(field, _)| *field == name)
-        .map(|(_, value)| value.trim())
-        .collect()
-}
-
 #[test]
 fn octet_stream_still_leaves_accept_to_the_http_stack() {
-    let (base, server) = serve_once("application/octet-stream", SIGNED);
+    let (base, server) = common::serve_once("application/octet-stream", "200 OK", SIGNED);
     let client = cbor_client::BlockingClient::new(&base).unwrap();
     client
         .put_blob(&bytes::Bytes::from_static(SIGNED))
         .expect("the octet-stream call round-trips");
-    let (head, _) = server.join().unwrap();
-    assert_eq!(header(&head, "content-type"), ["application/octet-stream"], "{head}");
+    let request = server.join().unwrap();
+    let head = &request.head;
+    assert_eq!(request.header("content-type"), ["application/octet-stream"], "{head}");
     // The generated method sets no `Accept`; what arrives is the HTTP stack's own default.
-    assert_eq!(header(&head, "accept"), ["*/*"], "{head}");
+    assert_eq!(request.header("accept"), ["*/*"], "{head}");
 }
 "##,
-    )
-    .unwrap();
+    );
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "cbor"])
@@ -758,46 +624,21 @@ paths:
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics().is_empty(), "{report:#?}");
 
-    std::fs::create_dir_all(out.join("tests")).unwrap();
-    std::fs::write(
-        out.join("tests/nulls.rs"),
+    write_fixture_test(
+        &out,
+        "nulls",
         r##"#![cfg(feature = "blocking")]
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
+mod common;
+
+use common::header;
 
 /// Send one `listItems` call with `params` and return the lowercased request head it arrived as.
 fn request_head(params: nulls_client::ListItemsParams) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut received = Vec::new();
-        let mut buf = [0u8; 4096];
-        while !received.windows(4).any(|window| window == b"\r\n\r\n") {
-            let read = stream.read(&mut buf).unwrap();
-            assert!(read > 0, "the request ended before its head did");
-            received.extend_from_slice(&buf[..read]);
-        }
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        stream.flush().unwrap();
-        String::from_utf8_lossy(&received).to_ascii_lowercase()
-    });
-    let client = nulls_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let (base, server) = common::serve_no_content();
+    let client = nulls_client::BlockingClient::new(&base).unwrap();
     client.list_items(params).expect("the call round-trips");
-    server.join().unwrap()
-}
-
-/// Every value of the header `name` in a lowercased request head, in order.
-fn header<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
-    head.lines()
-        .skip(1)
-        .filter_map(|line| line.split_once(':'))
-        .filter(|(field, _)| *field == name)
-        .map(|(_, value)| value.trim())
-        .collect()
+    server.join().unwrap().head.to_ascii_lowercase()
 }
 
 #[test]
@@ -828,8 +669,7 @@ fn absent_null_and_a_value_are_three_requests() {
     assert_eq!(header(&value, "cookie"), ["session=3"], "{value}");
 }
 "##,
-    )
-    .unwrap();
+    );
 
     let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "nulls"])
