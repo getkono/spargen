@@ -8,7 +8,7 @@ use crate::ir::Api;
 use crate::name::Names;
 
 use super::docs::normalize_rustdoc;
-use super::operation::emit_operation;
+use super::operation::{emit_operation, OperationSig};
 use super::params::emit_params_struct;
 use super::responses::{emit_error_enum, emit_response_enum, emit_response_headers};
 use super::CodegenOptions;
@@ -40,13 +40,19 @@ fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
 /// struct, typed error, multi-status success enum, and response-header structs, the `servers`
 /// module, and the `Client` itself — its constructors (`new`, `with_default_server` when a server
 /// is declared, `with_client`, `with_backend`), `core`, the credential registration methods, and
-/// one async method per operation.
-pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
+/// one async method per operation, declared from its entry in `signatures`, which runs parallel to
+/// `api.operations`.
+pub(super) fn emit_client(
+    api: &Api,
+    signatures: &[OperationSig],
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
     let scheme_docs = scheme_doc_lines(api);
     let params = api
         .operations
         .iter()
-        .filter(|operation| operation.params.iter().any(|param| !param.required))
+        .filter(|operation| operation.has_optional_params())
         .map(|operation| emit_params_struct(operation, names));
     let errors = api
         .operations
@@ -59,7 +65,8 @@ pub(super) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_operation(operation, api, names));
+        .zip(signatures)
+        .map(|(operation, sig)| emit_operation(operation, sig, api, names));
     let response_headers = api
         .operations
         .iter()
@@ -180,11 +187,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         return quote! {};
     }
     let builders = api.servers.iter().enumerate().map(|(index, server)| {
-        let ident = names
-            .servers
-            .get(index)
-            .expect("server name allocated")
-            .clone();
+        let ident = names.servers.get(index).expect("server name allocated");
         let mut docs = vec![format!("Server `{}`.", server.url)];
         if let Some(description) = &server.description {
             docs.push(description.clone());
@@ -360,7 +363,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
             }
         }
     });
-    let first = names.servers.first().expect("at least one server").clone();
+    let first = names.servers.first().expect("at least one server");
     quote! {
         /// Base URLs declared by the API description.
         #[allow(dead_code)]
@@ -501,17 +504,23 @@ mod tests {
         };
         let names = crate::name::allocate(&api);
         let options = CodegenOptions::default();
-        let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
-            .expect("the emitted client parses");
-        let blocking: syn::File =
-            syn::parse2(super::super::blocking::emit_blocking_client(&api, &names))
-                .expect("the emitted blocking client parses");
+        let signatures = super::super::operation::signatures(&api, &names);
+        let client: syn::File =
+            syn::parse2(super::emit_client(&api, &signatures, &names, &options))
+                .expect("the emitted client parses");
+        let blocking: syn::File = syn::parse2(super::super::blocking::emit_blocking_client(
+            &api,
+            &signatures,
+            &names,
+        ))
+        .expect("the emitted blocking client parses");
 
         // Each operation's method and its URL accessor.
-        let operation_methods: std::collections::BTreeSet<String> = names
+        let operation_methods: std::collections::BTreeSet<String> = api
             .operations
-            .values()
-            .chain(names.operation_urls.values())
+            .iter()
+            .map(|operation| names.operation(&operation.id))
+            .flat_map(|names| [&names.method, &names.url_accessor])
             .map(|ident| ident.as_str().to_owned())
             .collect();
         let mut fixed = std::collections::BTreeSet::new();

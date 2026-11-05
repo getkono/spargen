@@ -5,7 +5,7 @@
 //! Pointer + span model, and the [`InterpId`] (`INT-###`) a code may name for the interpretation
 //! its behavior depends on.
 //! `diag` is the lowest layer, which the stages that report diagnostics reach and which depends
-//! on nothing.
+//! on nothing; that is also why it holds [`fnv1a64`], the stable hash `compat` and `name` share.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
 //! construct, a [`Span`] (line and column within the file its [`FileId`] names) when the
@@ -16,6 +16,7 @@
 
 mod code;
 mod collect;
+mod fnv;
 mod interp;
 mod pointer;
 mod provenance;
@@ -24,6 +25,7 @@ mod span;
 
 pub use code::{Code, UnknownCode};
 pub(crate) use collect::{Aborted, Diagnostics};
+pub(crate) use fnv::fnv1a64;
 pub use interp::InterpId;
 pub(crate) use pointer::escape_token;
 pub use pointer::JsonPointer;

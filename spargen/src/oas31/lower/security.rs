@@ -10,13 +10,7 @@ use crate::source::security_requirement_key_reference;
 pub(super) fn lower_security_requirement(
     requirement: &SecurityRequirement,
 ) -> crate::ir::SecurityRequirement {
-    crate::ir::SecurityRequirement(
-        requirement
-            .0
-            .iter()
-            .map(|(name, scopes)| (SchemeId(name.clone()), scopes.clone()))
-            .collect(),
-    )
+    crate::ir::SecurityRequirement(requirement.0.keys().cloned().map(SchemeId).collect())
 }
 
 /// Resolve security requirement names that are URIs rather than declared component names.

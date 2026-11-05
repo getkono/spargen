@@ -4,9 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Change, ChangeKind, DiffReport, FieldSurface, HeadersSurface, Impact, OpSurface,
-    OverflowSurface, ParamKey, ParamSurface, ServerSurface, ServerVariableSurface, Surface,
-    TypeSurface,
+    Change, ChangeKind, DiffReport, HeadersSurface, Impact, MemberSurface, OpSurface,
+    OverflowSurface, ParamKey, ServerSurface, ServerVariableSurface, Surface, TypeSurface,
 };
 
 /// Diff two surfaces into a classified, deterministically ordered [`DiffReport`].
@@ -68,7 +67,7 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     } else if old.url_accessor_name != new.url_accessor_name {
-        // The accessor was renamed although its method was not (see `Names::operation_urls`):
+        // The accessor was renamed although its method was not (see `OperationNames::url_accessor`):
         // its callers break just as a method's would.
         changes.push(Change::new(
             ChangeKind::MethodRenamed,
@@ -79,42 +78,13 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             ),
         ));
     }
-    match (&old.request_body, &new.request_body) {
-        (None, Some(body)) => changes.push(Change::new(
-            ChangeKind::RequestBodyAdded,
-            key,
-            format!("request body added: `{}`", body.ty),
-        )),
-        (Some(body), None) => changes.push(Change::new(
-            ChangeKind::RequestBodyRemoved,
-            key,
-            format!("request body removed (was `{}`)", body.ty),
-        )),
-        (Some(old_body), Some(new_body)) => {
-            if old_body.ty != new_body.ty {
-                changes.push(Change::new(
-                    ChangeKind::RequestBodyTypeChanged,
-                    key,
-                    format!("request body type `{}` -> `{}`", old_body.ty, new_body.ty),
-                ));
-            }
-            if old_body.required != new_body.required {
-                changes.push(Change::new(
-                    ChangeKind::RequestBodyRequirednessChanged,
-                    key,
-                    format!(
-                        "request body now {}",
-                        if new_body.required {
-                            "required"
-                        } else {
-                            "optional"
-                        }
-                    ),
-                ));
-            }
-        }
-        (None, None) => {}
-    }
+    diff_member(
+        &BODY,
+        key,
+        old.request_body.as_ref(),
+        new.request_body.as_ref(),
+        changes,
+    );
     if old.success != new.success {
         changes.push(Change::new(
             ChangeKind::SuccessTypeChanged,
@@ -151,42 +121,16 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             // The arrival side of a move; its departure side compares the pair.
             (None, Some(_)) if moved_param(param_key, &new.params, &old.params).is_some() => {}
             (Some(old_param), None) => match moved_param(param_key, &old.params, &new.params) {
-                Some(to) => diff_param(
+                Some(to) => diff_member(
+                    &PARAM,
                     format!("{key} param `{name}` ({loc} -> {})", to.1),
-                    old_param,
-                    &new.params[to],
+                    Some(old_param),
+                    Some(&new.params[to]),
                     changes,
                 ),
-                None => changes.push(Change::new(
-                    ChangeKind::ParamRemoved,
-                    location,
-                    format!("parameter removed (was `{}`)", old_param.ty),
-                )),
+                None => diff_member(&PARAM, location, Some(old_param), None, changes),
             },
-            (Some(old_param), Some(new_param)) => {
-                diff_param(location, old_param, new_param, changes);
-            }
-            (None, Some(param)) => {
-                let kind = if param.required {
-                    ChangeKind::RequiredParamAdded
-                } else {
-                    ChangeKind::OptionalParamAdded
-                };
-                changes.push(Change::new(
-                    kind,
-                    location,
-                    format!(
-                        "{} parameter added: `{}`",
-                        if param.required {
-                            "required"
-                        } else {
-                            "optional"
-                        },
-                        param.ty
-                    ),
-                ));
-            }
-            (None, None) => unreachable!("key drawn from the union of both maps"),
+            (old_param, new_param) => diff_member(&PARAM, location, old_param, new_param, changes),
         }
     }
     diff_response_headers(key, &old.response_headers, &new.response_headers, changes);
@@ -241,53 +185,13 @@ fn diff_header_fields(
     changes: &mut Vec<Change>,
 ) {
     for field in keys(&old.fields, &new.fields) {
-        let location = format!("{key} {status} header `{field}`");
-        match (old.fields.get(field), new.fields.get(field)) {
-            (None, Some(header)) => {
-                let (kind, label) = if header.required {
-                    (ChangeKind::RequiredResponseHeaderAdded, "required")
-                } else {
-                    (ChangeKind::ResponseHeaderAdded, "optional")
-                };
-                changes.push(Change::new(
-                    kind,
-                    location,
-                    format!("{label} response header added: `{}`", header.ty),
-                ));
-            }
-            (Some(header), None) => changes.push(Change::new(
-                ChangeKind::ResponseHeaderRemoved,
-                location,
-                format!("response header removed (was `{}`)", header.ty),
-            )),
-            (Some(old_header), Some(new_header)) => {
-                if old_header.ty != new_header.ty {
-                    changes.push(Change::new(
-                        ChangeKind::ResponseHeaderTypeChanged,
-                        location.clone(),
-                        format!(
-                            "response header type `{}` -> `{}`",
-                            old_header.ty, new_header.ty
-                        ),
-                    ));
-                }
-                if old_header.required != new_header.required {
-                    changes.push(Change::new(
-                        ChangeKind::ResponseHeaderRequirednessChanged,
-                        location,
-                        format!(
-                            "response header now {}",
-                            if new_header.required {
-                                "required"
-                            } else {
-                                "optional"
-                            }
-                        ),
-                    ));
-                }
-            }
-            (None, None) => unreachable!("key drawn from the union of both maps"),
-        }
+        diff_member(
+            &HEADER,
+            format!("{key} {status} header `{field}`"),
+            old.fields.get(field),
+            new.fields.get(field),
+            changes,
+        );
     }
 }
 
@@ -393,33 +297,111 @@ fn moved_param<'a, V>(
     }
 }
 
-/// The changes between two declarations of one parameter, reported at `location`.
-fn diff_param(
-    location: String,
-    old_param: &ParamSurface,
-    new_param: &ParamSurface,
+/// What a kind of typed member is called in a change's detail, and the [`ChangeKind`] each
+/// difference in it takes.
+struct Member {
+    /// The member as a detail names it: `parameter`, `request body`, `field`, `response header`.
+    noun: &'static str,
+    /// The kind of an added member that is required, and of one that is optional.
+    added: (ChangeKind, ChangeKind),
+    /// Whether an added member's detail says which of the two it is (`required field added`); a
+    /// request body's does not.
+    added_says_required: bool,
+    removed: ChangeKind,
+    type_changed: ChangeKind,
+    requiredness_changed: ChangeKind,
+}
+
+const PARAM: Member = Member {
+    noun: "parameter",
+    added: (
+        ChangeKind::RequiredParamAdded,
+        ChangeKind::OptionalParamAdded,
+    ),
+    added_says_required: true,
+    removed: ChangeKind::ParamRemoved,
+    type_changed: ChangeKind::ParamTypeChanged,
+    requiredness_changed: ChangeKind::ParamRequirednessChanged,
+};
+
+const BODY: Member = Member {
+    noun: "request body",
+    added: (ChangeKind::RequestBodyAdded, ChangeKind::RequestBodyAdded),
+    added_says_required: false,
+    removed: ChangeKind::RequestBodyRemoved,
+    type_changed: ChangeKind::RequestBodyTypeChanged,
+    requiredness_changed: ChangeKind::RequestBodyRequirednessChanged,
+};
+
+const FIELD: Member = Member {
+    noun: "field",
+    added: (ChangeKind::RequiredFieldAdded, ChangeKind::FieldAdded),
+    added_says_required: true,
+    removed: ChangeKind::FieldRemoved,
+    type_changed: ChangeKind::FieldTypeChanged,
+    requiredness_changed: ChangeKind::FieldRequirednessChanged,
+};
+
+const HEADER: Member = Member {
+    noun: "response header",
+    added: (
+        ChangeKind::RequiredResponseHeaderAdded,
+        ChangeKind::ResponseHeaderAdded,
+    ),
+    added_says_required: true,
+    removed: ChangeKind::ResponseHeaderRemoved,
+    type_changed: ChangeKind::ResponseHeaderTypeChanged,
+    requiredness_changed: ChangeKind::ResponseHeaderRequirednessChanged,
+};
+
+/// The changes between a typed `member`'s two sides, reported at `location`: added, removed, or,
+/// present on both, its type and its requiredness each compared. Absent on both, nothing changed.
+fn diff_member(
+    member: &Member,
+    location: impl Into<String>,
+    old: Option<&MemberSurface>,
+    new: Option<&MemberSurface>,
     changes: &mut Vec<Change>,
 ) {
-    if old_param.ty != new_param.ty {
-        changes.push(Change::new(
-            ChangeKind::ParamTypeChanged,
-            location.clone(),
-            format!("parameter type `{}` -> `{}`", old_param.ty, new_param.ty),
-        ));
-    }
-    if old_param.required != new_param.required {
-        changes.push(Change::new(
-            ChangeKind::ParamRequirednessChanged,
+    let location = location.into();
+    let noun = member.noun;
+    let label = |required: bool| if required { "required" } else { "optional" };
+    match (old, new) {
+        (None, Some(added)) => {
+            let kind = if added.required {
+                member.added.0
+            } else {
+                member.added.1
+            };
+            let detail = if member.added_says_required {
+                format!("{} {noun} added: `{}`", label(added.required), added.ty)
+            } else {
+                format!("{noun} added: `{}`", added.ty)
+            };
+            changes.push(Change::new(kind, location, detail));
+        }
+        (Some(removed), None) => changes.push(Change::new(
+            member.removed,
             location,
-            format!(
-                "parameter now {}",
-                if new_param.required {
-                    "required"
-                } else {
-                    "optional"
-                }
-            ),
-        ));
+            format!("{noun} removed (was `{}`)", removed.ty),
+        )),
+        (Some(old), Some(new)) => {
+            if old.ty != new.ty {
+                changes.push(Change::new(
+                    member.type_changed,
+                    location.clone(),
+                    format!("{noun} type `{}` -> `{}`", old.ty, new.ty),
+                ));
+            }
+            if old.required != new.required {
+                changes.push(Change::new(
+                    member.requiredness_changed,
+                    location,
+                    format!("{noun} now {}", label(new.required)),
+                ));
+            }
+        }
+        (None, None) => {}
     }
 }
 
@@ -542,63 +524,18 @@ fn diff_overflow(
 
 fn diff_struct(
     name: &str,
-    old: &BTreeMap<String, FieldSurface>,
-    new: &BTreeMap<String, FieldSurface>,
+    old: &BTreeMap<String, MemberSurface>,
+    new: &BTreeMap<String, MemberSurface>,
     changes: &mut Vec<Change>,
 ) {
     for field in keys(old, new) {
-        let location = format!("{name}.{field}");
-        match (old.get(field), new.get(field)) {
-            (None, Some(field_surface)) => {
-                let kind = if field_surface.required {
-                    ChangeKind::RequiredFieldAdded
-                } else {
-                    ChangeKind::FieldAdded
-                };
-                changes.push(Change::new(
-                    kind,
-                    location,
-                    format!(
-                        "{} field added: `{}`",
-                        if field_surface.required {
-                            "required"
-                        } else {
-                            "optional"
-                        },
-                        field_surface.ty
-                    ),
-                ));
-            }
-            (Some(field_surface), None) => changes.push(Change::new(
-                ChangeKind::FieldRemoved,
-                location,
-                format!("field removed (was `{}`)", field_surface.ty),
-            )),
-            (Some(old_field), Some(new_field)) => {
-                if old_field.ty != new_field.ty {
-                    changes.push(Change::new(
-                        ChangeKind::FieldTypeChanged,
-                        location.clone(),
-                        format!("field type `{}` -> `{}`", old_field.ty, new_field.ty),
-                    ));
-                }
-                if old_field.required != new_field.required {
-                    changes.push(Change::new(
-                        ChangeKind::FieldRequirednessChanged,
-                        location,
-                        format!(
-                            "field now {}",
-                            if new_field.required {
-                                "required"
-                            } else {
-                                "optional"
-                            }
-                        ),
-                    ));
-                }
-            }
-            (None, None) => unreachable!("key drawn from the union of both maps"),
-        }
+        diff_member(
+            &FIELD,
+            format!("{name}.{field}"),
+            old.get(field),
+            new.get(field),
+            changes,
+        );
     }
 }
 

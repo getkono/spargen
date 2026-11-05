@@ -5,7 +5,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph, TypeKind,
+    AdditionalProps, Api, Emission, Field, ScalarRepr, ScalarValue, Ty, TypeDef, TypeGraph,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -62,11 +63,12 @@ pub(super) fn emit_models(
 /// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
 /// string and matches it, reaching the catch-all only for a value no unit variant lists.
 ///
-/// `display_arms` are the closed enum's `Display` arms, which map each unit variant to its value.
+/// `listed` are the [`string_variants`] the closed enum declares, and `display_arms` its `Display`
+/// arms, which map each unit variant to its value.
 fn emit_open_string_enum(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
-    enumeration: &crate::ir::ScalarEnum,
+    listed: &[(&String, &crate::name::Ident)],
     names: &Names,
     docs: TokenStream,
     deprecated: Option<TokenStream>,
@@ -76,7 +78,6 @@ fn emit_open_string_enum(
         .open_variants
         .get(&id)
         .expect("open variant name allocated");
-    let listed = string_variants(id, enumeration, names);
     let variants = listed
         .iter()
         .map(|(_, variant_ident)| quote! { #variant_ident, });
@@ -173,8 +174,8 @@ fn emit_type_def(
     let ident = names.types.get(&id).expect("type name allocated");
     let docs = doc_tokens(&def.docs);
     let deprecated = def.docs.deprecated.then(|| quote! { #[deprecated] });
-    match &def.kind {
-        TypeKind::Struct(object) => {
+    match types.emission(id, def) {
+        Emission::Struct(object) => {
             let deny_unknown = matches!(object.additional, AdditionalProps::Deny)
                 .then(|| quote! { #[serde(deny_unknown_fields)] });
             // A root `xml.name`, or a component's inferred one, names the element quick-xml writes
@@ -183,7 +184,7 @@ fn emit_type_def(
             // equal to the identifier is the serde name already.
             let xml_root = types
                 .xml_root_name(id)
-                .filter(|name| *name != ident.to_string())
+                .filter(|name| *name != ident.as_str())
                 .map(|name| quote! { #[serde(rename = #name)] });
             let fields = object
                 .fields
@@ -217,7 +218,7 @@ fn emit_type_def(
                 #(#providers)*
             }
         }
-        TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
+        Emission::StringEnum(enumeration) => {
             let listed = string_variants(id, enumeration, names);
             let variants = listed.iter().map(|(value, variant_ident)| {
                 quote! { #[serde(rename = #value)] #variant_ident, }
@@ -229,7 +230,7 @@ fn emit_type_def(
                 return emit_open_string_enum(
                     id,
                     ident,
-                    enumeration,
+                    &listed,
                     names,
                     docs,
                     deprecated,
@@ -253,15 +254,15 @@ fn emit_type_def(
                 }
             }
         }
-        TypeKind::Enum(enumeration) => {
-            let ty = match enumeration.repr {
-                ScalarRepr::String => unreachable!("a string enum is emitted by the arm above"),
+        Emission::ScalarAlias(repr) => {
+            let ty = match repr {
+                ScalarRepr::String => unreachable!("a string enum is emitted as a `pub enum`"),
                 ScalarRepr::Int => quote! { i64 },
                 ScalarRepr::Bool => quote! { bool },
             };
             quote! { #docs #deprecated pub type #ident = #ty; }
         }
-        TypeKind::Never => {
+        Emission::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
             quote! {
                 #docs
@@ -288,18 +289,11 @@ fn emit_type_def(
                 }
             }
         }
-        TypeKind::Union(union) => emit_union(id, ident, union, names, docs, deprecated),
-        // Named here rather than left to the alias arm: `type_kind_tokens` refuses it too, but a
-        // reservation is not an alias and must not read as one at this site either.
-        TypeKind::Reserved => {
-            unreachable!(
-                "a reservation reached codegen; `check_invariants` should have rejected it"
-            )
-        }
+        Emission::Union(union) => emit_union(id, ident, union, names, docs, deprecated),
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.
-        TypeKind::Array(_) | TypeKind::Tuple(_) if types.closes_alias_cycle(id) => {
+        Emission::Newtype => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! {
                 #docs
@@ -309,7 +303,7 @@ fn emit_type_def(
                 pub struct #ident(pub #ty);
             }
         }
-        _ => {
+        Emission::Alias => {
             let ty = type_kind_tokens(&def.kind, names, options);
             quote! { #docs #deprecated pub type #ident = #ty; }
         }
@@ -403,11 +397,7 @@ fn default_provider_ident(
     id: crate::ir::TypeId,
     field_ident: &crate::name::Ident,
 ) -> proc_macro2::Ident {
-    format_ident!(
-        "default_{}_{}",
-        id.0,
-        field_ident.as_str().trim_start_matches("r#")
-    )
+    format_ident!("default_{}_{}", id.0, field_ident.unraw())
 }
 
 /// Emit a field's serde default-provider function, when its `default` is a representable scalar

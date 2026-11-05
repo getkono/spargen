@@ -607,8 +607,9 @@ impl std::error::Error for DiffRejection {}
 /// spec's `batch_cap`.
 ///
 /// Read through [`old_report`](Self::old_report), [`new_report`](Self::new_report), or
-/// [`reports`](Self::reports) for both sides in turn.
-#[derive(Debug, Clone)]
+/// [`reports`](Self::reports) for both sides in turn. Serializes as `{"old": …, "new": …}`, keyed
+/// by [`Side::as_str`].
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiffSides {
     old: Report,
     new: Report,
@@ -642,17 +643,6 @@ impl std::fmt::Display for DiffSides {
             }
         }
         Ok(())
-    }
-}
-
-impl serde::Serialize for DiffSides {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(2))?;
-        for (side, report) in self.reports() {
-            map.serialize_entry(side.as_str(), report)?;
-        }
-        map.end()
     }
 }
 

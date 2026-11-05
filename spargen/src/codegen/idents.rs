@@ -1,72 +1,8 @@
-//! The identifiers an emitted item is declared or referenced by: lookups into the
-//! [`Names`] table `name` allocated, and the status-selector variant names derived from a
-//! [`StatusSpec`](crate::ir::StatusSpec), read by the operation, blocking-client, parameter,
-//! response and dispatch emitters.
+//! The status-selector variant names derived from a [`StatusSpec`](crate::ir::StatusSpec), read by
+//! the response and dispatch emitters. Every other identifier an emitted item is declared or
+//! referenced by is looked up in the [`Names`](crate::name::Names) table `name` allocated.
 
 use quote::format_ident;
-
-use crate::ir::Operation;
-use crate::name::{Names, OperationBindings};
-
-/// The method identifier of an operation on `Client` and `BlockingClient`, as
-/// [`Names::operations`] allocates it.
-pub(super) fn operation_method_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .operations
-        .get(&operation.id)
-        .expect("operation name allocated")
-}
-
-/// The URL-accessor method identifier of an operation on `Client` and `BlockingClient`, as
-/// [`Names::operation_urls`] allocates it.
-pub(super) fn operation_url_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .operation_urls
-        .get(&operation.id)
-        .expect("operation URL accessor name allocated")
-}
-
-/// The type name of an operation's optional-parameters `…Params` struct, as
-/// [`Names::params_structs`] allocates it.
-pub(super) fn params_struct_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated")
-}
-
-/// The type name of an operation's multi-status success response enum, `{Method}Response` as
-/// [`Names::success_enums`] allocates it.
-pub(super) fn success_enum_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .success_enums
-        .get(&operation.id)
-        .expect("success enum name allocated for an enum-shaped success")
-}
-
-/// The type name of an operation's error type, `{Method}Error` or `{Method}OperationError` as
-/// [`Names::operation_errors`] allocates it.
-pub(super) fn error_type_ident<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a crate::name::Ident {
-    names
-        .operation_errors
-        .get(&operation.id)
-        .expect("error type name allocated")
-}
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
 /// code, `Status2xx` for a range, and `Default` for [`StatusSpec::Default`](crate::ir::StatusSpec)
@@ -79,37 +15,4 @@ pub(super) fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::
         "{}",
         crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
     )
-}
-
-/// The local and argument identifiers `name` allocated for one operation method's body.
-pub(super) fn operation_bindings<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a OperationBindings {
-    names
-        .operation_bindings
-        .get(&operation.id)
-        .expect("operation bindings allocated")
-}
-
-/// The identifier `name` allocated for `param`: its method argument when it is required, its
-/// `…Params` field and setter when it is optional. Looked up rather than escaped here, so two
-/// parameters whose names escape alike still get distinct identifiers.
-///
-/// `param` must be borrowed from `operation.params`; the allocation is positional, and it is found
-/// by address so that two parameters sharing a wire name in different locations stay apart.
-pub(super) fn param_ident<'a>(
-    names: &'a Names,
-    operation: &Operation,
-    param: &crate::ir::Parameter,
-) -> &'a crate::name::Ident {
-    let index = operation
-        .params
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, param))
-        .expect("a parameter is borrowed from its own operation");
-    &names
-        .parameters
-        .get(&operation.id)
-        .expect("parameter names allocated")[index]
 }

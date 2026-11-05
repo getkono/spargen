@@ -57,7 +57,8 @@ pub(crate) enum ApiKeyLoc {
     Cookie,
 }
 
-/// One operation-level `security` requirement: an AND of schemes (each with its required scopes).
-/// A list of these on an operation is an OR of alternatives.
+/// One operation-level `security` requirement: an AND of schemes. A list of these on an operation
+/// is an OR of alternatives. A requirement's scopes are the server's to check against the token it
+/// is sent, so the IR keeps only the schemes, which select the credentials to attach.
 #[derive(Debug, Clone)]
-pub(crate) struct SecurityRequirement(pub(crate) Vec<(SchemeId, Vec<String>)>);
+pub(crate) struct SecurityRequirement(pub(crate) Vec<SchemeId>);

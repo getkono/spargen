@@ -9,7 +9,7 @@ use crate::ir::{
 };
 use crate::name::{Names, OperationBindings};
 
-use super::idents::{status_variant_ident, success_enum_ident};
+use super::idents::status_variant_ident;
 use super::ty::{boxed_ty_tokens, is_bytes_ty, ty_tokens};
 
 /// The statement that attaches the operation's credentials to `request_binding`: the first
@@ -24,7 +24,7 @@ pub(super) fn attach_auth_tokens(
         quote! {}
     } else {
         let alternatives = operation.security.iter().map(|requirement| {
-            let schemes = requirement.0.iter().map(|(id, _scopes)| {
+            let schemes = requirement.0.iter().map(|id| {
                 let scheme = api
                     .security_schemes
                     .get(id)
@@ -69,11 +69,10 @@ pub(super) fn error_branch_tokens(
     names: &Names,
     error_ident: &crate::name::Ident,
 ) -> TokenStream {
-    let error_ty = quote! { #error_ident };
     let error_shape = operation.responses.error();
     match &error_shape {
         ErrorShape::None => quote! {
-            Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
+            Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
         },
         // A single documented error body, the operation's only error entry: classify against its
         // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
@@ -87,19 +86,17 @@ pub(super) fn error_branch_tokens(
                 .map(|(status, _)| runtime_status_spec(status))
                 .collect::<Vec<_>>();
             // The raw-bytes classifier builds the newtype through `From<Bytes>` and takes no type
-            // argument; every other codec's classifier decodes into the aliased `E`.
-            let classifier = if is_bytes_ty(api, *body_ty) {
-                quote! { classify_error_bytes }
-            } else {
-                match operation.responses.single_error_media() {
-                    Some(MediaType::Xml) => quote! { classify_error_xml::<#error_ty> },
-                    Some(MediaType::Text) => quote! { classify_error_text::<#error_ty> },
-                    // JSON. A streaming error media never reaches this arm: lowering rejects a
-                    // bodied stream on the error side (`Responses::stream_outside_single_success`),
-                    // since a stream cannot be classified as one whole body.
-                    _ => quote! { classify_error::<#error_ty> },
-                }
-            };
+            // argument; every other codec's classifier decodes into the aliased `E`. A streaming
+            // error media never reaches here: lowering rejects a bodied stream on the error side
+            // (`Responses::stream_outside_single_success`), since a stream cannot be classified as
+            // one whole body.
+            let classifier =
+                match BodyCodec::of(api, *body_ty, operation.responses.single_error_media()) {
+                    BodyCodec::Bytes => quote! { classify_error_bytes },
+                    BodyCodec::Xml => quote! { classify_error_xml::<#error_ident> },
+                    BodyCodec::Text => quote! { classify_error_text::<#error_ident> },
+                    BodyCodec::Json => quote! { classify_error::<#error_ident> },
+                };
             let classify = quote! {
                 support::#classifier(
                     &self.core,
@@ -158,7 +155,7 @@ pub(super) fn error_branch_tokens(
             });
             quote! {
                 let (status, headers, body, truncated) =
-                    match support::read_error_body::<#error_ty>(&self.core, response).await {
+                    match support::read_error_body::<#error_ident>(&self.core, response).await {
                         Ok(parts) => parts,
                         Err(error) => return Err(error),
                     };
@@ -182,7 +179,6 @@ pub(super) fn success_decode_tokens(
 ) -> (TokenStream, Option<TokenStream>) {
     let request_binding = &bindings.request;
     let reconnect_request_binding = &bindings.reconnect_request;
-    let error_ty = quote! { #error_ident };
     let success_decode = match operation.responses.success() {
         SuccessShape::Unit => quote! {
             let status = response.status();
@@ -191,19 +187,21 @@ pub(super) fn success_decode_tokens(
         },
         // A single success body: decode into the aliased `T` through its selected wire codec.
         SuccessShape::Plain(body_ty) => {
-            let decode = if is_bytes_ty(api, body_ty) {
-                quote! { support::decode_success_bytes(&self.core, response) }
-            } else {
-                match operation.responses.single_success_media() {
-                    Some(MediaType::Xml) => {
+            let decode =
+                match BodyCodec::of(api, body_ty, operation.responses.single_success_media()) {
+                    BodyCodec::Bytes => {
+                        quote! { support::decode_success_bytes(&self.core, response) }
+                    }
+                    BodyCodec::Xml => {
                         quote! { support::decode_success_xml::<#success_ty>(&self.core, response) }
                     }
-                    Some(MediaType::Text) => {
+                    BodyCodec::Text => {
                         quote! { support::decode_success_text::<#success_ty>(&self.core, response) }
                     }
-                    _ => quote! { support::decode_success::<#success_ty>(&self.core, response) },
-                }
-            };
+                    BodyCodec::Json => {
+                        quote! { support::decode_success::<#success_ty>(&self.core, response) }
+                    }
+                };
             quote! {
                 #decode.await.map_err(support::Error::widen)
             }
@@ -214,7 +212,7 @@ pub(super) fn success_decode_tokens(
         // variant is an unexpected-status error — there is no untyped fallback. Every body an
         // error keeps goes through a runtime helper that caps it at `max_error_body`.
         SuccessShape::Enum(entries) => {
-            let enum_ident = success_enum_ident(operation, names);
+            let enum_ident = names.operation(&operation.id).success_enum();
             let arms = entries.iter().map(|(spec, ty)| {
                 let spec_tokens = runtime_status_spec(*spec);
                 let variant_ident = status_variant_ident(*spec);
@@ -255,7 +253,7 @@ pub(super) fn success_decode_tokens(
             quote! {
                 let status = response.status();
                 #(#arms)*
-                Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
+                Err(support::unexpected_status::<#error_ident>(&self.core, response).await)
             }
         }
     };
@@ -323,28 +321,54 @@ fn variant_body_decode(
     } else {
         quote! { &body }
     };
-    if is_bytes_ty(api, body_ty) {
-        let payload = quote! { Box::new(body.clone()) };
-        return match success_variant {
-            Some(variant) => quote! { Ok::<_, String>(#variant(#payload)) },
-            None => quote! { Ok::<#ty, String>(#payload) },
-        };
-    }
-    let decode = if media == Some(MediaType::Text) {
-        quote! { support::decode_text_body::<#ty>(#bytes) }
-    } else if media == Some(MediaType::Xml) {
+    let decode = match BodyCodec::of(api, body_ty, media) {
+        BodyCodec::Bytes => {
+            let payload = quote! { Box::new(body.clone()) };
+            return match success_variant {
+                Some(variant) => quote! { Ok::<_, String>(#variant(#payload)) },
+                None => quote! { Ok::<#ty, String>(#payload) },
+            };
+        }
+        BodyCodec::Text => quote! { support::decode_text_body::<#ty>(#bytes) },
         // Only as the lone body beside bodyless entries on its side: a second bodied response
         // beside an XML one is rejected (`xml_in_multi_status`).
-        quote! { support::decode_xml_body::<#ty>(#bytes) }
-    } else {
-        quote! {
+        BodyCodec::Xml => quote! { support::decode_xml_body::<#ty>(#bytes) },
+        BodyCodec::Json => quote! {
             serde_json::from_slice::<#ty>(#bytes)
                 .map_err(|error| error.to_string())
-        }
+        },
     };
     match success_variant {
         Some(variant) => quote! { #decode.map(#variant) },
         None => decode,
+    }
+}
+
+/// The codec a response body is decoded with, chosen once for the single-body success and error
+/// paths and the by-status variants alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyCodec {
+    /// A `bytes`-typed body, read raw whatever its media.
+    Bytes,
+    /// An XML media.
+    Xml,
+    /// A `text/plain` media.
+    Text,
+    /// Every other media: JSON.
+    Json,
+}
+
+impl BodyCodec {
+    /// The codec of a body of type `ty` under the response's chosen `media`.
+    fn of(api: &Api, ty: Ty, media: Option<MediaType>) -> Self {
+        if is_bytes_ty(api, ty) {
+            return Self::Bytes;
+        }
+        match media {
+            Some(MediaType::Xml) => Self::Xml,
+            Some(MediaType::Text) => Self::Text,
+            _ => Self::Json,
+        }
     }
 }
 
@@ -355,7 +379,7 @@ pub(super) fn success_type(operation: &Operation, names: &Names) -> TokenStream 
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, true),
         SuccessShape::Enum(_) => {
-            let ident = success_enum_ident(operation, names);
+            let ident = names.operation(&operation.id).success_enum();
             quote! { #ident }
         }
     }

@@ -4,12 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    BodySurface, FieldSurface, HeadersSurface, OpSurface, OverflowSurface, ParamSurface,
-    ServerSurface, ServerVariableSurface, Surface, TypeSurface,
+    HeadersSurface, MemberSurface, OpSurface, OverflowSurface, ServerSurface,
+    ServerVariableSurface, Surface, TypeSurface,
 };
 use crate::ir::{
-    AdditionalProps, Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec,
-    SuccessShape, Ty, TypeKind,
+    AdditionalProps, Api, ApiErrorBodyImpl, Emission, ErrorShape, Prim, ScalarRepr, ScalarValue,
+    StatusSpec, SuccessShape, Ty, TypeKind,
 };
 use crate::name::Names;
 
@@ -19,18 +19,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     let mut operations = BTreeMap::new();
     for operation in &api.operations {
         let key = format!("{} {}", method_label(&operation.method), operation.path.raw);
-        let method_name = names
-            .operations
-            .get(&operation.id)
-            .expect("operation name allocated")
-            .as_str()
-            .to_owned();
-        let url_accessor_name = names
-            .operation_urls
-            .get(&operation.id)
-            .expect("operation URL accessor name allocated")
-            .as_str()
-            .to_owned();
+        let operation_names = names.operation(&operation.id);
+        let method_name = operation_names.method.as_str().to_owned();
+        let url_accessor_name = operation_names.url_accessor.as_str().to_owned();
 
         let mut params = BTreeMap::new();
         for param in &operation.params {
@@ -44,19 +35,18 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             };
             params.insert(
                 (param.name.clone(), param.location.as_openapi_in()),
-                ParamSurface {
+                MemberSurface {
                     ty,
                     required: param.required,
                 },
             );
         }
 
-        let request_body = operation.request_body.as_ref().and_then(|body| {
-            body.ty.map(|ty| BodySurface {
-                ty: canon_ty(ty, api, names),
-                required: body.required,
-            })
+        let request_body = operation.typed_body().map(|(body, ty)| MemberSurface {
+            ty: canon_ty(ty, api, names),
+            required: body.required,
         });
+        let error = operation.responses.error();
 
         operations.insert(
             key,
@@ -66,8 +56,8 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 params,
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names),
-                error: error_sig(&operation.responses.error(), api, names),
-                error_body: error_body_sig(&operation.responses.error(), api, names),
+                error: error_sig(&error, api, names),
+                error_body: error_body_sig(&error, api, names),
                 response_headers: response_headers(operation, api, names),
             },
         );
@@ -83,8 +73,8 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             .expect("type name allocated")
             .as_str()
             .to_owned();
-        let surface = match &def.kind {
-            TypeKind::Struct(object) => {
+        let surface = match api.types.emission(id, def) {
+            Emission::Struct(object) => {
                 let mut fields = BTreeMap::new();
                 for field in &object.fields {
                     let field_name = names
@@ -95,7 +85,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         .to_owned();
                     fields.insert(
                         field_name,
-                        FieldSurface {
+                        MemberSurface {
                             ty: canon_ty(field.ty, api, names),
                             required: field.required,
                         },
@@ -117,21 +107,17 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 TypeSurface::Struct(fields, overflow)
             }
             // Only string enums generate a real `pub enum` whose variants are surface. Integer /
-            // boolean enums lower to a scalar alias and carry no variant surface — skip them here;
-            // they render as their scalar at every use site via `canon_ty`.
-            TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
-                let variants = enumeration
-                    .variants
-                    .iter()
-                    .map(scalar_value_label)
-                    .collect();
+            // boolean enums lower to a scalar alias and carry no variant surface; they render as
+            // their scalar at every use site via `canon_ty`.
+            Emission::StringEnum(enumeration) => {
+                let variants = enumeration.variants.iter().map(ScalarValue::wire).collect();
                 let open = names
                     .open_variants
                     .get(&id)
                     .map(|ident| ident.as_str().to_owned());
                 TypeSurface::Enum(variants, open)
             }
-            TypeKind::Union(union) => {
+            Emission::Union(union) => {
                 let mut variants = BTreeMap::new();
                 for variant in &union.variants {
                     let variant_name = names
@@ -147,19 +133,11 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             // A cycle-member array or tuple is a nominal newtype whose wrapped type is the public
             // `.0` field (#648); every use site renders it by name, so its structure is compared
             // here, one level deep, or a change to what it wraps would go unreported (#654).
-            TypeKind::Array(_) | TypeKind::Tuple(_) if api.types.closes_alias_cycle(id) => {
-                TypeSurface::Newtype(canon_container(&def.kind, api, names))
-            }
-            // Unreachable for the reason `canon_ty` states: only a checked `Api` is surfaced.
-            // Skipping it like an alias would drop a type from the diff without anything noticing.
-            TypeKind::Reserved => unreachable!(
-                "a reservation reached the surface; `check_invariants` should have rejected it"
-            ),
+            Emission::Newtype => TypeSurface::Newtype(canon_container(&def.kind, api, names)),
             // An uninhabited schema is emitted as an empty `pub enum`, not as an alias, and every
             // use site renders it by name, so it is listed here like any other nominal type (#661).
-            TypeKind::Never => TypeSurface::Never,
-            // Every other kind is emitted as `pub type X = …;`, as codegen's own fallback arm does.
-            _ => {
+            Emission::Never => TypeSurface::Never,
+            Emission::ScalarAlias(_) | Emission::Alias => {
                 aliases.insert(name);
                 continue;
             }
@@ -235,23 +213,14 @@ fn response_headers(
             continue;
         }
         let label = crate::name::status_label(status);
-        let name = names
-            .response_header_structs
-            .get(&(operation.id.clone(), label.clone()))
-            .expect("response header struct name allocated")
-            .as_str()
-            .to_owned();
+        let header_names = names.operation(&operation.id).response_headers(&label);
+        let name = header_names.ty.as_str().to_owned();
         let fields = response
             .headers
             .iter()
             .map(|header| {
-                let field = names
-                    .response_header_fields
-                    .get(&(operation.id.clone(), label.clone(), header.name.clone()))
-                    .expect("response header field allocated")
-                    .as_str()
-                    .to_owned();
-                let surface = FieldSurface {
+                let field = header_names.field(&header.name).as_str().to_owned();
+                let surface = MemberSurface {
                     ty: canon_ty(header.ty, api, names),
                     required: header.required,
                 };
@@ -266,32 +235,35 @@ fn response_headers(
 /// Render a [`Ty`] to its stable structural string (see the module docs). Nominal types render by
 /// their generated name, so recursion always terminates at a nominal boundary or a primitive.
 pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
-    let base = match api.types.get(ty.id).map(|def| &def.kind) {
-        Some(TypeKind::Primitive(prim)) => prim_label(*prim).to_owned(),
-        Some(TypeKind::Struct(_) | TypeKind::Union(_)) => nominal_name(ty, names),
-        Some(TypeKind::Enum(enumeration)) => match enumeration.repr {
-            // A string enum is a real nominal `pub enum`; int/bool enums are scalar aliases.
-            ScalarRepr::String => nominal_name(ty, names),
-            ScalarRepr::Int => "i64".to_owned(),
-            ScalarRepr::Bool => "bool".to_owned(),
-        },
-        // A cycle-member array or tuple is a nominal newtype in the generated client (#648), and
+    let Some(def) = api.types.get(ty.id) else {
+        return "Value".to_owned();
+    };
+    let base = match api.types.emission(ty.id, def) {
+        // Every nominal item renders by name. A cycle-member array or tuple is one (#648), and
         // expanding its structure here would never terminate.
-        Some(TypeKind::Array(_) | TypeKind::Tuple(_)) if api.types.closes_alias_cycle(ty.id) => {
-            nominal_name(ty, names)
+        Emission::Struct(_)
+        | Emission::StringEnum(_)
+        | Emission::Union(_)
+        | Emission::Newtype
+        | Emission::Never => nominal_name(ty, names),
+        // An integer or boolean enum is its scalar alias.
+        Emission::ScalarAlias(ScalarRepr::Int) => "i64".to_owned(),
+        Emission::ScalarAlias(ScalarRepr::Bool) => "bool".to_owned(),
+        Emission::ScalarAlias(ScalarRepr::String) => {
+            unreachable!("a string enum is emitted as a `pub enum`")
         }
-        Some(kind @ (TypeKind::Array(_) | TypeKind::Tuple(_))) => canon_container(kind, api, names),
-        Some(TypeKind::Bytes) => "Bytes".to_owned(),
-        Some(TypeKind::Null) => "()".to_owned(),
-        Some(TypeKind::Never) => nominal_name(ty, names),
-        // Unreachable on a checked `Api`; see `TypeKind::Reserved`. A rendered placeholder here
-        // could be folded into the `Value` arm below without anything noticing.
-        Some(TypeKind::Reserved) => {
-            unreachable!(
-                "a reservation reached the surface; `check_invariants` should have rejected it"
-            )
-        }
-        Some(TypeKind::Any) | None => "Value".to_owned(),
+        Emission::Alias => match &def.kind {
+            TypeKind::Primitive(prim) => prim_label(*prim).to_owned(),
+            kind @ (TypeKind::Array(_) | TypeKind::Tuple(_)) => canon_container(kind, api, names),
+            TypeKind::Bytes => "Bytes".to_owned(),
+            TypeKind::Null => "()".to_owned(),
+            TypeKind::Any => "Value".to_owned(),
+            TypeKind::Struct(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Union(_)
+            | TypeKind::Never
+            | TypeKind::Reserved => unreachable!("`TypeGraph::emission` never aliases {def:?}"),
+        },
     };
     if ty.nullable {
         format!("Option<{base}>")
@@ -387,14 +359,6 @@ fn status_enum_sig(
         })
         .collect();
     format!("{tag}{{{}}}", rendered.join(", "))
-}
-
-fn scalar_value_label(value: &ScalarValue) -> String {
-    match value {
-        ScalarValue::Bool(value) => value.to_string(),
-        ScalarValue::Int(value) => value.to_string(),
-        ScalarValue::String(value) => value.clone(),
-    }
 }
 
 pub(super) fn prim_label(prim: Prim) -> &'static str {

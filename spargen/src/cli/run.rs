@@ -29,9 +29,7 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
         }),
         Command::Deps(args) => with_spec(args.spec, &args.options, |spec| {
             let requirements = spargen::requirements(&spec).map(|(requirements, report)| {
-                if !report.diagnostics().is_empty() {
-                    emit(&report, args.format, Stream::Aside);
-                }
+                emit_aside(&report, !report.diagnostics().is_empty(), args.format);
                 requirements
             });
             report_or(requirements, args.format)
@@ -52,12 +50,10 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                     ExitStatus::Diagnostics.into()
                 }
                 Ok((report, sides)) => {
-                    if sides
+                    let warned = sides
                         .reports()
-                        .any(|(_, side)| !side.diagnostics().is_empty())
-                    {
-                        emit(&sides, args.format, Stream::Aside);
-                    }
+                        .any(|(_, side)| !side.diagnostics().is_empty());
+                    emit_aside(&sides, warned, args.format);
                     let breaking = report.bump == spargen::Impact::Major;
                     emit(&report, args.format, Stream::Stdout);
                     if args.exit_code && breaking {
@@ -147,6 +143,14 @@ enum Stream {
     Stdout,
     Stderr,
     Aside,
+}
+
+/// Emit `value`, the warnings of a run that succeeded, to [`Stream::Aside`] when `warned` says it
+/// carries a diagnostic; a run with none emits nothing beside its one document.
+fn emit_aside<T: std::fmt::Display + serde::Serialize>(value: &T, warned: bool, format: Format) {
+    if warned {
+        emit(value, format, Stream::Aside);
+    }
 }
 
 /// Render one value in the requested format.

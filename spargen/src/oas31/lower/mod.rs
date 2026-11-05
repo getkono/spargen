@@ -514,7 +514,7 @@ fn lower_operation(
     // referenced scheme must have lowered; an undeclared or unsupported scheme would
     // otherwise silently generate an unauthenticated call.
     for requirement in &security {
-        for (scheme, _) in &requirement.0 {
+        for scheme in &requirement.0 {
             if !security_schemes.contains_key(scheme) {
                 Diagnostic::error(Code::UnknownSecurityScheme, operation.provenance.clone())
                     .message(format!(

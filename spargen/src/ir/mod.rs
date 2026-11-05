@@ -8,6 +8,7 @@
 //! version would lower into it too, touching nothing downstream.
 
 mod auth;
+mod graph;
 mod invariant;
 mod media;
 mod operation;
@@ -21,6 +22,7 @@ use indexmap::IndexMap;
 pub(crate) use auth::{
     ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
 };
+pub(crate) use graph::{Emission, TypeGraph};
 pub(crate) use invariant::check_invariants;
 pub(crate) use media::{
     BodyEncoding, EncodingMode, Framing, MediaType, PropertyEncoding, RequestBody,
@@ -35,8 +37,8 @@ pub(crate) use responses::{
 };
 pub(crate) use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Openness,
-    Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeGraph,
-    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeId, TypeKind,
+    Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.
@@ -54,7 +56,31 @@ pub(crate) struct Api {
     pub(crate) security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
 }
 
+/// The conditionally embedded runtime modules a generated module carries, decided once by
+/// [`Api::runtime_features`] for both the embed (`codegen`) and the dependencies it implies
+/// (`runtime_contract`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeFeatures {
+    /// The XML codec: [`Api::uses_xml`].
+    pub(crate) xml: bool,
+    /// The sequential-response `stream` module: [`Api::uses_streams`].
+    pub(crate) streams: bool,
+    /// The RFC 3339 `Date`/`DateTime` newtypes: [`Api::uses_time`], with the `time` mapping on.
+    pub(crate) time: bool,
+}
+
 impl Api {
+    /// The conditional runtime modules the module generated from this API embeds, with the `time`
+    /// mapping on or off as `time_mapping` says. With it off, the date primitives stay `String` and
+    /// the newtypes would be dead weight.
+    pub(crate) fn runtime_features(&self, time_mapping: bool) -> RuntimeFeatures {
+        RuntimeFeatures {
+            xml: self.uses_xml(),
+            streams: self.uses_streams(),
+            time: time_mapping && self.uses_time(),
+        }
+    }
+
     /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
     /// the `quick-xml` row of the consumer requirements table (`runtime_contract`) and the
     /// conditional embedding of the XML runtime helpers — both deterministic functions of the API.
@@ -125,16 +151,16 @@ impl Api {
                 operation.params.iter().any(|parameter| {
                     matches!(&parameter.style, ParamStyle::Content(MediaType::Json))
                         && contains_bytes(&self.types, parameter.ty.id, &mut BTreeSet::new())
-                }) || operation.request_body.as_ref().is_some_and(|body| {
-                    body.ty
-                        .is_some_and(|ty| self.typed_body_needs_bytes_serde(body.media, ty.id))
-                }) || operation.responses.entries().any(|(_, response)| {
-                    response.body.is_some_and(|ty| {
-                        response
-                            .media
-                            .is_some_and(|media| self.typed_body_needs_bytes_serde(media, ty.id))
+                }) || operation
+                    .typed_body()
+                    .is_some_and(|(body, ty)| self.typed_body_needs_bytes_serde(body.media, ty.id))
+                    || operation.responses.entries().any(|(_, response)| {
+                        response.body.is_some_and(|ty| {
+                            response.media.is_some_and(|media| {
+                                self.typed_body_needs_bytes_serde(media, ty.id)
+                            })
+                        })
                     })
-                })
             })
     }
 
