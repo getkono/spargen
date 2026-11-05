@@ -42,10 +42,10 @@ impl Scope {
     /// Allocate a unique identifier for `hint` in `role`. If the cased/escaped name is already
     /// taken in this scope, `provenance` seeds a stable disambiguator.
     ///
-    /// The first call for a spelling wins it. Model types, operation error types, success enums
-    /// and parameters are allocated through [`Scope::alloc_ranked`] instead, so reordering their
-    /// requests renames none of them; operation methods, `…Params` structs, URL accessors and
-    /// response-header structs are allocated here, in operation order.
+    /// The first call for a spelling wins it. Model types and every operation-level name (methods,
+    /// URL accessors, `…Params` structs, error types, success enums, response-header structs and
+    /// parameters) are allocated through [`Scope::alloc_ranked`] instead, so reordering their
+    /// requests renames none of them.
     pub(crate) fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
         let base = super::escape(hint, role);
         if self.used.insert(base.as_str().to_owned()) {
