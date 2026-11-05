@@ -54,19 +54,21 @@ jobs:
       - run: cargo test --workspace --all-features
 
   bench-build:
-    name: Benchmarks compile
+    name: Benchmarks (test mode)
     # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
     # release PR, and other pull requests skip it so their wall-clock is the `test` job's
     # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
+      # The `ollama` benchmark input lives in the LFS-backed corpus.
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      # Compile (do not run) the benchmarks so they cannot silently rot; the timed run and its
-      # artifact live in benchmarks.yml.
-      - run: cargo bench --no-run --workspace
+      # Each benchmark once, untimed, so its `Outcome` asserts run; the timed run is benchmarks.yml.
+      - run: cargo test --benches --workspace
 
   check:
     name: Check

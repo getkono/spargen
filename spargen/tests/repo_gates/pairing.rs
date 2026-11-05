@@ -184,7 +184,7 @@ const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
         job: "bench-build",
         tasks: &["bench-build"],
-        ci_only: &[CHECKOUT, STABLE, CACHE],
+        ci_only: &[CHECKOUT_LFS, STABLE, CACHE],
         job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),

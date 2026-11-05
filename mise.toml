@@ -219,11 +219,9 @@ description = "Run the full workspace test suite, including generated-code E2E c
 run = "cargo test --workspace --all-features"
 
 [tasks.bench-build]
-description = "Compile (do not run) the benchmarks, as CI's bench-build job does"
-# A task of its own rather than part of `test`: `test` is the pre-push hook, and this is CI's
-# `bench-build` job, a slow gate pull requests skip (`every_mise_task_runs_exactly_what_its_ci_job_runs`
-# holds the job to this task).
-run = "cargo bench --no-run --workspace"
+description = "Run each benchmark once in test mode, so its outcome asserts run, as CI's bench-build job does"
+# A slow gate pull requests skip, so a task of its own rather than part of `test` (the pre-push hook).
+run = "cargo test --benches --workspace"
 
 [tasks.msrv]
 description = "Check the workspace and the generated petstore client on the declared rust-version"

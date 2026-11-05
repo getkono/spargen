@@ -54,7 +54,7 @@ mise run lint       # cargo clippy --workspace --all-targets --all-features -- -
 mise run lint-fix   # cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged
 mise run test       # cargo test --workspace --all-features
 mise run bench      # criterion benchmarks over the generation pipeline (not a gate)
-mise run bench-build  # cargo bench --no-run --workspace
+mise run bench-build  # cargo test --benches --workspace
 mise run msrv       # the declared rust-version floor (+1.88.0): workspace + petstore example
 mise run package    # cargo publish --dry-run: the published crates stay self-contained
 mise run runtime-dependencies  # the ignored minimal-versions proof in e2e.rs
