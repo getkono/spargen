@@ -1,9 +1,4 @@
-# Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x.
-#
-# Two published crates: `spargen` (the library + CLI) and `spargen-macro` (a thin proc-macro
-# shim exposing `generate_api!`). Neither ever enters a consumer's RUNTIME graph — a proc-macro
-# crate and everything it reaches are host/build-time only. Plus a `publish = false`
-# `support-runtime` member holding the freestanding runtime embedded into generated output.
+# AGENTS.md's Workspace section describes each member.
 [workspace]
 resolver = "2"
 members = ["spargen", "spargen-macro", "support-runtime"]
@@ -51,13 +46,8 @@ cfg-expr = { version = "0.20.9", default-features = false }
 proptest = "1.11"
 tempfile = "3.10"
 insta = "1.43"
-# Content-addressing for the corpus integrity gate (`tests/corpus_manifest.rs`). Dev-only: the
-# generator has its own internal digest for build-cache fingerprints and does not use this.
 sha2 = "0.10"
-# Statistics-driven benchmark harness for `spargen/benches/` (run via `cargo bench`). Dev-only —
-# never in a library/build.rs graph nor the generated-output runtime. Default features off to skip
-# the `plotters`/`rayon` report stack (unused here); `cargo_bench_support` keeps it usable under
-# `cargo bench`.
+# Default features off to skip the `plotters`/`rayon` report stack.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # Full debug info is what makes `target/` grow during fast iteration, so dev (and `test`, which

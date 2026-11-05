@@ -55,9 +55,7 @@ jobs:
 
   bench-build:
     name: Benchmarks (test mode)
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -81,38 +79,22 @@ jobs:
 
   msrv:
     name: MSRV
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      # `rust-version` in the workspace manifest is a published contract: it is what tells a
-      # consumer which toolchains can compile spargen and the code it emits. Every other job runs
-      # the release `rust-toolchain.toml` pins, so nothing proved the floor was real.
-      #
-      # The action installs 1.88.0 as rustup's *default*, but `rust-toolchain.toml` overrides the
-      # default, so a bare `cargo check` here ran on the pinned release (the job log said "overridden by
-      # rust-toolchain.toml"). An explicit `+1.88.0` outranks the file. The commands are also
-      # `mise run msrv`'s, byte for byte.
+      # `+1.88.0` outranks `rust-toolchain.toml`, which would otherwise select the pinned release.
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo +1.88.0 check --workspace --all-features --locked
-      # Generated output has its own floor, and it is the one consumers actually hit. The petstore
-      # example runs build.rs -> generate -> compile, so this covers the emitter and the emitted
-      # code together, bounded by what that spec exercises. Still no `--locked`: the examples are
-      # separate workspaces, so a release bumps the workspace version without refreshing their
-      # lockfiles, and the `spargen` path-dependency stamp goes stale again on every release.
-      # `--locked` here would turn that into a red MSRV job rather than a lockfile refresh.
+      # The generated petstore client's floor; unlocked like every example gate (AGENTS.md).
       - run: cargo +1.88.0 check --manifest-path examples/petstore/Cargo.toml
 
   powerset:
     name: Feature combinations
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -124,10 +106,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack@0.6.39
-      # Every other job runs `--all-features`, so a combination such as `xml` on and `time` off was
-      # never compiled — and those are exactly the subsets the generator embeds per spec. The
-      # `--no-dev-deps` lines check the libs without dev-dependency feature unification; the
-      # `--all-targets` lines compile `#[cfg(test)]` code at each point too (#237).
+      # `mise run powerset`'s comment says what each line covers.
       - run: cargo hack check --workspace --each-feature --no-dev-deps
       - run: cargo hack check -p support-runtime --no-dev-deps --feature-powerset
       - run: cargo hack check --workspace --exclude support-runtime --each-feature --all-targets
@@ -155,15 +134,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      # Packages + runs an isolated verify build. Guards that the published .crate stays
-      # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
-      # inside the crate and compile standalone.
+      # The runtime sources reached through symlinks must ship inside the crate and compile there.
       - run: cargo publish --dry-run -p spargen
-      # Always pin the macro's package contents. On ordinary changes, also run Cargo's full
-      # isolated verification, patching its registry dependency to the matching workspace
-      # `spargen` source (whose own package was verified above). A release-plz PR points at a new
-      # registry version, so dependency-first publishing performs its final verification after
-      # uploading `spargen`.
+      # On a release (its pull request, or the `chore: release` commit it merges as) the macro's
+      # registry dependency is not published yet, so only its package contents are checked.
       - run: cargo package --list -p spargen-macro > /dev/null
       - if: >-
           (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||
@@ -172,9 +146,7 @@ jobs:
 
   corpus-smoke:
     name: Corpus smoke
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -183,8 +155,7 @@ jobs:
           lfs: true
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      # `mise run corpus-smoke`'s commands, byte for byte. Each case's expected outcome, and why,
-      # is in `corpus/README.md`.
+      # Each case's expected outcome, and why, is in `corpus/README.md`.
       - run: mkdir -p target/corpus-smoke
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1
       - run: grep -q E001 target/corpus-smoke/github-30.json
@@ -209,9 +180,7 @@ jobs:
 
   github-api:
     name: GitHub API generated client
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -229,9 +198,7 @@ jobs:
 
   example:
     name: Petstore example
-    # A slow gate: it runs on every push to `master`, on `workflow_dispatch`, and on release-plz's
-    # release PR, and other pull requests skip it so their wall-clock is the `test` job's
-    # (AGENTS.md's Quality section; `SLOW_GATE_IF` in `repo_gates/pairing.rs` pins it).
+    # A slow gate pull requests skip (AGENTS.md, Quality; `SLOW_GATE_IF` in repo_gates/pairing.rs).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
@@ -242,9 +209,7 @@ jobs:
           workspaces: |
             examples/petstore
             examples/petstore-macro
-      # Guard the premise deny.toml reasons about TLS advisories on: generated output carries its
-      # own default-features-off reqwest, so no example's committed lockfile holds a TLS crate
-      # (#146). First, so no cargo call has rewritten a lockfile yet.
+      # First, before any cargo call can rewrite a lockfile (#146).
       - name: Assert example lockfiles are TLS-free
         run: |
           for lock in examples/petstore/Cargo.lock examples/petstore-macro/Cargo.lock examples/github-api/Cargo.lock; do
@@ -260,8 +225,6 @@ jobs:
       # macro path (spargen_macro::generate_api!)
       - run: cargo clippy --manifest-path examples/petstore-macro/Cargo.toml -- -D warnings
       - run: cargo run --manifest-path examples/petstore-macro/Cargo.toml
-      # Guard the invariant: a proc-macro crate is host-only, so no spargen crate may appear in the
-      # macro consumer's RUNTIME graph. `-i spargen` prints nothing when it is absent from the graph.
       - name: Assert macro runtime graph is spargen-free
         run: |
           leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml)
@@ -281,21 +244,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
-      # The built HTML (docs/book/book/) is git-ignored; only the book source is committed.
       - run: mdbook build docs/book
-      # `mdbook build` checks no link and exits 0 on an unreadable include: this reads the built
-      # site and fails the job on an unresolved include, or a relative link or anchor that does not
-      # resolve inside it.
       - run: cargo test -p spargen --test docs every_link_in_the_built_book_resolves -- --exact --ignored
-      # Rustdoc's own link check. `--document-private-items` is load-bearing: every subsystem
-      # module is private, so without it rustdoc never looks at most of the crate and broken
-      # links accumulate unseen.
+      # `mise run docs` and `mise run doc-links` say why each of these steps is there.
       - name: Rustdoc link check
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --workspace --all-features --document-private-items
-      # The `spargen` binary shares its library's name, so `--workspace` skips it; this documents
-      # it on its own, or the CLI's doc links would go unchecked.
       - name: Rustdoc link check (spargen binary)
         env:
           RUSTDOCFLAGS: -D warnings
@@ -310,13 +265,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.98.1
-      # The release-plz version `[tools]` pins in mise.toml, which is also the `version:` input
-      # release-plz.yml's action runs (`ci_installs_exactly_the_tool_versions_mise_pins`).
+      # The pin release-plz.yml's action also runs (`ci_installs_exactly_the_tool_versions_mise_pins`).
       - uses: taiki-e/install-action@v2
         with:
           tool: release-plz@0.3.160
-      # `mise run release-preview`'s commands, byte for byte: the version bumps and CHANGELOG
-      # section the next release pull request would write, printed to the log (#190).
+      # The version bumps and CHANGELOG section the next release pull request would write (#190).
       - run: rm -rf target/release-preview
       - run: GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview
       - run: git -C target/release-preview switch --quiet --create release-preview

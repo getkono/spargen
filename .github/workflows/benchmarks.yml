@@ -1,13 +1,7 @@
 name: Benchmarks
 
-# Benchmarks are a RECORD, not a gate. They run on demand, and once per `spargen` release on its
-# `spargen-v<version>` tag, and upload their results as a downloadable artifact — so anyone can read
-# the numbers without setting up the harness locally. Absolute numbers from a shared CI runner are
-# noisy; the durable signal is the ratios and the trend across releases.
-#
-# The release run is dispatched by `release-plz.yml`'s `benchmarks` job, not by a `push: tags:`
-# filter: release-plz pushes its tags with `GITHUB_TOKEN`, and a push made with that token starts
-# no workflow (#685).
+# A record, not a gate: on demand, and once per `spargen` release, dispatched by `release-plz.yml`
+# because a tag pushed with `GITHUB_TOKEN` starts no workflow (#685).
 on:
   workflow_dispatch:
 
@@ -25,11 +19,7 @@ jobs:
           lfs: true
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      # Bounded warm-up / measurement times keep the run practical on a shared runner while still
-      # giving criterion enough samples for stable-ish statistics. Full output is captured verbatim.
-      # The command is `mise run bench`'s; `tee` only captures it. A step's default shell is
-      # `bash -e` without `pipefail`, so without the first line a failing `cargo bench` would
-      # exit through `tee` with status 0.
+      # `pipefail`, or a failing `cargo bench` would exit through `tee` with status 0.
       - name: Run generation benchmarks
         run: |
           set -o pipefail

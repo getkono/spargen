@@ -1,14 +1,5 @@
-# The proc-macro front-end for spargen. A thin shim: `generate_api!` resolves the spec path,
-# calls spargen's private in-memory renderer, and
-# expands to the rendered client — no filesystem, no CLI.
-#
-# This is a SECOND published crate alongside `spargen`, and the ONLY way to keep the strict
-# invariant intact: a `proc-macro = true` crate can only export macros, so it cannot also be the
-# library. Crucially, a proc-macro crate (and everything it reaches, i.e. `spargen`) is compiled
-# for the HOST and never linked into the consumer's binary — so neither `spargen` nor
-# `spargen-macro` ever appears in the consumer's RUNTIME graph. The consumer depends on this crate
-# directly (`spargen_macro::generate_api!`); `spargen` does NOT depend back on it, so there is no
-# dependency cycle.
+# The proc-macro front-end for spargen; AGENTS.md's Workspace section says why it is a crate of its
+# own and why `spargen` must never depend back on it.
 [package]
 name = "spargen-macro"
 version.workspace = true
