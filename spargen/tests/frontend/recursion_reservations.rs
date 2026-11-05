@@ -636,6 +636,42 @@ components:
     );
 }
 
+/// The same merge where the union is a component's whole body and its one member closes a cycle
+/// through another component (`A = B | B`, `B.x -> A`) has no def to hand back as `A`'s root, so
+/// it is refused as `E007` with its own wording rather than failing the IR invariant as `E011`
+/// (#1152).
+#[test]
+fn a_component_body_repeating_a_cycle_closing_ref_is_refused_not_an_invariant_failure() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    B:
+      type: object
+      properties:
+        x: { $ref: '#/components/schemas/A' }
+    A:
+      oneOf: [{ $ref: '#/components/schemas/B' }, { $ref: '#/components/schemas/B' }]
+"##;
+    for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let errors: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.severity == spargen::Severity::Error)
+            .collect();
+        assert!(
+            errors.iter().all(|d| d.code == Code::NonDisjointUnion
+                && d.pointer.as_str() == "/components/schemas/A"
+                && d.message.contains("members all lower to one `$ref`")),
+            "{entry}: the only error must be `E007` at `A`: {report:#?}"
+        );
+        assert!(!errors.is_empty(), "{entry}: {report:#?}");
+    }
+}
+
 /// Mutually-recursive components (`A -> B -> A`) must also generate, directly and through an
 /// array. Directly, exactly one back-edge in the cycle is boxed; through an array, the array's
 /// `Vec` already puts the cycle behind a pointer, so neither edge is.
