@@ -196,35 +196,35 @@ mod support {
             if requirements.is_empty() {
                 return Ok(request);
             }
-            let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(
-                requirements.len(),
-            );
-            for alternative in requirements {
-                let mut missing = Vec::new();
-                let mut registered = Vec::with_capacity(alternative.len());
-                for scheme in *alternative {
-                    match resolve(core, scheme) {
-                        Resolution::Transport => {}
-                        Resolution::Registered(credential) => {
-                            registered.push((scheme, credential))
-                        }
-                        Resolution::Missing => missing.push(scheme.name),
-                    }
+            let is_missing = |scheme: &AuthScheme| {
+                matches!(resolve(core, scheme), Resolution::Missing)
+            };
+            let Some(chosen) = requirements
+                .iter()
+                .find(|alternative| !alternative.iter().any(is_missing)) else {
+                let alternatives = requirements
+                    .iter()
+                    .map(|alternative| {
+                        alternative
+                            .iter()
+                            .filter(|scheme| is_missing(scheme))
+                            .map(|scheme| scheme.name)
+                            .collect()
+                    })
+                    .collect();
+                return Err(
+                    Error::RequestConstruction(RequestError::MissingCredential {
+                        alternatives,
+                    }),
+                );
+            };
+            let mut request = request;
+            for scheme in *chosen {
+                if let Resolution::Registered(credential) = resolve(core, scheme) {
+                    request = apply_credential(request, scheme, credential).await?;
                 }
-                if missing.is_empty() {
-                    let mut request = request;
-                    for (scheme, credential) in registered {
-                        request = apply_credential(request, scheme, credential).await?;
-                    }
-                    return Ok(request);
-                }
-                alternatives.push(missing);
             }
-            Err(
-                Error::RequestConstruction(RequestError::MissingCredential {
-                    alternatives,
-                }),
-            )
+            Ok(request)
         }
         /// How one scheme of a security alternative is satisfied, if at all.
         enum Resolution<'a> {
@@ -261,21 +261,19 @@ mod support {
             let takes_token = !matches!(
                 scheme.kind, AuthKind::Basic | AuthKind::MutualTls
             );
-            let token: Option<SecretString> = match credential {
-                Credential::Bearer(secret) | Credential::ApiKey(secret) => {
-                    Some(secret.clone())
-                }
+            let fetched: SecretString;
+            let token: Option<&SecretString> = match credential {
+                Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret),
                 Credential::Provider(provider) if takes_token => {
-                    Some(
-                        provider()
-                            .await
-                            .map_err(|source| {
-                                Error::RequestConstruction(RequestError::CredentialProvider {
-                                    scheme: scheme.name,
-                                    source,
-                                })
-                            })?,
-                    )
+                    fetched = provider()
+                        .await
+                        .map_err(|source| {
+                            Error::RequestConstruction(RequestError::CredentialProvider {
+                                scheme: scheme.name,
+                                source,
+                            })
+                        })?;
+                    Some(&fetched)
                 }
                 Credential::Provider(_) | Credential::Basic { .. } => None,
             };

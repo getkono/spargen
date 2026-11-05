@@ -183,33 +183,37 @@ pub async fn attach_auth(
     if requirements.is_empty() {
         return Ok(request);
     }
-    // Selection and reporting are one computation: an alternative is chosen exactly when the list
-    // of its unregistered schemes is empty, and that same list is what `MissingCredential`
-    // reports for it. So every reported inner list is non-empty by construction, and the outer
-    // list is non-empty because `requirements` is.
-    let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(requirements.len());
-    for alternative in requirements {
-        let mut missing = Vec::new();
-        let mut registered = Vec::with_capacity(alternative.len());
-        for scheme in *alternative {
-            match resolve(core, scheme) {
-                Resolution::Transport => {}
-                Resolution::Registered(credential) => registered.push((scheme, credential)),
-                Resolution::Missing => missing.push(scheme.name),
-            }
+    // Selection and reporting read the one predicate `is_missing`: an alternative is chosen
+    // exactly when none of its schemes is missing, and its missing schemes are what
+    // `MissingCredential` reports for it. So every reported inner list is non-empty by
+    // construction, and the outer list is non-empty because `requirements` is. The report is
+    // built only once no alternative was chosen.
+    let is_missing = |scheme: &AuthScheme| matches!(resolve(core, scheme), Resolution::Missing);
+    let Some(chosen) = requirements
+        .iter()
+        .find(|alternative| !alternative.iter().any(is_missing))
+    else {
+        let alternatives = requirements
+            .iter()
+            .map(|alternative| {
+                alternative
+                    .iter()
+                    .filter(|scheme| is_missing(scheme))
+                    .map(|scheme| scheme.name)
+                    .collect()
+            })
+            .collect();
+        return Err(Error::RequestConstruction(
+            RequestError::MissingCredential { alternatives },
+        ));
+    };
+    let mut request = request;
+    for scheme in *chosen {
+        if let Resolution::Registered(credential) = resolve(core, scheme) {
+            request = apply_credential(request, scheme, credential).await?;
         }
-        if missing.is_empty() {
-            let mut request = request;
-            for (scheme, credential) in registered {
-                request = apply_credential(request, scheme, credential).await?;
-            }
-            return Ok(request);
-        }
-        alternatives.push(missing);
     }
-    Err(Error::RequestConstruction(
-        RequestError::MissingCredential { alternatives },
-    ))
+    Ok(request)
 }
 
 /// How one scheme of a security alternative is satisfied, if at all.
@@ -252,15 +256,18 @@ async fn apply_credential(
     // `MutualTls` before calling this, so the `MutualTls` term below is never evaluated from there;
     // it is deliberate defence, so a caller that bypasses the skip still never fetches a token.
     let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
-    let token: Option<SecretString> = match credential {
-        Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
+    // A static secret is borrowed; only a provider's fresh token is owned, here.
+    let fetched: SecretString;
+    let token: Option<&SecretString> = match credential {
+        Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret),
         Credential::Provider(provider) if takes_token => {
-            Some(provider().await.map_err(|source| {
+            fetched = provider().await.map_err(|source| {
                 Error::RequestConstruction(RequestError::CredentialProvider {
                     scheme: scheme.name,
                     source,
                 })
-            })?)
+            })?;
+            Some(&fetched)
         }
         Credential::Provider(_) | Credential::Basic { .. } => None,
     };
