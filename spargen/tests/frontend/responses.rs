@@ -438,7 +438,10 @@ components:
     assert!(code.contains("from_response"), "{code}");
     // A documented `Content-Type` is ignored per the specification, and said so.
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message
+                .contains("a documented `Content-Type` response header is ignored")),
         "{report:#?}"
     );
     assert!(

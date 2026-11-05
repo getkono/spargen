@@ -549,7 +549,10 @@ components:
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::SpecUndefinedBehavior),
+        messages_for(&report, Code::SpecUndefinedBehavior)
+            .iter()
+            .any(|message| message
+                .contains("a Path Item `$ref` declared alongside `post` has undefined behavior")),
         "{report:#?}"
     );
 }

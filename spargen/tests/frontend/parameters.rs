@@ -732,7 +732,12 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    assert!(
+        messages_for(&report, Code::UnsupportedParameterStyle)
+            .iter()
+            .any(|message| message.contains("with `explode: true` has no defined serialization")),
+        "{report:#?}"
+    );
 }
 
 /// `spaceDelimited`/`pipeDelimited` are defined only for arrays and objects, and `deepObject`
@@ -1032,7 +1037,9 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("this parameter is sent without percent-encoding")),
         "{report:#?}"
     );
 }
@@ -1081,7 +1088,14 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    assert!(
+        messages_for(&report, Code::UnsupportedParameterStyle)
+            .iter()
+            .any(|message| message.contains(
+                "simple/form parameter serialization does not support nested arrays or objects"
+            )),
+        "{report:#?}"
+    );
 }
 
 // W011 case: reserved-header-parameter
@@ -1106,14 +1120,17 @@ paths:
 "##;
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::DeclarationHasNoEffect);
     assert_eq!(
-        report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::DeclarationHasNoEffect)
-            .count(),
+        messages.len(),
         2,
         "one per reserved header, matched case-insensitively: {report:#?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.contains("the specification reserves `Accept`")),
+        "{report:#?}"
     );
 }
 
@@ -1162,7 +1179,9 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("`allowEmptyValue` has no effect: an optional parameter the caller omits is not sent at all")),
         "{report:#?}"
     );
 }
@@ -1281,6 +1300,41 @@ paths:
                 "{report:#?}"
             );
         }
+    }
+}
+
+/// A `querystring` parameter is one typed argument, so its content entry needs a schema to type
+/// it, and a form-urlencoded entry an object schema whose properties become the query's pairs.
+/// Each shortfall is `E010` in its own words.
+// E010 case: querystring-content
+#[test]
+fn e010_a_querystring_content_entry_with_no_usable_schema_is_unsupported() {
+    for (content, expected) in [
+        (
+            "application/json: {}",
+            "querystring content requires a schema for a typed client argument",
+        ),
+        (
+            "application/x-www-form-urlencoded: { schema: { type: string } }",
+            "form-urlencoded querystring parameters require an object schema",
+        ),
+    ] {
+        let report = generate(&format!(
+            "openapi: 3.2.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n  /search:\n    \
+             get:\n      operationId: search\n      parameters:\n        - name: q\n          \
+             in: querystring\n          content: {{ {content} }}\n      responses:\n        \
+             '204': {{ description: ok }}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{content}: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::UnsupportedParameterStyle),
+            [expected],
+            "{content}: {report:#?}"
+        );
     }
 }
 

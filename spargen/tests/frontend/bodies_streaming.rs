@@ -271,7 +271,11 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::ValidationKeywordIgnored),
+        messages_for(&report, Code::ValidationKeywordIgnored)
+            .iter()
+            .any(|message| message.contains(
+                "are decoded only on an OpenAPI 3.2 SSE envelope's string `data` property"
+            )),
         "{report:#?}"
     );
 }
@@ -318,7 +322,13 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("`schema` on sequential media describes the complete sequence")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -590,7 +600,13 @@ paths:
 "##,
     );
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType));
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("is only supported for streaming response bodies, not request bodies")),
+        "{report:#?}"
+    );
 }
 
 /// The one message the streaming-position rejection carries, so each fixture below proves it is

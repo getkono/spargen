@@ -147,7 +147,11 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains(
+                "it applies only to `multipart` and `application/x-www-form-urlencoded` content"
+            )),
         "{report:#?}"
     );
 }
@@ -175,7 +179,10 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message
+                .contains("names no property of the body schema, so it is ignored")),
         "{report:#?}"
     );
 }
@@ -237,7 +244,13 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("is a wildcard; a client must send one concrete media type")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1289,7 +1302,9 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("the specification scopes it to `multipart` content")),
         "{report:#?}"
     );
 }
@@ -1314,7 +1329,13 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message
+                .contains("describes positional parts of an array-shaped multipart body")),
+        "{report:#?}"
+    );
 }
 
 #[test]

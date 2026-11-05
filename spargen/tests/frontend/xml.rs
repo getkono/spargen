@@ -533,7 +533,14 @@ paths:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message.contains(
+                "cannot share a response enum with a second bodied success or error status"
+            )),
+        "{report:#?}"
+    );
 }
 
 /// Issue #704: a bodyless `application/xml: {}` status beside two bodied JSON statuses decodes no

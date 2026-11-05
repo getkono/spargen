@@ -157,7 +157,9 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::DeclarationHasNoEffect),
+        messages_for(&report, Code::DeclarationHasNoEffect)
+            .iter()
+            .any(|message| message.contains("past the first has no effect here")),
         "{report:#?}"
     );
 }

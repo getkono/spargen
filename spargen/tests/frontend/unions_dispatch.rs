@@ -349,7 +349,13 @@ components:
 "##;
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert!(
+        messages_for(&report, Code::NonDisjointUnion)
+            .iter()
+            .any(|message| message
+                .contains("a single schema node declares both `oneOf` and `anyOf`")),
+        "{report:#?}"
+    );
 }
 
 #[test]
