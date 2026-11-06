@@ -142,6 +142,10 @@ pub(crate) fn rerun_paths(build: &Build, snapshot: Option<&InputSnapshot>) -> Ve
     paths
 }
 
+// Mutation testing: replacing this reader survives the unit tests and is declared in
+// `.cargo/mutants.toml` rather than killed. Its only input is the process-wide `OUT_DIR`, which a
+// unit test could set only under every test running beside it; the cache logic it feeds takes the
+// directory as an argument (`pipeline::generate_with_cache_dir`), which the tests below drive.
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
     std::env::var("OUT_DIR")
         .ok()

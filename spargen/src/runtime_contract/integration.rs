@@ -7,6 +7,14 @@ use camino::Utf8PathBuf;
 use crate::diag::Diagnostic;
 use crate::{Build, CargoIntegration, Code, Severity};
 
+// Mutation testing: replacing `under_build_script` with `false`, `build_script_manifest` with
+// `None`, `manifest_from_env`, or `print_rerun` survives the unit tests and is declared in
+// `.cargo/mutants.toml` rather than killed. Their only input is the process-wide environment, or
+// their only output standard output, which a unit test could set or read only under every test
+// running beside it. The decisions they feed are the pure functions below (`manifest_from`,
+// `resolve_cargo_environment`, `rerun_if_changed_lines`), which the unit tests pin, and
+// `spargen/tests/e2e/manifest_audit.rs` runs the readers from a real build script.
+
 /// Whether this process is an actual Cargo build script. Only there do `cargo:` directives reach
 /// Cargo and does the environment name the consuming package.
 pub(super) fn under_build_script() -> bool {
@@ -125,6 +133,8 @@ pub(super) fn resolve_cargo_environment(
 ///
 /// Both are decided by [`manifest_from`], which takes the two lookups as arguments so they can be
 /// exercised without mutating the process environment.
+// Mutation testing: an environment reader, declared in `.cargo/mutants.toml` with the others
+// named at the top of this file.
 fn manifest_from_env() -> Option<Utf8PathBuf> {
     manifest_from(
         std::env::var("CARGO_MANIFEST_PATH"),
@@ -148,6 +158,8 @@ pub(super) fn manifest_from(
 
 /// Print [`rerun_if_changed_lines`] for `paths`: the one writer of `cargo:rerun-if-changed`
 /// directives, for the build's inputs and output and for the manifests the audit read alike.
+// Mutation testing: a standard-output writer, declared in `.cargo/mutants.toml` with the
+// environment readers named at the top of this file.
 pub(crate) fn print_rerun(paths: &[Utf8PathBuf]) {
     for directive in rerun_if_changed_lines(paths) {
         println!("{directive}");
