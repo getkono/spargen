@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
+use serde_json::{Map, Value};
 
 use crate::{AuthError, ResponseValue};
 
@@ -306,7 +307,7 @@ pub struct ProblemDetails {
     /// Every member besides the five above, by name: RFC 9457's extension members, such as a
     /// validation problem's `errors`. A standard member present with another type than the RFC
     /// gives it is not an extension, and is in neither place.
-    pub extensions: serde_json::Map<String, serde_json::Value>,
+    pub extensions: Map<String, Value>,
 }
 
 impl ProblemDetails {
@@ -322,12 +323,12 @@ impl ProblemDetails {
         Self::from_value(serde_json::from_slice(body).ok()?)
     }
 
-    fn from_value(value: serde_json::Value) -> Option<Self> {
-        let serde_json::Value::Object(mut extensions) = value else {
+    fn from_value(value: Value) -> Option<Self> {
+        let Value::Object(mut extensions) = value else {
             return None;
         };
         let mut text = |name: &str| match extensions.remove(name) {
-            Some(serde_json::Value::String(text)) => Some(text),
+            Some(Value::String(text)) => Some(text),
             _ => None,
         };
         let problem_type = text("type");
@@ -337,7 +338,7 @@ impl ProblemDetails {
         let status = extensions
             .remove("status")
             .as_ref()
-            .and_then(serde_json::Value::as_u64)
+            .and_then(Value::as_u64)
             .and_then(|status| u16::try_from(status).ok())
             .filter(|status| (100..=599).contains(status));
         Some(Self {
