@@ -1216,23 +1216,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
         };
         let meet_hint = format!("{hint}{}", spelling.meet_suffix());
-        let enclosing_unmerged = self.unmerged_union.replace(union.provenance.clone());
         // With no composition, only untyped refiners meet the union: they leave `null` to it, as
         // an untyped composition does ([`Self::composition_takes_union_null`]), so they admit it
         // where a branch admits it itself ([`union_branch_admits_null`]), and its untyped branches
         // take it there (#586).
-        let enclosing_meets_null = std::mem::replace(
-            &mut self.unmerged_union_meets_null,
-            composed.map_or_else(
-                || union_branch_admits_null(union),
-                |composed| composed.nullable,
-            ),
+        let meets_null = composed.map_or_else(
+            || union_branch_admits_null(union),
+            |composed| composed.nullable,
         );
         let union_mark = self.graph_mark();
-        let lowered = self.lower_schema(union, union_hint);
-        self.unmerged_union = enclosing_unmerged;
-        self.unmerged_union_meets_null = enclosing_meets_null;
-        let lowered = lowered?;
+        let lowered = self
+            .with_unmerged_union(Some((union.provenance.clone(), meets_null)), |ctx| {
+                ctx.lower_schema(union, union_hint)
+            })?;
         let mark = self.graph_mark();
         let meets_from = self.variant_meets.len();
         let mut meet = lowered;

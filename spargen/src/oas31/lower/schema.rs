@@ -222,17 +222,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.meet_ref_union_sibling(schema, hint, referenced, &keywords, &union);
             }
         }
-        let enclosing_unmerged = std::mem::replace(
-            &mut self.unmerged_union,
-            has_union_sibling.then(|| schema.provenance.clone()),
-        );
-        let enclosing_meets_null =
-            std::mem::replace(&mut self.unmerged_union_meets_null, referenced.nullable);
         let sibling_mark = self.graph_mark();
-        let sibling = self.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint"));
-        self.unmerged_union = enclosing_unmerged;
-        self.unmerged_union_meets_null = enclosing_meets_null;
-        let sibling = sibling?;
+        let sibling = self.with_unmerged_union(
+            has_union_sibling.then(|| (schema.provenance.clone(), referenced.nullable)),
+            |ctx| ctx.lower_ref_sibling(referenced, &sibling, &format!("{hint}Constraint")),
+        )?;
         let mark = self.graph_mark();
         let meets_from = self.variant_meets.len();
         let intersection =

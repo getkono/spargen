@@ -144,6 +144,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .is_some_and(|allowed| self.cycle_branch_within(member, allowed))
     }
 
+    /// Run `lower` with `unmerged` as [`Self::unmerged_union`]: the union whose merge waits for
+    /// its meet, beside whether a conjunct it is met with admits `null`, or `None` for no such
+    /// union. The enclosing value is restored.
+    pub(super) fn with_unmerged_union<T>(
+        &mut self,
+        unmerged: Option<(Provenance, bool)>,
+        lower: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let enclosing = std::mem::replace(&mut self.unmerged_union, unmerged);
+        let lowered = lower(self);
+        self.unmerged_union = enclosing;
+        lowered
+    }
+
+    /// Whether the union written at `provenance` is [`Self::unmerged_union`], whose merge waits
+    /// for its meet.
+    fn is_unmerged_union(&self, provenance: &Provenance) -> bool {
+        self.unmerged_union
+            .as_ref()
+            .is_some_and(|(unmerged, _)| unmerged == provenance)
+    }
+
+    /// Whether the union written at `provenance` is [`Self::unmerged_union`] and a conjunct it is
+    /// met with admits `null`.
+    fn unmerged_union_meets_null(&self, provenance: &Provenance) -> bool {
+        self.unmerged_union
+            .as_ref()
+            .is_some_and(|(unmerged, meets_null)| unmerged == provenance && *meets_null)
+    }
+
     /// [`Self::lower_union_closed`] past the lowering of its `sibling`, which it meets with every
     /// member of the `oneOf`/`anyOf` `members`: the members are sorted into null-only and real
     /// ones, a single real member collapses ([`Self::lower_sole_union_member`]), and several are
@@ -572,8 +602,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the branch's answer, which the `oneOf` reads after the meet
             // ([`Self::collapse_met_union`]) and the one decision settles (#597).
             if sibling.is_none()
-                && self.unmerged_union.as_ref() == Some(&schema.provenance)
-                && self.unmerged_union_meets_null
+                && self.unmerged_union_meets_null(&schema.provenance)
                 && self.branch_takes_conjunct_null(member, ty)
                 && (mode == UnionMode::AnyOf || self.branch_leaves_null_undecided(member, ty))
             {
@@ -854,7 +883,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let held_for_scalar_meet = self.scalar_meet_union.as_ref() == Some(&schema.provenance);
         if mode == UnionMode::OneOf
             && schema.discriminator.is_none()
-            && self.unmerged_union.as_ref() != Some(&schema.provenance)
+            && !self.is_unmerged_union(&schema.provenance)
             && !held_for_scalar_meet
         {
             merged_members = self.merge_indistinguishable_variants(
@@ -956,7 +985,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // branches what they are ([`Self::collapse_met_union`]), as its merge is. While an `allOf`
         // gathers its members the report waits for its scalar meet, which may give a `Value`
         // variant a type ([`Self::held_untyped_warnings`], #660).
-        if self.unmerged_union.as_ref() != Some(&schema.provenance) {
+        if !self.is_unmerged_union(&schema.provenance) {
             let untyped = self.untyped_one_of_variants(&union, &variant_members);
             self.report_untyped_one_of(HeldUntypedWarning {
                 provenance: schema.provenance.clone(),
