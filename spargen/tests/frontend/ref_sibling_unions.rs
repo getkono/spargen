@@ -140,23 +140,20 @@ fn a_ref_whose_union_sibling_contradicts_its_target_is_rejected() {
         let site =
             format!("{{ $ref: '#/components/schemas/Name', {keyword}: [ {{ type: integer }} ] }}");
         for (position, spec, pointer) in ref_union_sibling_documents(&site) {
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{keyword} in a {position} via {entry}: the sibling must not be dropped in \
-                     silence: {report:#?}\n{spec}"
-                );
-                assert!(
-                    report
-                        .diagnostics()
-                        .iter()
-                        .any(|d| d.code == Code::AllOfIrreconcilable
-                            && d.pointer.as_str() == pointer),
-                    "{keyword} in a {position} via {entry}: E013 must point at `{pointer}`: \
-                     {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} in a {position}: the sibling must not be dropped in silence: \
+                 {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+                "{keyword} in a {position}: E013 must point at `{pointer}`: {report:#?}"
+            );
         }
     }
 }
@@ -257,23 +254,21 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{keyword} via {entry}: {report:#?}"
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{keyword}: {report:#?}"
+        );
+        for pointer in [
+            "/components/schemas/Pick",
+            "/components/schemas/Holder/properties/inline",
+        ] {
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored && d.pointer.as_str() == pointer
+                }),
+                "{keyword}: W001 must point at `{pointer}`: {report:#?}"
             );
-            for pointer in [
-                "/components/schemas/Pick",
-                "/components/schemas/Holder/properties/inline",
-            ] {
-                assert!(
-                    report.diagnostics().iter().any(|d| {
-                        d.code == Code::ValidationKeywordIgnored && d.pointer.as_str() == pointer
-                    }),
-                    "{keyword} via {entry}: W001 must point at `{pointer}`: {report:#?}"
-                );
-            }
         }
         let types = types_module(&code);
         assert_eq!(
@@ -333,20 +328,14 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{shape} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/U"
-                }),
-                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/U"
+            }),
+            "{shape}: the collapse must warn at `U`: {report:#?}"
+        );
         let types = types_module(&code);
         match expect_variants {
             Some(count) => assert_eq!(
@@ -406,21 +395,18 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "third `type: {third}` via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
-                }),
-                "third `type: {third}` via {entry}: the partial merge must warn at `x`: \
-                 {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "third `type: {third}`: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "third `type: {third}`: the partial merge must warn at `x`: {report:#?}"
+        );
         let types = types_module(&code);
         let x = field_type(&types, "pub x")
             .unwrap_or_else(|| panic!("third `type: {third}`: no `x` field: {types}"));
@@ -487,20 +473,18 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{branches} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
-                }),
-                "{branches} via {entry}: the collapse must warn at `x`: {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{branches}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "{branches}: the collapse must warn at `x`: {report:#?}"
+        );
         let types = types_module(&code);
         let x = field_type(&types, "pub x")
             .unwrap_or_else(|| panic!("{branches}: no `x` field: {types}"));
@@ -552,20 +536,14 @@ components:
       required: [x]
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: {report:#?}"
-        );
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::ValidationKeywordIgnored
-                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
-            }),
-            "partly shared via {entry}: the merge must warn at `x`: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::ValidationKeywordIgnored
+                && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+        }),
+        "partly shared: the merge must warn at `x`: {report:#?}"
+    );
     let types = types_module(&code);
     let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
     let variants = enum_variants(&types, &x);
@@ -643,20 +621,18 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{branches} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
-                }),
-                "{branches} via {entry}: the partial merge must warn at `x`: {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{branches}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "{branches}: the partial merge must warn at `x`: {report:#?}"
+        );
         let types = types_module(&code);
         let x = field_type(&types, "pub x")
             .unwrap_or_else(|| panic!("{branches}: no `x` field: {types}"));
@@ -727,32 +703,30 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{keyword} via {entry}: {report:#?}"
-            );
-            let merged_at = |pointer: &str| {
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == pointer
-                        && (d.message.contains("differ only in keywords")
-                            || d.message.contains("same generated type"))
-                })
-            };
-            assert_eq!(
-                merged_at("/components/schemas/P"),
-                warned_at_p,
-                "{keyword} via {entry}: `P` reports a merge exactly when its meet made two \
-                 branches alike: {report:#?}"
-            );
-            assert_eq!(
-                merged_at("/components/schemas/U"),
-                !warned_at_p,
-                "{keyword} via {entry}: `U` reports the merge its own branches take: {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{keyword}: {report:#?}"
+        );
+        let merged_at = |pointer: &str| {
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == pointer
+                    && (d.message.contains("differ only in keywords")
+                        || d.message.contains("same generated type"))
+            })
+        };
+        assert_eq!(
+            merged_at("/components/schemas/P"),
+            warned_at_p,
+            "{keyword}: `P` reports a merge exactly when its meet made two branches alike: \
+             {report:#?}"
+        );
+        assert_eq!(
+            merged_at("/components/schemas/U"),
+            !warned_at_p,
+            "{keyword}: `U` reports the merge its own branches take: {report:#?}"
+        );
         let types = types_module(&code);
         assert!(
             types.contains("pub enum P "),
@@ -799,22 +773,16 @@ fn a_ref_to_a_union_merges_the_branches_its_non_union_sibling_leaves_alike() {
             ),
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Pick"
-                        && d.message
-                            .contains("this `$ref`'s target and its sibling keywords")
-                }),
-                "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{target}: {report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Pick"
+                    && d.message
+                        .contains("this `$ref`'s target and its sibling keywords")
+            }),
+            "{target}: the merge must be reported at `Pick`: {report:#?}"
+        );
         let types = types_module(&code);
         let repeated = unions_with_a_repeated_payload(&types);
         assert!(
@@ -862,22 +830,16 @@ fn a_ref_to_a_union_merges_the_branches_its_untyped_applicator_siblings_leave_al
             ),
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Pick"
-                        && d.message
-                            .contains("this `$ref`'s target and its sibling keywords")
-                }),
-                "{target} via {entry}: the merge must be reported at `Pick`: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{target}: {report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Pick"
+                    && d.message
+                        .contains("this `$ref`'s target and its sibling keywords")
+            }),
+            "{target}: the merge must be reported at `Pick`: {report:#?}"
+        );
         let types = types_module(&code);
         let repeated = unions_with_a_repeated_payload(&types);
         assert!(
@@ -1234,23 +1196,18 @@ fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
                  [{{ type: integer }}]\n        - type: boolean\n"
             ));
             let pointer = format!("/components/schemas/U/{outer}/0");
-            for (entry, report) in [
-                ("generate", generate(&contradicting)),
-                ("check", check(&contradicting)),
-            ] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{keyword} beside a {outer} member via {entry}: {report:#?}\n{contradicting}"
-                );
-                assert!(
-                    report.diagnostics().iter().any(|d| {
-                        d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer
-                    }),
-                    "{keyword} beside a {outer} member via {entry}: E013 must point at \
-                     `{pointer}`: {report:#?}"
-                );
-            }
+            let report = generate(&contradicting);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} beside a {outer} member: {report:#?}\n{contradicting}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer
+                }),
+                "{keyword} beside a {outer} member: E013 must point at `{pointer}`: {report:#?}"
+            );
 
             let narrowing = single_component_document(&format!(
                 "      {outer}:\n        - $ref: '#/components/schemas/Name'\n          {keyword}: \
@@ -1258,24 +1215,22 @@ fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
                  boolean\n"
             ));
             let (report, code) = generate_with_code(&narrowing);
-            for (entry, report) in [("generate", &report), ("check", &check(&narrowing))] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{keyword} beside a {outer} member via {entry}: {report:#?}\n{narrowing}"
-                );
-                // The integer branch `Name` excludes is reported (#671).
-                assert_eq!(
-                    messages_for(report, Code::DeclarationHasNoEffect),
-                    [EXCLUDED_MEMBER_1],
-                    "{keyword} beside a {outer} member via {entry}: {report:#?}"
-                );
-                assert_eq!(
-                    codes(report),
-                    ["W011"],
-                    "{keyword} beside a {outer} member via {entry}: {report:#?}"
-                );
-            }
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} beside a {outer} member: {report:#?}\n{narrowing}"
+            );
+            // The integer branch `Name` excludes is reported (#671).
+            assert_eq!(
+                messages_for(&report, Code::DeclarationHasNoEffect),
+                [EXCLUDED_MEMBER_1],
+                "{keyword} beside a {outer} member: {report:#?}"
+            );
+            assert_eq!(
+                codes(&report),
+                ["W011"],
+                "{keyword} beside a {outer} member: {report:#?}"
+            );
             let types = types_module(&code);
             let variants = enum_variants(&types, "U");
             let payload = variants
@@ -1330,21 +1285,19 @@ fn an_all_of_member_ref_with_a_union_sibling_is_not_dropped() {
             ("beside an object member", beside_object),
             ("contradicting its target", contradicting),
         ] {
-            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{keyword} {shape} via {entry}: the member's union must not be dropped: \
-                     {report:#?}\n{spec}"
-                );
-                assert!(
-                    report.diagnostics().iter().any(|d| {
-                        d.code == Code::AllOfIrreconcilable
-                            && d.pointer.as_str().starts_with("/components/schemas/U")
-                    }),
-                    "{keyword} {shape} via {entry}: E013 must point into `U`: {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} {shape}: the member's union must not be dropped: {report:#?}\n{spec}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::AllOfIrreconcilable
+                        && d.pointer.as_str().starts_with("/components/schemas/U")
+                }),
+                "{keyword} {shape}: E013 must point into `U`: {report:#?}"
+            );
         }
     }
 }

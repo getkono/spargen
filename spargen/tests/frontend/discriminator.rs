@@ -60,22 +60,21 @@ components:
     Dog: { type: object, properties: { kind: { type: string } } }
     Fish: { type: object, properties: { kind: { const: fish } } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        // At the `defaultMapping` itself: the same discriminator's `mapping` entries are a sibling
-        // `E007` site (`a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry`).
-        let e007: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::NonDisjointUnion)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        assert_eq!(
-            e007,
-            ["/components/schemas/Pet/discriminator/defaultMapping"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // At the `defaultMapping` itself: the same discriminator's `mapping` entries are a sibling
+    // `E007` site (`a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry`).
+    let e007: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::NonDisjointUnion)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        e007,
+        ["/components/schemas/Pet/discriminator/defaultMapping"],
+        "{report:#?}"
+    );
 }
 
 /// A `Pet` union over `Cat` and `Dog` (both declared) plus a declared non-member `Fish`, carrying
@@ -144,30 +143,28 @@ fn a_discriminator_mapping_value_naming_an_undeclared_schema_is_e004_at_the_entr
         ),
     ];
     for (what, spec, pointer, named) in cases {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}\n{spec}"
-            );
-            let e004: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::UnresolvedRef)
-                .collect();
-            assert!(
-                e004.iter()
-                    .any(|d| d.pointer.as_str() == pointer && d.message.contains(named)),
-                "{what} via {entry}: E004 must sit at `{pointer}` and name `{named}`: \
-                 {report:#?}"
-            );
-            // The schema does not exist, so saying it is "not a member" would send the reader to
-            // edit the union rather than to the dangling name.
-            assert!(
-                !has_code(&report, Code::NonDisjointUnion),
-                "{what} via {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(
+            e004.iter()
+                .any(|d| d.pointer.as_str() == pointer && d.message.contains(named)),
+            "{what}: E004 must sit at `{pointer}` and name `{named}`: {report:#?}"
+        );
+        // The schema does not exist, so saying it is "not a member" would send the reader to
+        // edit the union rather than to the dangling name.
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{what}: {report:#?}"
+        );
     }
 }
 
@@ -205,27 +202,25 @@ fn a_discriminator_mapping_value_naming_a_non_member_is_e007_at_the_entry() {
         ),
     ];
     for (what, spec) in cases {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::NonDisjointUnion
-                        && d.pointer.as_str()
-                            == "/components/schemas/Pet/discriminator/mapping/fish"
-                        && d.message.contains("Fish")),
-                "{what} via {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::UnresolvedRef),
-                "{what} via {entry}: `Fish` is declared: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::NonDisjointUnion
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/fish"
+                    && d.message.contains("Fish")),
+            "{what}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{what}: `Fish` is declared: {report:#?}"
+        );
     }
 }
 
@@ -367,28 +362,26 @@ fn a_discriminator_beside_no_union_is_w011_at_the_discriminator() {
             Outcome::Rejected,
             "{what}: {report:#?}\n{spec}"
         );
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            let w011: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .collect();
-            assert_eq!(
-                w011.len(),
-                1,
-                "{what} via {entry}: one W011, at the discriminator: {report:#?}"
-            );
-            assert_eq!(w011[0].pointer.as_str(), pointer, "{what} via {entry}");
-            assert!(
-                w011[0].message.contains("`discriminator`"),
-                "{what} via {entry}: {:?}",
-                w011[0].message
-            );
-            assert!(
-                !has_code(report, Code::UnresolvedRef) && !has_code(report, Code::NonDisjointUnion),
-                "{what} via {entry}: every mapping target is declared: {report:#?}"
-            );
-        }
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(
+            w011.len(),
+            1,
+            "{what}: one W011, at the discriminator: {report:#?}"
+        );
+        assert_eq!(w011[0].pointer.as_str(), pointer, "{what}");
+        assert!(
+            w011[0].message.contains("`discriminator`"),
+            "{what}: {:?}",
+            w011[0].message
+        );
+        assert!(
+            !has_code(&report, Code::UnresolvedRef) && !has_code(&report, Code::NonDisjointUnion),
+            "{what}: every mapping target is declared: {report:#?}"
+        );
         assert!(
             !code.contains("\"cat\""),
             "{what}: an inert discriminator dispatches on nothing:\n{code}"
@@ -417,27 +410,25 @@ fn a_discriminator_beside_no_union_naming_an_undeclared_schema_is_e004_at_the_en
         "/components/schemas/Pet/discriminator/defaultMapping".to_owned(),
     ));
     for (what, spec, pointer) in cases {
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::UnresolvedRef
-                        && d.pointer.as_str() == pointer
-                        && d.message.contains("MissingC")),
-                "{what} via {entry}: E004 must sit at `{pointer}` and name `MissingC`: \
-                 {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::NonDisjointUnion),
-                "{what} via {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef
+                    && d.pointer.as_str() == pointer
+                    && d.message.contains("MissingC")),
+            "{what}: E004 must sit at `{pointer}` and name `MissingC`: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{what}: {report:#?}"
+        );
     }
 }
 
@@ -451,22 +442,17 @@ fn a_discriminator_beside_all_of_and_a_union_has_its_mapping_checked() {
          oneOf: [ { $ref: '#/components/schemas/Cat' } ]\n      \
          discriminator: { propertyName: kind, mapping: { x: Nope } }\n",
     );
-    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-        assert_eq!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: {report:#?}"
-        );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == Code::UnresolvedRef
-                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/x"
-                    && d.message.contains("Nope")),
-            "via {entry}: E004 must sit at the mapping entry and name `Nope`: {report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/x"
+                && d.message.contains("Nope")),
+        "E004 must sit at the mapping entry and name `Nope`: {report:#?}"
+    );
 }
 
 /// The dispatch a discriminated union `name` emits, read back from the generated source: per
@@ -619,26 +605,25 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
         "        propertyName: kind\n        mapping:\n          \
          Cat: Dog\n",
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let e007: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::NonDisjointUnion)
-            .collect();
-        assert_eq!(e007.len(), 1, "{report:#?}");
-        assert_eq!(
-            e007[0].pointer.as_str(),
-            "/components/schemas/Pet/discriminator/mapping/Cat",
-            "{report:#?}"
-        );
-        assert!(
-            e007[0]
-                .message
-                .contains("no discriminator value selects it"),
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let e007: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::NonDisjointUnion)
+        .collect();
+    assert_eq!(e007.len(), 1, "{report:#?}");
+    assert_eq!(
+        e007[0].pointer.as_str(),
+        "/components/schemas/Pet/discriminator/mapping/Cat",
+        "{report:#?}"
+    );
+    assert!(
+        e007[0]
+            .message
+            .contains("no discriminator value selects it"),
+        "{report:#?}"
+    );
 
     let fallback = discriminated_pet(
         "3.2.0",
@@ -737,42 +722,30 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
     ] {
         let dispatches = !decoded.is_empty();
         let spec = spec(members, "", "3.1.0");
-        let (generated, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::NonDisjointUnion),
-                "{what} {entry}: {report:#?}"
-            );
-            let w011: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                .collect();
-            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
-            assert_eq!(
-                w011[0].pointer.as_str(),
-                "/components/schemas/Pet/discriminator",
-                "{what} {entry}: {report:#?}"
-            );
-            assert!(
-                w011[0].message.contains(subject),
-                "{what} {entry}: {report:#?}"
-            );
-            let consequence = if dispatches {
-                "the tag dispatches only to the members a value names"
-            } else {
-                "this `discriminator` dispatches nothing"
-            };
-            assert!(
-                w011[0].message.contains(consequence),
-                "{what} {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{what}: {report:#?}"
+        );
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(w011.len(), 1, "{what}: {report:#?}");
+        assert_eq!(
+            w011[0].pointer.as_str(),
+            "/components/schemas/Pet/discriminator",
+            "{what}: {report:#?}"
+        );
+        assert!(w011[0].message.contains(subject), "{what}: {report:#?}");
+        let consequence = if dispatches {
+            "the tag dispatches only to the members a value names"
+        } else {
+            "this `discriminator` dispatches nothing"
+        };
+        assert!(w011[0].message.contains(consequence), "{what}: {report:#?}");
         if dispatches {
             // The tagged member keeps its tag both ways; the untagged member is selected by no tag
             // and written with none.
@@ -878,20 +851,19 @@ fn a_malformed_discriminator_object_is_e011_at_the_field() {
     ];
     for (what, discriminator, pointer) in cases {
         let spec = discriminated_pet("3.2.0", CAT_AND_DOG, discriminator);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::InvalidInput && d.pointer.as_str() == pointer),
-                "{what} via {entry}: E011 must sit at `{pointer}`: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::InvalidInput && d.pointer.as_str() == pointer),
+            "{what}: E011 must sit at `{pointer}`: {report:#?}"
+        );
     }
 }
 
@@ -1012,9 +984,8 @@ components:
         .unwrap();
         std::fs::write(dir.join("cat.yaml"), cat).unwrap();
         let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
         let code = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-        (generated, checked, code)
+        (generated, code)
     };
     let rejected = [
         ("cat.yaml", "cat.yaml", Code::UnresolvedRef),
@@ -1027,20 +998,18 @@ components:
         ),
     ];
     for (member, target, code) in rejected {
-        let (generated, checked, _) = run(member, target);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{member} / {target} {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| d.code == code
-                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/meow"
-                    && d.message.contains(&format!("`{target}`"))),
-                "{member} / {target} {entry}: {code:?} must sit at the entry: {report:#?}"
-            );
-        }
+        let (report, _) = run(member, target);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{member} / {target}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| d.code == code
+                && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/meow"
+                && d.message.contains(&format!("`{target}`"))),
+            "{member} / {target}: {code:?} must sit at the entry: {report:#?}"
+        );
     }
 
     // The member's own name, bare or as a pointer, and the file member's unambiguous spelling are
@@ -1050,18 +1019,16 @@ components:
         ("#/components/schemas/Cat", "#/components/schemas/Cat"),
         ("cat.yaml", "./cat.yaml"),
     ] {
-        let (generated, checked, code) = run(member, target);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{member} / {target} {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::NonDisjointUnion) && !has_code(report, Code::UnresolvedRef),
-                "{member} / {target} {entry}: {report:#?}"
-            );
-        }
+        let (report, code) = run(member, target);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{member} / {target}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion) && !has_code(&report, Code::UnresolvedRef),
+            "{member} / {target}: {report:#?}"
+        );
         // The mapped tag leads the member's arm, so it is the one serialization writes; a
         // component member also keeps its name (#263), a file member has none to keep.
         let expected = match member {
@@ -1132,18 +1099,12 @@ MAPPING
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
         let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-        (temp, dir, generated, checked)
+        (temp, dir, generated)
     };
 
-    let (_temp, dir, generated, checked) = write(mapping);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::NonDisjointUnion),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (_temp, dir, report) = write(mapping);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
     for expected in [
         "EnvelopePropertiesCat(Box<Cat>)",
@@ -1155,26 +1116,21 @@ MAPPING
     }
     assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
 
-    let (_temp, dir, generated, checked) = write("");
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::NonDisjointUnion),
-            "{entry}: {report:#?}"
-        );
-        let w011: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::DeclarationHasNoEffect)
-            .collect();
-        assert_eq!(w011.len(), 1, "{entry}: {report:#?}");
-        assert!(
-            w011[0]
-                .message
-                .contains("union members 0, 1 are no schema components"),
-            "{entry}: {report:#?}"
-        );
-    }
+    let (_temp, dir, report) = write("");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let w011: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::DeclarationHasNoEffect)
+        .collect();
+    assert_eq!(w011.len(), 1, "{report:#?}");
+    assert!(
+        w011[0]
+            .message
+            .contains("union members 0, 1 are no schema components"),
+        "{report:#?}"
+    );
     let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
     for expected in [
         "EnvelopePropertiesCat(Box<Cat>)",

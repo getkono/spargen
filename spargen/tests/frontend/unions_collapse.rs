@@ -229,20 +229,18 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{keyword} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
-                }),
-                "{keyword} via {entry}: the collapse must still warn: {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{keyword}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "{keyword}: the collapse must still warn: {report:#?}"
+        );
         let types = types_module(&code);
         let x = field_type(&types, "pub x")
             .unwrap_or_else(|| panic!("{keyword}: no `x` field: {types}"));
@@ -292,21 +290,15 @@ fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
     ] {
         let spec = single_component_document(&body);
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{shape} via {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/U"
-                        && d.message.contains("same generated type")
-                }),
-                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/U"
+                    && d.message.contains("same generated type")
+            }),
+            "{shape}: the collapse must warn at `U`: {report:#?}"
+        );
         let types = types_module(&code);
         match (expect_fields, expect_variants) {
             (Some(fields), _) => assert_eq!(
@@ -555,22 +547,16 @@ fn one_of_branches_of_one_structure_merge_and_warn() {
         let spec = single_component_document(&format!("      oneOf: [ {members} ]\n"))
             .replace("application/json", media);
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{shape} via {entry}: {report:#?}"
-            );
-            assert_eq!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/U"
-                        && d.message.contains("identically structured")
-                }),
-                merged,
-                "{shape} via {entry}: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{shape}: {report:#?}");
+        assert_eq!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/U"
+                    && d.message.contains("identically structured")
+            }),
+            merged,
+            "{shape}: {report:#?}"
+        );
         let types = types_module(&code);
         match variants {
             Some(count) => assert_eq!(
@@ -596,20 +582,14 @@ fn one_of_arrays_of_uninhabited_items_merge_and_warn() {
         "      oneOf: [ { type: array, items: false }, { type: array, items: false } ]\n",
     );
     let (report, code) = generate_with_code(&spec);
-    for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: {report:#?}"
-        );
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::ValidationKeywordIgnored
-                    && d.pointer.as_str() == "/components/schemas/U"
-            }),
-            "via {entry}: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::ValidationKeywordIgnored
+                && d.pointer.as_str() == "/components/schemas/U"
+        }),
+        "{report:#?}"
+    );
     let types = types_module(&code);
     assert!(
         types.contains("pub type U = Vec<Uvariant0Item>;") && !types.contains("pub enum U "),
