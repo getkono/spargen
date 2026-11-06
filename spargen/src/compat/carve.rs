@@ -1,5 +1,6 @@
 //! Auto-carve: the pure mapping from error diagnostics to the omit rules that carve the smallest
-//! enclosing omittable constructs out of a document. The fixpoint driver lives in the facade.
+//! enclosing omittable constructs out of a document. The fixpoint driver is the facade's
+//! `pipeline::carve_spec`.
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
