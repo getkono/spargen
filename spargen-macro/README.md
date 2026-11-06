@@ -48,7 +48,7 @@ same as the module written by
 
 ```toml
 [dependencies]
-spargen-macro = "0.5"
+spargen-macro = "0.6"
 # ...plus the audited crates this generated client uses at runtime. No spargen crate appears at
 # runtime. See spargen's runtime dependency contract for the exact floors and conditional features.
 ```
