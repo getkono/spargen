@@ -222,3 +222,49 @@ pub(super) fn retain_strategy(strategy: &UnionStrategy, retained: &[usize]) -> U
         UnionStrategy::Trial { mode } => UnionStrategy::Trial { mode: *mode },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discriminated(default_variant: Option<usize>, open: bool) -> UnionStrategy {
+        UnionStrategy::Discriminated {
+            tag_field: "kind".to_owned(),
+            default_variant,
+            mode: UnionMode::OneOf,
+            open,
+        }
+    }
+
+    /// `(default_variant, open)` of a narrowed discriminated strategy.
+    fn fallback_and_openness(strategy: &UnionStrategy) -> (Option<usize>, bool) {
+        match strategy {
+            UnionStrategy::Discriminated {
+                default_variant,
+                open,
+                ..
+            } => (*default_variant, *open),
+            UnionStrategy::Disjoint | UnionStrategy::Trial { .. } => {
+                panic!("a discriminated strategy stays discriminated: {strategy:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrowed_open_union_stays_open() {
+        // The dropped variant's tags become unlisted, and reach `Unknown` like any other.
+        let narrowed = retain_strategy(&discriminated(None, true), &[0, 2]);
+        assert_eq!(fallback_and_openness(&narrowed), (None, true));
+        let closed = retain_strategy(&discriminated(None, false), &[0, 2]);
+        assert_eq!(fallback_and_openness(&closed), (None, false));
+    }
+
+    #[test]
+    fn a_closed_union_losing_its_fallback_stays_closed() {
+        // The fallback moves with the retained set, and dropping it opens nothing.
+        let moved = retain_strategy(&discriminated(Some(2), false), &[0, 2]);
+        assert_eq!(fallback_and_openness(&moved), (Some(1), false));
+        let dropped = retain_strategy(&discriminated(Some(1), false), &[0, 2]);
+        assert_eq!(fallback_and_openness(&dropped), (None, false));
+    }
+}

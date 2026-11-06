@@ -573,7 +573,7 @@ fn hint() -> impl proptest::strategy::Strategy<Value = String> {
             "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
             "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
             "body", "path", "query", "url", "request", "cookies", "additional", "other",
-            "Other", "1a", "-", "requestOperation", "getV2", "get_v_2",
+            "Other", "unknown", "Unknown", "1a", "-", "requestOperation", "getV2", "get_v_2",
         ])
         .prop_map(str::to_owned),
     ]
@@ -594,6 +594,8 @@ enum Shape {
     },
     Union {
         hints: std::collections::BTreeSet<String>,
+        /// A discriminated union open to unlisted tags, which allocates one more variant.
+        open: bool,
     },
 }
 
@@ -631,7 +633,7 @@ fn definition() -> impl proptest::strategy::Strategy<Value = Definition> {
     let shape = prop_oneof![
         (hints(8), any::<bool>()).prop_map(|(fields, overflow)| Shape::Struct { fields, overflow }),
         (hints(8), any::<bool>()).prop_map(|(values, open)| Shape::Enum { values, open }),
-        hints(6).prop_map(|hints| Shape::Union { hints }),
+        (hints(6), any::<bool>()).prop_map(|(hints, open)| Shape::Union { hints, open }),
     ];
     (hint(), proptest::bool::weighted(0.2), shape).prop_map(|(hint, anonymous, shape)| Definition {
         hint,
@@ -728,17 +730,35 @@ fn synthetic_api(
                     Openness::Closed
                 },
             }),
-            Shape::Union { hints } => TypeKind::Union(Union {
+            // An open union is discriminated, each variant selected by its hint as its tag.
+            Shape::Union { hints, open } => TypeKind::Union(Union {
                 variants: hints
                     .iter()
                     .map(|hint| UnionVariant {
                         name_hint: hint.clone(),
                         ty: text,
-                        dispatch: VariantDispatch::Trial { priority: 0 },
+                        dispatch: if *open {
+                            VariantDispatch::Discriminated {
+                                tags: vec![hint.clone()],
+                                category: None,
+                                untagged: None,
+                            }
+                        } else {
+                            VariantDispatch::Trial { priority: 0 }
+                        },
                     })
                     .collect(),
-                strategy: UnionStrategy::Trial {
-                    mode: UnionMode::OneOf,
+                strategy: if *open {
+                    UnionStrategy::Discriminated {
+                        tag_field: "kind".to_owned(),
+                        default_variant: None,
+                        mode: UnionMode::OneOf,
+                        open: true,
+                    }
+                } else {
+                    UnionStrategy::Trial {
+                        mode: UnionMode::OneOf,
+                    }
                 },
             }),
         };
