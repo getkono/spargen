@@ -150,6 +150,9 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             // An uninhabited schema is emitted as an empty `pub enum`, not as an alias, and every
             // use site renders it by name, so it is listed here like any other nominal type (#661).
             Emission::Never => TypeSurface::Never,
+            // A base64 schema is a nominal newtype over `bytes::Bytes`, whose serde form is the
+            // base64 string; its public `.0` field is the bytes.
+            Emission::Base64 => TypeSurface::Newtype("Bytes".to_owned()),
             Emission::ScalarAlias(_) | Emission::Alias => {
                 aliases.insert(name);
                 continue;
@@ -258,7 +261,8 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         | Emission::StringEnum(_)
         | Emission::Union(_)
         | Emission::Newtype
-        | Emission::Never => nominal_name(ty, names),
+        | Emission::Never
+        | Emission::Base64 => nominal_name(ty, names),
         // An integer or boolean enum is its scalar alias.
         Emission::ScalarAlias(ScalarRepr::Int) => "i64".to_owned(),
         Emission::ScalarAlias(ScalarRepr::Bool) => "bool".to_owned(),
@@ -268,13 +272,14 @@ pub(super) fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         Emission::Alias => match &def.kind {
             TypeKind::Primitive(prim) => prim_label(*prim).to_owned(),
             kind @ (TypeKind::Array(_) | TypeKind::Tuple(_)) => canon_container(kind, api, names),
-            TypeKind::Bytes => "Bytes".to_owned(),
+            TypeKind::Bytes(crate::ir::BytesEncoding::Raw) => "Bytes".to_owned(),
             TypeKind::Null => "()".to_owned(),
             TypeKind::Any => "Value".to_owned(),
             TypeKind::Struct(_)
             | TypeKind::Enum(_)
             | TypeKind::Union(_)
             | TypeKind::Never
+            | TypeKind::Bytes(crate::ir::BytesEncoding::Base64)
             | TypeKind::Reserved => unreachable!("`TypeGraph::emission` never aliases {def:?}"),
         },
     };

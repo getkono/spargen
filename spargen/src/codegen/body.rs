@@ -43,7 +43,7 @@ pub(super) fn body_send_tokens(
         };
         if matches!(
             api.types.get(ty.id).map(|def| &def.kind),
-            Some(TypeKind::Bytes)
+            Some(TypeKind::Bytes(_))
         ) {
             raw_bytes_send
         } else {
@@ -404,8 +404,9 @@ fn media_part_tokens(
     reference: &TokenStream,
 ) -> TokenStream {
     match kind {
-        // A binary/bytes property → a file/bytes part carrying the raw bytes.
-        Some(TypeKind::Bytes) => quote! {
+        // A binary/bytes property → a file/bytes part carrying the raw bytes; a base64 newtype
+        // reaches them through its `Deref`, so its part is the decoded bytes, not their text.
+        Some(TypeKind::Bytes(_)) => quote! {
             let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
         },
         // A scalar property → a text part rendered through `Display`.

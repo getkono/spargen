@@ -6,8 +6,8 @@
 //! (compiled and tested in its own right); this module carries each file's source
 //! (`include_str!`) for codegen to embed into a private `support` module of the generated code:
 //! [`runtime_files`] for the files every client embeds as they are, and one accessor for each file
-//! embedded on its own terms: streams, XML, and the RFC 3339 date types only for an API that uses
-//! them, and the blocking client behind its `blocking` feature on a non-wasm32 target.
+//! embedded on its own terms: streams, XML, the RFC 3339 date types and the base64 codec only for
+//! an API that uses them, and the blocking client behind its `blocking` feature on a non-wasm32 target.
 //!
 //! The embed is not verbatim: `codegen::runtime::emit_support` keeps each file only up to its
 //! `#[cfg(test)]` marker, rewrites every `crate::` to `super::` so the paths resolve from the
@@ -111,6 +111,17 @@ pub(crate) fn datetime_runtime_file() -> SupportFile {
     SupportFile {
         name: "datetime.rs",
         contents: include_str!("runtime/datetime.rs"),
+    }
+}
+
+/// The `contentEncoding: base64` codec runtime source, embedded only when an output emits a base64
+/// newtype (see [`crate::ir::Api::uses_base64`]). Kept out of [`runtime_files`] so an output with no
+/// such schema carries no unused codec; its bytes still ship inside the published crate through the
+/// `runtime/base64.rs` symlink.
+pub(crate) fn base64_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "base64.rs",
+        contents: include_str!("runtime/base64.rs"),
     }
 }
 

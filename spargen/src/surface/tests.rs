@@ -476,7 +476,7 @@ struct Node {
 #[derive(Debug, Clone)]
 enum Shape {
     Primitive(crate::ir::Prim),
-    /// A struct, string enum, union or uninhabited type: rendered by its allocated name.
+    /// A struct, string enum, union, uninhabited or base64 type: rendered by its allocated name.
     Nominal(NominalKind),
     IntEnum,
     BoolEnum,
@@ -493,6 +493,7 @@ enum NominalKind {
     StringEnum,
     Union,
     Never,
+    Base64,
 }
 
 fn node() -> impl proptest::strategy::Strategy<Value = Node> {
@@ -515,6 +516,7 @@ fn node() -> impl proptest::strategy::Strategy<Value = Node> {
             NominalKind::StringEnum,
             NominalKind::Union,
             NominalKind::Never,
+            NominalKind::Base64,
         ])
         .prop_map(Shape::Nominal),
         Just(Shape::IntEnum),
@@ -570,9 +572,10 @@ fn insert(node: &Node, api: &mut crate::ir::Api, names: &mut crate::name::Names)
             },
         }),
         Shape::Nominal(NominalKind::Never) => TypeKind::Never,
+        Shape::Nominal(NominalKind::Base64) => TypeKind::Bytes(crate::ir::BytesEncoding::Base64),
         Shape::IntEnum => scalar_enum(ScalarRepr::Int),
         Shape::BoolEnum => scalar_enum(ScalarRepr::Bool),
-        Shape::Bytes => TypeKind::Bytes,
+        Shape::Bytes => TypeKind::Bytes(crate::ir::BytesEncoding::Raw),
         Shape::Null => TypeKind::Null,
         Shape::Any => TypeKind::Any,
         Shape::Array(item) => TypeKind::Array(Box::new(insert(item, api, names))),

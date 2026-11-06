@@ -1,6 +1,6 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
+use super::{AdditionalProps, Api, BytesEncoding, MediaType, Ty, TypeKind};
 
 /// The prefix of every message [`check_invariants`] emits. The fuzz harness
 /// (`tests/fuzz_frontend.rs`) declares the same literal to recognise a report that carries one,
@@ -24,6 +24,9 @@ pub(crate) const INVARIANT_FAILURE: &str = "IR invariant failed";
 /// 3. No definition that is not elided is still a [`TypeKind::Reserved`].
 /// 4. Every variant of a union that is not elided carries a [`super::VariantDispatch`] of its
 ///    union's [`super::UnionStrategy`] arm ([`super::UnionStrategy::admits`]).
+/// 5. No whole non-streaming body — a request body, or a response body that is not a stream — is
+///    of a [`BytesEncoding::Base64`] definition: the emitter sends and decodes a whole `bytes` body
+///    raw, as `bytes::Bytes`, which the base64 newtype is not.
 ///
 /// A failure here is a frontend bug, not a spec problem, so it is reported as
 /// [`Code::InvalidInput`] against the construct that carries the violation.
@@ -46,13 +49,14 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
         if let Some(body) = &operation.request_body {
             if let Some(ty) = body.ty {
                 check_ty(api, ty, diags, "request body", operation.provenance.clone());
+                check_raw_body(api, ty, diags, "request body", &operation.provenance);
                 // A missing definition is already reported by `check_ty`; only a definition that
                 // exists with the wrong kind, or is nullable, is an octet-stream violation.
                 if body.media == MediaType::OctetStream
                     && api
                         .types
                         .get(ty.id)
-                        .is_some_and(|def| ty.nullable || !matches!(def.kind, TypeKind::Bytes))
+                        .is_some_and(|def| ty.nullable || !matches!(def.kind, TypeKind::Bytes(_)))
                 {
                     Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
                         .message(format!(
@@ -147,7 +151,7 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
             }
             TypeKind::Primitive(_)
             | TypeKind::Enum(_)
-            | TypeKind::Bytes
+            | TypeKind::Bytes(_)
             | TypeKind::Null
             | TypeKind::Never
             | TypeKind::Any => {}
@@ -166,6 +170,9 @@ fn check_response(
 ) {
     if let Some(ty) = response.body {
         check_ty(api, ty, diags, &format!("{label} body"), provenance.clone());
+        if response.stream.is_none() {
+            check_raw_body(api, ty, diags, &format!("{label} body"), provenance);
+        }
     }
     for header in &response.headers {
         check_ty(
@@ -175,6 +182,28 @@ fn check_response(
             &format!("{label} header `{}`", header.name),
             provenance.clone(),
         );
+    }
+}
+
+/// Invariant 5: a whole non-streaming body is never of a base64 bytes definition.
+fn check_raw_body(
+    api: &Api,
+    ty: Ty,
+    diags: &mut Diagnostics,
+    label: &str,
+    provenance: &crate::diag::Provenance,
+) {
+    if api
+        .types
+        .get(ty.id)
+        .is_some_and(|def| matches!(def.kind, TypeKind::Bytes(BytesEncoding::Base64)))
+    {
+        Diagnostic::error(Code::InvalidInput, provenance.clone())
+            .message(format!(
+                "{INVARIANT_FAILURE}: `{label}` is a whole body of a base64 bytes type, which the \
+                 emitter would send or decode raw"
+            ))
+            .emit(diags);
     }
 }
 
@@ -657,7 +686,7 @@ mod tests {
         let api = api_with_request_body(
             MediaType::OctetStream,
             "application/octet-stream",
-            Some(TypeKind::Bytes),
+            Some(TypeKind::Bytes(super::BytesEncoding::Raw)),
         );
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
@@ -695,7 +724,7 @@ mod tests {
         let mut api = api_with_request_body(
             MediaType::OctetStream,
             "application/octet-stream",
-            Some(TypeKind::Bytes),
+            Some(TypeKind::Bytes(super::BytesEncoding::Raw)),
         );
         api.operations[0]
             .request_body

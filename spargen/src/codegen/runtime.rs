@@ -12,13 +12,15 @@ use super::blocking::blocking_cfg;
 /// make the output unusable via `include!`. When `features.xml` is set (the API has an
 /// `application/xml` / `text/xml` body), the XML codec module is embedded and its helpers
 /// re-exported; otherwise it is omitted entirely, so a non-XML output carries no `quick-xml`
-/// reference. `features.streams` embeds the sequential-response `stream` module, and
-/// `features.time` the RFC 3339 `DateTime`/`Date` newtypes, on the same terms.
+/// reference. `features.streams` embeds the sequential-response `stream` module,
+/// `features.time` the RFC 3339 `DateTime`/`Date` newtypes, and `features.base64` the
+/// `contentEncoding: base64` codec, on the same terms.
 pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream {
     let crate::ir::RuntimeFeatures {
         xml: uses_xml,
         streams: uses_streams,
         time: uses_time,
+        base64: uses_base64,
     } = features;
     let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
@@ -62,6 +64,12 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
     let datetime_reexport = uses_time.then(|| {
         quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
+    // The base64 codec is embedded only when a `contentEncoding: base64` newtype survives lowering;
+    // the newtype's serde impls are its only callers. It adds no dependency.
+    let base64_module = uses_base64.then(|| embed(&crate::support::base64_runtime_file()));
+    let base64_reexport = uses_base64.then(|| {
+        quote! { pub use base64::{deserialize_base64, serialize_base64}; }
+    });
     // The blocking runtime (`BlockingRuntime`) is embedded unconditionally under `blocking_cfg`. A
     // consumer opts in by declaring its own `blocking` feature wired to an optional, non-wasm tokio
     // dependency — which is what `spargen deps` prints, commented out, and what the audit then
@@ -86,6 +94,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             #stream_module
             #xml_module
             #datetime_module
+            #base64_module
             #blocking_module
 
             pub use auth::{attach_auth, AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
@@ -103,6 +112,7 @@ pub(super) fn emit_support(features: crate::ir::RuntimeFeatures) -> TokenStream 
             #stream_reexport
             #xml_reexport
             #datetime_reexport
+            #base64_reexport
             #blocking_reexport
         }
     }

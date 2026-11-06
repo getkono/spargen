@@ -148,7 +148,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     )
                     .emit(self.diags);
             }
-            (lower_whole_body(self), None)
+            // A whole body is read raw when it is bytes, base64 or not (`raw_body_bytes`).
+            let mark = self.graph_mark();
+            let ty = lower_whole_body(self)
+                .map(|ty| self.raw_body_bytes(ty, "ResponseBody", &response.provenance, mark));
+            (ty, None)
         };
         if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
             self.warn_structural_default_ref(schema, "a response body schema");

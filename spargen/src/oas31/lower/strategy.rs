@@ -103,9 +103,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(TypeKind::Primitive(Prim::I32)) => 700,
             Some(TypeKind::Primitive(Prim::I64)) => 650,
             Some(TypeKind::Primitive(Prim::Uuid | Prim::DateTime | Prim::Date)) => 600,
-            Some(TypeKind::Primitive(Prim::F64 | Prim::String | Prim::Bool) | TypeKind::Bytes) => {
-                500
-            }
+            Some(
+                TypeKind::Primitive(Prim::F64 | Prim::String | Prim::Bool) | TypeKind::Bytes(_),
+            ) => 500,
             Some(TypeKind::Union(union)) => union
                 .variants
                 .iter()
@@ -152,7 +152,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // back edge by `value.is_object()`, and a `Tree` — an array — would then match no
             // variant at runtime. `None` sends the union to trial matching, which decodes it.
             // Pinned by `a_union_back_edge_to_an_open_component_is_not_categorised`.
-            TypeKind::Reserved | TypeKind::Bytes => None,
+            TypeKind::Reserved | TypeKind::Bytes(_) => None,
             kind => value_category(kind),
         }
     }

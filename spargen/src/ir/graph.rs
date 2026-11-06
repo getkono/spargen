@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use indexmap::IndexMap;
 
 use super::types::{
-    AdditionalProps, Prim, ScalarEnum, ScalarRepr, Struct, Ty, TypeDef, TypeId, TypeKind, Union,
+    AdditionalProps, BytesEncoding, Prim, ScalarEnum, ScalarRepr, Struct, Ty, TypeDef, TypeId,
+    TypeKind, Union,
 };
 use super::Docs;
 use crate::diag::{JsonPointer, Provenance};
@@ -177,6 +178,7 @@ impl TypeGraph {
             TypeKind::Enum(enumeration) => Emission::ScalarAlias(enumeration.repr),
             TypeKind::Union(union) => Emission::Union(union),
             TypeKind::Never => Emission::Never,
+            TypeKind::Bytes(BytesEncoding::Base64) => Emission::Base64,
             TypeKind::Reserved => unreachable!(
                 "a reservation reached emission; `check_invariants` should have rejected it"
             ),
@@ -208,7 +210,7 @@ impl TypeGraph {
                 TypeKind::Primitive(_)
                 | TypeKind::Struct(_)
                 | TypeKind::Enum(_)
-                | TypeKind::Bytes
+                | TypeKind::Bytes(_)
                 | TypeKind::Null
                 | TypeKind::Never
                 | TypeKind::Union(_)
@@ -238,8 +240,9 @@ impl TypeGraph {
     /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
     /// means the generated types are one type, because every non-nominal definition is emitted as a
     /// transparent `pub type` alias of its structure. A nominal definition (a struct, string enum,
-    /// union, `Never`, or an array or tuple that [closes an alias cycle](Self::closes_alias_cycle))
-    /// is its own item and matches only itself. Both use-site modifiers must agree, so callers
+    /// union, `Never`, base64 bytes, or an array or tuple that
+    /// [closes an alias cycle](Self::closes_alias_cycle)) is its own item and matches only
+    /// itself. Both use-site modifiers must agree, so callers
     /// strip the top-level ones they absorb; nested ones are compared, because a tuple item keeps
     /// its `Box`. Independent of the `uuid`/`time` features: a feature-mapped primitive never
     /// equals `String`, even in a build where it would emit one.
@@ -253,7 +256,8 @@ impl TypeGraph {
     /// field's type matches by this same test, and their `additionalProperties` policies match;
     /// two string enums match when they list the same value set and agree on whether they are
     /// open; two `Never` definitions match, since neither decodes any value (#643), so arrays of
-    /// two such items both decode only `[]`. A union still matches only itself. Sound rather than
+    /// two such items both decode only `[]`; two base64 bytes newtypes match, since both decode
+    /// the same base64 strings. A union still matches only itself. Sound rather than
     /// complete, like
     /// [`same_generated_type`]: `true` means no value tells the two apart, which is what a `oneOf`'s
     /// exactly-one rule needs, but not that they are one Rust type, so a caller that needs one type
@@ -337,7 +341,12 @@ impl TypeGraph {
             }
             // Each `Never` is its own empty `pub enum`, but neither decodes a value.
             (TypeKind::Never, TypeKind::Never) => structural,
-            (TypeKind::Bytes, TypeKind::Bytes)
+            // Each base64 definition is its own newtype, but all decode the same strings. Raw and
+            // base64 bytes differ on the wire, so they never match.
+            (TypeKind::Bytes(BytesEncoding::Base64), TypeKind::Bytes(BytesEncoding::Base64)) => {
+                structural
+            }
+            (TypeKind::Bytes(BytesEncoding::Raw), TypeKind::Bytes(BytesEncoding::Raw))
             | (TypeKind::Null, TypeKind::Null)
             | (TypeKind::Any, TypeKind::Any) => true,
             // A reservation's body is unknown, so nothing proves it emits the same type as another
@@ -401,6 +410,9 @@ pub(crate) enum Emission<'a> {
     Newtype,
     /// The empty `pub enum X {}` of an uninhabited schema.
     Never,
+    /// `pub struct X(pub bytes::Bytes);` of a `contentEncoding: base64` schema, which serde
+    /// writes and reads as a base64 string rather than `bytes::Bytes`' own sequence of numbers.
+    Base64,
     /// `pub type X = …;` naming the type the definition lowered to.
     Alias,
 }

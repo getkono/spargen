@@ -23,10 +23,10 @@
 //!   concrete Rust type, not the surface identity;
 //! * a **nominal** type — a `struct`, a string `enum`, a union (the models a consumer names,
 //!   constructs, and matches), an array or tuple that closes an alias cycle (emitted as a
-//!   newtype, #648), or an uninhabited schema (emitted as an empty `pub enum`) → its generated
-//!   type name;
+//!   newtype, #648), a `contentEncoding: base64` schema (emitted as a newtype over the bytes), or
+//!   an uninhabited schema (emitted as an empty `pub enum`) → its generated type name;
 //! * an array → `Vec<inner>`, a tuple → `(a, b, …)` (one position → `(a,)`, as Rust spells it),
-//!   bytes → `Bytes`, an untyped node → `Value`;
+//!   other bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
 //!   carrying no consumer-facing structure beyond its scalar) → that scalar;
 //! * a nullable reference wraps the above in `Option<…>`.
@@ -184,8 +184,9 @@ enum TypeSurface {
     Enum(BTreeSet<String>, Option<String>),
     /// A union enum: variants keyed by generated variant name → canonical payload type.
     Union(BTreeMap<String, String>),
-    /// An array or tuple that closes an alias cycle, emitted as `pub struct X(pub T);` (#648): the
-    /// canonical rendering of the wrapped `T`, which is the type of the public `.0` field.
+    /// An array or tuple that closes an alias cycle, or a `contentEncoding: base64` schema (`T` is
+    /// `Bytes`), emitted as `pub struct X(pub T);` (#648): the canonical rendering of the wrapped
+    /// `T`, which is the type of the public `.0` field.
     Newtype(String),
     /// An uninhabited schema (`false`, or one whose constraints admit nothing), emitted as an empty
     /// `pub enum X {}`: it has no structure, but it is a public type a use site names.
