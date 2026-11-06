@@ -280,20 +280,20 @@ paths:
               schema: { type: object, required: [id], properties: { id: { type: integer } } }
 "##;
     let (report, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for report in [&report, &checked] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|diagnostic| {
-                diagnostic.code == Code::AlternativeMediaIgnored
-                    && diagnostic.message
-                        == "`application/json` is selected; the alternative media type(s) \
-                            `text/plain/extra` are not"
-            }),
-            "{report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == Code::AlternativeMediaIgnored
+                && diagnostic.message
+                    == "`application/json` is selected; the alternative media type(s) \
+                        `text/plain/extra` are not"
+        }),
+        "{report:#?}"
+    );
     assert!(code.contains("pub type ResponseBodyid = i64;"), "{code}");
 }
 
@@ -431,16 +431,13 @@ paths:
         );
         let expected =
             format!("`{generated}` is selected; the alternative media type(s) `{other}` are not");
-        for report in [report, check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(
-                report.diagnostics().iter().any(|diagnostic| {
-                    diagnostic.code == Code::AlternativeMediaIgnored
-                        && diagnostic.message == expected
-                }),
-                "{report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::AlternativeMediaIgnored && diagnostic.message == expected
+            }),
+            "{report:#?}"
+        );
     }
 }
 
@@ -462,17 +459,16 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == Code::UnsupportedMediaType
-                    && diagnostic.message.contains("is a media range")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == Code::UnsupportedMediaType
+                && diagnostic.message.contains("is a media range")),
+        "{report:#?}"
+    );
 }
 
 /// A request body whose `content` lists `application/*+json` first and then `sibling`.
@@ -509,27 +505,25 @@ fn w014_a_structured_suffix_range_yields_to_a_sendable_request_sibling() {
         ("text/plain", "{ type: string }"),
     ] {
         let spec = suffix_range_request_document(sibling, schema);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::UnsupportedMediaType),
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-            let expected = format!(
-                "`{sibling}` is selected; the alternative media type(s) `application/*+json` are not"
-            );
-            assert!(
-                report.diagnostics().iter().any(|diagnostic| {
-                    diagnostic.code == Code::AlternativeMediaIgnored
-                        && diagnostic.message == expected
-                }),
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{sibling}`: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "`{sibling}`: {report:#?}"
+        );
+        let expected = format!(
+            "`{sibling}` is selected; the alternative media type(s) `application/*+json` are not"
+        );
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::AlternativeMediaIgnored && diagnostic.message == expected
+            }),
+            "`{sibling}`: {report:#?}"
+        );
     }
 }
 
@@ -540,22 +534,21 @@ fn e009_a_structured_suffix_range_with_no_sendable_request_sibling_is_unsupporte
     // counts as sendable.
     for (sibling, schema) in [("video/*", "{}"), ("text/event-stream", "{ type: string }")] {
         let spec = suffix_range_request_document(sibling, schema);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|diagnostic| {
-                    diagnostic.code == Code::UnsupportedMediaType
-                        && diagnostic
-                            .message
-                            .starts_with("media type `application/*+json` is a media range")
-                }),
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{sibling}`: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic
+                        .message
+                        .starts_with("media type `application/*+json` is a media range")
+            }),
+            "`{sibling}`: {report:#?}"
+        );
     }
 }
 
@@ -575,22 +568,21 @@ fn w014_a_suffix_range_listed_after_a_sendable_request_sibling_is_withheld() {
         let expected = format!(
             "`{sibling}` is selected; the alternative media type(s) `application/*+json` are not"
         );
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(&report, Code::UnsupportedMediaType),
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-            assert_eq!(
-                messages_for(&report, Code::AlternativeMediaIgnored),
-                [expected.as_str()],
-                "`{sibling}` through {entry}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{sibling}`: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "`{sibling}`: {report:#?}"
+        );
+        assert_eq!(
+            messages_for(&report, Code::AlternativeMediaIgnored),
+            [expected.as_str()],
+            "`{sibling}`: {report:#?}"
+        );
     }
 }
 
@@ -603,21 +595,20 @@ fn w014_every_suffix_range_beside_a_sendable_request_sibling_is_withheld() {
         ("application/*+json-seq", "{ type: object }"),
         ("application/json", "{ type: object }"),
     ]);
-    for report in [generate(&spec), check(&spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::UnsupportedMediaType),
-            "{report:#?}"
-        );
-        assert_eq!(
-            messages_for(&report, Code::AlternativeMediaIgnored),
-            [
-                "`application/json` is selected; the alternative media type(s) \
-                 `application/*+json`, `application/*+json-seq` are not"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert_eq!(
+        messages_for(&report, Code::AlternativeMediaIgnored),
+        [
+            "`application/json` is selected; the alternative media type(s) \
+             `application/*+json`, `application/*+json-seq` are not"
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -628,16 +619,14 @@ fn e009_a_suffix_range_beside_only_an_unclassified_request_sibling_is_a_media_ra
         ("application/*+json", "{ type: object }"),
         ("application/pdf", "{}"),
     ]);
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            messages_for(&report, Code::UnsupportedMediaType)
-                .iter()
-                .any(|message| message
-                    .starts_with("media type `application/*+json` is a media range")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message.starts_with("media type `application/*+json` is a media range")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -650,26 +639,25 @@ fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itsel
         ("application/*+json", "{ type: object }"),
         ("text/plain", "{ type: object }"),
     ]);
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-        let unsupported = messages_for(&report, Code::UnsupportedMediaType);
-        assert!(
-            unsupported
-                .iter()
-                .all(|message| !message.contains("is a media range")),
-            "{report:#?}"
-        );
-        assert!(
-            unsupported
-                .iter()
-                .any(|message| message.contains("text/plain")),
-            "{report:#?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    let unsupported = messages_for(&report, Code::UnsupportedMediaType);
+    assert!(
+        unsupported
+            .iter()
+            .all(|message| !message.contains("is a media range")),
+        "{report:#?}"
+    );
+    assert!(
+        unsupported
+            .iter()
+            .any(|message| message.contains("text/plain")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -682,6 +670,7 @@ fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separatel
         ("application/json", "{ type: object }"),
         ("application/xml", "{ type: object }"),
     ]);
+    // The order is pinned, and the parity oracle compares diagnostics unordered, so `check` stays.
     for report in [generate(&spec), check(&spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
@@ -720,18 +709,17 @@ paths:
             text/plain: { schema: { type: object } }
             text/html: { schema: { type: object } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-        assert_eq!(
-            messages_for(&report, Code::UnsupportedMediaType),
-            ["media type `text/plain` requires a string-like or binary response schema"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    assert_eq!(
+        messages_for(&report, Code::UnsupportedMediaType),
+        ["media type `text/plain` requires a string-like or binary response schema"],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -752,14 +740,13 @@ paths:
             text/plain: { schema: { type: string } }
             text/html: { schema: { type: string } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::AlternativeMediaIgnored),
-            ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::AlternativeMediaIgnored),
+        ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -774,15 +761,14 @@ fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
     // each diagnostic's structured `claim` with the run's outcome (#413); see
     // `a_w014_generation_claim_is_refused_on_every_run_that_writes_nothing`.
     let spec = W014_REJECTED_ELSEWHERE;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::AlternativeMediaIgnored),
-            ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::AlternativeMediaIgnored),
+        ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
+        "{report:#?}"
+    );
 }
 
 #[test]

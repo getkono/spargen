@@ -576,16 +576,14 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains("`video/*` is a media range")
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType && d.message.contains("`video/*` is a media range")
+        }),
+        "{report:#?}"
+    );
 
     // ... and the preferred concrete key still meets the octet gate: an object under `image/png`
     // is rejected on its own account, not waved through because a range stood beside it.
@@ -604,17 +602,16 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message
-                        .contains("`image/png` requires a string-like or binary schema")
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType
+                && d.message
+                    .contains("`image/png` requires a string-like or binary schema")
+        }),
+        "{report:#?}"
+    );
 
     // (v) The `text/*` range keeps a response too: it generates as text beside an `image/png` of
     // another family, and a concrete family member ranks below it.
@@ -764,17 +761,14 @@ paths:
     );
     assert!(code.contains("\"image/png\""), "{code}");
     assert!(!code.contains("\"video/*\""), "{code}");
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::AlternativeMediaIgnored
-                    && d.message.contains("`image/png` is selected")
-                    && d.message.contains("`video/*`")
-            }),
-            "{report:#?}"
-        );
-    }
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message.contains("`image/png` is selected")
+                && d.message.contains("`video/*`")
+        }),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -810,17 +804,14 @@ paths:
     );
     assert!(code.contains("\"image/png\""), "{code}");
     assert!(!code.contains("\"application/*+json\""), "{code}");
-    for report in [report, check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::AlternativeMediaIgnored
-                    && d.message.contains("`image/png` is selected")
-                    && d.message.contains("`application/*+json`")
-            }),
-            "{report:#?}"
-        );
-    }
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message.contains("`image/png` is selected")
+                && d.message.contains("`application/*+json`")
+        }),
+        "{report:#?}"
+    );
 }
 
 // E009 case: request-range
@@ -845,27 +836,26 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let rejections: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::UnsupportedMediaType)
-            .map(|d| d.message.as_str())
-            .collect();
-        assert_eq!(
-            rejections,
-            [
-                "media type `video/*` is a media range, which describes a family rather than the \
-                 concrete `Content-Type` a request must send"
-            ],
-            "{report:#?}"
-        );
-        assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let rejections: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnsupportedMediaType)
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(
+        rejections,
+        [
+            "media type `video/*` is a media range, which describes a family rather than the \
+             concrete `Content-Type` a request must send"
+        ],
+        "{report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
 }
 
 /// The generated `pub async fn {name}` method, from its signature to the next method.
@@ -1002,20 +992,19 @@ paths:
 "##,
         ),
     ] {
-        for report in [generate(document), check(document)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{position}: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::UnsupportedMediaType
-                        && d.message.contains("requires a string-like or binary")
-                }),
-                "{position}: {report:#?}"
-            );
-        }
+        let report = generate(document);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{position}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("requires a string-like or binary")
+            }),
+            "{position}: {report:#?}"
+        );
     }
 }
 
@@ -1137,15 +1126,14 @@ paths:
           content:
             application/*+cbor: { schema: { type: string, format: binary } }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType && d.message.contains("application/*+cbor")
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType && d.message.contains("application/*+cbor")
+        }),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -1202,17 +1190,16 @@ paths:
         "204": {{ description: No Content }}
 "##
         );
-        for report in [generate(&spec), check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::AlternativeMediaIgnored
-                        && d.message.contains(&format!("`{selection}` is selected"))
-                        && d.message.contains(&format!("`{alternative}`"))
-                }),
-                "{report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::AlternativeMediaIgnored
+                    && d.message.contains(&format!("`{selection}` is selected"))
+                    && d.message.contains(&format!("`{alternative}`"))
+            }),
+            "{report:#?}"
+        );
     }
 }
 
@@ -1278,17 +1265,16 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message
-                        .contains("requires a string-like or binary schema")
-            }),
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedMediaType
+                && d.message
+                    .contains("requires a string-like or binary schema")
+        }),
+        "{report:#?}"
+    );
 }
 
 /// The raw-body schemas that admit `null` (#104), one per spelling: a union with `null` over
@@ -1313,15 +1299,14 @@ components:
 "#;
 
 fn assert_rejected_as_nullable_raw_body(spec: &str) {
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
-        assert!(
-            messages_for(&report, Code::UnsupportedMediaType)
-                .iter()
-                .any(|message| message.contains("has no wire representation of `null`")),
-            "{spec}\n{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message.contains("has no wire representation of `null`")),
+        "{spec}\n{report:#?}"
+    );
 }
 
 // E009 case: raw-null

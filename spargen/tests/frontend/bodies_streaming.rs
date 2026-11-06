@@ -377,17 +377,16 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::Oas32ConstructIgnored),
-            [
-                "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; on this \
-                 request body it is not used"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::Oas32ConstructIgnored),
+        [
+            "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; on this \
+             request body it is not used"
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -614,8 +613,8 @@ paths:
 /// *this* gate that fired rather than some other `E009`.
 const STREAM_POSITION_MESSAGE: &str = "is only supported as an operation's single success body";
 
-/// Generate `spec`, require it rejected with the streaming-position `E009`, and hold `check` to the
-/// same verdict.
+/// Generate `spec` and require it rejected with the streaming-position `E009`; [`generate`] holds
+/// `check` to the same verdict and diagnostics.
 fn assert_stream_position_rejected(spec: &str) {
     let report = generate(spec);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
@@ -624,14 +623,6 @@ fn assert_stream_position_rejected(spec: &str) {
             .iter()
             .any(|message| message.contains(STREAM_POSITION_MESSAGE)),
         "{report:#?}"
-    );
-    let checked = check(spec);
-    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
-    assert!(
-        messages_for(&checked, Code::UnsupportedMediaType)
-            .iter()
-            .any(|message| message.contains(STREAM_POSITION_MESSAGE)),
-        "{checked:#?}"
     );
 }
 

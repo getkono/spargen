@@ -61,55 +61,44 @@ components:
 "##;
 
     for (label, spec) in [("bare", bare), ("with siblings", with_siblings)] {
-        let generated = generate(spec);
-        let checked = check(spec);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}/{entry}: {report:#?}"
-            );
-            // A spec-facing code with a matrix cell, an `errors.md` row and this fixture — never
-            // the internal invariant's `E011`, whose explain text claims malformed input.
-            assert!(
-                !has_code(report, Code::InvalidInput),
-                "{label}/{entry}: {report:#?}"
-            );
-            // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
-            // shape passes through are ordered deliberately, the cycle question before the
-            // sibling-intersection question, and `oas31/lower/union.rs` records at that site that
-            // a reordering turns this fixture red. A disjunction would not: it is satisfied by either verdict,
-            // so the ordering it claims to protect would be free to flip in silence. The `with
-            // siblings` spelling is the one that carries the difference, because it is the only one
-            // the sibling guard can answer at all.
-            let codes: Vec<Code> = report
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.severity == Severity::Error)
-                .map(|diagnostic| diagnostic.code)
-                .collect();
-            assert_eq!(
-                codes,
-                vec![Code::NonDisjointUnion],
-                "{label}/{entry}: {report:#?}"
-            );
-            // The remedy is the sentence the author acts on, and the one this rejecter carries has
-            // to serve its cycle situations as well as its overlap ones — neither of which a
-            // discriminator answers. Nothing else in the suite reads a remedy on this path, so
-            // without this the whole text was free to be replaced by advice that contradicts the
-            // fix.
-            let remedy = report
-                .diagnostics()
-                .iter()
-                .find(|diagnostic| diagnostic.code == Code::NonDisjointUnion)
-                .and_then(|diagnostic| diagnostic.remedy.as_deref())
-                .unwrap_or_default();
-            assert!(
-                remedy.contains("break the reference cycle"),
-                "{label}/{entry}: the remedy must name what an author with a self-referential \
-                 union actually has to change: {remedy:?}"
-            );
-        }
+        let report = generate(spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        // A spec-facing code with a matrix cell, an `errors.md` row and this fixture — never
+        // the internal invariant's `E011`, whose explain text claims malformed input.
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{label}: {report:#?}"
+        );
+        // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
+        // shape passes through are ordered deliberately, the cycle question before the
+        // sibling-intersection question, and `oas31/lower/union.rs` records at that site that
+        // a reordering turns this fixture red. A disjunction would not: it is satisfied by either verdict,
+        // so the ordering it claims to protect would be free to flip in silence. The `with
+        // siblings` spelling is the one that carries the difference, because it is the only one
+        // the sibling guard can answer at all.
+        let codes: Vec<Code> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .map(|diagnostic| diagnostic.code)
+            .collect();
+        assert_eq!(codes, vec![Code::NonDisjointUnion], "{label}: {report:#?}");
+        // The remedy is the sentence the author acts on, and the one this rejecter carries has
+        // to serve its cycle situations as well as its overlap ones — neither of which a
+        // discriminator answers. Nothing else in the suite reads a remedy on this path, so
+        // without this the whole text was free to be replaced by advice that contradicts the
+        // fix.
+        let remedy = report
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == Code::NonDisjointUnion)
+            .and_then(|diagnostic| diagnostic.remedy.as_deref())
+            .unwrap_or_default();
+        assert!(
+            remedy.contains("break the reference cycle"),
+            "{label}: the remedy must name what an author with a self-referential union actually \
+             has to change: {remedy:?}"
+        );
     }
 }
 
@@ -133,25 +122,23 @@ components:
 "##;
     for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
         let lib = SELFY.replace("PREFIX", prefix);
-        let (generated, checked, _) = split("./lib.yaml#/components/schemas/Selfy", &lib);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{spelling}/{entry}: {report:#?}"
-            );
-            let codes: Vec<Code> = report
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.severity == Severity::Error)
-                .map(|diagnostic| diagnostic.code)
-                .collect();
-            assert_eq!(
-                codes,
-                vec![Code::NonDisjointUnion],
-                "{spelling}/{entry}: {report:#?}"
-            );
-        }
+        let (report, _, _) = split("./lib.yaml#/components/schemas/Selfy", &lib);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{spelling}: {report:#?}"
+        );
+        let codes: Vec<Code> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .map(|diagnostic| diagnostic.code)
+            .collect();
+        assert_eq!(
+            codes,
+            vec![Code::NonDisjointUnion],
+            "{spelling}: {report:#?}"
+        );
     }
 }
 
@@ -364,6 +351,8 @@ components:
         - type: object
           additionalProperties: { type: string }
 "##;
+    // The message read is the first `E013`, and the parity oracle compares diagnostics unordered,
+    // so `check` stays.
     for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         let message = report
@@ -542,22 +531,21 @@ components:
       type: array
       items: { $ref: '#/components/schemas/A' }
 "##;
-    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert_eq!(
-            codes(&report),
-            vec!["E004", "E010"],
-            "{entry}: the failed component is reported where it fails, and the parameter whose \
-             shape depends on it is refused rather than accepted: {report:#?}"
-        );
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedParameterStyle
-                    && d.pointer.as_str() == "/paths/~1q/get/parameters/0"
-            }),
-            "{entry}: E010 must be reported against the parameter: {report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        codes(&report),
+        vec!["E004", "E010"],
+        "the failed component is reported where it fails, and the parameter whose shape depends \
+         on it is refused rather than accepted: {report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::UnsupportedParameterStyle
+                && d.pointer.as_str() == "/paths/~1q/get/parameters/0"
+        }),
+        "E010 must be reported against the parameter: {report:#?}"
+    );
 }
 
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as
@@ -607,24 +595,22 @@ components:
         a: { oneOf: [{ $ref: '#/components/schemas/S2' }, { $ref: '#/components/schemas/S2' }] }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .all(|d| d.severity != spargen::Severity::Error),
-            "{entry}: the merged self-reference must raise no error: {report:#?}"
-        );
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::ValidationKeywordIgnored
-                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
-                    && d.message.contains("same generated type")
-            }),
-            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "the merged self-reference must raise no error: {report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::ValidationKeywordIgnored
+                && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                && d.message.contains("same generated type")
+        }),
+        "the repeated member must still be reported as `W001`: {report:#?}"
+    );
     let types = types_module(&code);
     assert!(
         types.contains("Option<Box<S2>>"),
@@ -673,24 +659,22 @@ components:
               - { type: 'null' }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .all(|d| d.severity != spargen::Severity::Error),
-            "{entry}: the merged nullable self-reference must raise no error: {report:#?}"
-        );
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::ValidationKeywordIgnored
-                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
-                    && d.message.contains("same generated type")
-            }),
-            "{entry}: the repeated member must still be reported as `W001`: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "the merged nullable self-reference must raise no error: {report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::ValidationKeywordIgnored
+                && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                && d.message.contains("same generated type")
+        }),
+        "the repeated member must still be reported as `W001`: {report:#?}"
+    );
     let types = types_module(&code);
     assert!(
         types.contains("pub a: Option<Box<S2>>"),
@@ -745,35 +729,33 @@ components:
             - { type: [string, 'null'], enum: [x, null] }
 "##;
     let (report, code) = generate_with_code(spec);
-    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .all(|d| d.severity != spargen::Severity::Error),
-            "{entry}: the merged self-reference must raise no error: {report:#?}"
-        );
-        for property in ["a", "b"] {
-            let pointer = format!("/components/schemas/S2/properties/{property}");
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == pointer
-                        && d.message.contains("same generated type")
-                }),
-                "{entry}: `{property}`'s repeated member must be reported as `W001`: {report:#?}"
-            );
-        }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "the merged self-reference must raise no error: {report:#?}"
+    );
+    for property in ["a", "b"] {
+        let pointer = format!("/components/schemas/S2/properties/{property}");
         assert!(
             report.diagnostics().iter().any(|d| {
-                d.code == Code::DeclarationHasNoEffect
-                    && d.pointer.as_str() == "/components/schemas/S2/properties/a"
-                    && d.message.contains("union member 2 cannot satisfy")
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == pointer
+                    && d.message.contains("same generated type")
             }),
-            "{entry}: the excluded string branch must be reported as `W011`: {report:#?}"
+            "`{property}`'s repeated member must be reported as `W001`: {report:#?}"
         );
     }
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::DeclarationHasNoEffect
+                && d.pointer.as_str() == "/components/schemas/S2/properties/a"
+                && d.message.contains("union member 2 cannot satisfy")
+        }),
+        "the excluded string branch must be reported as `W011`: {report:#?}"
+    );
     let types = types_module(&code);
     for property in ["a", "b"] {
         assert!(
@@ -817,30 +799,23 @@ components:
 "##
         );
         let (report, code) = generate_with_code(&spec);
-        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{second} {entry}: {report:#?}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .all(|d| d.severity != spargen::Severity::Error),
-                "{second} {entry}: the repeated alias must raise no error: {report:#?}"
-            );
-            assert!(
-                report.diagnostics().iter().any(|d| {
-                    d.code == Code::ValidationKeywordIgnored
-                        && d.pointer.as_str() == "/components/schemas/A"
-                        && d.message
-                            .contains("members 0, 1 lower to the same generated type")
-                }),
-                "{second} {entry}: the repeated member must still be reported as `W001`: \
-                 {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{second}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .all(|d| d.severity != spargen::Severity::Error),
+            "{second}: the repeated alias must raise no error: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/A"
+                    && d.message
+                        .contains("members 0, 1 lower to the same generated type")
+            }),
+            "{second}: the repeated member must still be reported as `W001`: {report:#?}"
+        );
         let types = types_module(&code);
         assert!(
             types.contains("pub x: Option<Box<B>>"),
@@ -892,31 +867,28 @@ fn a_component_body_reaching_a_cycle_closing_ref_through_an_alias_generates_in_e
                     "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\n\
                      components:\n  schemas:\n{schemas}"
                 );
-                let (generated, checked, code) =
+                let (report, _, code) =
                     generate_and_check_files(&[("openapi.yaml", &spec), ("lib.yaml", lib)]);
                 let case = format!("{body} {alias} {order:?}");
-                for (entry, report) in [("generate", &generated), ("check", &checked)] {
-                    assert!(
-                        report.outcome().is_success()
-                            && report
-                                .diagnostics()
-                                .iter()
-                                .all(|d| d.severity != spargen::Severity::Error),
-                        "{case} {entry}: every order must generate without an error: \
-                         {report:#?}"
-                    );
-                    assert_eq!(
-                        body == "oneOf",
-                        report.diagnostics().iter().any(|d| {
-                            d.code == Code::ValidationKeywordIgnored
-                                && d.pointer.as_str() == "/components/schemas/A"
-                                && d.message
-                                    .contains("members 0, 1 lower to the same generated type")
-                        }),
-                        "{case} {entry}: the repeated member is `W001` at `A` exactly where \
-                         `A` repeats it: {report:#?}"
-                    );
-                }
+                assert!(
+                    report.outcome().is_success()
+                        && report
+                            .diagnostics()
+                            .iter()
+                            .all(|d| d.severity != spargen::Severity::Error),
+                    "{case}: every order must generate without an error: {report:#?}"
+                );
+                assert_eq!(
+                    body == "oneOf",
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::ValidationKeywordIgnored
+                            && d.pointer.as_str() == "/components/schemas/A"
+                            && d.message
+                                .contains("members 0, 1 lower to the same generated type")
+                    }),
+                    "{case}: the repeated member is `W001` at `A` exactly where `A` repeats it: \
+                     {report:#?}"
+                );
                 let types = types_module(&code);
                 assert!(
                     types.contains("pub struct B"),
