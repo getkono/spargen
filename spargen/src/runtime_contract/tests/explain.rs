@@ -363,9 +363,19 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     );
     promises(
         "The requirement is also checked for a package that lies under Cargo's `git/checkouts` \
-         or `registry/src` source cache, which Cargo builds as a dependency of another workspace \
-         with that workspace's lockfile",
+         or `registry/src` source cache",
         &["an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked"],
+    );
+    promises(
+        "or beside the `.cargo-checksum.json` of a `cargo vendor` or other directory source",
+        &["an_unpublished_package_in_a_directory_source_has_its_requirement_checked"],
+    );
+    promises(
+        "which Cargo builds as a dependency of another workspace with that workspace's lockfile",
+        &[
+            "an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked",
+            "an_unpublished_package_in_a_directory_source_has_its_requirement_checked",
+        ],
     );
     // Each fixture below pins whole messages, the closing clause that says which version was
     // checked and why included.

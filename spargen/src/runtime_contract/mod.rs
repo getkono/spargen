@@ -38,7 +38,7 @@ pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};
 use target::TargetContext;
 use workspace::{
-    absolutized, cargo_source_cache, lockfile_path, read_lock, unpublished, workspace_root, Lock,
+    absolutized, foreign_source, lockfile_path, read_lock, unpublished, workspace_root, Lock,
     WorkspaceRoot,
 };
 
@@ -135,11 +135,11 @@ fn audit_in(
     // A `publish = false` package builds only with the versions its workspace's lockfile
     // resolves, so that lockfile is read, and named to Cargo beside the manifests, whose edits it
     // follows. A publishable one's users resolve its requirements themselves, so it is not, and
-    // neither is one in Cargo's source cache: that is a git or registry dependency of another
-    // workspace, built with the other workspace's lockfile.
+    // neither is one in Cargo's source cache or in a directory source: that is a git, registry,
+    // or vendored dependency of another workspace, built with the other workspace's lockfile.
     let lock = unpublished(&manifest, workspace).then(|| {
-        if let Some(cache) = cargo_source_cache(manifest_path, cargo_home) {
-            return Lock::Foreign(cache);
+        if let Some(source) = foreign_source(manifest_path, cargo_home) {
+            return Lock::Foreign(source);
         }
         let package = manifest
             .get("package")
