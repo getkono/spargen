@@ -4,8 +4,9 @@
 use super::*;
 
 /// A discriminated union whose description promises new kinds (`ServerEvent`), one with an
-/// untagged inline member (`Notice`), and one with a member named `Unknown`, used as a request
-/// body (`Shape`).
+/// untagged inline member (`Notice`), one with a member named `Unknown`, used as a request body
+/// (`Shape`), a `oneOf` with no discriminator holding the first beside another object
+/// (`Envelope`), and one holding it a property down (`Holder`).
 const OPEN_UNIONS_SPEC: &str = include_str!("specs/open_unions.yaml");
 
 /// The doc line the open variant's `value` field carries, which only an open union emits.
@@ -34,7 +35,7 @@ fn open_unions_decodes_an_unlisted_tag_into_the_unknown_variant() {
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
         out.join("tests/open.rs"),
-        r##"use open_unions::types::{Notice, ServerEvent, Shape};
+        r##"use open_unions::types::{Envelope, Holder, Notice, ServerEvent, Shape};
 
 /// `decoded` failed because the type refused a well-formed value: a `Data` error, never a syntax
 /// or end-of-input one, which would mean the test's own document was malformed and proved nothing.
@@ -120,6 +121,51 @@ fn an_untagged_member_is_tried_before_the_unknown_variant() {
 }
 
 #[test]
+fn a_nested_open_union_yields_to_a_member_that_matches() {
+    // `Aside` takes a payload it matches, as it does with `ServerEvent` closed: the nested open
+    // union's `Unknown` does not count as a second match against `oneOf`.
+    let wire = serde_json::json!({"kind": "resize", "aside": 1});
+    let aside: Envelope = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(aside, Envelope::Aside(_)), "{aside:?}");
+    assert_eq!(serde_json::to_value(&aside).unwrap(), wire);
+
+    // A listed tag still selects the nested union's variant.
+    let tick: Envelope = serde_json::from_str(r#"{"kind":"tick","n":1}"#).unwrap();
+    assert!(
+        matches!(&tick, Envelope::ServerEvent(event) if matches!(**event, ServerEvent::Tick(_))),
+        "{tick:?}"
+    );
+
+    // A payload no member matches outright reaches the nested union's `Unknown`, and is written
+    // back as it arrived.
+    let wire = serde_json::json!({"kind": "resize"});
+    let unknown: Envelope = serde_json::from_value(wire.clone()).unwrap();
+    assert!(
+        matches!(&unknown, Envelope::ServerEvent(event) if matches!(**event, ServerEvent::Unknown { .. })),
+        "{unknown:?}"
+    );
+    assert_eq!(serde_json::to_value(&unknown).unwrap(), wire);
+
+    // A payload with no string tag is still refused by every member.
+    assert_refused(
+        serde_json::from_str::<Envelope>(r#"{"aside":1}"#),
+        "a payload no member takes",
+    );
+}
+
+#[test]
+fn an_open_union_one_property_down_widens_its_member() {
+    // With `ServerEvent` closed only the second member takes this; open, the first takes it too,
+    // and `oneOf` refuses the two matches.
+    assert_refused(
+        serde_json::from_str::<Holder>(r#"{"event":{"kind":"resize","aside":1}}"#),
+        "a payload both members take",
+    );
+    let tick: Holder = serde_json::from_str(r#"{"event":{"kind":"tick","n":1}}"#).unwrap();
+    assert!(format!("{tick:?}").contains("Tick("), "{tick:?}");
+}
+
+#[test]
 fn a_member_named_unknown_keeps_its_name() {
     let member: Shape = serde_json::from_str(r#"{"shape":"Unknown"}"#).unwrap();
     assert!(matches!(member, Shape::Unknown(_)), "{member:?}");
@@ -156,6 +202,14 @@ fn open_unions_opens_only_a_discriminated_union_without_a_fallback() {
         open.matches(OPEN_VARIANT_DOC).count(),
         3,
         "each of the three unions opens:\n{open}"
+    );
+    // `Envelope` keeps its nested open union's `Unknown` only as a fallback; with the option off
+    // there is nothing to keep.
+    assert!(!closed.contains("unknown_fallback"), "{closed}");
+    assert_eq!(
+        open.matches("let mut unknown_fallback").count(),
+        1,
+        "{open}"
     );
 
     let fallback = r##"

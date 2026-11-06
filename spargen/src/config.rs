@@ -223,9 +223,14 @@ impl Spec {
     ///
     /// It applies to every union with a `discriminator`, in requests and responses alike, except
     /// one with an OpenAPI 3.2 `defaultMapping`, whose fallback variant already takes every tag
-    /// value it does not list. Unlike [`open_narrowing`](Self::open_narrowing), no union variant
-    /// can come to overlap another: the tag selects exactly one variant, and `Unknown` only where
-    /// it selects none.
+    /// value it does not list. Within the union the tag selects exactly one variant, and `Unknown`
+    /// only where it selects none. An open union that is itself a variant of an enclosing union
+    /// with no discriminator counts as a match there only when it decodes a payload as one of its
+    /// listed variants: a payload it takes only as `Unknown` goes to another variant that matches
+    /// it, as with this option off, and to the open union only when none does. An open union
+    /// reached deeper inside such a variant, such as through a property, is not held back that
+    /// way: it makes that variant accept more, so a `oneOf` payload another variant also matches
+    /// can fail to decode where it decoded with this option off.
     pub fn open_unions(mut self, enabled: bool) -> Self {
         self.open_unions = enabled;
         self

@@ -19,6 +19,24 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Notice" }
+  /envelopes:
+    get:
+      operationId: getEnvelope
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+  /holders:
+    get:
+      operationId: getHolder
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Holder" }
   /shapes:
     post:
       operationId: postShape
@@ -66,6 +84,30 @@ components:
         propertyName: kind
         mapping:
           tick: "#/components/schemas/Tick"
+    # An open union nested in a union with no discriminator, beside a member that takes some of
+    # the payloads its `Unknown` would: that member wins, as it does with the nested union closed.
+    Envelope:
+      oneOf:
+        - $ref: "#/components/schemas/ServerEvent"
+        - $ref: "#/components/schemas/Aside"
+    Aside:
+      type: object
+      required: [kind, aside]
+      properties:
+        kind: { type: string }
+        aside: { type: integer }
+    # The open union one property down is not held back: its first member accepts every
+    # string-tagged `event`, so a payload the second member takes matches both.
+    Holder:
+      oneOf:
+        - type: object
+          required: [event]
+          properties:
+            event: { $ref: "#/components/schemas/ServerEvent" }
+        - type: object
+          required: [event]
+          properties:
+            event: { $ref: "#/components/schemas/Aside" }
     # A member named `Unknown` keeps that name; the open variant takes the next one. Used in a
     # request body, which an open union applies to as well.
     Shape:
