@@ -109,13 +109,6 @@ pub(super) fn emit_union(
                 Some(fallback) => fallback.clone(),
                 None => quote! { Err(serde::de::Error::custom(#missing_tag)) },
             };
-            // `open_unions`: an unrecognized tag is kept, with the payload, in `Unknown`.
-            // Lowering never opens a union that has a fallback.
-            let unknown_tag_arm = match (&fallback, unknown) {
-                (Some(fallback), _) => fallback.clone(),
-                (None, Some(unknown)) => quote! { Ok(#ident::#unknown { tag, value }) },
-                (None, None) => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
-            };
             // Variants no tag selects are tried by their own schemas — with the source
             // applicator's semantics, as `Trial` tries them — before the absent or
             // unrecognized tag falls through to `defaultMapping` or the error. A tag that
@@ -137,6 +130,30 @@ pub(super) fn emit_union(
                     ))
                 })
                 .collect();
+            // `open_unions`: an unrecognized tag is kept, with the payload, in `Unknown`, but only
+            // for a payload no untagged variant matched: a `oneOf` payload two of them take is a
+            // decode failure, not an unknown kind. Lowering never opens a union that has a
+            // fallback.
+            let unknown_tag_arm = match (&fallback, unknown) {
+                (Some(fallback), _) => fallback.clone(),
+                (None, Some(unknown)) if attempts.is_empty() => {
+                    quote! { Ok(#ident::#unknown { tag, value }) }
+                }
+                (None, Some(unknown)) => {
+                    let ambiguous = format!(
+                        "data matched more than one untagged variant of union {}",
+                        ident.as_str()
+                    );
+                    quote! {
+                        if match_count == 0 {
+                            Ok(#ident::#unknown { tag, value })
+                        } else {
+                            Err(serde::de::Error::custom(#ambiguous))
+                        }
+                    }
+                }
+                (None, None) => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
+            };
             let fallback_member = union.variants.iter().any(|variant| {
                 discriminated_dispatch(variant).untagged.is_some()
                     && open_member_unknown_test(types, names, variant.ty).is_some()

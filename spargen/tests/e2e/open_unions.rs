@@ -4,7 +4,8 @@
 use super::*;
 
 /// A discriminated union whose description promises new kinds (`ServerEvent`), one with an
-/// untagged inline member (`Notice`), one with a member named `Unknown`, used as a request body
+/// untagged inline member (`Notice`), one with two untagged members a payload can match at once
+/// (`Memo`), one with a member named `Unknown`, used as a request body
 /// (`Shape`), a `oneOf` with no discriminator holding the first beside another object
 /// (`Envelope`), and one holding it a property down (`Holder`).
 const OPEN_UNIONS_SPEC: &str = include_str!("specs/open_unions.yaml");
@@ -35,7 +36,7 @@ fn open_unions_decodes_an_unlisted_tag_into_the_unknown_variant() {
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
         out.join("tests/open.rs"),
-        r##"use open_unions::types::{Envelope, Holder, Notice, ServerEvent, Shape};
+        r##"use open_unions::types::{Envelope, Holder, Memo, Notice, ServerEvent, Shape};
 
 /// `decoded` failed because the type refused a well-formed value: a `Data` error, never a syntax
 /// or end-of-input one, which would mean the test's own document was malformed and proved nothing.
@@ -121,6 +122,26 @@ fn an_untagged_member_is_tried_before_the_unknown_variant() {
 }
 
 #[test]
+fn a_payload_two_untagged_members_match_is_refused_not_unknown() {
+    // Each member alone takes its payload.
+    let note: Memo = serde_json::from_str(r#"{"kind":"memo","note":"hi"}"#).unwrap();
+    assert!(!matches!(note, Memo::Unknown { .. }), "{note:?}");
+    let body: Memo = serde_json::from_str(r#"{"kind":"memo","body":"hi"}"#).unwrap();
+    assert!(!matches!(body, Memo::Unknown { .. }), "{body:?}");
+    // Both take this one, so `oneOf` refuses it rather than calling it an unknown kind.
+    assert_refused(
+        serde_json::from_str::<Memo>(r#"{"kind":"memo","note":"a","body":"b"}"#),
+        "a payload both untagged members take",
+    );
+    // Neither takes this one: it is an unknown kind.
+    let unknown: Memo = serde_json::from_str(r#"{"kind":"memo"}"#).unwrap();
+    assert!(
+        matches!(unknown, Memo::Unknown { ref tag, .. } if tag == "memo"),
+        "{unknown:?}"
+    );
+}
+
+#[test]
 fn a_nested_open_union_yields_to_a_member_that_matches() {
     // `Aside` takes a payload it matches, as it does with `ServerEvent` closed: the nested open
     // union's `Unknown` does not count as a second match against `oneOf`.
@@ -200,8 +221,8 @@ fn open_unions_opens_only_a_discriminated_union_without_a_fallback() {
     });
     assert_eq!(
         open.matches(OPEN_VARIANT_DOC).count(),
-        3,
-        "each of the three unions opens:\n{open}"
+        4,
+        "each of the four discriminated unions opens:\n{open}"
     );
     // `Envelope` keeps its nested open union's `Unknown` only as a fallback; with the option off
     // there is nothing to keep.

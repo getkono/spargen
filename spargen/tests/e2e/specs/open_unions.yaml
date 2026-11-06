@@ -19,6 +19,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Notice" }
+  /memos:
+    get:
+      operationId: getMemo
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Memo" }
   /envelopes:
     get:
       operationId: getEnvelope
@@ -80,6 +89,25 @@ components:
           properties:
             kind: { type: string }
             note: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+    # Two untagged members a payload can match at once: `oneOf` refuses that payload rather than
+    # taking it as an unknown kind.
+    Memo:
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - type: object
+          required: [kind, note]
+          properties:
+            kind: { type: string }
+            note: { type: string }
+        - type: object
+          required: [kind, body]
+          properties:
+            kind: { type: string }
+            body: { type: string }
       discriminator:
         propertyName: kind
         mapping:
