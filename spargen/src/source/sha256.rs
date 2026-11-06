@@ -53,6 +53,10 @@ impl Sha256 {
     /// Append `bytes` to the message.
     pub(crate) fn update(&mut self, mut bytes: &[u8]) {
         self.length = self.length.wrapping_add(bytes.len() as u64);
+        // Mutation testing: `>` to `>=` is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: from an empty block the branch buffers what the tail copy below
+        // would, or fills and compresses the block the loop below would compress first. Only how
+        // many bytes are copied differs.
         if self.buffered > 0 {
             let take = bytes.len().min(64 - self.buffered);
             self.block[self.buffered..self.buffered + take].copy_from_slice(&bytes[..take]);
@@ -121,10 +125,11 @@ fn compress(state: &mut [u32; 8], chunk: &[u8; 64]) {
             .wrapping_add(K[i])
             .wrapping_add(w[i]);
         let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        // Mutation testing: the second `^` to `|` is an equivalent mutant, declared in
-        // `.cargo/mutants.toml`: the two differ only where `b & c` and `(a & b) ^ (a & c)` are
-        // both set, and wherever `b` and `c` are both set `a & b` equals `a & c`, so their xor is
-        // clear.
+        // Mutation testing: either `^` to `|` is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: each spelling it leaves is another form of the bitwise majority.
+        // `(a & b) | (a & c) ^ (b & c)` parses as `(a & b) | (c & (a ^ b))`; and
+        // `(a & b) ^ (a & c) | (b & c)` differs from this only where `b & c` is set, where
+        // `a & b` equals `a & c` and their xor is clear.
         let maj = (a & b) ^ (a & c) ^ (b & c);
         let t2 = s0.wrapping_add(maj);
         hh = g;
