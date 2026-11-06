@@ -75,6 +75,14 @@ audit reads (see the [CLI reference](./cli.md#spargen-deps)). You may choose a h
 floor; spargen rejects a requirement that could resolve below a floor or beyond the next semver
 breaking line, and `reqwest` must have its default features off.
 
+A package that sets `publish = false` builds only with the versions its `Cargo.lock` resolves, so
+when that lockfile sits at the workspace root the audit checks the locked version of each crate
+instead of the requirement: a broad `serde = "1"` inherited from `[workspace.dependencies]` passes
+while the lockfile resolves it at or above the floor. A publishable package keeps the requirement
+check, because its users resolve the requirement with lockfiles of their own. Every version
+diagnostic says which of the two it checked, and names the `[workspace.dependencies]` entry to
+change when the requirement is inherited. The lockfile is a rebuild trigger beside the manifests.
+
 The audit happens during both `build.rs` and proc-macro expansion and fails compilation with
 `E023` before generated output is accepted. Cargo cannot add spec-derived features after it has
 resolved dependencies: build scripts and proc macros run later in the compilation. Spargen
