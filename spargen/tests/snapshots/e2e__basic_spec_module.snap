@@ -11,11 +11,12 @@ expression: basic_spec_module(|spec| spec)
 #[allow(unused_imports)]
 pub use support::{
     ApiErrorBody, ApiErrorProblem, AuthError, ClientConfig, ClientCore, Credential,
-    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, LinkPaginator,
-    Middleware, MiddlewareBackend, Next, ProblemDetails, ProtocolError, RedirectError,
-    RequestCause, RequestError, ReqwestBackend, ResponseValue, RetryBackend,
-    RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind, TokenFuture,
-    TokenProvider, TransportError, exponential_backoff, next_link,
+    Error, ExecuteFuture, ExposeSecret, HeaderError, HttpBackend, HttpBody,
+    LinkPaginator, MaybeSend, MaybeSync, Middleware, MiddlewareBackend, Next,
+    ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TransportError,
+    exponential_backoff, next_link,
 };
 #[allow(unused_imports)]
 pub use support::{
@@ -535,9 +536,12 @@ mod support {
         //! is monomorphized per distinct body or error type.
         use std::convert::Infallible;
         use bytes::Bytes;
-        use reqwest::{Request, Response, Url};
+        use reqwest::{Request, Url};
         use serde::de::DeserializeOwned;
-        use super::{ClientCore, Error, HttpBackend, ResponseValue};
+        use super::transport::request_from_reqwest;
+        use super::{ClientCore, Error, HttpBackend, HttpBody, ResponseValue};
+        /// A response as the transport seam carries it.
+        type Response = http::Response<HttpBody>;
         /// Build a request URL from the base URL, or an optional per-operation server override, and a
         /// pre-rendered path plus pre-encoded query fragments. An absolute override replaces the client's
         /// base URL; a relative one is joined onto it. Paths compile to static segment concatenation — no
@@ -660,27 +664,26 @@ mod support {
             }
             Ok(url)
         }
-        /// Send a prepared request through the core's transport [`super::HttpBackend`], mapping
-        /// transport/timeout/protocol/redirect failures into the taxonomy. The backend reports failures as
-        /// a [`super::TransportError`] wrapping the originating `reqwest::Error`; that error is run back
-        /// through [`Error::from_reqwest`] here, so classification is identical to executing directly on the
-        /// reqwest client. Non-generic.
+        /// Send a request built on the core's `reqwest::Client` through the core's transport
+        /// [`super::HttpBackend`], mapping transport/timeout/protocol/redirect failures into the taxonomy.
+        /// The request crosses the seam as an [`http::Request`] whose in-memory body moves without a copy
+        /// off `wasm32`; a URL that is not a valid URI is refused first, as
+        /// [`Error::RequestConstruction`]. The backend reports failures as a [`super::TransportError`]
+        /// carrying its taxonomy class, which picks the variant here. Non-generic.
         pub async fn send(
             core: &ClientCore,
             request: Request,
-        ) -> Result<Response, Error<Infallible>> {
+        ) -> Result<http::Response<HttpBody>, Error<Infallible>> {
+            let request = request_from_reqwest(request).map_err(Error::from_reqwest)?;
             send_on(core.backend().as_ref(), request).await
         }
-        /// [`send`] through the backend alone, for a caller that holds the backend rather than the whole
-        /// [`ClientCore`]: a streaming response's reconnect.
+        /// [`send`] through the backend alone, for a caller that holds the backend and a request already
+        /// on the seam rather than the whole [`ClientCore`]: a streaming response's reconnect.
         pub(crate) async fn send_on(
             backend: &dyn HttpBackend,
-            request: Request,
+            request: http::Request<HttpBody>,
         ) -> Result<Response, Error<Infallible>> {
-            backend
-                .execute(request)
-                .await
-                .map_err(|error| Error::from_reqwest(error.into_source()))
+            backend.execute(request).await.map_err(Error::from_transport)
         }
         /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
         /// per body type. Decode failures become [`Error::Decode`] with serde's error message and a body
@@ -728,12 +731,12 @@ mod support {
         /// binary variant keeps it without a copy.
         pub async fn decode_success_with<T>(
             core: &ClientCore,
-            mut response: Response,
+            response: Response,
             decode: impl FnOnce(&Bytes) -> Result<T, String>,
         ) -> Result<ResponseValue<T>, Error<Infallible>> {
-            let status = response.status();
-            let headers = std::mem::take(response.headers_mut());
-            let body = response.bytes().await.map_err(Error::from_body_read)?;
+            let (parts, body) = response.into_parts();
+            let (status, headers) = (parts.status, parts.headers);
+            let body = body.collect().await.map_err(Error::from_transport)?;
             match decode(&body) {
                 Ok(value) => Ok(ResponseValue::new(status, headers, value)),
                 Err(path) => {
@@ -792,15 +795,14 @@ mod support {
         /// rather than the whole [`ClientCore`].
         async fn read_error_body_capped<E>(
             max_error_body: usize,
-            mut response: Response,
+            response: Response,
         ) -> Result<
             (reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool),
             Error<E>,
         > {
-            let status = response.status();
-            let headers = std::mem::take(response.headers_mut());
-            let (body, truncated) = read_capped(max_error_body, response).await?;
-            Ok((status, headers, body, truncated))
+            let (parts, body) = response.into_parts();
+            let (body, truncated) = read_capped(max_error_body, body).await?;
+            Ok((parts.status, parts.headers, body, truncated))
         }
         /// A status selector an operation documents a response under. Generated code passes these as
         /// static tables so classification distinguishes documented from undocumented statuses, and
@@ -955,7 +957,7 @@ mod support {
         /// The copy is unconditional, including when nothing is truncated, because a `Bytes` does not
         /// reveal how much memory stands behind it and every source here can hand over more than it holds:
         /// `Bytes::slice` is a refcounted view onto the whole original; `BytesMut::freeze` hands over the
-        /// buffer at its doubled capacity; and `response.bytes()` can return a view sharing the transport's
+        /// buffer at its doubled capacity; and a body read whole can be a view sharing the transport's
         /// read buffer. Retention is documented as bounded by the cap, so the only way to mean it is to
         /// detach every time. The cost is one copy of at most `cap` bytes, on error paths only.
         pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
@@ -968,33 +970,21 @@ mod support {
         /// so peak memory depends on the cap (plus one transport chunk, and the retained copy `cap_body`
         /// makes) rather than on whatever the server chose to send; `reqwest` imposes no response size
         /// limit of its own. Abandoning the body forgoes reuse of that connection; a deployment that would
-        /// rather keep it raises the cap.
-        ///
-        /// Uses `Response::chunk`, which, unlike `bytes_stream`, is not behind reqwest's `stream` feature,
-        /// which generated clients enable only for APIs with sequential responses.
-        #[cfg(not(target_arch = "wasm32"))]
+        /// rather keep it raises the cap. A body the backend delivers whole (reqwest's `fetch` backend
+        /// on `wasm32` without the `stream` feature) arrives as one chunk, so there only *retention* is
+        /// bounded, not peak memory.
         async fn read_capped<E>(
             cap: usize,
-            mut response: Response,
+            mut body: HttpBody,
         ) -> Result<(Bytes, bool), Error<E>> {
             let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
             while buffered.len() <= cap {
-                match response.chunk().await.map_err(Error::from_body_read)? {
+                match body.chunk().await.map_err(Error::from_transport)? {
                     Some(chunk) => buffered.extend_from_slice(&chunk),
                     None => break,
                 }
             }
             Ok(cap_body(buffered.freeze(), cap))
-        }
-        /// The `wasm32` counterpart. reqwest's `fetch` backend exposes no `chunk`, so the body arrives
-        /// whole and only *retention* can be bounded here, not peak memory.
-        #[cfg(target_arch = "wasm32")]
-        async fn read_capped<E>(
-            cap: usize,
-            response: Response,
-        ) -> Result<(Bytes, bool), Error<E>> {
-            let bytes = response.bytes().await.map_err(Error::from_body_read)?;
-            Ok(cap_body(bytes, cap))
         }
     }
     mod error {
@@ -1118,49 +1108,34 @@ mod support {
             /// `RequestBuilder::build`, or from `execute` on a request that built fine — a URL whose
             /// scheme is not `http`/`https`, plain `http` on an `https_only` client, or a URL that is not
             /// a valid URI. Re-sending it is refused again, so it is not transient.
+            ///
+            /// This is [`TransportError::from_reqwest`]'s classification, read as the variant
+            /// [`super::send`] maps that transport error to.
             pub fn from_reqwest(error: reqwest::Error) -> Self {
-                Self::from_class(ReqwestClass::of(&error), error)
+                Self::from_transport(TransportError::from_reqwest(error))
             }
-            /// Build the variant `class` names around `error`.
-            fn from_class(class: ReqwestClass, error: reqwest::Error) -> Self {
+            /// The taxonomy variant a backend's [`TransportError`] stands for: the class its constructor
+            /// named decides. A timeout keeps only its [`TimeoutKind`]; a request-kind failure is
+            /// [`RequestError::Other`] with the cause as its source; the redirect, protocol, connection
+            /// and interruption classes keep it behind [`RedirectError`], [`ProtocolError`], and the
+            /// transport error itself.
+            pub(crate) fn from_transport(error: TransportError) -> Self {
+                let TransportError { class, source } = error;
                 match class {
-                    ReqwestClass::Timeout(kind) => Error::Timeout(kind),
-                    ReqwestClass::Redirect => {
-                        Error::Redirect(RedirectError { source: error })
+                    TransportClass::Timeout(kind) => Error::Timeout(kind),
+                    TransportClass::Redirect => Error::Redirect(RedirectError { source }),
+                    TransportClass::Protocol => Error::Protocol(ProtocolError { source }),
+                    TransportClass::Connection => {
+                        Error::Transport(TransportError { class, source })
                     }
-                    ReqwestClass::Protocol => {
-                        Error::Protocol(ProtocolError { source: error })
+                    TransportClass::Interrupted => {
+                        Error::InterruptedBody(TransportError { class, source })
                     }
-                    ReqwestClass::Transport => {
-                        Error::Transport(TransportError { source: error })
-                    }
-                    ReqwestClass::Request => {
+                    TransportClass::Request => {
                         Error::RequestConstruction(
-                            RequestError::Other(RequestCause(Box::new(error))),
+                            RequestError::Other(RequestCause(source)),
                         )
                     }
-                }
-            }
-            /// Classify a failure reading the body of a response that has already arrived, the same way
-            /// `EventStream` classifies one mid-stream: the connection giving out partway through the
-            /// body is [`Error::InterruptedBody`], and so transient.
-            ///
-            /// reqwest reports any failure while reading a body as a decode-kind error, so the cause
-            /// decides. The first [`std::io::Error`] in its source chain is the evidence: a reset,
-            /// aborted, broken, or unconnected connection, or one that ended before the body did, is an
-            /// interruption, including a compressed body that ends before its compressed stream does;
-            /// any other kind (corrupt compressed data, a malformed chunked encoding) is not. With no I/O
-            /// error in the chain, a body-kind reqwest error, the error itself or one in the chain, is an
-            /// interruption. A timeout is asked for first, and everything that is not an interruption is
-            /// classified as [`Error::from_reqwest`] classifies it, so a body that is malformed rather
-            /// than cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
-            /// failed read as a decode-kind error over a JavaScript error, with neither an I/O error nor
-            /// a body-kind error in its chain, so every such failure there is [`Error::Protocol`].
-            pub(crate) fn from_body_read(error: reqwest::Error) -> Self {
-                if !error.is_timeout() && is_interrupted_read(&error) {
-                    Error::InterruptedBody(TransportError::new(error))
-                } else {
-                    Self::from_reqwest(error)
                 }
             }
             /// Whether the failure is worth retrying: transport failures, timeouts, and a `429` or `5xx`
@@ -1558,72 +1533,153 @@ mod support {
                 self.0.source()
             }
         }
-        /// Transport-layer failure (taxonomy #2 / #9).
+        /// The failure an [`super::HttpBackend`] reports, or an [`super::HttpBody`] yields while it is
+        /// read, carrying the taxonomy class it belongs to; and the payload of the transport-layer
+        /// variants that keep it (taxonomy #2 / #9).
+        ///
+        /// A backend picks the class through the constructor it builds the error with, and
+        /// [`super::send`] maps the error to that class's [`Error`] variant: [`Self::connection`] to
+        /// [`Error::Transport`], [`Self::timeout`] to [`Error::Timeout`], [`Self::protocol`] to
+        /// [`Error::Protocol`], [`Self::redirect`] to [`Error::Redirect`], [`Self::request`] to
+        /// [`RequestError::Other`], and [`Self::interrupted`] to [`Error::InterruptedBody`].
+        /// [`Self::from_reqwest`] reads the class off a `reqwest::Error`, so [`super::ReqwestBackend`]
+        /// classifies exactly as executing on a `reqwest::Client` always has. The cause is reachable
+        /// through [`std::error::Error::source`], and downcasts to its own type there.
         #[derive(Debug)]
         pub struct TransportError {
-            source: reqwest::Error,
+            class: TransportClass,
+            source: Box<dyn std::error::Error + Send + Sync>,
         }
         impl TransportError {
-            /// Wrap a `reqwest::Error` as a transport failure. [`super::HttpBackend`] implementations, whose
-            /// currency is reqwest's own types, report failures through this so [`super::send`] can
-            /// reclassify them via [`Error::from_reqwest`] — keeping timeout/redirect/protocol
-            /// classification identical to executing directly on a `reqwest::Client`.
-            pub fn new(source: reqwest::Error) -> Self {
-                Self { source }
+            fn new(class: TransportClass, source: impl Into<BoxError>) -> Self {
+                Self {
+                    class,
+                    source: source.into(),
+                }
             }
-            /// Consume the transport error, yielding the underlying `reqwest::Error` so [`super::send`] can
-            /// run it back through the full taxonomy classifier.
-            pub(crate) fn into_source(self) -> reqwest::Error {
-                self.source
+            /// A connection-level failure: name resolution, a refused or reset connection, a TLS
+            /// handshake or certificate error. It becomes [`Error::Transport`], which is transient.
+            pub fn connection(source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Connection, source)
             }
-            /// Whether [`Error::from_reqwest`] would classify this failure as transient, decided on a
-            /// borrow: [`super::RetryBackend`] asks before it has to hand the error back unconsumed.
+            /// A timeout of the given kind. It becomes [`Error::Timeout`], which is transient; the cause
+            /// is dropped there, as the variant carries only its [`TimeoutKind`].
+            pub fn timeout(kind: TimeoutKind, source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Timeout(kind), source)
+            }
+            /// Malformed HTTP, or a body that could not be decoded (decompression). It becomes
+            /// [`Error::Protocol`], which is not transient.
+            pub fn protocol(source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Protocol, source)
+            }
+            /// Redirect-policy exhaustion. It becomes [`Error::Redirect`], which is not transient.
+            pub fn redirect(source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Redirect, source)
+            }
+            /// The backend refused the request, or failed inside the send without a connection failure to
+            /// show for it. It becomes [`RequestError::Other`], which is not transient; that variant's
+            /// documentation says why such a request may already have been transmitted.
+            pub fn request(source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Request, source)
+            }
+            /// The connection gave out partway through a body. It becomes [`Error::InterruptedBody`],
+            /// which is transient; an [`super::HttpBody`] whose source fails with an error of any other
+            /// type reports it as this class.
+            pub fn interrupted(source: impl Into<BoxError>) -> Self {
+                Self::new(TransportClass::Interrupted, source)
+            }
+            /// Classify a `reqwest::Error` from executing a request, keeping it as the source. This is
+            /// the classification [`Error::from_reqwest`] documents.
+            pub fn from_reqwest(error: reqwest::Error) -> Self {
+                Self::new(TransportClass::of(&error), error)
+            }
+            /// Classify a `reqwest::Error` from reading the body of a response that has already
+            /// arrived, the same way `EventStream` classifies one mid-stream: the connection giving out
+            /// partway through the body is an interruption, and so transient.
+            ///
+            /// reqwest wraps any failure while reading a body in an error of its own, decode-kind or
+            /// body-kind depending on how the body is read, so the cause under that wrapper decides. The
+            /// first [`std::io::Error`] in its source chain is the evidence: a reset, aborted, broken,
+            /// or unconnected connection, or one that ended before the body did, is an interruption,
+            /// including a compressed body that ends before its compressed stream does; any other kind
+            /// (corrupt compressed data, a malformed chunked encoding) is not. With no I/O error in the
+            /// chain, a body-kind reqwest error in the chain is an interruption. A timeout is asked for
+            /// first, and everything else is a protocol failure, so a body that is malformed rather than
+            /// cut short stays [`Error::Protocol`]. On `wasm32`, reqwest's `fetch` backend reports a
+            /// failed read over a JavaScript error, with neither an I/O error nor a body-kind error in
+            /// its chain, so every such failure there is [`Error::Protocol`].
+            pub(crate) fn from_reqwest_body(error: reqwest::Error) -> Self {
+                let class = if error.is_timeout() {
+                    TransportClass::of(&error)
+                } else if is_interrupted_read(&error) {
+                    TransportClass::Interrupted
+                } else {
+                    TransportClass::Protocol
+                };
+                Self::new(class, error)
+            }
+            /// The error a body source failed with: a [`TransportError`] keeps its own class, and any
+            /// other error is an interruption.
+            pub(crate) fn from_body_source(error: BoxError) -> Self {
+                match error.downcast::<TransportError>() {
+                    Ok(error) => *error,
+                    Err(other) => Self::new(TransportClass::Interrupted, other),
+                }
+            }
+            /// Whether the [`Error`] variant [`super::send`] maps this failure to is transient, decided
+            /// on a borrow: [`super::RetryBackend`] asks before it has to hand the error back unconsumed.
             pub(crate) fn is_transient(&self) -> bool {
-                ReqwestClass::of(&self.source).is_transient()
+                self.class.is_transient()
             }
         }
-        /// The taxonomy class [`Error::from_reqwest`] assigns a `reqwest::Error`, decided without
-        /// consuming it, so the retry adapter and the taxonomy read one classification.
+        /// The boxed cause a [`TransportError`] carries.
+        type BoxError = Box<dyn std::error::Error + Send + Sync>;
+        /// The taxonomy class of a [`TransportError`], decided without consuming it, so the retry
+        /// adapter and the taxonomy read one classification.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum ReqwestClass {
+        enum TransportClass {
             Timeout(TimeoutKind),
             Redirect,
             Protocol,
-            Transport,
+            Connection,
             Request,
+            Interrupted,
         }
-        impl ReqwestClass {
-            /// The order is the classification: a timeout first, split by the connect discriminator; then
-            /// redirect and decode; then a connection failure, which reqwest also reports as request-kind;
-            /// then reqwest's request and builder kinds; anything else falls back to transport.
+        impl TransportClass {
+            /// The class of a `reqwest::Error` from executing a request. The order is the
+            /// classification: a timeout first, split by the connect discriminator; then redirect and
+            /// decode; then a connection failure, which reqwest also reports as request-kind; then
+            /// reqwest's request and builder kinds; anything else falls back to a connection failure.
             fn of(error: &reqwest::Error) -> Self {
                 #[cfg(not(target_arch = "wasm32"))]
                 let connect = error.is_connect();
                 #[cfg(target_arch = "wasm32")]
                 let connect = false;
                 if error.is_timeout() {
-                    ReqwestClass::Timeout(
+                    TransportClass::Timeout(
                         if connect { TimeoutKind::Connect } else { TimeoutKind::Total },
                     )
                 } else if error.is_redirect() {
-                    ReqwestClass::Redirect
+                    TransportClass::Redirect
                 } else if error.is_decode() {
-                    ReqwestClass::Protocol
+                    TransportClass::Protocol
                 } else if connect {
-                    ReqwestClass::Transport
+                    TransportClass::Connection
                 } else if error.is_request() || error.is_builder() {
-                    ReqwestClass::Request
+                    TransportClass::Request
                 } else {
-                    ReqwestClass::Transport
+                    TransportClass::Connection
                 }
             }
-            /// [`Error::is_transient`] of the variant [`Error::from_reqwest`] builds for this class.
+            /// [`Error::is_transient`] of the variant [`Error::from_transport`] builds for this class.
             fn is_transient(self) -> bool {
                 match self {
-                    ReqwestClass::Timeout(_) | ReqwestClass::Transport => true,
-                    ReqwestClass::Redirect
-                    | ReqwestClass::Protocol
-                    | ReqwestClass::Request => false,
+                    TransportClass::Timeout(_)
+                    | TransportClass::Connection
+                    | TransportClass::Interrupted => true,
+                    TransportClass::Redirect
+                    | TransportClass::Protocol
+                    | TransportClass::Request => false,
                 }
             }
         }
@@ -1636,12 +1692,11 @@ mod support {
             std::io::ErrorKind::NotConnected,
             std::io::ErrorKind::UnexpectedEof,
         ];
-        /// Whether a failed body read is an interruption, as [`Error::from_body_read`] describes.
+        /// Whether a failed body read is an interruption, as [`TransportError::from_reqwest_body`]
+        /// describes. The error itself is reqwest's wrapper of the read failure, so only its causes are
+        /// read.
         fn is_interrupted_read(error: &reqwest::Error) -> bool {
-            if !error.is_body() && !error.is_decode() {
-                return false;
-            }
-            let mut body_kind = error.is_body();
+            let mut body_kind = false;
             let mut cause = std::error::Error::source(error);
             while let Some(current) = cause {
                 if let Some(io) = current.downcast_ref::<std::io::Error>() {
@@ -1671,12 +1726,12 @@ mod support {
         /// Protocol-layer failure — malformed HTTP or decompression (taxonomy #4).
         #[derive(Debug)]
         pub struct ProtocolError {
-            source: reqwest::Error,
+            source: BoxError,
         }
         /// Redirect-policy exhaustion (taxonomy #5).
         #[derive(Debug)]
         pub struct RedirectError {
-            source: reqwest::Error,
+            source: BoxError,
         }
         impl std::fmt::Display for RequestError {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1730,18 +1785,18 @@ mod support {
                 }
             }
         }
-        macro_rules! impl_reqwest_source_error {
+        macro_rules! impl_source_error {
             ($ty:ty, $label:literal) => {
                 impl std::fmt::Display for $ty { fn fmt(& self, f : & mut
                 std::fmt::Formatter <'_ >) -> std::fmt::Result { write!(f, "{}: {}",
                 $label, self.source) } } impl std::error::Error for $ty { fn source(&
-                self) -> Option <& (dyn std::error::Error + 'static) > { Some(& self
-                .source) } }
+                self) -> Option <& (dyn std::error::Error + 'static) > { Some(self.source
+                .as_ref() as & (dyn std::error::Error + 'static)) } }
             };
         }
-        impl_reqwest_source_error!(TransportError, "transport error");
-        impl_reqwest_source_error!(ProtocolError, "protocol error");
-        impl_reqwest_source_error!(RedirectError, "redirect error");
+        impl_source_error!(TransportError, "transport error");
+        impl_source_error!(ProtocolError, "protocol error");
+        impl_source_error!(RedirectError, "redirect error");
     }
     mod header {
         //! Typed access to documented response headers.
@@ -1987,7 +2042,7 @@ mod support {
         //! A middleware receives the request plus a [`Next`] handle. Calling [`Next::run`] advances to the
         //! rest of the chain — the next middleware, or, when the chain is exhausted, the inner
         //! [`HttpBackend`]. A middleware may inspect/modify the request before calling `run`, inspect the
-        //! [`reqwest::Response`] after, or return a response *without* calling `run` at all to
+        //! [`http::Response`] after, or return a response *without* calling `run` at all to
         //! short-circuit. This is
         //! the classic "onion" middleware shape, expressed with std's `Future`/`Pin`/`Box` — no
         //! `async-trait` and no `tower`, so middleware adds no dependency to the generated runtime.
@@ -2029,12 +2084,13 @@ mod support {
         //! let client = Client::with_backend(backend, "https://api.example.com")?;
         //! ```
         use std::sync::Arc;
-        use reqwest::Request;
         use super::transport::{ExecuteFuture, HttpBackend};
-        use super::{MaybeSend, MaybeSync};
+        use super::{HttpBody, MaybeSend, MaybeSync};
+        /// A request as the transport seam carries it.
+        type Request = http::Request<HttpBody>;
         /// One link in the interceptor chain: it observes/modifies a request on the way in, calls
         /// [`Next::run`] to proceed (eventually reaching the transport), and observes/modifies the
-        /// [`reqwest::Response`] on the way out — or returns early to short-circuit.
+        /// [`http::Response`] on the way out — or returns early to short-circuit.
         ///
         /// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
         /// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`MiddlewareBackend`] — and thus
@@ -2043,7 +2099,7 @@ mod support {
         pub trait Middleware: MaybeSend + MaybeSync + std::fmt::Debug {
             /// Handle a request. Call `next.run(request)` to proceed to the rest of the chain (eventually
             /// the transport), or return a response without calling it to short-circuit. May inspect/modify
-            /// the request before and the [`reqwest::Response`] after.
+            /// the request before and the [`http::Response`] after.
             fn handle<'a>(
                 &'a self,
                 request: Request,
@@ -2064,7 +2120,7 @@ mod support {
         }
         impl<'a> Next<'a> {
             /// Proceed to the rest of the chain: run the next middleware, or — when no middlewares remain —
-            /// execute the request on the inner transport. Returns the eventual [`reqwest::Response`] or the
+            /// execute the request on the inner transport. Returns the eventual [`http::Response`] or the
             /// [`super::TransportError`] the transport failed with.
             pub fn run(self, request: Request) -> ExecuteFuture<'a> {
                 match self.remaining.split_first() {
@@ -2878,10 +2934,11 @@ mod support {
         use std::convert::Infallible;
         use std::marker::PhantomData;
         use reqwest::header::HeaderMap;
-        use reqwest::{Response, Url};
+        use reqwest::Url;
         use serde::de::DeserializeOwned;
         use super::{
-            decode_success, send, unexpected_status, ClientCore, Error, ResponseValue,
+            decode_success, send, unexpected_status, ClientCore, Error, HttpBody,
+            ResponseValue,
         };
         /// A manual async iterator over the pages of a `Link`-header-paginated collection.
         ///
@@ -2982,7 +3039,7 @@ mod support {
             async fn handle_response(
                 &mut self,
                 url: Url,
-                response: Response,
+                response: http::Response<HttpBody>,
             ) -> Option<Result<ResponseValue<T>, Error<Infallible>>> {
                 if !response.status().is_success() {
                     return Some(
@@ -3146,10 +3203,11 @@ mod support {
         //! ## Request replay and cloneability
         //!
         //! A retry re-sends the *same* request, which means it must be cloned before each attempt.
-        //! [`reqwest::Request::try_clone`] returns `None` when the body is a one-shot stream that cannot be
+        //! [`HttpBody::try_clone`] returns `None` when the body is a one-shot stream that cannot be
         //! rewound. Such a request is executed **exactly once** and its outcome returned unretried — silently
         //! replaying half a consumed stream would send a corrupt body. Requests with an in-memory (or empty)
-        //! body clone freely and retry normally.
+        //! body clone freely and retry normally; the clone carries the request's method, URI, version,
+        //! headers and extensions too.
         //!
         //! ## Idempotency
         //!
@@ -3204,17 +3262,21 @@ mod support {
         use std::sync::Arc;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         use reqwest::header::RETRY_AFTER;
-        use reqwest::{Method, Request, Response, StatusCode};
+        use reqwest::{Method, StatusCode};
         use super::error::is_transient_status;
-        use super::transport::{ExecuteFuture, HttpBackend};
+        use super::transport::{try_clone_request, ExecuteFuture, HttpBackend};
         use super::wasm::BoxFuture;
-        use super::{MaybeSend, MaybeSync, TransportError};
+        use super::{HttpBody, MaybeSend, MaybeSync, TransportError};
+        /// A request as the transport seam carries it.
+        type Request = http::Request<HttpBody>;
+        /// A response as the transport seam carries it.
+        type Response = http::Response<HttpBody>;
         /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
         ///
         /// `Send` off `wasm32` and not on it, as the `wasm` module explains.
         pub type RetryWait<'a> = BoxFuture<'a, ()>;
         /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
-        /// whether to retry: the [`Request`] that was sent, and either the raw [`Response`] the inner
+        /// whether to retry: the [`http::Request`] that was sent, and either the raw [`http::Response`] the inner
         /// backend returned (any status — success or error) or the [`TransportError`] it failed with (DNS,
         /// connect, timeout, …).
         ///
@@ -3272,10 +3334,11 @@ mod support {
             /// Whether the outcome is worth retrying by the runtime's default classifier: the request
             /// [is idempotent](Self::is_idempotent), and the failure is one [`super::Error::is_transient`]
             /// calls transient for the error this outcome becomes. A `429` or `5xx` response is transient.
-            /// A transport failure is classified as [`super::Error::from_reqwest`] classifies it, so a
-            /// timeout or a failed connection is transient, and a redirect-policy, protocol, or
-            /// request-kind failure ([`super::RequestError::Other`]) is not; on `wasm32` a failed
-            /// connection is request-kind too. A `POST` or `PATCH` without an `Idempotency-Key` is never
+            /// A transport failure is transient when the class its [`TransportError`] carries is: a
+            /// timeout, a failed connection, or an interrupted body is, and a redirect-policy, protocol,
+            /// or request-kind failure ([`super::RequestError::Other`]) is not. [`super::ReqwestBackend`]
+            /// classifies as [`super::Error::from_reqwest`] documents, so on `wasm32` a failed connection
+            /// is request-kind there. A `POST` or `PATCH` without an `Idempotency-Key` is never
             /// transient here, since the server may already have applied it. Policies are free to ignore
             /// this and key on [`Self::status`] / [`Self::transport_error`] directly.
             pub fn is_transient(&self) -> bool {
@@ -3381,7 +3444,7 @@ mod support {
                 Box::pin(async move {
                     let mut attempt: u32 = 0;
                     loop {
-                        let Some(replay) = request.try_clone() else {
+                        let Some(replay) = try_clone_request(&request) else {
                             return self.inner.execute(request).await;
                         };
                         let result = self.inner.execute(replay).await;
@@ -3563,25 +3626,30 @@ mod support {
         }
     }
     mod transport {
-        //! The transport seam: how a prepared [`reqwest::Request`] is executed into a
-        //! [`reqwest::Response`]. Everything else — URL building, auth attachment, decode, streaming,
-        //! pagination — operates on the request/response *around* this one step, so swapping the backend
-        //! swaps only the execute step and leaves the rest of the runtime untouched.
+        //! The transport seam: how a prepared [`http::Request`] is executed into an [`http::Response`],
+        //! both carrying the runtime's own body type, [`HttpBody`]. Everything else — URL building, auth
+        //! attachment, decode, streaming, pagination — operates on the request/response *around* this one
+        //! step, so swapping the backend swaps only the execute step and leaves the rest of the runtime
+        //! untouched.
         //!
         //! The seam is a `dyn`-able trait ([`HttpBackend`]) so the generated `Client` stays non-generic:
         //! [`super::ClientCore`] holds an `Arc<dyn HttpBackend>` rather than a type parameter. The async
         //! method returns a manually boxed future ([`ExecuteFuture`], `Send` off wasm) instead of using
         //! `async-trait`, so std's `Future`/`Pin`/`Box` carry the abstraction.
         //!
-        //! The currency is reqwest's own types: the trait abstracts *how* a `reqwest::Request` runs, not a
-        //! full re-typing of requests and responses. Failures are reported as a [`super::TransportError`]
-        //! wrapping the underlying `reqwest::Error`; [`super::send`] reclassifies that error through the
-        //! taxonomy ([`super::Error::from_reqwest`]) so timeout/redirect/protocol classification is
-        //! identical to executing directly on a `reqwest::Client`.
-        use reqwest::{Request, Response};
+        //! The currency is the `http` crate's request and response types, so a backend need not be built
+        //! on reqwest. Failures are reported as a [`super::TransportError`] carrying the taxonomy class
+        //! its constructor names; [`super::send`] maps it to that class's [`super::Error`] variant.
+        //! [`ReqwestBackend`] adapts a `reqwest::Client` to the seam in both directions and classifies its
+        //! failures with [`super::TransportError::from_reqwest`], so timeout/redirect/protocol
+        //! classification is identical to executing directly on the reqwest client.
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use bytes::{Bytes, BytesMut};
+        use http_body::{Body as _, Frame, SizeHint};
         use super::wasm::BoxFuture;
         use super::{MaybeSend, MaybeSync, TransportError};
-        /// The boxed future [`HttpBackend::execute`] returns: an executed [`Response`] or a
+        /// The boxed future [`HttpBackend::execute`] returns: an executed [`http::Response`] or a
         /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, so a backend may
         /// borrow its own fields while the request runs (as [`ReqwestBackend`] borrows its client); a
         /// `'static` future fits too, since a longer lifetime coerces to the shorter one the trait
@@ -3589,27 +3657,484 @@ mod support {
         ///
         /// The future is `Send` off `wasm32` and not on it, since reqwest's `fetch`-backed futures are
         /// `!Send` on the single-threaded browser target; the `wasm` module explains the gating.
-        pub type ExecuteFuture<'a> = BoxFuture<'a, Result<Response, TransportError>>;
-        /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
-        /// [`reqwest::Response`].
+        pub type ExecuteFuture<'a> = BoxFuture<
+            'a,
+            Result<http::Response<HttpBody>, TransportError>,
+        >;
+        /// The swappable HTTP transport: it executes a prepared [`http::Request`] into an
+        /// [`http::Response`], each carrying an [`HttpBody`].
         ///
         /// This is the seam the retry adapter, the middleware interceptor, and the WASM build all rest on:
         /// implement it to wrap, replace, or retry the execute step without touching URL building, auth,
-        /// decode, streaming, or pagination. The default [`ReqwestBackend`] simply runs the request on a
-        /// wrapped [`reqwest::Client`].
+        /// decode, streaming, or pagination. The default [`ReqwestBackend`] runs the request on a wrapped
+        /// `reqwest::Client`.
         ///
         /// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
         /// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`super::ClientCore`] stays `Debug`).
         /// The returned future is manually boxed so the trait is object-safe without an `async-trait`
         /// dependency.
         pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
-            /// Execute a prepared request, yielding the raw response or a transport failure. A backend that
-            /// fails should wrap the originating `reqwest::Error` via [`TransportError::new`] so
-            /// [`super::send`] can reclassify timeouts/redirects/protocol errors into the taxonomy.
-            fn execute(&self, request: Request) -> ExecuteFuture<'_>;
+            /// Execute a prepared request, yielding the raw response or a transport failure. The request's
+            /// URI is absolute. A backend that fails builds its [`TransportError`] with the constructor
+            /// naming the failure's class, so [`super::send`] maps it to the right [`super::Error`]
+            /// variant.
+            fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_>;
         }
-        /// The default backend: executes requests on a wrapped [`reqwest::Client`]. This is what
-        /// `Client::new` and `Client::with_client` install.
+        /// The cause a body source may fail with, before it is read as a [`TransportError`].
+        type BoxError = Box<dyn std::error::Error + Send + Sync>;
+        /// A streaming body behind the seam: `Send + Sync` off `wasm32` and neither on it, as the `wasm`
+        /// module explains. `Sync` is what lets [`ReqwestBackend`] hand a streaming request body to
+        /// reqwest, which requires it.
+        #[cfg(not(target_arch = "wasm32"))]
+        type BoxBody = Pin<
+            Box<dyn http_body::Body<Data = Bytes, Error = TransportError> + Send + Sync>,
+        >;
+        /// A streaming body behind the seam (the wasm variant: neither `Send` nor `Sync`).
+        #[cfg(target_arch = "wasm32")]
+        type BoxBody = Pin<
+            Box<dyn http_body::Body<Data = Bytes, Error = TransportError>>,
+        >;
+        /// The body of a request or response crossing the transport seam: bytes held in memory, or a
+        /// stream of them read as an [`http_body::Body`] whose failures are [`TransportError`]s.
+        ///
+        /// An in-memory body clones ([`Self::try_clone`]), which is what lets [`super::RetryBackend`]
+        /// resend a request and `EventStream` reconnect one; a streaming body is read once.
+        /// [`Self::wrap`] adopts any `http_body::Body`, so a backend built on another HTTP stack hands its
+        /// response body over without copying it.
+        pub struct HttpBody {
+            inner: Inner,
+        }
+        enum Inner {
+            /// Bytes held in memory: read as one data frame, then the end of the body.
+            Full(Bytes),
+            /// A body read frame by frame.
+            Streaming(BoxBody),
+            /// A request body reqwest's `fetch` backend holds as something other than bytes (a multipart
+            /// form), which only [`ReqwestBackend`] can send.
+            #[cfg(target_arch = "wasm32")]
+            Reqwest(reqwest::Body),
+        }
+        impl HttpBody {
+            /// A body with no bytes.
+            pub fn empty() -> Self {
+                Self::from(Bytes::new())
+            }
+            /// Adopt a streaming body. Its data frames are read as `Bytes`; a failure that is a
+            /// [`TransportError`] keeps its class, and any other is
+            /// [an interruption](TransportError::interrupted).
+            pub fn wrap<B>(body: B) -> Self
+            where
+                B: http_body::Body + MaybeSend + MaybeSync + 'static,
+                B::Data: Into<Bytes>,
+                B::Error: Into<BoxError>,
+            {
+                Self {
+                    inner: Inner::Streaming(
+                        Box::pin(SourceBody {
+                            inner: Box::pin(body),
+                        }),
+                    ),
+                }
+            }
+            /// The bytes of an in-memory body; `None` for a streaming one.
+            pub fn as_bytes(&self) -> Option<&[u8]> {
+                match &self.inner {
+                    Inner::Full(bytes) => Some(bytes),
+                    Inner::Streaming(_) => None,
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(body) => body.as_bytes(),
+                }
+            }
+            /// A copy of an in-memory body, sharing its bytes; `None` for a streaming one, which can be
+            /// read only once.
+            pub fn try_clone(&self) -> Option<Self> {
+                match &self.inner {
+                    Inner::Full(bytes) => Some(Self::from(bytes.clone())),
+                    Inner::Streaming(_) => None,
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(_) => None,
+                }
+            }
+            /// The next chunk of data, or `None` once the body has ended. Frames that carry no data
+            /// (trailers) are skipped.
+            pub(crate) async fn chunk(
+                &mut self,
+            ) -> Result<Option<Bytes>, TransportError> {
+                std::future::poll_fn(|cx| self.poll_chunk(cx)).await
+            }
+            /// [`Self::chunk`] as a poll, for a reader that is itself polled (`EventStream`).
+            pub(crate) fn poll_chunk(
+                &mut self,
+                cx: &mut Context<'_>,
+            ) -> Poll<Result<Option<Bytes>, TransportError>> {
+                loop {
+                    match Pin::new(&mut *self).poll_frame(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(None) => return Poll::Ready(Ok(None)),
+                        Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Some(Ok(frame))) => {
+                            if let Ok(data) = frame.into_data() {
+                                return Poll::Ready(Ok(Some(data)));
+                            }
+                        }
+                    }
+                }
+            }
+            /// The whole body. An in-memory body is handed over without a copy, and so is a streaming
+            /// one that arrives as a single chunk.
+            pub(crate) async fn collect(mut self) -> Result<Bytes, TransportError> {
+                if let Inner::Full(bytes) = self.inner {
+                    return Ok(bytes);
+                }
+                let Some(first) = self.chunk().await? else {
+                    return Ok(Bytes::new());
+                };
+                let Some(second) = self.chunk().await? else {
+                    return Ok(first);
+                };
+                let mut buffered = BytesMut::with_capacity(first.len() + second.len());
+                buffered.extend_from_slice(&first);
+                buffered.extend_from_slice(&second);
+                while let Some(chunk) = self.chunk().await? {
+                    buffered.extend_from_slice(&chunk);
+                }
+                Ok(buffered.freeze())
+            }
+            /// A request body reqwest built, as the seam carries it. Off `wasm32` an in-memory body
+            /// moves over without a copy, and anything else is read as a stream. On `wasm32` an in-memory
+            /// body is copied, and a multipart form stays reqwest's, for [`ReqwestBackend`] to send.
+            ///
+            /// One function for both targets, with the target-specific steps `cfg`-gated inside it, so a
+            /// native test reaches it and no mutation of it survives by being compiled out.
+            fn from_reqwest_request(
+                #[allow(unused_mut)]
+                mut body: reqwest::Body,
+            ) -> Self {
+                #[cfg(target_arch = "wasm32")]
+                return match body.as_bytes() {
+                    Some(bytes) => Self::from(Bytes::copy_from_slice(bytes)),
+                    None => {
+                        Self {
+                            inner: Inner::Reqwest(body),
+                        }
+                    }
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if body.as_bytes().is_none() {
+                        return Self::from_reqwest_stream(body);
+                    }
+                    let mut cx = Context::from_waker(std::task::Waker::noop());
+                    match Pin::new(&mut body).poll_frame(&mut cx) {
+                        Poll::Ready(Some(Ok(frame))) => {
+                            Self::from(frame.into_data().unwrap_or_default())
+                        }
+                        Poll::Ready(None) => Self::empty(),
+                        Poll::Ready(Some(Err(_))) | Poll::Pending => {
+                            Self::from_reqwest_stream(body)
+                        }
+                    }
+                }
+            }
+            /// A body reqwest reads, read through [`TransportError::from_reqwest_body`].
+            #[cfg(not(target_arch = "wasm32"))]
+            fn from_reqwest_stream(body: reqwest::Body) -> Self {
+                Self {
+                    inner: Inner::Streaming(Box::pin(ReqwestBody { inner: body })),
+                }
+            }
+            /// The body as reqwest sends it. reqwest's `fetch` backend on `wasm32` takes no stream, so
+            /// there a streaming body is refused as a request-kind failure.
+            fn into_reqwest(self) -> Result<reqwest::Body, TransportError> {
+                match self.inner {
+                    Inner::Full(bytes) => Ok(reqwest::Body::from(bytes)),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    Inner::Streaming(body) => Ok(reqwest::Body::wrap(body)),
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Streaming(_) => {
+                        Err(
+                            TransportError::request(
+                                "reqwest's fetch backend cannot send a streaming request body",
+                            ),
+                        )
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(body) => Ok(body),
+                }
+            }
+        }
+        impl http_body::Body for HttpBody {
+            type Data = Bytes;
+            type Error = TransportError;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, TransportError>>> {
+                match &mut self.inner {
+                    Inner::Full(bytes) if bytes.is_empty() => Poll::Ready(None),
+                    Inner::Full(bytes) => {
+                        Poll::Ready(Some(Ok(Frame::data(std::mem::take(bytes)))))
+                    }
+                    Inner::Streaming(body) => body.as_mut().poll_frame(cx),
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(_) => {
+                        self.inner = Inner::Full(Bytes::new());
+                        Poll::Ready(
+                            Some(
+                                Err(
+                                    TransportError::request(
+                                        "a multipart request body built by reqwest is sent only by ReqwestBackend",
+                                    ),
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            fn is_end_stream(&self) -> bool {
+                match &self.inner {
+                    Inner::Full(bytes) => bytes.is_empty(),
+                    Inner::Streaming(body) => body.is_end_stream(),
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(_) => false,
+                }
+            }
+            fn size_hint(&self) -> SizeHint {
+                match &self.inner {
+                    Inner::Full(bytes) => SizeHint::with_exact(bytes.len() as u64),
+                    Inner::Streaming(body) => body.size_hint(),
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(_) => SizeHint::default(),
+                }
+            }
+        }
+        impl Default for HttpBody {
+            fn default() -> Self {
+                Self::empty()
+            }
+        }
+        impl std::fmt::Debug for HttpBody {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match &self.inner {
+                    Inner::Full(bytes) => {
+                        f.debug_tuple("HttpBody").field(&bytes.len()).finish()
+                    }
+                    Inner::Streaming(_) => f.write_str("HttpBody(streaming)"),
+                    #[cfg(target_arch = "wasm32")]
+                    Inner::Reqwest(_) => f.write_str("HttpBody(reqwest)"),
+                }
+            }
+        }
+        impl From<Bytes> for HttpBody {
+            fn from(bytes: Bytes) -> Self {
+                Self { inner: Inner::Full(bytes) }
+            }
+        }
+        impl From<Vec<u8>> for HttpBody {
+            fn from(bytes: Vec<u8>) -> Self {
+                Self::from(Bytes::from(bytes))
+            }
+        }
+        impl From<String> for HttpBody {
+            fn from(text: String) -> Self {
+                Self::from(Bytes::from(text))
+            }
+        }
+        impl From<&'static str> for HttpBody {
+            fn from(text: &'static str) -> Self {
+                Self::from(Bytes::from_static(text.as_bytes()))
+            }
+        }
+        impl From<&'static [u8]> for HttpBody {
+            fn from(bytes: &'static [u8]) -> Self {
+                Self::from(Bytes::from_static(bytes))
+            }
+        }
+        /// An adopted body: its data read as `Bytes`, and its failures as [`TransportError`]s.
+        struct SourceBody<B> {
+            inner: Pin<Box<B>>,
+        }
+        impl<B> http_body::Body for SourceBody<B>
+        where
+            B: http_body::Body,
+            B::Data: Into<Bytes>,
+            B::Error: Into<BoxError>,
+        {
+            type Data = Bytes;
+            type Error = TransportError;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, TransportError>>> {
+                self.inner
+                    .as_mut()
+                    .poll_frame(cx)
+                    .map(|frame| {
+                        frame
+                            .map(|frame| {
+                                frame
+                                    .map(|frame| frame.map_data(Into::into))
+                                    .map_err(|error| TransportError::from_body_source(
+                                        error.into(),
+                                    ))
+                            })
+                    })
+            }
+            fn is_end_stream(&self) -> bool {
+                self.inner.is_end_stream()
+            }
+            fn size_hint(&self) -> SizeHint {
+                self.inner.size_hint()
+            }
+        }
+        /// A body reqwest reads, its failures classified by [`TransportError::from_reqwest_body`].
+        #[cfg(not(target_arch = "wasm32"))]
+        struct ReqwestBody {
+            inner: reqwest::Body,
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        impl http_body::Body for ReqwestBody {
+            type Data = Bytes;
+            type Error = TransportError;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, TransportError>>> {
+                Pin::new(&mut self.inner)
+                    .poll_frame(cx)
+                    .map(|frame| {
+                        frame
+                            .map(|frame| {
+                                frame.map_err(TransportError::from_reqwest_body)
+                            })
+                    })
+            }
+            fn is_end_stream(&self) -> bool {
+                self.inner.is_end_stream()
+            }
+            fn size_hint(&self) -> SizeHint {
+                self.inner.size_hint()
+            }
+        }
+        /// A response body reqwest's `fetch` backend reads, its failures classified by
+        /// [`TransportError::from_reqwest_body`]. With the `stream` feature it is read chunk by chunk as
+        /// the browser delivers them; without it, whole.
+        #[cfg(target_arch = "wasm32")]
+        struct FetchBody {
+            #[cfg(feature = "stream")]
+            chunks: Pin<
+                Box<dyn futures_core::Stream<Item = Result<Bytes, reqwest::Error>>>,
+            >,
+            #[cfg(not(feature = "stream"))]
+            whole: Option<BoxFuture<'static, Result<Bytes, reqwest::Error>>>,
+        }
+        #[cfg(target_arch = "wasm32")]
+        impl FetchBody {
+            fn new(response: reqwest::Response) -> Self {
+                Self {
+                    #[cfg(feature = "stream")]
+                    chunks: Box::pin(response.bytes_stream()),
+                    #[cfg(not(feature = "stream"))]
+                    whole: Some(Box::pin(response.bytes())),
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        impl http_body::Body for FetchBody {
+            type Data = Bytes;
+            type Error = TransportError;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Bytes>, TransportError>>> {
+                #[cfg(feature = "stream")]
+                let polled = futures_core::Stream::poll_next(self.chunks.as_mut(), cx);
+                #[cfg(not(feature = "stream"))]
+                let polled = {
+                    let polled = match self.whole.as_mut() {
+                        None => Poll::Ready(None),
+                        Some(whole) => {
+                            std::future::Future::poll(whole.as_mut(), cx).map(Some)
+                        }
+                    };
+                    if polled.is_ready() {
+                        self.whole = None;
+                    }
+                    polled
+                };
+                polled
+                    .map(|chunk| {
+                        chunk
+                            .map(|chunk| {
+                                chunk
+                                    .map(Frame::data)
+                                    .map_err(TransportError::from_reqwest_body)
+                            })
+                    })
+            }
+        }
+        /// A request reqwest built, as the seam carries it. A URL that is not a valid URI is refused here
+        /// as reqwest refuses it at `execute`, as a builder-kind error.
+        pub(crate) fn request_from_reqwest(
+            request: reqwest::Request,
+        ) -> Result<http::Request<HttpBody>, reqwest::Error> {
+            let request = http::Request::<reqwest::Body>::try_from(request)?;
+            Ok(request.map(HttpBody::from_reqwest_request))
+        }
+        /// A copy of `request` to send again, its method, URI, version, headers, extensions and body
+        /// alike; `None` when its body is a stream, which can be read only once.
+        pub(crate) fn try_clone_request(
+            request: &http::Request<HttpBody>,
+        ) -> Option<http::Request<HttpBody>> {
+            let mut clone = http::Request::new(request.body().try_clone()?);
+            *clone.method_mut() = request.method().clone();
+            *clone.uri_mut() = request.uri().clone();
+            *clone.version_mut() = request.version();
+            *clone.headers_mut() = request.headers().clone();
+            *clone.extensions_mut() = request.extensions().clone();
+            Some(clone)
+        }
+        /// A request from the seam, as reqwest sends it. The URI is parsed back into a URL; one that does
+        /// not parse is refused as a request-kind failure, before anything is sent.
+        fn request_into_reqwest(
+            request: http::Request<HttpBody>,
+        ) -> Result<reqwest::Request, TransportError> {
+            let (parts, body) = request.into_parts();
+            let body = body.into_reqwest()?;
+            reqwest::Request::try_from(http::Request::from_parts(parts, body))
+                .map_err(TransportError::from_reqwest)
+        }
+        /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
+        /// read as it arrives; on `wasm32` it is the `fetch` response's, as `FetchBody` reads it. One
+        /// function for both targets, as [`HttpBody::from_reqwest_request`] is, and for the same reason.
+        pub(crate) fn response_from_reqwest(
+            #[allow(unused_mut)]
+            mut response: reqwest::Response,
+        ) -> http::Response<HttpBody> {
+            #[cfg(not(target_arch = "wasm32"))]
+            return http::Response::<reqwest::Body>::from(response)
+                .map(HttpBody::from_reqwest_stream);
+            #[cfg(target_arch = "wasm32")]
+            {
+                let status = response.status();
+                let headers = std::mem::take(response.headers_mut());
+                let mut converted = http::Response::new(
+                    HttpBody::wrap(FetchBody::new(response)),
+                );
+                *converted.status_mut() = status;
+                *converted.headers_mut() = headers;
+                converted
+            }
+        }
+        /// The default backend: executes requests on a wrapped [`reqwest::Client`], adapting each request
+        /// from the seam to reqwest and each response back. This is what `Client::new` and
+        /// `Client::with_client` install.
+        ///
+        /// An in-memory request body moves to reqwest without a copy off `wasm32`, and a streaming one
+        /// is streamed; reqwest's `fetch` backend on `wasm32` sends no streaming body, and refuses one as
+        /// a request-kind failure. A failure to execute is classified by
+        /// [`TransportError::from_reqwest`], and one while reading the response body by the rules
+        /// [`super::Error::InterruptedBody`] and [`super::Error::Protocol`] describe.
         #[derive(Debug, Clone)]
         pub struct ReqwestBackend {
             client: reqwest::Client,
@@ -3625,9 +4150,15 @@ mod support {
             }
         }
         impl HttpBackend for ReqwestBackend {
-            fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+            fn execute(&self, request: http::Request<HttpBody>) -> ExecuteFuture<'_> {
                 Box::pin(async move {
-                    self.client.execute(request).await.map_err(TransportError::new)
+                    let request = request_into_reqwest(request)?;
+                    let response = self
+                        .client
+                        .execute(request)
+                        .await
+                        .map_err(TransportError::from_reqwest)?;
+                    Ok(response_from_reqwest(response))
                 })
             }
         }
@@ -3691,10 +4222,10 @@ mod support {
         //! newline-delimited JSON (`application/x-ndjson`), or RFC 7464 JSON Text Sequences
         //! (`application/json-seq`); [`Framing`] names each mode. A streaming operation returns an
         //! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
-        //! `next().await` convenience method. Reqwest's body stream delivers chunks incrementally on native
-        //! targets; on `wasm32`, its fetch implementation may buffer the body internally, and the stream
-        //! API and framing are the same. Dropping `EventStream` drops that body stream and cancels the
-        //! transfer.
+        //! `next().await` convenience method. It reads the response's [`HttpBody`] chunk by chunk as the
+        //! backend delivers it: `ReqwestBackend` delivers chunks incrementally on native targets; on
+        //! `wasm32`, reqwest's fetch implementation may buffer the body internally, and the stream API and
+        //! framing are the same. Dropping `EventStream` drops that body and cancels the transfer.
         //!
         //! Framing is a pure function ([`next_frame`]) over an owned [`FrameBuffer`], with no network IO
         //! and no async runtime. The buffer remembers how far the framer has already searched, so each
@@ -3708,22 +4239,18 @@ mod support {
         use bytes::{Bytes, BytesMut};
         use futures_core::Stream;
         use reqwest::header::HeaderMap;
-        use reqwest::{Request, Response, StatusCode};
+        use reqwest::StatusCode;
         use serde::de::DeserializeOwned;
         use super::dispatch::{cap_body, send_on, unexpected_status_capped};
+        use super::transport::{request_from_reqwest, try_clone_request};
         use super::wasm::BoxFuture;
         use super::{
-            ClientConfig, ClientCore, Error, HttpBackend, MaybeSend, MaybeSync,
-            TransportError,
+            ClientConfig, ClientCore, Error, HttpBackend, HttpBody, MaybeSend, MaybeSync,
         };
         /// The failure yielded by a streaming response after its initial HTTP response was accepted.
         pub type StreamError = Error<Infallible>;
-        #[cfg(not(target_arch = "wasm32"))]
-        type BodyStream = Pin<
-            Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>,
-        >;
-        #[cfg(target_arch = "wasm32")]
-        type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
+        /// A response as the transport seam carries it.
+        type Response = http::Response<HttpBody>;
         /// The caller-provided wait before an automatic reconnect attempt. `Send` off `wasm32` and not on
         /// it, as the `wasm` module explains.
         pub type ReconnectWait = BoxFuture<'static, ()>;
@@ -3812,7 +4339,7 @@ mod support {
             _marker: PhantomData<fn() -> T>,
         }
         enum StreamState {
-            Body(BodyStream),
+            Body(HttpBody),
             Eof,
             Waiting(ReconnectWait),
             Connecting(ReconnectFuture),
@@ -3827,7 +4354,7 @@ mod support {
         /// own `max_error_body`, taken from the same client configuration.
         struct ReconnectContext {
             backend: Arc<dyn HttpBackend>,
-            request: Request,
+            request: http::Request<HttpBody>,
             policy: Option<Arc<dyn ReconnectPolicy>>,
             attempt: u32,
         }
@@ -3836,12 +4363,13 @@ mod support {
             /// consumed lazily — no bytes are read until the first [`Self::next`] call. It holds no
             /// [`ClientCore`], so its limits are `ClientConfig::default()`'s.
             /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
-            pub(crate) fn new(mut response: Response, framing: Framing) -> Self {
+            pub(crate) fn new(response: Response, framing: Framing) -> Self {
                 let config = ClientConfig::default();
+                let (parts, body) = response.into_parts();
                 Self {
-                    status: response.status(),
-                    headers: std::mem::take(response.headers_mut()),
-                    state: StreamState::Body(Box::pin(response.bytes_stream())),
+                    status: parts.status,
+                    headers: parts.headers,
+                    state: StreamState::Body(body),
                     buffer: FrameBuffer::default(),
                     max_frame: config.max_stream_frame,
                     max_error_body: config.max_error_body,
@@ -3858,13 +4386,18 @@ mod support {
             /// Crate-visible: the generated operation methods share the consumer's crate with the
             /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
             /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
+            ///
+            /// `request` is the clone the operation kept of what it sent, built on reqwest; a URL that is
+            /// not a valid URI cannot cross the seam again, so it leaves the stream nothing to resend.
             #[allow(dead_code)]
             pub(crate) fn new_reconnectable(
                 response: Response,
                 framing: Framing,
                 core: &ClientCore,
-                request: Option<Request>,
+                request: Option<reqwest::Request>,
             ) -> Self {
+                let request = request
+                    .and_then(|request| request_from_reqwest(request).ok());
                 let last_event_id = request
                     .as_ref()
                     .and_then(|request| {
@@ -3970,29 +4503,27 @@ mod support {
                     }
                     match std::mem::replace(&mut this.state, StreamState::Done) {
                         StreamState::Body(mut body) => {
-                            match body.as_mut().poll_next(cx) {
+                            match body.poll_chunk(cx) {
                                 Poll::Pending => {
                                     this.state = StreamState::Body(body);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Some(Ok(chunk))) => {
+                                Poll::Ready(Ok(Some(chunk))) => {
                                     this.state = StreamState::Body(body);
                                     this.buffer.extend_from_slice(&chunk);
                                     if this.bom_pending {
                                         this.bom_pending = this.buffer.strip_leading_bom();
                                     }
                                 }
-                                Poll::Ready(Some(Err(error))) => {
-                                    let error = Error::InterruptedBody(
-                                        TransportError::new(error),
-                                    );
+                                Poll::Ready(Err(error)) => {
+                                    let error = Error::InterruptedBody(error);
                                     if let Some(error) = this
                                         .schedule_reconnect(OwnedReconnectReason::Failure(error))
                                     {
                                         return Poll::Ready(Some(Err(error)));
                                     }
                                 }
-                                Poll::Ready(None) => this.state = StreamState::Eof,
+                                Poll::Ready(Ok(None)) => this.state = StreamState::Eof,
                             }
                         }
                         StreamState::Eof => {
@@ -4031,13 +4562,12 @@ mod support {
                                     this.state = StreamState::Connecting(future);
                                     return Poll::Pending;
                                 }
-                                Poll::Ready(Ok(mut response)) => {
-                                    this.status = response.status();
-                                    this.headers = std::mem::take(response.headers_mut());
+                                Poll::Ready(Ok(response)) => {
+                                    let (parts, body) = response.into_parts();
+                                    this.status = parts.status;
+                                    this.headers = parts.headers;
                                     this.bom_pending = is_sse(this.framing);
-                                    this.state = StreamState::Body(
-                                        Box::pin(response.bytes_stream()),
-                                    );
+                                    this.state = StreamState::Body(body);
                                 }
                                 Poll::Ready(Err(error)) => {
                                     if let Some(error) = this
@@ -4119,7 +4649,7 @@ mod support {
                 let reconnect = self.reconnect.as_ref()?;
                 let backend = Arc::clone(&reconnect.backend);
                 let max_error_body = self.max_error_body;
-                let mut request = reconnect.request.try_clone()?;
+                let mut request = try_clone_request(&reconnect.request)?;
                 if let Some(id) = self.last_event_id.as_deref() {
                     match reqwest::header::HeaderValue::from_str(id) {
                         Ok(value) if !id.is_empty() => {
@@ -4537,10 +5067,11 @@ mod support {
         //! uses an `application/xml` / `text/xml` body, so a non-XML generated client never references
         //! `quick-xml`.
         use std::convert::Infallible;
-        use reqwest::Response;
         use serde::de::DeserializeOwned;
         use serde::Serialize;
-        use super::{ClientCore, Error, ResponseValue, StatusSpec};
+        use super::{ClientCore, Error, HttpBody, ResponseValue, StatusSpec};
+        /// A response as the transport seam carries it.
+        type Response = http::Response<HttpBody>;
         /// Serialize a request body to an XML string. A serialization failure is a request-construction
         /// error (taxonomy #1) — the value has no XML representation — never a panic. The `@name` serde
         /// convention on a field maps to an XML attribute; `xml.name` renames the element/attribute.
@@ -4877,7 +5408,7 @@ mod support {
     pub use retry::{
         exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
     };
-    pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+    pub use transport::{ExecuteFuture, HttpBackend, HttpBody, ReqwestBackend};
     pub use wasm::{MaybeSend, MaybeSync};
     pub use stream::{
         EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait,

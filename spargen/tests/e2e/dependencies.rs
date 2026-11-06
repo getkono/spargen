@@ -74,6 +74,8 @@ edition = "2021"
 
 [dependencies]
 bytes = "1.12.0"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = {{ version = "0.12.28", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
@@ -150,6 +152,8 @@ blocking = ["dep:tokio"]
 
 [dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = {{ version = "0.12.28", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}

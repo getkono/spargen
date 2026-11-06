@@ -30,6 +30,8 @@ fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
     for dependency in [
         BYTES,
         FUTURES_CORE,
+        HTTP,
+        HTTP_BODY,
         REQWEST,
         SECRECY,
         SERDE,

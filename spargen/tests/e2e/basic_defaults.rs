@@ -652,7 +652,7 @@ fn generated_support_module_exposes_link_paginator() {
 #[test]
 fn custom_http_backend_plugs_into_non_generic_client() {
     // the transport seam is re-exported at the crate root
-    // (`basic_client::HttpBackend` / `ExecuteFuture` / `ReqwestBackend`), so a consumer can
+    // (`basic_client::HttpBackend` / `ExecuteFuture` / `HttpBody` / `ReqwestBackend`), so a consumer can
     // implement their own transport and plug it via `Client::with_backend` WITHOUT `Client`
     // becoming generic. A trivial backend compiles (under clippy -D warnings) and constructs a
     // client. This test only exercises construction, so the transport is never polled — the runtime
@@ -660,7 +660,7 @@ fn custom_http_backend_plugs_into_non_generic_client() {
     #[derive(Debug)]
     struct TestBackend;
     impl basic_client::HttpBackend for TestBackend {
-        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+        fn execute(&self, _request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
             Box::pin(async { unreachable!("transport is never exercised in this construction test") })
         }
     }
@@ -697,7 +697,7 @@ fn retry_backend_wraps_an_inner_backend() {
     #[derive(Debug)]
     struct TrivialBackend;
     impl basic_client::HttpBackend for TrivialBackend {
-        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+        fn execute(&self, _request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
             Box::pin(async { unreachable!("transport is never exercised in this construction test") })
         }
     }
@@ -741,7 +741,7 @@ fn middleware_backend_wraps_an_inner_backend() {
     #[derive(Debug)]
     struct TrivialBackend;
     impl basic_client::HttpBackend for TrivialBackend {
-        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+        fn execute(&self, _request: http::Request<basic_client::HttpBody>) -> basic_client::ExecuteFuture<'_> {
             Box::pin(async { unreachable!("transport is never exercised in this construction test") })
         }
     }
@@ -754,7 +754,7 @@ fn middleware_backend_wraps_an_inner_backend() {
     impl basic_client::Middleware for InjectHeader {
         fn handle<'a>(
             &'a self,
-            mut request: reqwest::Request,
+            mut request: http::Request<basic_client::HttpBody>,
             next: basic_client::Next<'a>,
         ) -> basic_client::ExecuteFuture<'a> {
             request.headers_mut().insert(

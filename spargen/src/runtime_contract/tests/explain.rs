@@ -312,7 +312,7 @@ fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
     );
 
     // The clause that is the answer to #71 itself: an inherited declaration is accepted rather
-    // than reported as missing. Both fixtures assert the audit emits nothing at all for five
+    // than reported as missing. Both fixtures assert the audit emits nothing at all for seven
     // crates the member only inherits.
     promises(
         "Inheriting a required crate therefore satisfies the audit",

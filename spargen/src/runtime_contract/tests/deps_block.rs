@@ -21,6 +21,8 @@ fn the_default_dependency_block_is_printed_byte_for_byte() {
         format!(
             r#"[dependencies]
 bytes = "1.12.1"
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = {{ version = "0.12.28", default-features = false }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
@@ -46,6 +48,8 @@ fn the_all_capability_dependency_block_is_printed_byte_for_byte() {
         format!(
             r#"[dependencies]
 bytes = {{ version = "1.12.1", features = ["serde"] }}
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = {{ version = "0.12.28", default-features = false, features = ["multipart", "stream"] }}
 futures-core = "0.3.32"
 secrecy = "0.10.3"

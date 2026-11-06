@@ -20,6 +20,8 @@ spargen = { path = "../../spargen", default-features = false }
 # Every line of this block but `tokio` is exactly what `spargen deps petstore.yaml` prints.
 [dependencies]
 bytes = { version = "1.12.1", features = ["serde"] }
+http = "1.4.2"
+http-body = "1.0.1"
 reqwest = { version = "0.12.28", default-features = false, features = ["multipart"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

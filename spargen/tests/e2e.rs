@@ -423,6 +423,8 @@ blocking = ["dep:tokio"]
 [dependencies]
 bytes = {{ version = "{bytes}", features = ["serde"] }}
 futures-core = "{futures_core}"
+http = "{http}"
+http-body = "{http_body}"
 quick-xml = {{ version = "{quick_xml}", features = ["serialize"] }}
 reqwest = {{ version = "{reqwest}", default-features = false, features = ["multipart", "stream"] }}
 secrecy = "{secrecy}"
@@ -436,6 +438,8 @@ tokio = {{ version = "{tokio}", features = ["rt"], optional = true }}
 "#,
             bytes = runtime_floor("bytes"),
             futures_core = runtime_floor("futures-core"),
+            http = runtime_floor("http"),
+            http_body = runtime_floor("http-body"),
             quick_xml = runtime_floor("quick-xml"),
             reqwest = runtime_floor("reqwest"),
             secrecy = runtime_floor("secrecy"),
