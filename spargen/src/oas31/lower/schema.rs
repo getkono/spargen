@@ -14,7 +14,7 @@ use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
 use super::refiner::{implied_applicator_category, split_union_sibling, ImpliedCategory};
-use super::shape::{schema_has_shape_constraint, schema_has_union};
+use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union};
 use super::{LowerCtx, MetUnion, MAX_SCHEMA_DEPTH};
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -97,9 +97,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
         // schema. Intersect every shape-bearing sibling instead of silently discarding it.
-        let mut sibling = schema.clone();
-        sibling.reference = None;
-        if !schema_has_shape_constraint(&sibling) {
+        if !ref_siblings_bear_shape(schema) {
             // No shape to compose, so a cycle-closing reference here is the ordinary recursive
             // schema: it boxes and generates. Only the intersection below needs a real target.
             self.record_ref_xml(schema, referenced.id);
@@ -155,6 +153,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
         // and reject the strings the target accepts. There the applicators refine the branches
         // of their own category, as they do beside an inline union (#282).
+        let mut sibling = schema.clone();
+        sibling.reference = None;
         let category = implied_applicator_category(&sibling);
         if category.is_some() {
             if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {

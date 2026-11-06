@@ -9,7 +9,7 @@ use crate::oas31::{JsonType, Schema, SchemaOr};
 use crate::source::{is_remote_ref, Node};
 
 use super::combine::Contribution;
-use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union};
+use super::shape::{ref_siblings_bear_shape, schema_has_union};
 use super::strategy::retain_strategy;
 use super::{memoised_answer, resolved_identity, LowerCtx, MAX_SCHEMA_DEPTH};
 
@@ -700,11 +700,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     Err(_) => true,
                 };
+            if !target_admits || !ref_siblings_bear_shape(member) {
+                return target_admits;
+            }
             let mut sibling = member.clone();
             sibling.reference = None;
-            return target_admits
-                && (!schema_has_shape_constraint(&sibling)
-                    || self.flattened_member_admits_null(&sibling, visited, depth + 1));
+            return self.flattened_member_admits_null(&sibling, visited, depth + 1);
         }
         own_keywords_admit_null(member)
             && (member.all_of.is_empty()

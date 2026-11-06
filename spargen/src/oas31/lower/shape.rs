@@ -1,6 +1,7 @@
 //! Keyword gates over one schema: [`schema_has_shape_constraint`], whether a schema's keywords
 //! give it a shape of its own, and [`ref_siblings_bear_shape`], the same question of a `$ref`'s
-//! siblings, which decides whether they are intersected with its target;
+//! siblings, which decides whether they are intersected with its target, and
+//! [`bears_shape_except`] and [`union_siblings_bear_shape`], the gate with some rows cleared;
 //! [`schema_imposes_scalar`], whether an `allOf` member not read as an object still constrains its
 //! instances, which decides whether it is lowered whole as a scalar contribution; and
 //! [`schema_is_object_like`] and [`schema_has_union`], whether a schema constrains object shape or
@@ -76,13 +77,26 @@ pub(super) fn schema_has_shape_constraint(schema: &Schema) -> bool {
     SHAPE_KEYWORDS.iter().any(|(_, bears)| bears(schema))
 }
 
+/// [`schema_has_shape_constraint`] of `schema` with the [`SHAPE_KEYWORDS`] rows named in `except`
+/// cleared, asked without cloning it: whether any other row's keyword gives it a shape.
+pub(super) fn bears_shape_except(schema: &Schema, except: &[&str]) -> bool {
+    SHAPE_KEYWORDS
+        .iter()
+        .any(|&(keyword, bears)| !except.contains(&keyword) && bears(schema))
+}
+
 /// Whether `schema`'s keywords beside its `$ref` give it a shape of its own:
 /// [`schema_has_shape_constraint`] of the schema with the reference stripped, asked without
 /// cloning it. A `$ref` whose siblings answer `false` is simply its target.
 pub(super) fn ref_siblings_bear_shape(schema: &Schema) -> bool {
-    SHAPE_KEYWORDS
-        .iter()
-        .any(|&(keyword, bears)| keyword != "$ref" && bears(schema))
+    bears_shape_except(schema, &["$ref"])
+}
+
+/// Whether `schema`'s keywords beside its `oneOf`/`anyOf` give it a shape of its own:
+/// [`schema_has_shape_constraint`] of the schema with its union keywords cleared
+/// ([`Schema::clear_union_keywords`]), asked without cloning it.
+pub(super) fn union_siblings_bear_shape(schema: &Schema) -> bool {
+    bears_shape_except(schema, &["oneOf", "anyOf"])
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
@@ -106,8 +120,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union,
-        schema_imposes_scalar, schema_is_object_like, Schema, SHAPE_KEYWORDS,
+        bears_shape_except, ref_siblings_bear_shape, schema_has_shape_constraint, schema_has_union,
+        schema_imposes_scalar, schema_is_object_like, union_siblings_bear_shape, Schema,
+        SHAPE_KEYWORDS,
     };
     use crate::diag::{Code, Diagnostics, FileId, JsonPointer};
 
@@ -181,7 +196,25 @@ mod tests {
     /// wrong name would pass the explain comparison above while publishing the wrong rule.
     #[test]
     fn every_shape_keyword_row_recognises_the_keyword_it_names() {
-        let probe = |keyword: &str| match keyword {
+        for (keyword, _) in SHAPE_KEYWORDS {
+            let schema = schema(row_probe(keyword));
+            let matched: Vec<&str> = SHAPE_KEYWORDS
+                .iter()
+                .filter(|(_, bears)| bears(&schema))
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(
+                matched,
+                [*keyword],
+                "a schema carrying only `{keyword}` should clear exactly its own row"
+            );
+        }
+    }
+
+    /// A schema carrying `keyword`, a row of [`SHAPE_KEYWORDS`], and nothing else that row or any
+    /// other reads.
+    fn row_probe(keyword: &str) -> &'static str {
+        match keyword {
             "type" => "type: string",
             "properties" => "properties: { a: { type: string } }",
             "patternProperties" => "patternProperties: { '^a': { type: string } }",
@@ -198,20 +231,63 @@ mod tests {
             "oneOf" => "oneOf: [{ type: string }]",
             "anyOf" => "anyOf: [{ type: string }]",
             other => panic!("`SHAPE_KEYWORDS` row `{other}` has no probe here; add one"),
-        };
-        for (keyword, _) in SHAPE_KEYWORDS {
-            let schema = schema(probe(keyword));
-            let matched: Vec<&str> = SHAPE_KEYWORDS
+        }
+    }
+
+    /// `bears_shape_except` clears exactly the rows it names: a schema carrying one row's keyword
+    /// alone bears a shape unless that row is excepted, alone or among others, and nothing is
+    /// excepted by an empty list.
+    #[test]
+    fn bears_shape_except_clears_exactly_the_rows_it_names() {
+        for (carried, _) in SHAPE_KEYWORDS {
+            let schema = schema(row_probe(carried));
+            assert!(
+                bears_shape_except(&schema, &[]),
+                "nothing excepted, `{carried}` still bears a shape"
+            );
+            for (excepted, _) in SHAPE_KEYWORDS {
+                assert_eq!(
+                    bears_shape_except(&schema, &[excepted]),
+                    carried != excepted,
+                    "a schema carrying only `{carried}`, with `{excepted}` excepted"
+                );
+                assert_eq!(
+                    bears_shape_except(&schema, &[excepted, "allOf"]),
+                    *carried != *excepted && *carried != "allOf",
+                    "a schema carrying only `{carried}`, with `{excepted}` and `allOf` excepted"
+                );
+            }
+        }
+    }
+
+    /// `union_siblings_bear_shape` is the gate asked of the schema with its union keywords
+    /// cleared, for a union alone, beside each other row's keyword, and beside nothing at all.
+    #[test]
+    fn union_siblings_bear_shape_is_the_gate_without_the_union() {
+        let mut probes = vec![
+            "oneOf: [{ type: string }]".to_owned(),
+            "anyOf: [{ type: string }]".to_owned(),
+            "oneOf: [{ type: string }]\nanyOf: [{ type: string }]".to_owned(),
+            "oneOf: [{ type: string }]\ndiscriminator: { propertyName: kind }".to_owned(),
+            "description: d".to_owned(),
+        ];
+        probes.extend(
+            SHAPE_KEYWORDS
                 .iter()
-                .filter(|(_, bears)| bears(&schema))
-                .map(|(name, _)| *name)
-                .collect();
+                .filter(|(keyword, _)| *keyword != "oneOf")
+                .map(|(keyword, _)| format!("oneOf: [{{ type: string }}]\n{}", row_probe(keyword))),
+        );
+        for probe in &probes {
+            let schema = schema(probe);
+            let mut stripped = schema.clone();
+            stripped.clear_union_keywords();
             assert_eq!(
-                matched,
-                [*keyword],
-                "a schema carrying only `{keyword}` should clear exactly its own row"
+                union_siblings_bear_shape(&schema),
+                schema_has_shape_constraint(&stripped),
+                "`union_siblings_bear_shape` disagrees with the stripped gate for {probe:?}"
             );
         }
+        assert!(!union_siblings_bear_shape(&schema(&probes[0])));
     }
 
     /// `ref_siblings_bear_shape` is the gate asked of the schema with its `$ref` stripped, for a

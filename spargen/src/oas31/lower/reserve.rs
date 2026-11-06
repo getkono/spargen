@@ -11,7 +11,7 @@ use super::cycle::{Opening, Via};
 use super::defaults::default_display_for;
 use super::nullability::{member_is_null_only, NullAdmission};
 use super::reference::RefHop;
-use super::shape::{ref_siblings_bear_shape, schema_has_shape_constraint};
+use super::shape::{ref_siblings_bear_shape, union_siblings_bear_shape};
 use super::{
     append_text, resolved_hint, resolved_identity, LowerCtx, Reservation, MAX_SCHEMA_DEPTH,
 };
@@ -463,9 +463,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Everything the component says apart from the union itself. A `type`, a `properties`, an
         // `enum`, a sibling `$ref`: anything at all makes it a constrained schema rather than
         // another name for its target.
-        let mut without_union = schema.clone();
-        without_union.clear_union_keywords();
-        if schema_has_shape_constraint(&without_union) {
+        if union_siblings_bear_shape(schema) {
             return None;
         }
         // Each real member is a bare reference and nothing else: a member carrying its own

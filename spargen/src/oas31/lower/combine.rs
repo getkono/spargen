@@ -16,7 +16,8 @@ use super::meet::{carries_key, drop_applied_default_if_required, merge_field_def
 use super::nullability::{object_all_of_admits_null, stated_nullability, NullAdmission};
 use super::refiner::{implied_applicator_category, ImpliedCategory};
 use super::shape::{
-    schema_has_shape_constraint, schema_has_union, schema_imposes_scalar, schema_is_object_like,
+    bears_shape_except, ref_siblings_bear_shape, schema_has_union, schema_imposes_scalar,
+    schema_is_object_like,
 };
 use super::{
     resolved_hint, resolved_identity, LowerCtx, Refiner, ScopeReach, ScopedRefiners,
@@ -501,11 +502,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `required` silently, and let a sibling contradicting its target generate as the
             // target alone. The gate is the one `lower_ref_with_siblings` asks of a
             // `$ref`'s siblings, so the two positions agree on what counts as a shape.
-            let mut sibling = schema.clone();
-            sibling.reference = None;
-            if !schema_has_shape_constraint(&sibling) {
+            if !ref_siblings_bear_shape(schema) {
                 return Some(());
             }
+            let mut sibling = schema.clone();
+            sibling.reference = None;
             return self.gather_schema_member(&sibling, &format!("{hint}Constraint"), out);
         }
 
@@ -1082,9 +1083,7 @@ impl LowerCtx<'_, '_> {
                 {
                     return None;
                 }
-                let mut siblings = member.as_ref().clone();
-                siblings.reference = None;
-                if schema_has_shape_constraint(&siblings) {
+                if ref_siblings_bear_shape(member) {
                     return None;
                 }
                 let target = self.ref_target_body(reference, &member.provenance)?;
@@ -1102,9 +1101,7 @@ impl LowerCtx<'_, '_> {
     /// Whether every `allOf` member of `schema` is a `oneOf`/`anyOf`, inline or as the target of
     /// a `$ref`, and its own keywords bear no shape ([`Self::sole_union_member`]).
     fn every_member_is_a_union(&self, schema: &Schema) -> bool {
-        let mut own = schema.clone();
-        own.all_of.clear();
-        !schema_has_shape_constraint(&own)
+        !bears_shape_except(schema, &["allOf"])
             && schema.all_of.iter().all(|member| {
                 let SchemaOr::Schema(member) = member else {
                     return false;
