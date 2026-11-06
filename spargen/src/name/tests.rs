@@ -499,6 +499,38 @@ fn a_declared_root_document_schema_takes_a_type_name_from_a_synthesized_one() {
     assert_ne!(names.types[&synthesized].as_str(), "Text");
 }
 
+#[test]
+fn a_component_keeps_its_type_name_from_an_inline_type_spelling_it() {
+    // `Pet`'s `id` property hints `PetId`, which a component declares too. The inline pointer
+    // sorts before the component's (`/` before `I`), so only the declared-schema rank keeps the
+    // bare name with the component, in either insertion order.
+    for component_first in [false, true] {
+        let mut api = api(Vec::new(), false);
+        let def = |pointer: JsonPointer| TypeDef {
+            name_hint: "PetId".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Default::default(),
+            provenance: Provenance::new(pointer, None),
+            document: String::new(),
+        };
+        let schemas = JsonPointer::root().push("components").push("schemas");
+        let component = def(schemas.push("PetId"));
+        let inline = def(schemas.push("Pet").push("properties").push("id"));
+        let (component, inline) = if component_first {
+            let component = api.types.insert(component);
+            (component, api.types.insert(inline))
+        } else {
+            let inline = api.types.insert(inline);
+            (api.types.insert(component), inline)
+        };
+
+        let names = allocate(&api);
+
+        assert_eq!(names.types[&component].as_str(), "PetId");
+        assert_ne!(names.types[&inline].as_str(), "PetId");
+    }
+}
+
 /// Does `text` lex as exactly one Rust identifier token, spelled as itself? `Ident`'s
 /// `ToTokens` hands the text to `proc_macro2::Ident::new`, which panics on anything else.
 fn is_legal(text: &str) -> bool {
