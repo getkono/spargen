@@ -648,6 +648,31 @@ fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
 }
 
 #[test]
+fn a_known_triple_that_is_no_native_target_is_not_named_as_unknown() {
+    // The counterpart of the custom triple above: `wasm32-wasip1` is in the builtin list and is
+    // not the wasm anchor, so the table passes the native-only check, and without a build target
+    // it is reported as applying to no native target rather than as a triple spargen lacks.
+    let wasm = blocking_manifest(&format!(
+        "[target.wasm32-wasip1.dependencies]\n{}\n",
+        tokio_declaration()
+    ));
+    let messages = messages(&audit_manifest(
+        &wasm,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    ));
+    assert!(
+        messages
+            .contains("`[target.wasm32-wasip1.dependencies]` applies to no known non-wasm target"),
+        "{messages}"
+    );
+    assert!(
+        !messages.contains("not a target spargen knows"),
+        "{messages}"
+    );
+}
+
+#[test]
 fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
     // Pins existing behaviour. `feature`, `test`, `debug_assertions` and `proc_macro` have no
     // value for any target: Cargo does not select target tables by them. The key rules wasm

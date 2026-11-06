@@ -564,6 +564,25 @@ components:
     }
 
     #[test]
+    fn the_input_paths_are_the_ones_the_snapshot_fingerprints() {
+        // `input_paths` is what `generate_api!` tracks: the paths `InputSnapshot::load` hashes,
+        // read without hashing them — the root, each `$ref` target and `spargen.lock`, sorted.
+        let (temp, build) = fixture();
+        std::fs::write(temp.path().join("spargen.lock"), "version = 1\n").unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+        let paths = super::input_paths(&build.spec).unwrap();
+        assert_eq!(
+            paths,
+            [
+                root.join("openapi.yaml"),
+                root.join("schema.yaml"),
+                root.join("spargen.lock"),
+            ]
+        );
+        assert_eq!(paths, InputSnapshot::load(&build.spec).unwrap().paths);
+    }
+
+    #[test]
     fn output_fingerprints_detect_missing_stale_and_edited_modules() {
         let (_temp, config) = fixture();
         assert_eq!(verified_output(&config.output, "input-a"), None);
