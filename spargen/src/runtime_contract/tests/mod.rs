@@ -116,6 +116,41 @@ fn core_entry(key: &str) -> (&'static str, &'static str) {
     (line, version)
 }
 
+/// A `Cargo.lock` locking the workspace package `package` with each of `CORE_MANIFEST`'s seven
+/// crates as a direct dependency, at the version `CORE_MANIFEST` pins unless `locked` names
+/// another for it.
+///
+/// Each dependency is written in the bare `name` form, which Cargo uses when only one version of
+/// the crate is locked; `extra` is appended verbatim, for a fixture that locks a second version.
+fn core_lock(package: &str, locked: &[(&str, &str)], extra: &str) -> String {
+    let crates = core_workspace_dependencies()
+        .lines()
+        .filter_map(|line| line.split_once(" = "))
+        .map(|(key, _)| {
+            let version = locked
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map_or_else(|| core_entry(key).1, |(_, version)| *version);
+            (key, version)
+        })
+        .collect::<Vec<_>>();
+    let mut lock = format!(
+        "version = 4\n\n[[package]]\nname = \"{package}\"\nversion = \"0.0.0\"\ndependencies = [\n"
+    );
+    for (name, _) in &crates {
+        lock.push_str(&format!(" \"{name}\",\n"));
+    }
+    lock.push_str("]\n");
+    for (name, version) in &crates {
+        lock.push_str(&format!(
+            "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \
+             \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        ));
+    }
+    lock.push_str(extra);
+    lock
+}
+
 const CORE_INHERITED: &str = "\
 [dependencies]
 bytes.workspace = true

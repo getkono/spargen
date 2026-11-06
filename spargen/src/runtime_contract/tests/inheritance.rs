@@ -387,3 +387,92 @@ fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() 
         );
     }
 }
+
+/// A workspace whose root declares `CORE_MANIFEST`'s crates with `bytes` as `bytes` and sets
+/// `publish` in `[workspace.package]`, a member `client` inheriting all seven with
+/// `publish.workspace = true`, and, when `lock` is given, that `Cargo.lock` at the root. Returns
+/// the audit of the member, the root manifest and the lockfile's path.
+fn inherited_publish_audit(
+    bytes: &str,
+    publish: &str,
+    lock: Option<&str>,
+) -> (Audit, Utf8PathBuf, Utf8PathBuf) {
+    let directory = Sandbox::new();
+    let root = directory.root.join("Cargo.toml");
+    let (core_bytes, _) = core_entry("bytes");
+    std::fs::write(
+        &root,
+        format!(
+            "[workspace]\nmembers = [\"client\"]\n\n[workspace.package]\npublish = {publish}\n\n\
+             [workspace.dependencies]\n{}",
+            replace_once(core_workspace_dependencies(), core_bytes, bytes)
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir(directory.root.join("client")).unwrap();
+    let member = directory.root.join("client/Cargo.toml");
+    std::fs::write(
+        &member,
+        format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\npublish.workspace = true\n\n\
+             {CORE_INHERITED}"
+        ),
+    )
+    .unwrap();
+    let lockfile = directory.root.join("Cargo.lock");
+    if let Some(lock) = lock {
+        std::fs::write(&lockfile, lock).unwrap();
+    }
+    let audit = directory.audit(&member, &RuntimeRequirements::default());
+    (audit, root, lockfile)
+}
+
+#[test]
+fn an_inherited_requirement_is_held_to_the_version_the_workspace_lockfile_resolves() {
+    // The layout #1235 reports: the root's plain `bytes = "1"` inherited by an unpublished
+    // member, whose workspace lockfile at the root resolves it above the floor. `publish = false`
+    // reaches the member through `publish.workspace = true`.
+    let floor = BYTES.floor_version();
+    let above = Version::new(floor.major, floor.minor, floor.patch + 1).to_string();
+    let lock = core_lock("consumer", &[("bytes", &above)], "");
+    let (audit, root, lockfile) = inherited_publish_audit("bytes = \"1\"", "false", Some(&lock));
+    assert!(audit.diagnostics.is_empty(), "{:#?}", audit.diagnostics);
+    let member = root.parent().unwrap().join("client/Cargo.toml");
+    assert_eq!(audit.manifests, vec![lockfile, root, member]);
+}
+
+#[test]
+fn an_inherited_version_out_of_range_names_its_workspace_dependencies_entry() {
+    // Either way the version is checked, an inherited requirement is changed in the root, so the
+    // message names that entry and the manifest it is in.
+    let below = super::versions::version_below(&BYTES.floor_version()).to_string();
+    let lock = core_lock("consumer", &[("bytes", &below)], "");
+    let (audit, root, lockfile) = inherited_publish_audit("bytes = \"1\"", "false", Some(&lock));
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!(
+            "`bytes` is locked at `{below}` in `{lockfile}`, outside the supported range \
+             >={floor}, <{ceiling}; replace the requirement `1` in the `bytes` entry of \
+             `[workspace.dependencies]` in `{root}` with `{floor}` or a higher compatible caret \
+             requirement; the locked version was checked, not the requirement, because the \
+             package sets `publish = false` and `{lockfile}` resolves its dependencies",
+            floor = BYTES.floor,
+            ceiling = BYTES.ceiling(),
+        )
+    );
+
+    // A workspace that may publish has the requirement checked, and its lockfile left unread.
+    let (audit, root, lockfile) = inherited_publish_audit("bytes = \"1\"", "true", Some(&lock));
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!(
+            "`bytes` version requirement `1` is outside the supported range >={floor}, \
+             <{ceiling}; use `{floor}` or a higher compatible caret requirement in the `bytes` \
+             entry of `[workspace.dependencies]` in `{root}`; the requirement was checked, not a \
+             lockfile, because {PUBLISHABLE}",
+            floor = BYTES.floor,
+            ceiling = BYTES.ceiling(),
+        )
+    );
+    assert!(!audit.manifests.contains(&lockfile));
+}

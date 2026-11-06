@@ -11,7 +11,8 @@
 //! - `requirements` — the tested dependency floors, what one lowered API requires, and the
 //!   requirement table both the audit and `spargen deps` read;
 //! - `target` — how a `[target.<key>.dependencies]` key is evaluated for the target being built;
-//! - `workspace` — locating the workspace root a `workspace = true` declaration inherits from;
+//! - `workspace` — locating the workspace root a `workspace = true` declaration inherits from, and
+//!   reading the `Cargo.lock` beside it;
 //! - `check` — the rules each dependency declaration is held to.
 
 mod check;
@@ -26,7 +27,7 @@ use crate::diag::Diagnostic;
 use crate::Code;
 
 use check::{
-    check_dependency, reads_underscore_default_features, DependencyCheck, WorkspaceOrigin,
+    check_dependency, reads_underscore_default_features, DependencyCheck, Versions, WorkspaceOrigin,
 };
 #[cfg(test)]
 pub(crate) use integration::rerun_if_changed_lines;
@@ -35,10 +36,14 @@ use requirements::requirement_table;
 pub(crate) use requirements::RuntimeRequirements;
 pub use requirements::{RequiredDependency, Requirements};
 use target::TargetContext;
-use workspace::{absolutized, workspace_root, WorkspaceRoot};
+use workspace::{
+    absolutized, lockfile_path, read_lock, unpublished, workspace_root, Lock, WorkspaceRoot,
+};
 
 pub(crate) struct Audit {
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Every file the audit read, for rebuild tracking: the consumer manifest, its workspace
+    /// manifest, and the `Cargo.lock` a `publish = false` package resolves with.
     pub(crate) manifests: Vec<Utf8PathBuf>,
 }
 
@@ -122,6 +127,22 @@ fn audit_in(
     };
 
     let underscore_default_features = reads_underscore_default_features(&manifest, workspace);
+    // A `publish = false` package builds only with the versions its workspace's lockfile
+    // resolves, so that lockfile is read, and named to Cargo beside the manifests, whose edits it
+    // follows. A publishable one's users resolve its requirements themselves, so it is not.
+    let lock = unpublished(&manifest, workspace).then(|| {
+        let package = manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str);
+        read_lock(lockfile_path(&root), package)
+    });
+    if let Some(path) = lock.as_ref().and_then(Lock::existing) {
+        manifests.push(path.to_path_buf());
+    }
+    let versions = lock
+        .as_ref()
+        .map_or(Versions::Publishable, Versions::Unpublished);
     for required in requirement_table(requirements) {
         if let Some(feature) = required.conditional {
             if !declares_feature(&manifest, feature) {
@@ -144,6 +165,7 @@ fn audit_in(
                 origin,
                 audited,
                 underscore_default_features,
+                versions,
             },
             target,
             &mut diagnostics,

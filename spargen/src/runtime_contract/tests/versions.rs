@@ -86,7 +86,7 @@ fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
 /// The release just below `version` at its lowest non-zero component, with the components
 /// after it zeroed: `1.12.1` gives `1.12.0`, `1.12.0` gives `1.11.0`, and `1.0.0` gives
 /// `0.0.0`, so a floor that is an `x.y.0` or `x.0.0` release still has one.
-fn version_below(version: &Version) -> Version {
+pub(super) fn version_below(version: &Version) -> Version {
     match (version.major, version.minor, version.patch) {
         (major, minor, patch @ 1..) => Version::new(major, minor, patch - 1),
         (major, minor @ 1.., 0) => Version::new(major, minor - 1, 0),
@@ -615,4 +615,193 @@ paths:
             "{case}"
         );
     }
+}
+
+/// `CORE_MANIFEST` with `publish` set as `publish` gives (left unset for `None`), its `bytes`
+/// entry declared as `bytes`, and, when `lock` is given, that `Cargo.lock` beside it: a package
+/// that belongs to no workspace, which Cargo resolves with the lockfile in its own directory.
+/// Returns the audit and the lockfile's path.
+fn standalone_audit(
+    publish: Option<&str>,
+    bytes: &str,
+    lock: Option<&str>,
+) -> (Audit, Utf8PathBuf) {
+    let (core_bytes, _) = core_entry("bytes");
+    let mut manifest = replace_once(CORE_MANIFEST, core_bytes, bytes);
+    if let Some(publish) = publish {
+        manifest = replace_once(
+            &manifest,
+            "version = \"0.0.0\"\n",
+            &format!("version = \"0.0.0\"\npublish = {publish}\n"),
+        );
+    }
+    let sandbox = Sandbox::new();
+    let path = sandbox.root.join("Cargo.toml");
+    std::fs::write(&path, manifest).unwrap();
+    let lockfile = sandbox.root.join("Cargo.lock");
+    if let Some(lock) = lock {
+        std::fs::write(&lockfile, lock).unwrap();
+    }
+    let audit = sandbox.audit_in(
+        &path,
+        &RuntimeRequirements::default(),
+        &TargetContext::Unknown,
+    );
+    (audit, lockfile)
+}
+
+/// The release just above `BYTES`'s floor on its line, a version a broad requirement may lock.
+fn bytes_above_floor() -> String {
+    let floor = BYTES.floor_version();
+    Version::new(floor.major, floor.minor, floor.patch + 1).to_string()
+}
+
+#[test]
+fn an_unpublished_package_is_held_to_the_version_its_lockfile_resolves() {
+    // `bytes = "1"` admits releases below the floor, so the requirement alone is refused; the
+    // lockfile resolves it above the floor, and that is what an unpublished package builds with.
+    // Both spellings of "never publish" count, and the lockfile is named to Cargo for rebuilds.
+    let above = bytes_above_floor();
+    let lock = core_lock("consumer", &[("bytes", &above)], "");
+    for publish in ["false", "[]"] {
+        let (audit, lockfile) = standalone_audit(Some(publish), "bytes = \"1\"", Some(&lock));
+        assert!(
+            audit.diagnostics.is_empty(),
+            "{publish}: {:#?}",
+            audit.diagnostics
+        );
+        assert!(
+            audit.manifests.contains(&lockfile),
+            "{publish}: {:?}",
+            audit.manifests
+        );
+    }
+}
+
+#[test]
+fn a_locked_version_outside_the_supported_range_names_the_lockfile_and_the_floor() {
+    let below = version_below(&BYTES.floor_version()).to_string();
+    let above_ceiling = BYTES.ceiling().to_string();
+    for (requirement, locked) in [("1", below.as_str()), (">=1", above_ceiling.as_str())] {
+        let lock = core_lock("consumer", &[("bytes", locked)], "");
+        let (audit, lockfile) = standalone_audit(
+            Some("false"),
+            &format!("bytes = \"{requirement}\""),
+            Some(&lock),
+        );
+        assert_eq!(
+            messages(&audit.diagnostics),
+            format!(
+                "`bytes` is locked at `{locked}` in `{lockfile}`, outside the supported range \
+                 >={floor}, <{ceiling}; replace the requirement `{requirement}` with `{floor}` or \
+                 a higher compatible caret requirement; the locked version was checked, not the \
+                 requirement, because the package sets `publish = false` and `{lockfile}` \
+                 resolves its dependencies",
+                floor = BYTES.floor,
+                ceiling = BYTES.ceiling(),
+            )
+        );
+    }
+}
+
+#[test]
+fn the_locked_version_checked_is_the_one_the_requirement_selects() {
+    // With two versions of a crate locked, Cargo writes each dependency as `name version`, and
+    // the one the package's requirement matches is the one it builds with: an older major
+    // locked beside it is not the one the requirement selects.
+    let above = bytes_above_floor();
+    let lock = replace_once(
+        &core_lock(
+            "consumer",
+            &[("bytes", &above)],
+            "\n[[package]]\nname = \"bytes\"\nversion = \"0.4.12\"\nsource = \
+             \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        ),
+        " \"bytes\",\n",
+        &format!(" \"bytes 0.4.12\",\n \"bytes {above}\",\n"),
+    );
+    let (audit, _) = standalone_audit(Some("false"), "bytes = \"1\"", Some(&lock));
+    assert!(audit.diagnostics.is_empty(), "{:#?}", audit.diagnostics);
+    // And the older one, selected, is the one held to the floor.
+    let (audit, _) = standalone_audit(Some("false"), "bytes = \"0.4\"", Some(&lock));
+    assert_eq!(audit.diagnostics.len(), 1, "{:#?}", audit.diagnostics);
+    assert!(
+        audit.diagnostics[0]
+            .message
+            .starts_with("`bytes` is locked at `0.4.12` in "),
+        "{:#?}",
+        audit.diagnostics
+    );
+}
+
+#[test]
+fn a_publishable_package_has_its_requirement_checked_beside_a_lockfile() {
+    // The lockfile would pass it, but a published package's users never read that lockfile, so
+    // it is neither checked nor named to Cargo.
+    let lock = core_lock("consumer", &[("bytes", &bytes_above_floor())], "");
+    for publish in [None, Some("true"), Some("[\"internal\"]")] {
+        let (audit, lockfile) = standalone_audit(publish, "bytes = \"1\"", Some(&lock));
+        assert_eq!(
+            messages(&audit.diagnostics),
+            format!(
+                "`bytes` version requirement `1` is outside the supported range >={floor}, \
+                 <{ceiling}; use `{floor}` or a higher compatible caret requirement; the \
+                 requirement was checked, not a lockfile, because {PUBLISHABLE}",
+                floor = BYTES.floor,
+                ceiling = BYTES.ceiling(),
+            ),
+            "{publish:?}"
+        );
+        assert!(!audit.manifests.contains(&lockfile), "{publish:?}");
+    }
+}
+
+#[test]
+fn an_unpublished_package_without_a_usable_lock_has_its_requirement_checked() {
+    // Each way the lockfile can fail to decide the version says which, after the floor message.
+    let floor_message = format!(
+        "`bytes` version requirement `1` is outside the supported range >={floor}, <{ceiling}; \
+         use `{floor}` or a higher compatible caret requirement; the requirement was checked, \
+         not a lockfile, because ",
+        floor = BYTES.floor,
+        ceiling = BYTES.ceiling(),
+    );
+
+    let (audit, lockfile) = standalone_audit(Some("false"), "bytes = \"1\"", None);
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!("{floor_message}no `Cargo.lock` exists at `{lockfile}`")
+    );
+    assert!(!audit.manifests.contains(&lockfile));
+
+    let other = core_lock("another", &[], "");
+    let (audit, lockfile) = standalone_audit(Some("false"), "bytes = \"1\"", Some(&other));
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!(
+            "{floor_message}`{lockfile}` could not be used: it locks no workspace package named \
+             `consumer`"
+        )
+    );
+    assert!(audit.manifests.contains(&lockfile));
+
+    let (audit, lockfile) = standalone_audit(
+        Some("false"),
+        "bytes = \"1\"",
+        Some("version = [unterminated"),
+    );
+    let rendered = messages(&audit.diagnostics);
+    assert!(
+        rendered.starts_with(&format!("{floor_message}`{lockfile}` could not be used: ")),
+        "{rendered}"
+    );
+    assert!(audit.manifests.contains(&lockfile));
+
+    // A lockfile that locks the package, but no `bytes` the requirement matches.
+    let unlocked = replace_once(&core_lock("consumer", &[], ""), " \"bytes\",\n", "");
+    let (audit, lockfile) = standalone_audit(Some("false"), "bytes = \"1\"", Some(&unlocked));
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!("{floor_message}`{lockfile}` locks no `bytes` matching `1` for this package")
+    );
 }
