@@ -16,7 +16,8 @@ pub struct ClientConfig {
     ///
     /// - Bodies read as errors are capped, and on native targets the cap bounds *reading* too —
     ///   an over-cap body is abandoned partway, which forgoes reuse of that connection. On
-    ///   `wasm32` the `fetch` backend has no incremental read, so there only retention is bounded.
+    ///   `wasm32`, `ReqwestBackend` delivers the `fetch` body whole unless the API has a streaming
+    ///   response, so there only retention is guaranteed to be bounded.
     /// - A success body that fails to decode is capped on retention only. Deserialization needs
     ///   the whole body, so it is always read whole.
     /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and

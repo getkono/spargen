@@ -2,7 +2,9 @@
 
 The runtime support code is embedded into generated output as a private `support` module — no
 spargen crate ever enters a consumer's dependency graph. Its core dependency set is `reqwest`
-(default features off) / `serde` / `serde_json` / `bytes` / `secrecy`. A capability that needs more
+(default features off) / `http` / `http-body` / `serde` / `serde_json` / `bytes` / `secrecy`;
+`http` and `http-body` carry the [transport seam](#the-transport-seam)'s request, response and body
+types. A capability that needs more
 adds it only when the compiled API uses it, as this table lists; each crate's exact Cargo features
 are in the contract linked below:
 
@@ -16,8 +18,8 @@ are in the contract linked below:
 | [`format: uuid`](#uuid-and-time) | `uuid` |
 | [Blocking client](#blocking-feature-blocking) | an optional, native-only `tokio`, behind the consumer's own `blocking` feature |
 
-The transport seam, retry, middleware, pagination, problem details and WebAssembly support add no
-dependency: no `tower`, no `async-trait`, and no async timer of its own. Std's `Future` / `Pin` /
+Beyond that core set, the transport seam, retry, middleware, pagination, problem details and
+WebAssembly support add no dependency: no `tower`, no `async-trait`, and no async timer of its own. Std's `Future` / `Pin` /
 `Box` carry the policy abstractions.
 
 The exact tested version floors and conditional Cargo features are the
@@ -35,17 +37,28 @@ compiled API uses them; the rest are in every client.
 ## The transport seam
 
 `HttpBackend` is a `dyn`-able trait that abstracts exactly one step: how a prepared
-`reqwest::Request` is executed into a `reqwest::Response`. Everything else — URL building, auth
-attachment, decode, streaming, pagination — operates on the request/response *around* that step,
-so swapping the backend swaps only the execute step and leaves the rest untouched. The generated
-`Client` holds an `Arc<dyn HttpBackend>` (not a type parameter), and async methods return a
-manually boxed future rather than using `async-trait`.
+`http::Request<HttpBody>` is executed into an `http::Response<HttpBody>`. Everything else — URL
+building, auth attachment, decode, streaming, pagination — operates on the request/response
+*around* that step, so swapping the backend swaps only the execute step and leaves the rest
+untouched. The generated `Client` holds an `Arc<dyn HttpBackend>` (not a type parameter), and async
+methods return a manually boxed future rather than using `async-trait`.
 
-`ReqwestBackend` is the default backend (execute directly on a `reqwest::Client`). The retry and
-middleware adapters below are themselves `HttpBackend`s that wrap an inner backend, so they
-compose by nesting. `Client::with_backend(backend, base_url)` takes the outermost one as an
-`Arc<dyn HttpBackend>`; requests are still built on a default `reqwest::Client`, and only the
-execute step goes through the backend.
+The currency is the `http` crate's types, so a backend need not be built on reqwest. `HttpBody` is
+the runtime's own body: bytes in memory, which clone (so a request can be retried or a stream
+reconnected), or any `http_body::Body` adopted with `HttpBody::wrap`, which streams and is read
+once. A backend reports a failure as a `TransportError` built with the constructor naming its
+class — `connection`, `timeout`, `protocol`, `redirect`, `request` or `interrupted` — and the
+runtime maps it to the matching `Error` variant, so `Error::is_transient()` and retry policies read
+one classification whichever backend ran.
+
+`ReqwestBackend` is the default backend: it adapts each request to a `reqwest::Client` and each
+response back, an in-memory body moving across without a copy off wasm, and classifies reqwest's
+failures exactly as executing on the client directly always has. On `wasm32` it runs reqwest's
+`fetch` backend, which sends no streaming request body. The retry and middleware adapters below
+are themselves `HttpBackend`s that wrap an inner backend, so they compose by nesting.
+`Client::with_backend(backend, base_url)` takes the outermost one as an `Arc<dyn HttpBackend>`;
+requests are still built on a default `reqwest::Client`, and only the execute step goes through the
+backend.
 
 ## Retry
 
@@ -145,7 +158,8 @@ shows both, and how to authenticate follow-up pages.
 A streaming operation returns an `EventStream<T>` for Server-Sent Events (`text/event-stream`),
 newline-delimited JSON, or JSON Text Sequences. It implements the standard
 `futures_core::Stream<Item = Result<T, StreamError>>` while retaining an inherent
-`next().await` convenience method, and pulls reqwest body chunks incrementally. Dropping it cancels
+`next().await` convenience method, and pulls the response's `HttpBody` chunks incrementally as the
+backend delivers them. Dropping it cancels
 the response through ordinary HTTP drop semantics.
 
 For OpenAPI 3.2 SSE, spargen parses the envelope fields first. A string `data` property annotated

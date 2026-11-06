@@ -14,8 +14,8 @@ body:
           ignores a dependency's lockfile, so an advisory here is fixed by a
           manifest floor plus a `deny.toml` ban, not by a lockfile bump alone.
         - **The generated client's runtime graph** — the crates the emitted code
-          needs in *your* manifest: `reqwest`, `serde`, `serde_json`, `bytes`,
-          `secrecy` and `futures-core`, plus `quick-xml`,
+          needs in *your* manifest: `reqwest`, `http`, `http-body`, `serde`,
+          `serde_json`, `bytes`, `secrecy` and `futures-core`, plus `quick-xml`,
           `tokio` and `time` only when the compiled API uses them. That set is
           deliberate and closed; *"can the generated code use X?" is answered by
           naming the capability that needs it*, not by arguing that X is good.

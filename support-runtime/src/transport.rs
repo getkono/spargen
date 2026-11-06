@@ -391,6 +391,9 @@ impl http_body::Body for ReqwestBody {
 /// A response body reqwest's `fetch` backend reads, its failures classified by
 /// [`TransportError::from_reqwest_body`]. With the `stream` feature it is read chunk by chunk as
 /// the browser delivers them; without it, whole.
+// Mutation testing: replacing `FetchBody::new` or its `poll_frame` survives the native suite and
+// is declared rather than killed. Both are compiled only for `wasm32`, so no native test reaches
+// them; on `wasm32` the runtime is compile-checked, not tested.
 #[cfg(target_arch = "wasm32")]
 struct FetchBody {
     #[cfg(feature = "stream")]
