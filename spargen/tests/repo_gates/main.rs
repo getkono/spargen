@@ -39,8 +39,10 @@ fn workflow_files() -> BTreeSet<String> {
 
 /// Every job of `workflow` (the parsed `.github/workflows/<file>`) with its steps. A scan over
 /// steps that skipped a workflow without `jobs`, or a job without `steps`, would pass over it
-/// unseen, so each must carry at least one of each; a job of another shape (a reusable-workflow
-/// `uses:` job) fails here until the scans that read this learn to follow it.
+/// unseen, so each must carry at least one of each. A job calling a workflow of this repository
+/// (`uses: ./.github/workflows/<file>`) is left out, because its steps are that file's jobs, which
+/// every scan over [`workflow_files`] reads in their own right; a job of any other shape (a
+/// reusable workflow from elsewhere) fails here until the scans that read this learn to follow it.
 fn workflow_jobs<'a>(
     file: &str,
     workflow: &'a yaml_rust2::Yaml,
@@ -50,17 +52,27 @@ fn workflow_jobs<'a>(
         .unwrap_or_else(|| panic!("`{file}` carries no `jobs:` map"));
     assert!(!jobs.is_empty(), "`{file}` declares no job");
     jobs.iter()
-        .map(|(job, body)| {
+        .filter_map(|(job, body)| {
             let job = job
                 .as_str()
                 .unwrap_or_else(|| panic!("`{file}` names a job with a non-string key"));
+            if let Some(called) = body["uses"]
+                .as_str()
+                .and_then(|uses| uses.strip_prefix("./.github/workflows/"))
+            {
+                assert!(
+                    workflow_files().contains(called),
+                    "`{file}`'s `{job}` job calls `{called}`, which is no workflow file here"
+                );
+                return None;
+            }
             let steps = body["steps"]
                 .as_vec()
                 .filter(|steps| !steps.is_empty())
                 .unwrap_or_else(|| {
                     panic!("`{file}`'s `{job}` job carries no `steps:` for this suite to read")
                 });
-            (job, steps)
+            Some((job, steps))
         })
         .collect()
 }
