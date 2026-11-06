@@ -443,3 +443,6 @@ fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
         .any(|binary| family.eq_ignore_ascii_case(binary))
         .then_some((MediaType::OctetStream, 9))
 }
+
+#[cfg(test)]
+mod tests;
