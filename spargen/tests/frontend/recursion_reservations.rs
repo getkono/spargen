@@ -617,7 +617,7 @@ components:
         "`S2.a` must be the boxed component itself: {types}"
     );
     assert!(
-        !types.contains("S2a"),
+        !types.contains("S2A"),
         "the merged union must not be re-emitted as a type of its own: {types}"
     );
 }
@@ -681,14 +681,14 @@ components:
         "the required `S2.a` must be the nullable boxed component itself: {types}"
     );
     assert!(
-        types.contains("pub type S2b = Vec<Option<S2>>;"),
+        types.contains("pub type S2B = Vec<Option<S2>>;"),
         "`S2.b`'s items must be the nullable component itself: {types}"
     );
     assert!(
         types.contains("pub additional: BTreeMap<String, Option<S2>>,"),
         "`S2.c`'s values must be the nullable component itself: {types}"
     );
-    for merged in ["S2a", "S2bItem", "S2cAdditional", "Variant"] {
+    for merged in ["S2A", "S2BItem", "S2CAdditional", "Variant"] {
         assert!(
             !types.contains(merged),
             "no merged union may be re-emitted as a type of its own (`{merged}`): {types}"
@@ -698,8 +698,8 @@ components:
 
 /// The same merge beside a third branch that the union's multi-category `type` array, which the
 /// cycle-closing members meet in themselves, leaves no variant: at `a` the sibling excludes a
-/// string enum (`W011`), whose own lowering inserted `S2aVariant2`; at `b` the meet narrows a
-/// nullable string enum to `null`, inserting `S2bVariant2Constrained`. Each position is the boxed
+/// string enum (`W011`), whose own lowering inserted `S2Avariant2`; at `b` the meet narrows a
+/// nullable string enum to `null`, inserting `S2Bvariant2Constrained`. Each position is the boxed
 /// component, as with no third branch, and neither type is emitted. The types are inserted, so
 /// the reservation branch's elision has something to elide; the output alone does not pin those
 /// calls, since the pass that withholds every unreached type once lowering ends removes them too
@@ -763,7 +763,7 @@ components:
             "`S2.{property}` must be the boxed component itself: {types}"
         );
     }
-    for dropped in ["S2a", "S2b", "Variant"] {
+    for dropped in ["S2A", "S2B", "Variant"] {
         assert!(
             !types.contains(dropped),
             "no type may be emitted for a merged union or its dropped branch (`{dropped}`): {types}"
@@ -804,11 +804,11 @@ components:
     }
     let types = types_module(&code);
     assert!(
-        types.contains("pub a: Option<S2a>"),
+        types.contains("pub a: Option<S2A>"),
         "the dropped null branch must make `S2.a` optional: {types}"
     );
     assert!(
-        types.contains("S2(Box<S2>),") && types.contains("S2aVariant2(Box<S2aVariant2>),"),
+        types.contains("S2(Box<S2>),") && types.contains("S2Avariant2(Box<S2Avariant2>),"),
         "the cycle-closing and string branches must stay the union's variants: {types}"
     );
     assert!(

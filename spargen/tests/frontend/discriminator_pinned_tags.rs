@@ -38,10 +38,10 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
     assert!(report.diagnostics().is_empty(), "{report:#?}");
     let arms = discriminated_arms(&code, "Config");
     let expected = [
-        ("ConfigVariant0", "webhook"),
-        ("ConfigVariant1", "apprise"),
-        ("ConfigVariant2", "email"),
-        ("ConfigVariant3", "ntfy"),
+        ("Webhook", "webhook"),
+        ("Apprise", "apprise"),
+        ("Email", "email"),
+        ("Ntfy", "ntfy"),
     ];
     assert_eq!(
         arms.decode,
@@ -59,6 +59,89 @@ fn an_inline_member_pinning_its_tag_property_is_selected_by_that_value() {
             .collect::<Vec<_>>(),
         "{code}"
     );
+}
+
+/// Issue #1232: an inline member its pinned tag selects is named from that tag, variant and
+/// struct alike (`Config::Webhook(ConfigWebhook)`), with its nested inline types under the same
+/// prefix (`ConfigWebhookUrl`), and its struct leaves out the tag property: the property admits
+/// one value, which the union writes back. A struct that denies unknown properties keeps the
+/// field, since the payload it is handed carries the tag. A member whose pinned tag starts with no
+/// ASCII letter, and one whose pin another member claims, keep the numbered name and the field.
+#[test]
+fn an_inline_member_selected_by_its_pinned_tag_is_named_from_it_and_leaves_the_tag_out() {
+    let spec = |members: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Config:\n      \
+             oneOf:\n{members}      \
+             discriminator:\n        \
+             propertyName: type\n    \
+             Mail: {{ type: object, required: [type, to], properties: {{ type: {{ type: string }}, to: {{ type: string }} }} }}\n"
+        )
+    };
+    let webhook = "        - { type: object, required: [type, url], properties: { type: { const: webhook }, url: { type: string }, retry: { oneOf: [{ type: string }, { type: integer }] } } }\n";
+    let members = format!(
+        "{webhook}        \
+         - {{ type: object, required: [type, port], additionalProperties: false, properties: {{ type: {{ const: apprise }}, port: {{ type: integer }} }} }}\n        \
+         - {{ type: object, required: [type, to], properties: {{ type: {{ const: 2fa }}, to: {{ type: string }} }} }}\n        \
+         - {{ type: object, required: [type, to], properties: {{ type: {{ const: Mail }}, to: {{ type: string }} }} }}\n        \
+         - {{ $ref: '#/components/schemas/Mail' }}\n"
+    );
+    let (report, code) = generate_with_code(&spec(&members));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let arms = discriminated_arms(&code, "Config");
+    assert_eq!(
+        arms.encode,
+        [
+            ("Webhook", Some("webhook")),
+            ("Apprise", Some("apprise")),
+            ("ConfigVariant2", Some("2fa")),
+            ("ConfigVariant3", None),
+            ("Mail", Some("Mail")),
+        ]
+        .iter()
+        .map(|(variant, tag)| ((*variant).to_owned(), tag.map(str::to_owned)))
+        .collect::<Vec<_>>(),
+        "{code}"
+    );
+    let types = types_module(&code);
+    assert!(
+        types.contains("Webhook(Box<ConfigWebhook>),")
+            && types.contains("Apprise(Box<ConfigApprise>),"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigWebhook"),
+        ["url", "retry"],
+        "{types}"
+    );
+    // A nested inline union keeps the tag's prefix, for its type and its own variants.
+    assert!(types.contains("pub enum ConfigWebhookRetry {"), "{types}");
+    assert_eq!(
+        alias_target(&types, "ConfigWebhookUrl").as_deref(),
+        Some("String"),
+        "{types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigApprise"),
+        ["r#type", "port"],
+        "a struct denying unknown properties keeps its tag: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigVariant2"),
+        ["r#type", "to"],
+        "a numbered variant keeps its tag: {types}"
+    );
+    assert_eq!(
+        declared_fields(&types, "ConfigVariant3"),
+        ["r#type", "to"],
+        "an untagged variant keeps its tag: {types}"
+    );
+    assert!(!types.contains("ConfigVariant0"), "{types}");
 }
 
 /// The pinned value of #1001 selects a member only where it is the one value every payload the
@@ -91,31 +174,31 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
             "optional",
             "{ type: object, required: [port], properties: { type: { const: apprise }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "nullable",
             "{ type: object, required: [type, port], properties: { type: { type: [string, 'null'], enum: [apprise, null] }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "several values",
             "{ type: object, required: [type, port], properties: { type: { enum: [apprise, gotify] }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "a component's tag",
             "{ type: object, required: [type, port], properties: { type: { const: Mail }, port: { type: integer } } }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "a mapping key",
             "{ type: object, required: [type, port], properties: { type: { const: apprise }, port: { type: integer } } }",
             "        mapping:\n          apprise: Mail\n",
-            &[("ConfigVariant0", "webhook"), ("Mail", "apprise|Mail")][..],
+            &[("Mail", "apprise|Mail"), ("Webhook", "webhook")][..],
         ),
         (
             "another member's pin",
@@ -144,7 +227,7 @@ fn a_tag_property_that_pins_no_free_value_leaves_the_member_untagged() {
             "an undeclared tag property on a closed object",
             "{ type: object, required: [port], properties: { port: { type: integer } }, additionalProperties: false }",
             "",
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
     ] {
         let spec = union(second, mapping);
@@ -217,7 +300,7 @@ fn a_default_mapping_member_admitting_a_pinned_value_claims_it() {
             "a closed set without the pin",
             "{ enum: [Mail] }",
             false,
-            &[("ConfigVariant0", "webhook"), ("Mail", "Mail")][..],
+            &[("Mail", "Mail"), ("Webhook", "webhook")][..],
         ),
     ] {
         let spec = spec(mail_tag);

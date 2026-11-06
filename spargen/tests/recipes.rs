@@ -163,7 +163,7 @@ fn utoipa_document_generates_cleanly() {
         "`tag` is not nullable: {}",
         tag.ty
     );
-    assert_eq!(alias_target(&text, "Pettag").as_deref(), Some("String"));
+    assert_eq!(alias_target(&text, "PetTag").as_deref(), Some("String"));
     // Nullable `$ref` through a `oneOf` `null` member: nullable, of the referenced object.
     let category = field(&text, "Pet", "category");
     assert!(
@@ -171,7 +171,7 @@ fn utoipa_document_generates_cleanly() {
         "`category` is not nullable: {}",
         category.ty
     );
-    assert_eq!(declared_fields(&text, "Petcategory"), ["id", "name"]);
+    assert_eq!(declared_fields(&text, "PetCategory"), ["id", "name"]);
     // The control: an optional, non-nullable field refuses a present `null`.
     assert!(
         !field(&text, "Pet", "status").is_nullable_option(),
@@ -248,8 +248,8 @@ fn aide_document_generates_with_only_validation_warnings() {
 
     // `anyOf: [string, null]` and `type: [integer, null]`: both nullable, of the plain type.
     for (name, alias, target) in [
-        ("label", "Itemlabel", "String"),
-        ("count", "Itemcount", "i32"),
+        ("label", "ItemLabel", "String"),
+        ("count", "ItemCount", "i32"),
     ] {
         let declared = field(&text, "Item", name);
         assert!(

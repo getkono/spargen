@@ -230,7 +230,7 @@ components:
     let generated = preview.contents.expect("generated module");
     assert!(generated.contains("mod stream {"), "{generated}");
     assert!(
-        generated.contains("pub type Eventid = uuid::Uuid;"),
+        generated.contains("pub type EventId = uuid::Uuid;"),
         "{generated}"
     );
     // The root is part of the input set — an edit there changes what the audit sees.

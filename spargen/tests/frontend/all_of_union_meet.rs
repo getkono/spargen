@@ -69,7 +69,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
                 "UunionVariant1",
                 "UconstraintConstraint",
             ],
-            &["B", "U", "UconstraintConstraintc"],
+            &["B", "U", "UconstraintConstraintC"],
         ),
         (
             "beside a $ref and its typed keywords, met with the target first",
@@ -84,7 +84,7 @@ fn an_all_of_union_meet_emits_no_union_its_result_does_not_use() {
                 "Uconstraint",
                 "UreferenceComposition",
             ],
-            &["B", "U", "Uconstraintc"],
+            &["B", "U", "UconstraintC"],
         ),
         (
             "a $ref'd component first lowered inside the union",

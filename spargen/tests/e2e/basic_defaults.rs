@@ -419,18 +419,33 @@ fn an_untagged_discriminated_member_leaves_the_tagged_dispatch_in_place() {
 
 #[test]
 fn an_inline_member_is_selected_by_the_tag_value_it_pins() {
-    use basic_client::types::Channel;
-    // Each member's own `const` / one-value `enum` is its tag (#1001), both ways.
+    use basic_client::types::{Channel, ChannelWebhook};
+    // Each member's own `const` / one-value `enum` is its tag (#1001), both ways. The variant and
+    // its struct are named from that tag, and the struct leaves the tag out: the union decodes the
+    // tagged payload into it and writes the tag back (#1232).
     for (tag, url) in [("webhook", "https://hook"), ("apprise", "apprise://x")] {
         let payload = serde_json::json!({"type": tag, "url": url});
         let channel: Channel = serde_json::from_value(payload.clone()).unwrap();
         let selected = match &channel {
-            Channel::ChannelVariant0(_) => "webhook",
-            Channel::ChannelVariant1(_) => "apprise",
+            Channel::Webhook(inner) => {
+                assert_eq!(inner.url, url);
+                "webhook"
+            }
+            Channel::Apprise(inner) => {
+                assert_eq!(inner.url, url);
+                "apprise"
+            }
         };
         assert_eq!(selected, tag, "{channel:?}");
         assert_eq!(serde_json::to_value(&channel).unwrap(), payload);
     }
+    let built = Channel::Webhook(Box::new(ChannelWebhook {
+        url: "https://hook".to_owned(),
+    }));
+    assert_eq!(
+        serde_json::to_value(&built).unwrap(),
+        serde_json::json!({"type": "webhook", "url": "https://hook"})
+    );
     assert_refuses::<Channel>(
         r#"{"type": "gotify", "url": "https://x"}"#,
         "Channel with a tag no member pins",

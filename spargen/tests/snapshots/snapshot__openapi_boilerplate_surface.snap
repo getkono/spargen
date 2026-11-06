@@ -16,12 +16,12 @@ types (18):
   ShowPetByIdError
   servers::Server0
   types::Error
-  types::Errorcode
-  types::Errormessage
+  types::ErrorCode
+  types::ErrorMessage
   types::HeaderxNext
   types::Limit
   types::Pet
   types::PetId
-  types::Petid
-  types::Petname
-  types::Pettag
+  types::PetId5e361c21
+  types::PetName
+  types::PetTag

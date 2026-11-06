@@ -11,7 +11,7 @@ use crate::oas31::discriminator::is_schema_component_name;
 use crate::oas31::{Schema, SchemaOr};
 
 use super::discriminator::member_component_name;
-use super::discriminator::DiscriminatorMembers;
+use super::discriminator::{DiscriminatorMembers, PinnedMembers};
 use super::meet::NoMeet;
 use super::nullability::{member_is_null_only, union_branch_admits_null, NullAdmission};
 use super::prune::{kind_edges, reachable_types};
@@ -724,6 +724,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             strategy,
             variants: dispatches,
         } = self.union_strategy(schema, &variants, mode, discriminator_members.as_ref())?;
+        if let UnionStrategy::Discriminated { tag_field, .. } = &strategy {
+            self.name_pinned_variants(
+                hint,
+                tag_field,
+                &mut variants,
+                &dispatches,
+                &PinnedMembers {
+                    real: real_members,
+                    member_lowerings: &member_lowerings,
+                    meet_inserts: &meet_inserts,
+                },
+            );
+        }
         // The member each variant came from, and every member it stands for.
         let labels: Vec<usize> = variants.iter().map(LoweredVariant::member).collect();
         let merged_members: Vec<Vec<usize>> = variants

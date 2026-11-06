@@ -8,6 +8,7 @@ use crate::ir::{
     AdditionalProps, Docs, Field, FieldDefault, JsonCategory, Openness, Prim, ScalarEnum,
     ScalarRepr, ScalarValue, Struct, Ty, TypeKind, Union,
 };
+use crate::name::hint_segment;
 
 use super::defaults::reclassify_default;
 use super::nullability::{non_nullable, type_accepts_null};
@@ -467,7 +468,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
-                    let field_hint = format!("{hint}{}", field.name.wire);
+                    let field_hint = format!("{hint}{}", hint_segment(&field.name.wire));
                     match self.merge_repeated_field(existing, field, &field_hint, true) {
                         None | Some(Ok(())) => {}
                         // Mirrors the array arm above, and for the same reason `E013`'s explain
@@ -519,7 +520,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else {
                 &left.additional
             };
-            let field_hint = format!("{hint}{}", field.name.wire);
+            let field_hint = format!("{hint}{}", hint_segment(&field.name.wire));
             match self.narrow_undeclared(field.ty, other, &field_hint) {
                 Ok(ty) => field.ty = ty,
                 Err(NoMeet::Empty) => return Err(NoMeet::Empty),

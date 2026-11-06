@@ -294,7 +294,7 @@ paths:
         }),
         "{report:#?}"
     );
-    assert!(code.contains("pub type ResponseBodyid = i64;"), "{code}");
+    assert!(code.contains("pub type ResponseBodyId = i64;"), "{code}");
 }
 
 #[test]
@@ -375,7 +375,7 @@ paths:
     );
     assert!(
         code.contains("pub struct ResponseBody {")
-            && code.contains("pub type ResponseBodyid = i64;"),
+            && code.contains("pub type ResponseBodyId = i64;"),
         "a typed JSON body, not bytes or text: {code}"
     );
 }

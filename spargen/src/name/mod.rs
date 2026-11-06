@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use crate::ir::{AdditionalProps, Api, OperationId, TypeId, TypeKind};
 
+pub(crate) use casing::hint_segment;
 use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
