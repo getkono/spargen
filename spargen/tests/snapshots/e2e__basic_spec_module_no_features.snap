@@ -5184,6 +5184,126 @@ mod support {
             quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())
         }
     }
+    mod base64 {
+        //! The base64 text form of binary content carried inside a structured body:
+        //! `contentEncoding: base64`.
+        //!
+        //! JSON Schema 2020-12 — the dialect OpenAPI 3.1 and 3.2 use — says a string with
+        //! `contentEncoding: base64` holds binary content encoded with RFC 4648's base64: the standard
+        //! alphabet (`A`–`Z`, `a`–`z`, `0`–`9`, `+`, `/`), padded with `=`. `bytes::Bytes`' own `serde`
+        //! implementation writes a byte sequence, which JSON spells as an array of numbers, so a generated
+        //! model never relies on it for such a value. Each schema with the keyword is emitted as a newtype
+        //! over `bytes::Bytes` whose `Serialize` and `Deserialize` are [`serialize_base64`] and
+        //! [`deserialize_base64`], so the value is that text wherever it sits: a field, an array item, a map
+        //! value, a union variant or a tuple position, in JSON, XML or a form body alike.
+        //!
+        //! Encoding always writes the padded standard alphabet. Decoding takes the same alphabet with or
+        //! without its trailing padding, and refuses anything else: another alphabet's characters
+        //! (base64url's `-` and `_`), whitespace or line breaks, padding before the end, or a length no
+        //! encoding produces.
+        use std::fmt;
+        use bytes::Bytes;
+        use serde::de::{Deserializer, Unexpected, Visitor};
+        use serde::ser::Serializer;
+        /// The RFC 4648 standard alphabet, indexed by sextet value.
+        const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        /// Writes `bytes` as its padded standard base64 text.
+        pub fn serialize_base64<S>(
+            bytes: &[u8],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_str(&encode(bytes))
+        }
+        /// Reads a padded or unpadded standard base64 string into the bytes it encodes.
+        pub fn deserialize_base64<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_str(Base64Visitor)
+        }
+        /// Accepts a string and decodes it; any other value is refused as not base64 text.
+        struct Base64Visitor;
+        impl Visitor<'_> for Base64Visitor {
+            type Value = Bytes;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a base64 string (RFC 4648, standard alphabet)")
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Bytes, E>
+            where
+                E: serde::de::Error,
+            {
+                decode(value)
+                    .map(Bytes::from)
+                    .ok_or_else(|| E::invalid_value(Unexpected::Str(value), &self))
+            }
+        }
+        /// `bytes` as padded standard base64.
+        fn encode(bytes: &[u8]) -> String {
+            let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+            for chunk in bytes.chunks(3) {
+                let group = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(
+                        0u32,
+                        |group, (index, byte)| {
+                            group | (u32::from(*byte) << (16 - 8 * index))
+                        },
+                    );
+                for sextet in 0..4 {
+                    if sextet <= chunk.len() {
+                        let value = (group >> (18 - 6 * sextet)) & 0x3f;
+                        out.push(char::from(ALPHABET[value as usize]));
+                    } else {
+                        out.push('=');
+                    }
+                }
+            }
+            out
+        }
+        /// The sextet value of one standard-alphabet character, or `None` for any other byte.
+        fn sextet(character: u8) -> Option<u32> {
+            let value = match character {
+                b'A'..=b'Z' => character - b'A',
+                b'a'..=b'z' => character - b'a' + 26,
+                b'0'..=b'9' => character - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return None,
+            };
+            Some(u32::from(value))
+        }
+        /// The bytes `text` encodes, or `None` when it is not standard base64. Trailing padding is
+        /// optional, but where present it must complete the final quantum exactly.
+        fn decode(text: &str) -> Option<Vec<u8>> {
+            let text = text.as_bytes();
+            let unpadded = text
+                .iter()
+                .rposition(|character| *character != b'=')
+                .map_or(0, |last| last + 1);
+            let padding = text.len() - unpadded;
+            let data = &text[..unpadded];
+            if data.len() % 4 == 1 || padding > 2
+                || (padding > 0 && !text.len().is_multiple_of(4))
+            {
+                return None;
+            }
+            let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
+            for chunk in data.chunks(4) {
+                let mut group = 0u32;
+                for (index, character) in chunk.iter().enumerate() {
+                    group |= sextet(*character)? << (18 - 6 * index);
+                }
+                for index in 0..chunk.len() - 1 {
+                    out.push((group >> (16 - 8 * index)) as u8);
+                }
+            }
+            Some(out)
+        }
+    }
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     mod blocking {
         //! A synchronous facade for callers without an async runtime.
@@ -5264,6 +5384,7 @@ mod support {
         StreamError,
     };
     pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
+    pub use base64::{deserialize_base64, serialize_base64};
     #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
     pub use blocking::BlockingRuntime;
 }
@@ -7434,8 +7555,74 @@ pub mod types {
     pub type Cursor84222325 = String;
     pub type RequestBody43755b84 = bytes::Bytes;
     pub type Cursor842223252 = String;
-    pub type RequestBodydigest = bytes::Bytes;
-    pub type RequestBodyprevious = bytes::Bytes;
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+    pub struct RequestBodydigest(pub bytes::Bytes);
+    impl std::ops::Deref for RequestBodydigest {
+        type Target = bytes::Bytes;
+        fn deref(&self) -> &bytes::Bytes {
+            &self.0
+        }
+    }
+    impl From<bytes::Bytes> for RequestBodydigest {
+        fn from(bytes: bytes::Bytes) -> Self {
+            RequestBodydigest(bytes)
+        }
+    }
+    impl From<RequestBodydigest> for bytes::Bytes {
+        fn from(value: RequestBodydigest) -> Self {
+            value.0
+        }
+    }
+    impl serde::Serialize for RequestBodydigest {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            super::support::serialize_base64(&self.0, serializer)
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for RequestBodydigest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_base64(deserializer).map(RequestBodydigest)
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+    pub struct RequestBodyprevious(pub bytes::Bytes);
+    impl std::ops::Deref for RequestBodyprevious {
+        type Target = bytes::Bytes;
+        fn deref(&self) -> &bytes::Bytes {
+            &self.0
+        }
+    }
+    impl From<bytes::Bytes> for RequestBodyprevious {
+        fn from(bytes: bytes::Bytes) -> Self {
+            RequestBodyprevious(bytes)
+        }
+    }
+    impl From<RequestBodyprevious> for bytes::Bytes {
+        fn from(value: RequestBodyprevious) -> Self {
+            value.0
+        }
+    }
+    impl serde::Serialize for RequestBodyprevious {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            super::support::serialize_base64(&self.0, serializer)
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for RequestBodyprevious {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_base64(deserializer).map(RequestBodyprevious)
+        }
+    }
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RequestBody4fcf0620 {
         #[serde(rename = "digest")]
@@ -7443,7 +7630,40 @@ pub mod types {
         #[serde(rename = "previous")]
         pub previous: Option<RequestBodyprevious>,
     }
-    pub type ResponseBodydigest = bytes::Bytes;
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+    pub struct ResponseBodydigest(pub bytes::Bytes);
+    impl std::ops::Deref for ResponseBodydigest {
+        type Target = bytes::Bytes;
+        fn deref(&self) -> &bytes::Bytes {
+            &self.0
+        }
+    }
+    impl From<bytes::Bytes> for ResponseBodydigest {
+        fn from(bytes: bytes::Bytes) -> Self {
+            ResponseBodydigest(bytes)
+        }
+    }
+    impl From<ResponseBodydigest> for bytes::Bytes {
+        fn from(value: ResponseBodydigest) -> Self {
+            value.0
+        }
+    }
+    impl serde::Serialize for ResponseBodydigest {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            super::support::serialize_base64(&self.0, serializer)
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for ResponseBodydigest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            super::support::deserialize_base64(deserializer).map(ResponseBodydigest)
+        }
+    }
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ResponseBody8899a140 {
         #[serde(rename = "digest")]

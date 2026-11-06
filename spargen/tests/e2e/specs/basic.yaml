@@ -518,10 +518,10 @@ paths:
         "204":
           description: No Content
   # A byte string that admits `null` (#104), in every position where `null` has a representation:
-  # a JSON member, both ways, and a multipart part become `Option<bytes::Bytes>` whichever way the
-  # `null` is spelled, and a query parameter an `Option<String>` (the binary parameter remap). The
-  # `type: [string, 'null']` spelling used to lose its `null` here; a *raw* body admitting `null`
-  # is rejected instead (`E009`, pinned in `frontend/bodies_binary.rs`).
+  # a JSON member, both ways, and a multipart part become an `Option` (of the base64 newtype, #1230)
+  # whichever way the `null` is spelled, and a query parameter an `Option<String>` (the binary
+  # parameter remap). The `type: [string, 'null']` spelling used to lose its `null` here; a *raw*
+  # body admitting `null` is rejected instead (`E009`, pinned in `frontend/bodies_binary.rs`).
   /nullable-bytes:
     post:
       operationId: postNullableBytes

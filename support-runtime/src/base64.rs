@@ -105,7 +105,7 @@ fn decode(text: &str) -> Option<Vec<u8>> {
     let data = &text[..unpadded];
     // A final quantum of one character carries no whole byte, and padding is either absent or
     // exactly what completes the last quantum to four characters.
-    if data.len() % 4 == 1 || padding > 2 || (padding > 0 && text.len() % 4 != 0) {
+    if data.len() % 4 == 1 || padding > 2 || (padding > 0 && !text.len().is_multiple_of(4)) {
         return None;
     }
     let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
