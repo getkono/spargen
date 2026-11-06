@@ -12,12 +12,15 @@
 # The patterns match the names `cargo mutants --list` prints, which start with
 # `<file>:<line>:<column>: `.
 exclude_re = [
-  # `support-runtime/src/transport.rs`, `FetchBody`: the `ReqwestBackend` response body on
-  # `wasm32`, compiled only for `target_arch = "wasm32"`, so no native test reaches it; on `wasm32`
-  # the runtime is compile-checked by `mise run github-api`, not tested. Its names are unique to
-  # it, so the patterns name them rather than a line.
-  '^support-runtime/src/transport\.rs:\d+:\d+: replace FetchBody::new -> ',
+  # `support-runtime/src/transport.rs`, `FetchBody` and `HttpBody::into_fetch_response`, and
+  # `support-runtime/src/stream.rs`, `FetchChunks`: how `ReqwestBackend`'s response body is read
+  # on `wasm32`, compiled only for `target_arch = "wasm32"`, so no native test reaches them; on
+  # `wasm32` the runtime is compile-checked by `mise run github-api`, not tested. Their names are
+  # unique to them, so the patterns name them rather than a line.
   '^support-runtime/src/transport\.rs:\d+:\d+: replace <impl http_body::Body for FetchBody>::poll_frame -> ',
+  '^support-runtime/src/transport\.rs:\d+:\d+: replace HttpBody::into_fetch_response -> ',
+  '^support-runtime/src/transport\.rs:\d+:\d+: delete match arm .* in HttpBody::into_fetch_response$',
+  '^support-runtime/src/stream\.rs:\d+:\d+: replace <impl http_body::Body for FetchChunks>::poll_frame -> ',
   # `support-runtime/src/paginate.rs`, the guard on `split_outside`'s `>` arm: whenever
   # `respect_angles && !in_quote` is false, `in_angle` is already false, so the arm's
   # `in_angle = false` changes nothing and no input can tell the guard from `true` (or its `&&` from
@@ -33,7 +36,7 @@ exclude_re = [
   # so `append_sse_field` leaves the event's fields as they were. The entry is anchored on line and
   # column like the ones above, so an edit that moves it fails the run instead of excluding another
   # comparison of the same kind in the same function.
-  '^support-runtime/src/stream\.rs:693:38: replace < with <= in sse_next$',
+  '^support-runtime/src/stream\.rs:732:38: replace < with <= in sse_next$',
   # `support-runtime/src/error.rs`, `ApiErrorBody::body` and `ApiErrorProblem::problem` for
   # `std::convert::Infallible`: the type is uninhabited, so no `&self` exists to call either with,
   # and no test or caller can observe what the body returns.

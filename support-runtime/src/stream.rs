@@ -162,7 +162,7 @@ impl<T> EventStream<T> {
         Self {
             status: parts.status,
             headers: parts.headers,
-            state: StreamState::Body(body),
+            state: StreamState::Body(streamed(body)),
             buffer: FrameBuffer::default(),
             max_frame: config.max_stream_frame,
             max_error_body: config.max_error_body,
@@ -347,7 +347,7 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                         this.status = parts.status;
                         this.headers = parts.headers;
                         this.bom_pending = is_sse(this.framing);
-                        this.state = StreamState::Body(body);
+                        this.state = StreamState::Body(streamed(body));
                     }
                     Poll::Ready(Err(error)) => {
                         if let Some(error) =
@@ -455,6 +455,45 @@ impl<T> EventStream<T> {
                 Err(unexpected_status_capped(max_error_body, response).await)
             }
         }))
+    }
+}
+
+/// The body a stream reads its items from. Off `wasm32` that is the response body as the backend
+/// delivered it. On `wasm32`, a `fetch` response `ReqwestBackend` received, still unread, is read
+/// chunk by chunk as the browser delivers it, through reqwest's `stream` feature, which an API
+/// with a streaming response requires; `ReqwestBackend` alone would read it whole, which for an
+/// event stream that never ends would never yield an item.
+fn streamed(body: HttpBody) -> HttpBody {
+    #[cfg(target_arch = "wasm32")]
+    return match body.into_fetch_response() {
+        Ok(response) => HttpBody::wrap(FetchChunks(Box::pin(response.bytes_stream()))),
+        Err(body) => body,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    body
+}
+
+/// A `fetch` response body read chunk by chunk. A failed read is yielded as reqwest reported it,
+/// which the stream reads as an interruption whatever its kind.
+// Mutation testing: replacing `FetchChunks`'s `poll_frame` survives the native suite and is
+// declared rather than killed. It is compiled only for `wasm32`, so no native test reaches it; on
+// `wasm32` the runtime is compile-checked, not tested.
+#[cfg(target_arch = "wasm32")]
+struct FetchChunks(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>);
+
+#[cfg(target_arch = "wasm32")]
+impl http_body::Body for FetchChunks {
+    type Data = Bytes;
+    type Error = reqwest::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, reqwest::Error>>> {
+        self.0
+            .as_mut()
+            .poll_next(cx)
+            .map(|chunk| chunk.map(|chunk| chunk.map(http_body::Frame::data)))
     }
 }
 

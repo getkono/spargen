@@ -87,6 +87,9 @@ enum Inner {
     /// form), which only [`ReqwestBackend`] can send.
     #[cfg(target_arch = "wasm32")]
     Reqwest(reqwest::Body),
+    /// A response body reqwest's `fetch` backend received.
+    #[cfg(target_arch = "wasm32")]
+    Fetch(FetchBody),
 }
 
 impl HttpBody {
@@ -117,6 +120,8 @@ impl HttpBody {
             Inner::Full(bytes) => Some(bytes),
             Inner::Streaming(_) => None,
             #[cfg(target_arch = "wasm32")]
+            Inner::Fetch(_) => None,
+            #[cfg(target_arch = "wasm32")]
             Inner::Reqwest(body) => body.as_bytes(),
         }
     }
@@ -127,6 +132,8 @@ impl HttpBody {
         match &self.inner {
             Inner::Full(bytes) => Some(Self::from(bytes.clone())),
             Inner::Streaming(_) => None,
+            #[cfg(target_arch = "wasm32")]
+            Inner::Fetch(_) => None,
             #[cfg(target_arch = "wasm32")]
             Inner::Reqwest(_) => None,
         }
@@ -216,6 +223,18 @@ impl HttpBody {
         }
     }
 
+    /// The `fetch` response a body reqwest's `fetch` backend received still holds, before anything
+    /// has read it; any other body comes back unchanged. The `allow` is for a build without the
+    /// `stream` module, its only caller.
+    #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
+    pub(crate) fn into_fetch_response(self) -> Result<reqwest::Response, Self> {
+        match self.inner {
+            Inner::Fetch(FetchBody::Unread(response)) => Ok(response),
+            inner => Err(Self { inner }),
+        }
+    }
+
     /// The body as reqwest sends it. reqwest's `fetch` backend on `wasm32` takes no stream, so
     /// there a streaming body is refused as a request-kind failure.
     fn into_reqwest(self) -> Result<reqwest::Body, TransportError> {
@@ -224,7 +243,7 @@ impl HttpBody {
             #[cfg(not(target_arch = "wasm32"))]
             Inner::Streaming(body) => Ok(reqwest::Body::wrap(body)),
             #[cfg(target_arch = "wasm32")]
-            Inner::Streaming(_) => Err(TransportError::request(
+            Inner::Streaming(_) | Inner::Fetch(_) => Err(TransportError::request(
                 "reqwest's fetch backend cannot send a streaming request body",
             )),
             #[cfg(target_arch = "wasm32")]
@@ -246,6 +265,8 @@ impl http_body::Body for HttpBody {
             Inner::Full(bytes) => Poll::Ready(Some(Ok(Frame::data(std::mem::take(bytes))))),
             Inner::Streaming(body) => body.as_mut().poll_frame(cx),
             #[cfg(target_arch = "wasm32")]
+            Inner::Fetch(body) => Pin::new(body).poll_frame(cx),
+            #[cfg(target_arch = "wasm32")]
             Inner::Reqwest(_) => {
                 self.inner = Inner::Full(Bytes::new());
                 Poll::Ready(Some(Err(TransportError::request(
@@ -261,6 +282,8 @@ impl http_body::Body for HttpBody {
             Inner::Streaming(body) => body.is_end_stream(),
             #[cfg(target_arch = "wasm32")]
             Inner::Reqwest(_) => false,
+            #[cfg(target_arch = "wasm32")]
+            Inner::Fetch(_) => false,
         }
     }
 
@@ -269,7 +292,7 @@ impl http_body::Body for HttpBody {
             Inner::Full(bytes) => SizeHint::with_exact(bytes.len() as u64),
             Inner::Streaming(body) => body.size_hint(),
             #[cfg(target_arch = "wasm32")]
-            Inner::Reqwest(_) => SizeHint::default(),
+            Inner::Reqwest(_) | Inner::Fetch(_) => SizeHint::default(),
         }
     }
 }
@@ -287,6 +310,8 @@ impl std::fmt::Debug for HttpBody {
             Inner::Streaming(_) => f.write_str("HttpBody(streaming)"),
             #[cfg(target_arch = "wasm32")]
             Inner::Reqwest(_) => f.write_str("HttpBody(reqwest)"),
+            #[cfg(target_arch = "wasm32")]
+            Inner::Fetch(_) => f.write_str("HttpBody(fetch)"),
         }
     }
 }
@@ -388,30 +413,23 @@ impl http_body::Body for ReqwestBody {
     }
 }
 
-/// A response body reqwest's `fetch` backend reads, its failures classified by
-/// [`TransportError::from_reqwest_body`]. With the `stream` feature it is read chunk by chunk as
-/// the browser delivers them; without it, whole.
-// Mutation testing: replacing `FetchBody::new` or its `poll_frame` survives the native suite and
-// is declared rather than killed. Both are compiled only for `wasm32`, so no native test reaches
-// them; on `wasm32` the runtime is compile-checked, not tested.
+/// A response body reqwest's `fetch` backend reads whole, its failure classified by
+/// [`TransportError::from_reqwest_body`]. Until it is first polled it holds the response itself,
+/// which the `stream` module takes back to read chunk by chunk as the browser delivers them
+/// ([`HttpBody::into_fetch_response`]), since only an API with a streaming response carries the
+/// dependencies that read needs.
+// Mutation testing: replacing `HttpBody::into_fetch_response` or `FetchBody`'s `poll_frame`
+// survives the native suite and is declared rather than killed. Both are compiled only for
+// `wasm32`, so no native test reaches them; on `wasm32` the runtime is compile-checked, not
+// tested.
 #[cfg(target_arch = "wasm32")]
-struct FetchBody {
-    #[cfg(feature = "stream")]
-    chunks: Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, reqwest::Error>>>>,
-    #[cfg(not(feature = "stream"))]
-    whole: Option<BoxFuture<'static, Result<Bytes, reqwest::Error>>>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl FetchBody {
-    fn new(response: reqwest::Response) -> Self {
-        Self {
-            #[cfg(feature = "stream")]
-            chunks: Box::pin(response.bytes_stream()),
-            #[cfg(not(feature = "stream"))]
-            whole: Some(Box::pin(response.bytes())),
-        }
-    }
+enum FetchBody {
+    /// Not read yet.
+    Unread(reqwest::Response),
+    /// Being read whole.
+    Reading(BoxFuture<'static, Result<Bytes, reqwest::Error>>),
+    /// Read, or failed.
+    Done,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -423,26 +441,26 @@ impl http_body::Body for FetchBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, TransportError>>> {
-        #[cfg(feature = "stream")]
-        let polled = futures_core::Stream::poll_next(self.chunks.as_mut(), cx);
-        #[cfg(not(feature = "stream"))]
-        let polled = {
-            let polled = match self.whole.as_mut() {
-                None => Poll::Ready(None),
-                Some(whole) => std::future::Future::poll(whole.as_mut(), cx).map(Some),
-            };
-            if polled.is_ready() {
-                self.whole = None;
+        loop {
+            match std::mem::replace(&mut *self, FetchBody::Done) {
+                FetchBody::Unread(response) => {
+                    *self = FetchBody::Reading(Box::pin(response.bytes()));
+                }
+                FetchBody::Reading(mut whole) => {
+                    return match std::future::Future::poll(whole.as_mut(), cx) {
+                        Poll::Pending => {
+                            *self = FetchBody::Reading(whole);
+                            Poll::Pending
+                        }
+                        Poll::Ready(read) => Poll::Ready(Some(
+                            read.map(Frame::data)
+                                .map_err(TransportError::from_reqwest_body),
+                        )),
+                    };
+                }
+                FetchBody::Done => return Poll::Ready(None),
             }
-            polled
-        };
-        polled.map(|chunk| {
-            chunk.map(|chunk| {
-                chunk
-                    .map(Frame::data)
-                    .map_err(TransportError::from_reqwest_body)
-            })
-        })
+        }
     }
 }
 
@@ -481,7 +499,8 @@ fn request_into_reqwest(
 }
 
 /// A response reqwest received, as the seam carries it. Off `wasm32` the body is reqwest's own,
-/// read as it arrives; on `wasm32` it is the `fetch` response's, as `FetchBody` reads it. One
+/// read as it arrives; on `wasm32` it is the `fetch` response's, read whole unless `EventStream`
+/// takes it back to stream it. One
 /// function for both targets, as [`HttpBody::from_reqwest_request`] is, and for the same reason.
 pub(crate) fn response_from_reqwest(
     #[allow(unused_mut)] mut response: reqwest::Response,
@@ -492,7 +511,9 @@ pub(crate) fn response_from_reqwest(
     {
         let status = response.status();
         let headers = std::mem::take(response.headers_mut());
-        let mut converted = http::Response::new(HttpBody::wrap(FetchBody::new(response)));
+        let mut converted = http::Response::new(HttpBody {
+            inner: Inner::Fetch(FetchBody::Unread(response)),
+        });
         *converted.status_mut() = status;
         *converted.headers_mut() = headers;
         converted

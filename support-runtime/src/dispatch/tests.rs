@@ -879,7 +879,10 @@ fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
     let source = std::error::Error::source(transport)
         .and_then(|source| source.downcast_ref::<reqwest::Error>())
         .unwrap_or_else(|| panic!("{reader}: an interrupted body wraps its reqwest error"));
-    assert!(source.is_body() && !source.is_timeout(), "{reader}: {source:?}");
+    assert!(
+        source.is_body() && !source.is_timeout(),
+        "{reader}: {source:?}"
+    );
     assert!(error.is_transient(), "{reader}");
     assert_eq!(error.status(), None, "{reader}");
 }
