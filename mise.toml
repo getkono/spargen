@@ -1,5 +1,4 @@
-# mise provisions dev tooling and defines the task runner.
-# The Rust toolchain itself is pinned by rust-toolchain.toml.
+# Dev tooling and the task runner; each gate task is held to its CI job (AGENTS.md, Quality).
 
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
@@ -37,16 +36,8 @@ run = "cargo test -p spargen --test e2e runtime_dependency_floors_compile_with_d
 
 [tasks.powerset]
 description = "Build every feature combination, not just --all-features"
-# Every other gate runs `--all-features`, so a combination such as `xml` on and `time` off was
-# never compiled — and those are exactly the subsets the generator embeds per spec. `--each-feature`
-# adds the none/all ends; the powerset covers the middle for the runtime, where the conditional
-# modules live. The first two lines build without dev-dependencies, so a feature they unify in
-# (serde's `derive`) cannot mask a missing one: each package at the ends, then the runtime's lib at
-# every combination. Neither compiles `#[cfg(test)]` code, and plain `cargo check` sets `cfg(test)`
-# for no target but a test one, so the last two lines pass `--all-targets`: test modules,
-# integration tests, and benches at each feature set they visit, which `test` (only
-# `--all-features`) cannot reach (#237). `--all-targets` unifies dev-dependency features into the
-# lib too, so it cannot replace the `--no-dev-deps` powerset. Doctests are not compiled here.
+# The `--no-dev-deps` lines check the libs without dev-dependency feature unification; the
+# `--all-targets` lines compile `#[cfg(test)]` code at each feature set too (#237).
 run = [
   "cargo hack check --workspace --each-feature --no-dev-deps",
   "cargo hack check -p support-runtime --no-dev-deps --feature-powerset",
@@ -55,43 +46,23 @@ run = [
 ]
 
 [tasks.deny]
-# CI's `deny` job runs this command byte for byte, on the cargo-deny version `[tools]` pins
-# above (`every_mise_task_runs_exactly_what_its_ci_job_runs` and
-# `ci_installs_exactly_the_tool_versions_mise_pins` in spargen/tests/repo_gates/). `--all-features` is load-bearing: rustls enters the graph
-# only under it, so without it an advisory against rustls is clean here and failing there (#141).
-# `--locked` audits the committed `Cargo.lock`: without it a skewed lockfile was silently rewritten,
-# and a missing one written, and the rewrite was what got audited (#146).
-# `the_deny_gate_states_the_feature_scope_it_audits` holds the command to both flags, to a bare
-# `check`, and to no flag outside an allow-list of ones that cannot narrow the graph (#238).
-# The three example workspaces are resolved and compiled by their own gates, and their lockfiles
-# carry crates the root resolve never reaches (the wasm-bindgen family among them), so each is
-# audited too, under the same `deny.toml` (#184). They take no `--locked`, like every gate that
-# compiles them: release-plz bumps the workspace version without refreshing their lockfiles, so
-# the `spargen` path-package stamp in them goes stale on every release, and `--locked` would turn
-# each release red. What they audit is therefore exactly what those gates compile. The same test
-# holds every example workspace to an audit here, with `--config deny.toml`, `--all-features`, and
-# a bare `check`.
-# cargo-deny audits the graph it activates, not the lockfile: an entry no feature activates (Cargo
-# locks the target of a weak `dep?/feature` without enabling it, which is how reqwest puts quinn,
-# and through it `rand 0.10` and `chacha20`, into the root `Cargo.lock`) is filtered out and never
-# checked, at any feature scope, so a yanked `chacha20 0.10.1` sat in the lockfile under `yanked =
-# "deny"` with this audit green (#187). `cargo audit` reads every entry of the file it is given,
-# so it runs over each committed lockfile, denying every warning kind (yanked, unmaintained,
-# unsound), as `deny.toml`'s `[advisories]` does. It runs over the RustSec checkout cargo-deny
-# just fetched into `deny.toml`'s `db-path`, without fetching, after the command that prints that
-# checkout's commit: the log of every run names the database revision its advisory verdict was
-# reached against. (The `cargo deny check`s after it fetch again, so theirs is that revision or a
-# later one.) `--no-fetch` also stops cargo-audit updating the crates.io index (it updates the index
-# only when it fetches the database), so its yank check reads only Cargo's local sparse-index
-# cache, and on an empty cache, as on every CI runner, it printed "couldn't check if the package is
-# yanked" for every entry and exited 0 (#414). So a `cargo fetch` of each lockfile's workspace
-# refreshes that cache from the registry for every entry first (`--locked` where the audit beside
-# it is), and each audit fails when it printed any error or warning, so a yank it could not check
-# fails the run instead of passing it. An example's fetch is unlocked, like its `cargo deny check`,
-# so it rewrites that example's lockfile in place before the audit reads it (at least the stale
-# `spargen` stamp): the root audit reads the committed `Cargo.lock`, and each example audit reads
-# its lockfile as the example gates resolve it, not the committed bytes. Its stderr goes through `target/cargo-audit.stderr`, which is
-# printed either way. `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
+# CI's `deny` job in deny.yml runs these commands. AGENTS.md's "Lockfiles and advisories" states the
+# rules they implement; `the_deny_gate_states_the_feature_scope_it_audits` and
+# `the_lockfile_audit_reads_every_committed_lockfile` pin their shape. Why each part is there:
+# - `--all-features`: rustls enters the graph only under it, so without it an advisory against
+#   rustls is clean here and failing in CI (#141).
+# - `--locked` on the root only: without it a skewed `Cargo.lock` was silently rewritten (or a
+#   missing one written) and the rewrite audited (#146). The example workspaces are audited
+#   unlocked, like every gate that compiles them: release-plz leaves their `spargen` stamp stale on
+#   each release, so `--locked` would turn every release red (#184).
+# - `cargo audit` over each lockfile: cargo-deny filters out entries no feature activates (a weak
+#   `dep?/feature` target such as reqwest's quinn), so a yanked `chacha20` sat in `Cargo.lock` with
+#   this audit green; `cargo audit` reads every entry (#187).
+# - `cargo fetch` before each `--no-fetch` audit, and the error/warning guard after it: with
+#   `--no-fetch` cargo-audit's yank check reads only Cargo's local index cache, and on an empty one
+#   it printed "couldn't check if the package is yanked" for every entry and exited 0 (#414). The
+#   fetch fills that cache; the guard fails a run that still could not check an entry.
+# - The `git log` line prints the advisory-database revision every verdict was reached against.
 description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
 run = [
   "cargo deny fetch db",
@@ -111,21 +82,14 @@ run = [
 ]
 
 [tasks.deny-published]
-# `spargen` has a `[[bin]]`, so its `.crate` ships a `Cargo.lock`, and `cargo install spargen
-# --features cli --locked` installs exactly that lockfile's pins. `deny` audits the committed
-# lockfile; this audits the published one, which a fix on `master` reaches only when a release
-# carries it (#178). The audited release is crates.io's `max_stable_version`, the one a bare
-# `cargo install --locked` picks. It is extracted under `target/`, inside this workspace, so the
-# empty `[workspace]` appended to its manifest keeps cargo from reading it as a member; that table
-# changes no resolution, and `--locked` fails the audit if the shipped lockfile would be rewritten
-# (or is missing). CI's `deny-published` job in `deny.yml` runs these commands byte for byte, only
-# on the schedule and on `workflow_dispatch`: a pull request cannot change a published artefact, so
-# failing one on it would only block the release that carries the fix.
-# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. As in `deny`, cargo-deny
-# checks only the activated graph, so `cargo audit` also reads every entry of the shipped lockfile
-# (`cargo install --locked` warns on a yanked one), against the printed database revision (#187),
-# after a `cargo fetch` refreshes the index cache its yank check reads, as in `deny` (#414).
-description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io"
+# Audits the `Cargo.lock` that `cargo install spargen --features cli --locked` installs (#178);
+# AGENTS.md's "Lockfiles and advisories" says when it runs and who fixes it.
+# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. The empty `[workspace]`
+# appended to the extracted manifest keeps cargo from reading it as a member of this one, and
+# `--locked` fails the audit if the shipped lockfile would be rewritten. The `cargo audit`, its
+# preceding `cargo fetch` and its warning guard are there for the reasons given under `deny`
+# (#187, #414).
+description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io (needs curl, jq and tar)"
 run = [
   '''
 rm -rf target/deny-published
@@ -145,26 +109,9 @@ echo "auditing the Cargo.lock published in spargen $version"
 ]
 
 [tasks.release-preview]
-# `spargen/CHANGELOG.md` ships inside the published `.crate`, and release-plz's embedded git-cliff
-# writes it: which commits it lists is decided by the tool, not by anything committed here (#190).
-# This runs that tool, at the version release-plz.yml's action is pinned to run
-# (`ci_installs_exactly_the_tool_versions_mise_pins`), and prints what the next release pull
-# request would change: the version bumps and the changelog section, so a change's changelog
-# impact is read off the log instead of argued. `release-plz update` has no dry-run mode and
-# rewrites the tree it runs in, so it runs in a clone under `target/`, which also means it reads
-# committed history only (uncommitted edits are not in the preview). The clone's `origin` is a
-# local path, so `--repo-url` restores the compare and pull-request links the real run writes.
-# release-plz refuses a detached HEAD (`cannot determine current branch`), and a clone of CI's
-# pull-request merge ref, which matches no branch, is detached, so the clone is put on a fresh
-# local branch with no upstream (release-plz then assumes `origin`) whatever the source was on.
-# LFS content is skipped: no packaged file is an LFS object. It is skipped for `release-plz update`
-# too, not only for the clone: release-plz checks out other revisions in copies under the system
-# temp directory and then this branch again, and that checkout smudges every LFS file that differs
-# between them, fetching it from the clone's `origin` — this checkout, which in CI holds no LFS
-# objects — so a change that adds or edits a corpus file fails without it. Like `deny`, the verdict is not
-# hermetic: release-plz compares against the crates.io release and dates the section today. CI's
-# `release-preview` job runs these commands byte for byte, so a `release-plz.toml` or commit
-# history the release job would choke on fails a pull request rather than `master`.
+# `release-plz update` has no dry-run mode, so it runs in a clone under `target/` on a fresh local
+# branch (it refuses a detached HEAD), and skips LFS smudging, which would fetch from a checkout that
+# holds no LFS objects in CI (#190).
 description = "Preview the version bumps and CHANGELOG section the next release pull request writes"
 run = [
   "rm -rf target/release-preview",
@@ -181,34 +128,18 @@ description = "Run the generation benchmarks (criterion). CI records these as a 
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.mutants]
-description = "Mutation testing over the runtime, the response partition, the name allocator, compat and diag"
-# CI's `mutants` job in `mutants.yml` runs these commands byte for byte, weekly and on
-# `workflow_dispatch` (`every_mise_task_runs_exactly_what_its_ci_job_runs`): it takes well over the
-# time a pull request should wait, so no hook or pull request runs it. The scope is the embedded
-# runtime, the media codecs in `ir/media.rs` and the success/error partition in
-# `ir/responses.rs`, the name allocator, the omit profiles and carve in `compat/`, and the
-# diagnostics in `diag/`: each carries unit tests of its own, which is what `--lib` below runs.
-# `oas31/lower/`, `surface/` and `lib.rs` stay out because their coverage lives in the
-# integration suites (`spargen/tests/frontend/`, `spargen/tests/diff/` and the rest), so `--lib`
-# would report nearly every mutant in them missed.
-# - `--config` names `.cargo/mutants.toml` rather than relying on its default location, so a
-#   missing file fails the run instead of silently dropping every exclusion. That file lists each
-#   excluded mutant with the argument for why no test can observe it.
+description = "Mutation testing over the runtime, ir/media.rs, the response partition, the name allocator, compat and diag (needs jq)"
+# CI's `mutants` job in `mutants.yml` runs these weekly. `oas31/lower/`, `surface/` and `lib.rs`
+# stay out because their coverage lives in the integration suites, which `--lib` does not run.
+# - `--config` names `.cargo/mutants.toml` explicitly, so a missing file fails the run rather than
+#   dropping every exclusion.
 # - `--all-features` builds the `xml`, `blocking` and `time` modules: a mutant in code the build
 #   leaves out compiles, passes every test, and would be reported missed.
-# - `-- --lib` runs each mutated package's unit tests, where the tests of every scope above live. A
-#   mutant only an integration test (`spargen/tests/e2e.rs` and the rest) would catch is reported
-#   missed, which fails the run; the kill belongs beside the code. Running the integration suites
-#   per mutant would take hours.
-# - `|| test $? -eq 3` accepts cargo-mutants' exit status 3, "some mutant timed out": a mutant that
-#   hangs the suite (`+=` to `*=` on a loop index that starts at 0 never ends) has been detected.
-#   Status 3 says nothing about missed mutants, though: cargo-mutants checks for a timeout before
-#   it checks for a missed mutant, so a run with any timeout exits 3 however many it missed (#881).
-#   Status 2 (missed mutants and no timeout), 1 (usage) and 4 (the unmutated tree fails) fail here.
-# - The second command reads the run's own count, `missed` in `mutants.out/outcomes.json`, and
-#   fails unless it is 0, so a missed mutant fails the gate whether or not a timeout came with it.
-#   `jq -e` exits non-zero on `false`, and on a missing file, so a run that wrote no outcomes fails
-#   too.
+# - `-- --lib` runs only the unit tests beside the code in scope; running the integration suites
+#   per mutant would take hours, so a mutant only they would catch is reported missed.
+# - `|| test $? -eq 3` accepts cargo-mutants' "some mutant timed out": cargo-mutants checks for a
+#   timeout before it checks for a missed mutant, so a run with any timeout exits 3 however many it
+#   missed (#881). The `jq` line therefore fails the gate on any missed mutant.
 run = [
   "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' --file 'spargen/src/compat/**' --file 'spargen/src/diag/**' -- --lib || test $? -eq 3",
   "jq -e '.missed == 0' mutants.out/outcomes.json",
@@ -219,11 +150,9 @@ description = "Run the full workspace test suite, including generated-code E2E c
 run = "cargo test --workspace --all-features"
 
 [tasks.bench-build]
-description = "Compile (do not run) the benchmarks, as CI's bench-build job does"
-# A task of its own rather than part of `test`: `test` is the pre-push hook, and this is CI's
-# `bench-build` job, a slow gate pull requests skip (`every_mise_task_runs_exactly_what_its_ci_job_runs`
-# holds the job to this task).
-run = "cargo bench --no-run --workspace"
+description = "Run each benchmark once in test mode, so its outcome asserts run, as CI's bench-build job does"
+# A slow gate pull requests skip, so a task of its own rather than part of `test` (the pre-push hook).
+run = "cargo test --benches --workspace"
 
 [tasks.msrv]
 description = "Check the workspace and the generated petstore client on the declared rust-version"
@@ -236,10 +165,8 @@ run = [
 
 [tasks.package]
 description = "Verify the published crates stay self-contained"
-# CI's `package` job also runs `cargo publish --dry-run -p spargen-macro` against the workspace
-# `spargen`, but only outside release-plz PRs; that step stays CI-only (see the `package` row of
-# `PAIRINGS` in spargen/tests/repo_gates/pairing.rs). `cargo publish --dry-run` refuses a dirty tree,
-# as it would in CI's fresh checkout.
+# CI's `package` job adds a release-PR-gated macro dry run (`PAIRINGS` in repo_gates/pairing.rs).
+# Needs a clean tree.
 run = [
   "cargo publish --dry-run -p spargen",
   "cargo package --list -p spargen-macro > /dev/null",
@@ -247,11 +174,7 @@ run = [
 
 [tasks.corpus-smoke]
 description = "Run fast corpus smoke checks"
-# Each entry is, byte for byte, a `run:` step of CI's `corpus-smoke` job
-# (`every_mise_task_runs_exactly_what_its_ci_job_runs`). mise runs each entry under
-# `sh -c -o errexit`, as CI runs each step under `bash -e`, so a `check` that exits with anything
-# but 0 or 1 fails the entry before its `grep` runs. Each case's expected outcome, and why, is in
-# `corpus/README.md`.
+# Each case's expected outcome, and why, is in `corpus/README.md`.
 run = [
   "mkdir -p target/corpus-smoke",
   "cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1",
@@ -286,11 +209,7 @@ run = [
 [tasks.example]
 description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"
 run = [
-  # Every example workspace's committed lockfile stays TLS-free: deny.toml reasons about TLS
-  # advisories on the premise that generated output carries its own default-features-off reqwest,
-  # and this is what holds that premise (#146). It reads the lockfiles before any cargo call below
-  # can rewrite them. `|| test $? -eq 1` lets grep's no-match through and keeps its error fatal, so
-  # a missing lockfile fails rather than passing as TLS-free. The script is CI's step verbatim.
+  # The example lockfiles stay TLS-free (#146); read before any cargo call below can rewrite them.
   '''
 for lock in examples/petstore/Cargo.lock examples/petstore-macro/Cargo.lock examples/github-api/Cargo.lock; do
   tls=$(grep -En '^name = "([^"]*(rustls|native-tls|openssl|webpki)[^"]*|[^"]*-tls)"$' "$lock" || test $? -eq 1)
@@ -306,10 +225,7 @@ echo "example lockfiles are TLS-free"
   # macro path (spargen_macro::generate_api!)
   "cargo clippy --manifest-path examples/petstore-macro/Cargo.toml -- -D warnings",
   "cargo run --manifest-path examples/petstore-macro/Cargo.toml",
-  # The macro path must keep spargen out of the consumer's RUNTIME graph — a proc-macro crate and
-  # everything it reaches are host-only. `-i spargen` under `-e no-proc-macro` prints nothing to
-  # stdout when spargen is absent from the pruned graph; a non-empty print means it leaked in.
-  # The script is CI's step verbatim, so a failing `cargo tree` fails here as it fails there.
+  # No spargen crate in the macro consumer's runtime graph.
   '''
 leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml)
 if [ -n "$leak" ]; then
@@ -321,12 +237,8 @@ echo "macro runtime graph is spargen-free"
 
 [tasks.doc-links]
 description = "Rustdoc across the workspace with warnings denied, private items included"
-# `--document-private-items` is the point: every subsystem module is private, so a plain
-# `cargo doc` documents none of them and link-checks none of them. Without this flag the whole
-# internal doc surface — which is most of the crate — is unchecked, and stale links accumulate
-# invisibly. `--no-deps` keeps it to this workspace. The `spargen` binary shares its library's
-# name, so `--workspace` skips it; the second command documents it on its own, or the CLI's doc
-# links would go unchecked.
+# `--document-private-items` reaches the private subsystem modules; the binary shares its library's
+# name, so `--workspace` skips it and the second command documents it.
 env = { RUSTDOCFLAGS = "-D warnings" }
 run = [
   "cargo doc --no-deps --workspace --all-features --document-private-items",
@@ -335,10 +247,7 @@ run = [
 
 [tasks.docs]
 description = "Build the mdBook documentation site into docs/book/book (git-ignored) and check its links"
-# mdBook is pinned in `[tools]` above, so this uses the same version CI does. `mdbook build` checks
-# no link and exits 0 on an unreadable `{{#include}}`, so the second command reads the built site
-# and fails on either: an include left unresolved, or a relative link or anchor that does not
-# resolve inside the site (`spargen/tests/docs.rs`).
+# `mdbook build` checks no link, so the second command checks the built site (`spargen/tests/docs.rs`).
 run = [
   "mdbook build docs/book",
   "cargo test -p spargen --test docs every_link_in_the_built_book_resolves -- --exact --ignored",
@@ -352,10 +261,7 @@ run = "if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then exit 0; fi;
 
 [tasks.commit-range]
 description = "Validate the outgoing commit range against Conventional Commits"
-# convco skips merge commits by default for revwalks (do not add --merges). CI's `commits` job
-# runs this command with the pull request's `base.sha..head.sha` in place of `origin/master..HEAD`;
-# that range is the one named difference `every_mise_task_runs_exactly_what_its_ci_job_runs`
-# allows, and it holds everything else in the command identical.
+# convco skips merge commits in a range; CI's `commits` job checks the pull request's range instead.
 run = "convco check origin/master..HEAD"
 
 [tasks.hooks]

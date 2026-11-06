@@ -1,10 +1,6 @@
 name: Supply chain
 
-# The audit's verdict depends on when it runs, not only on what is committed, so the daily run
-# finds a new advisory on `master` itself rather than on an unrelated pull request; AGENTS.md's
-# "Lockfiles and advisories" says why and who responds. The `deny` job is the same gate pull
-# requests and pushes run, in its own workflow so the schedule re-runs only it; `deny-published`
-# audits the lockfile the latest release ships, on the schedule only.
+# AGENTS.md's "Lockfiles and advisories" says why this runs daily and who responds to a red run.
 on:
   push:
     branches: [master]
@@ -13,8 +9,9 @@ on:
     - cron: "17 6 * * *"
   workflow_dispatch:
 
+# Grouped per event too, so a push to `master` never cancels the scheduled `deny-published`.
 concurrency:
-  group: deny-${{ github.ref }}
+  group: deny-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -27,16 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
-      # The cargo-deny and cargo-audit versions `[tools]` pins in mise.toml, installed here rather
-      # than run through an action, whose bundled version moves with its ref and whose inputs
-      # compose an argv this file would not state.
-      # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
+      # The pins in mise.toml (`ci_installs_exactly_the_tool_versions_mise_pins`).
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2
-      # `mise run deny`'s commands, byte for byte
-      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`); the comment on `[tasks.deny]` in
-      # mise.toml says why each one is there.
       - run: cargo deny fetch db
       - run: git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'
       - run: cargo fetch --locked
@@ -52,8 +43,6 @@ jobs:
       - run: cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check
       - run: cargo deny --manifest-path examples/petstore-macro/Cargo.toml --config deny.toml --all-features check
 
-  # `mise run deny-published`'s commands, byte for byte, on scheduled and manual runs only; the
-  # comment on `[tasks.deny-published]` in mise.toml says why.
   deny-published:
     name: cargo-deny (published spargen)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

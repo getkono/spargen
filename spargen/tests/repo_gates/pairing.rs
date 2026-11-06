@@ -113,7 +113,9 @@ const GATE_WORKFLOWS: [GateWorkflow; 4] = [
     GateWorkflow {
         file: "deny.yml",
         on: "push:\n  branches: [master]\npull_request:\nschedule:\n  - cron: \"17 6 * * *\"\nworkflow_dispatch:",
-        concurrency: Some("group: deny-${{ github.ref }}\ncancel-in-progress: true"),
+        concurrency: Some(
+            "group: deny-${{ github.ref }}-${{ github.event_name }}\ncancel-in-progress: true",
+        ),
         permissions: None,
     },
     // On demand only as far as GitHub's triggers go: the release run is a dispatch from
@@ -182,7 +184,7 @@ const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
         job: "bench-build",
         tasks: &["bench-build"],
-        ci_only: &[CHECKOUT, STABLE, CACHE],
+        ci_only: &[CHECKOUT_LFS, STABLE, CACHE],
         job_if: Some(SLOW_GATE_IF),
         ..PAIR
     }),
@@ -234,7 +236,7 @@ const PAIRINGS: &[Pairing] = &[
             STABLE,
             CACHE,
             CiOnly {
-                step: "if: >-\n  (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||\n  (github.event_name == 'push' && !contains(github.event.head_commit.message, 'release-plz-'))\nrun: cargo publish --dry-run -p spargen-macro --config 'patch.crates-io.spargen.path=\"spargen\"'",
+                step: "if: >-\n  (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||\n  (github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore: release'))\nrun: cargo publish --dry-run -p spargen-macro --config 'patch.crates-io.spargen.path=\"spargen\"'",
                 why: "runs only outside release-plz PRs, a condition that exists only in CI; on a \
                       release PR the macro's registry dependency is not published yet",
             },
@@ -275,10 +277,7 @@ const PAIRINGS: &[Pairing] = &[
             CHECKOUT,
             STABLE,
             CACHE,
-            CiOnly {
-                step: "name: Install mdBook\nrun: cargo install mdbook --version 0.5.4 --locked",
-                why: "installs the mdBook that `[tools]` in mise.toml provisions locally",
-            },
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: mdbook@0.5.4"),
         ],
         ..PAIR
     }),
@@ -327,10 +326,7 @@ const PAIRINGS: &[Pairing] = &[
         tasks: &["commit-range"],
         ci_only: &[
             provision("uses: actions/checkout@v4\nwith:\n  fetch-depth: 0"),
-            CiOnly {
-                step: "name: Install convco\nrun: cargo install convco --version 0.7.1 --locked",
-                why: "installs the convco that `[tools]` in mise.toml provisions locally",
-            },
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: convco@0.7.1"),
         ],
         job_if: Some("github.event_name == 'pull_request'"),
         rewrites: &[Rewrite {

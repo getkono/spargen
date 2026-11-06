@@ -9,12 +9,10 @@ repository.workspace = true
 description = "Freestanding runtime embedded into spargen-generated clients. Not published."
 publish = false
 
-# The runtime is embedded into generated output. Its dependency
-# surface is the audited set used by generated clients — no spargen crate, and nothing
-# project-specific. Generated models may additionally reference the separately audited `uuid`
-# dependency; this crate holds only the embedded runtime, not those models. Each feature below is
-# off by default and gates one conditionally embedded module; the comment on that module's `mod`
-# in src/lib.rs says what it adds and when a generated client carries it.
+# AGENTS.md's Workspace section names the dependency set this runtime may carry (generated models
+# may also reference `uuid`, which this crate does not carry). Each feature gates
+# one conditionally embedded module; the comment on its `mod` in src/lib.rs says when a client
+# carries it.
 [features]
 stream = ["reqwest/stream", "dep:futures-core"]
 xml = ["dep:quick-xml"]

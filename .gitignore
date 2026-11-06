@@ -21,6 +21,9 @@ docs/book/book/
 # cargo-mutants output (`mise run mutants`), and the `mutants.out.old` a later run renames it to.
 mutants.out*
 
+# Agent worktrees created inside the checkout.
+.claude/worktrees/
+
 # === macOS ===
 .DS_Store
 __MACOSX/
