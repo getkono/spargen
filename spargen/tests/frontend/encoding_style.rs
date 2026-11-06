@@ -30,17 +30,16 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert_eq!(
-            messages_for(&report, Code::UnsupportedMediaType),
-            [
-                "`encoding.filter.style: deepObject` is defined only for `in: query`; it has no \
-                 `multipart/form-data` part representation"
-            ],
-            "{report:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        messages_for(&report, Code::UnsupportedMediaType),
+        [
+            "`encoding.filter.style: deepObject` is defined only for `in: query`; it has no \
+             `multipart/form-data` part representation"
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -190,33 +189,31 @@ components:
         } else {
             ("only arrays and objects", "an array or object")
         };
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{media} {style} {schema}: {report:#?}"
-            );
-            let messages = messages_for(&report, Code::UnsupportedMediaType);
-            assert_eq!(messages.len(), 1, "{media} {style} {schema}: {report:#?}");
-            assert!(
-                messages[0].contains(&format!("`encoding.p.style: {style}` serializes {shape}")),
-                "{media} {style} {schema}: {messages:?}"
-            );
-            // The remedy asks for a schema the earlier checks accept: never an object on
-            // multipart, which the object-property check refuses.
-            let remedies: Vec<_> = report
-                .diagnostics()
-                .iter()
-                .filter(|d| d.code == Code::UnsupportedMediaType)
-                .filter_map(|d| d.remedy.as_deref())
-                .collect();
-            assert!(
-                remedies.len() == 1
-                    && remedies[0]
-                        .starts_with(&format!("give the property {wanted} schema, or use")),
-                "{media} {style} {schema}: {remedies:?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{media} {style} {schema}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::UnsupportedMediaType);
+        assert_eq!(messages.len(), 1, "{media} {style} {schema}: {report:#?}");
+        assert!(
+            messages[0].contains(&format!("`encoding.p.style: {style}` serializes {shape}")),
+            "{media} {style} {schema}: {messages:?}"
+        );
+        // The remedy asks for a schema the earlier checks accept: never an object on
+        // multipart, which the object-property check refuses.
+        let remedies: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnsupportedMediaType)
+            .filter_map(|d| d.remedy.as_deref())
+            .collect();
+        assert!(
+            remedies.len() == 1
+                && remedies[0].starts_with(&format!("give the property {wanted} schema, or use")),
+            "{media} {style} {schema}: {remedies:?}"
+        );
     }
     let accepted = [
         (

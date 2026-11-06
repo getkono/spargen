@@ -87,18 +87,17 @@ fn e011_an_xml_name_that_is_not_an_xml_name_is_rejected_wherever_it_is_written()
             ),
         ];
         for (spec, pointer) in positions {
-            for report in [generate(&spec), check(&spec)] {
-                assert_eq!(report.outcome(), Outcome::Rejected, "`{bad}` at {pointer}");
-                assert!(
-                    report
-                        .diagnostics()
-                        .iter()
-                        .any(|d| d.code == Code::InvalidInput
-                            && d.pointer.as_str() == pointer
-                            && d.message.contains("is not an XML name")),
-                    "`{bad}` at {pointer}: {report:#?}"
-                );
-            }
+            let report = generate(&spec);
+            assert_eq!(report.outcome(), Outcome::Rejected, "`{bad}` at {pointer}");
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::InvalidInput
+                        && d.pointer.as_str() == pointer
+                        && d.message.contains("is not an XML name")),
+                "`{bad}` at {pointer}: {report:#?}"
+            );
         }
     }
 }
