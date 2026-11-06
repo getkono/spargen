@@ -172,29 +172,56 @@ pub(super) fn lockfile_path(root: &WorkspaceRoot) -> Utf8PathBuf {
         .join("Cargo.lock")
 }
 
-/// The directory of Cargo's source cache the audited manifest lies in, when it lies in one:
-/// `git/checkouts` (a git dependency) or `registry/src` (a registry dependency) under
-/// `cargo_home`, compared component by component against the absolutized manifest path.
+/// Where the audited package is built from when Cargo builds it as a dependency of another
+/// workspace, with that workspace's `Cargo.lock`, so that a lockfile committed in the package's
+/// own sources decides nothing.
+pub(super) enum ForeignSource {
+    /// The directory of Cargo's source cache the manifest lies in: `git/checkouts` (a git
+    /// dependency) or `registry/src` (a registry dependency) under Cargo's home.
+    Cache(Utf8PathBuf),
+    /// The package's own directory, which holds the `.cargo-checksum.json` Cargo requires of every
+    /// package in a directory source: a `cargo vendor` directory or another `[source]` replacement
+    /// of kind `directory`.
+    Directory(Utf8PathBuf),
+}
+
+/// The checksum file Cargo reads beside every package of a directory source, and refuses to build
+/// the package without. `cargo vendor` writes one into each crate it vendors.
+const DIRECTORY_SOURCE_CHECKSUM: &str = ".cargo-checksum.json";
+
+/// Where the audited package is built from, when that is a source Cargo builds only as a
+/// dependency of another workspace.
 ///
-/// Cargo builds such a package as a dependency of another workspace, with that workspace's
-/// `Cargo.lock`, so a lockfile committed in the package's own sources decides nothing.
-pub(super) fn cargo_source_cache(
+/// Cargo's source cache is `git/checkouts` or `registry/src` under `cargo_home`, compared
+/// component by component against the absolutized manifest path, and is checked first. A
+/// directory source is recognised by its [`DIRECTORY_SOURCE_CHECKSUM`] beside the manifest, which
+/// Cargo requires there whichever `.cargo/config.toml` declared the source.
+pub(super) fn foreign_source(
     manifest_path: &Utf8Path,
     cargo_home: Option<&Utf8Path>,
-) -> Option<Utf8PathBuf> {
-    let cargo_home = cargo_home?;
+) -> Option<ForeignSource> {
     let manifest = absolutized(manifest_path);
-    [["git", "checkouts"], ["registry", "src"]]
-        .into_iter()
-        .map(|[first, second]| cargo_home.join(first).join(second))
-        .find(|cache| manifest.starts_with(cache))
+    let cache = cargo_home.and_then(|cargo_home| {
+        [["git", "checkouts"], ["registry", "src"]]
+            .into_iter()
+            .map(|[first, second]| cargo_home.join(first).join(second))
+            .find(|cache| manifest.starts_with(cache))
+    });
+    if let Some(cache) = cache {
+        return Some(ForeignSource::Cache(cache));
+    }
+    let package = manifest.parent()?;
+    package
+        .join(DIRECTORY_SOURCE_CHECKSUM)
+        .is_file()
+        .then(|| ForeignSource::Directory(package.to_path_buf()))
 }
 
 /// What the workspace's `Cargo.lock` says about the audited package's direct dependencies.
 pub(super) enum Lock {
-    /// The package is built from Cargo's source cache at this directory, as a dependency of a
-    /// workspace whose own lockfile resolves it, so no lockfile is read.
-    Foreign(Utf8PathBuf),
+    /// The package is built from this source, as a dependency of a workspace whose own lockfile
+    /// resolves it, so no lockfile is read.
+    Foreign(ForeignSource),
     /// No file exists at this path.
     Absent(Utf8PathBuf),
     /// The file exists, and could not be read or parsed or does not lock the audited package.

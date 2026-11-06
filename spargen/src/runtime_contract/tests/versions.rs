@@ -637,6 +637,18 @@ fn standalone_audit_under(
     bytes: &str,
     lock: Option<&str>,
 ) -> (Audit, Utf8PathBuf) {
+    standalone_audit_under_with(directory, publish, bytes, lock, |_| {})
+}
+
+/// [`standalone_audit_under`], with `prepare` run on the package directory before the audit, to
+/// place whatever else sits beside the manifest.
+fn standalone_audit_under_with(
+    directory: &str,
+    publish: Option<&str>,
+    bytes: &str,
+    lock: Option<&str>,
+    prepare: impl FnOnce(&Utf8Path),
+) -> (Audit, Utf8PathBuf) {
     let (core_bytes, _) = core_entry("bytes");
     let mut manifest = replace_once(CORE_MANIFEST, core_bytes, bytes);
     if let Some(publish) = publish {
@@ -655,6 +667,7 @@ fn standalone_audit_under(
     if let Some(lock) = lock {
         std::fs::write(&lockfile, lock).unwrap();
     }
+    prepare(&package);
     let audit = sandbox.audit_in(
         &path,
         &RuntimeRequirements::default(),
@@ -862,6 +875,57 @@ fn an_unpublished_package_in_cargos_source_cache_has_its_requirement_checked() {
         Some("false"),
         "bytes = \"1\"",
         Some(&lock),
+    );
+    assert!(audit.diagnostics.is_empty(), "{:#?}", audit.diagnostics);
+    assert!(audit.manifests.contains(&lockfile), "{:?}", audit.manifests);
+}
+
+#[test]
+fn an_unpublished_package_in_a_directory_source_has_its_requirement_checked() {
+    // #1242: a `publish = false` package vendored by `cargo vendor` (or in any other directory
+    // source) lies outside Cargo's home, beside the `.cargo-checksum.json` Cargo requires of it,
+    // and is built with the dependent workspace's lockfile. Its own `Cargo.lock` would pass
+    // `bytes = "1"`, so only the requirement check refuses it.
+    let lock = core_lock("consumer", &[("bytes", &bytes_above_floor())], "");
+    let (audit, lockfile) = standalone_audit_under_with(
+        "vendor/consumer",
+        Some("false"),
+        "bytes = \"1\"",
+        Some(&lock),
+        |package| {
+            std::fs::write(
+                package.join(".cargo-checksum.json"),
+                "{\"files\":{},\"package\":null}",
+            )
+            .unwrap();
+        },
+    );
+    let package = lockfile.parent().expect("the lockfile sits in the package");
+    assert_eq!(
+        messages(&audit.diagnostics),
+        format!(
+            "`bytes` version requirement `1` is outside the supported range >={floor}, \
+             <{ceiling}; use `{floor}` or a higher compatible caret requirement; the \
+             requirement was checked, not a lockfile, because the package is built from the \
+             directory source `{package}` its `.cargo-checksum.json` marks, as a dependency of \
+             another workspace whose `Cargo.lock` resolves it",
+            floor = BYTES.floor,
+            ceiling = BYTES.ceiling(),
+        ),
+    );
+    assert!(
+        !audit.manifests.contains(&lockfile),
+        "{:?}",
+        audit.manifests
+    );
+
+    // The marker is a file: a directory of that name marks nothing, and the lockfile is read.
+    let (audit, lockfile) = standalone_audit_under_with(
+        "vendor/consumer",
+        Some("false"),
+        "bytes = \"1\"",
+        Some(&lock),
+        |package| std::fs::create_dir(package.join(".cargo-checksum.json")).unwrap(),
     );
     assert!(audit.diagnostics.is_empty(), "{:#?}", audit.diagnostics);
     assert!(audit.manifests.contains(&lockfile), "{:?}", audit.manifests);

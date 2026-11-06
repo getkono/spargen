@@ -14,7 +14,7 @@ use crate::diag::Diagnostic;
 use super::diagnostic;
 use super::requirements::{Dependency, Placement, BLOCKING_GATE, WASM_ANCHOR};
 use super::target::{predicate_value, target_table_name, Subject, TableKey, TargetContext};
-use super::workspace::Lock;
+use super::workspace::{ForeignSource, Lock};
 
 pub(super) struct DependencyCheck<'a> {
     pub(super) placement: Placement,
@@ -493,10 +493,17 @@ fn version_message(
     });
     let why = match check.versions {
         Versions::Publishable => PUBLISHABLE.to_owned(),
-        Versions::Unpublished(Lock::Foreign(cache)) => {
+        Versions::Unpublished(Lock::Foreign(ForeignSource::Cache(cache))) => {
             format!(
                 "the package is built from Cargo's source cache `{cache}`, as a dependency of \
                  another workspace whose `Cargo.lock` resolves it"
+            )
+        }
+        Versions::Unpublished(Lock::Foreign(ForeignSource::Directory(package))) => {
+            format!(
+                "the package is built from the directory source `{package}` its \
+                 `.cargo-checksum.json` marks, as a dependency of another workspace whose \
+                 `Cargo.lock` resolves it"
             )
         }
         Versions::Unpublished(Lock::Absent(path)) => {
