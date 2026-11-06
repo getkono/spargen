@@ -142,6 +142,10 @@ pub(crate) fn rerun_paths(build: &Build, snapshot: Option<&InputSnapshot>) -> Ve
     paths
 }
 
+// Mutation testing: replacing this reader survives the unit tests and is declared in
+// `.cargo/mutants.toml` rather than killed. Its only input is the process-wide `OUT_DIR`, which a
+// unit test could set only under every test running beside it; the cache logic it feeds takes the
+// directory as an argument (`pipeline::generate_with_cache_dir`), which the tests below drive.
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
     std::env::var("OUT_DIR")
         .ok()
@@ -561,6 +565,25 @@ components:
         configured.spec = configured.spec.clone().error_body_cap(1);
         let config_changed = InputSnapshot::load(&configured.spec).unwrap();
         assert_ne!(lock_changed.digest, config_changed.digest);
+    }
+
+    #[test]
+    fn the_input_paths_are_the_ones_the_snapshot_fingerprints() {
+        // `input_paths` is what `generate_api!` tracks: the paths `InputSnapshot::load` hashes,
+        // read without hashing them — the root, each `$ref` target and `spargen.lock`, sorted.
+        let (temp, build) = fixture();
+        std::fs::write(temp.path().join("spargen.lock"), "version = 1\n").unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+        let paths = super::input_paths(&build.spec).unwrap();
+        assert_eq!(
+            paths,
+            [
+                root.join("openapi.yaml"),
+                root.join("schema.yaml"),
+                root.join("spargen.lock"),
+            ]
+        );
+        assert_eq!(paths, InputSnapshot::load(&build.spec).unwrap().paths);
     }
 
     #[test]

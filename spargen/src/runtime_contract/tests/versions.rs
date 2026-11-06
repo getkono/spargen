@@ -545,3 +545,74 @@ fn a_member_underscore_default_features_true_turns_on_defaults_the_root_turned_o
         "{messages:#?}"
     );
 }
+
+/// `RuntimeRequirements::for_api` asks for reqwest's multipart support exactly when a request
+/// body is `multipart/form-data`, and for `uuid` exactly when the mapping is on and the API emits
+/// a `format: uuid` type.
+#[test]
+fn the_requirements_follow_the_multipart_bodies_and_uuid_types_the_api_carries() {
+    const MULTIPART_AND_UUID: &str = "openapi: 3.1.0
+info: {title: T, version: '1'}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses: {'204': {description: done}}
+components:
+  schemas:
+    Id: {type: string, format: uuid}
+";
+    const JSON_ONLY: &str = "openapi: 3.1.0
+info: {title: T, version: '1'}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses: {'204': {description: done}}
+";
+    let sandbox = Sandbox::new();
+    let requirements = |source: &str, uuid: bool| {
+        let path = sandbox.root.join("openapi.yaml");
+        std::fs::write(&path, source).unwrap();
+        let spec = crate::Spec::new(path).uuid(uuid);
+        let mut diagnostics = crate::diag::Diagnostics::default();
+        let (api, _) = crate::pipeline::lower_frontend(&spec, &mut diagnostics)
+            .unwrap_or_else(|()| panic!("the spec lowers: {:?}", diagnostics.items()));
+        RuntimeRequirements::for_api(&api, &spec)
+    };
+    for (case, source, uuid, expected) in [
+        (
+            "a multipart body and a uuid type, mapping on",
+            MULTIPART_AND_UUID,
+            true,
+            (true, true),
+        ),
+        (
+            "a multipart body and a uuid type, mapping off",
+            MULTIPART_AND_UUID,
+            false,
+            (true, false),
+        ),
+        (
+            "a JSON body and no uuid type, mapping on",
+            JSON_ONLY,
+            true,
+            (false, false),
+        ),
+    ] {
+        let requirements = requirements(source, uuid);
+        assert_eq!(
+            (requirements.reqwest_multipart, requirements.uuid),
+            expected,
+            "{case}"
+        );
+    }
+}

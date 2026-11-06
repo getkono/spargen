@@ -501,6 +501,26 @@ mod tests {
         );
     }
 
+    /// `runtime_features` embeds the date newtypes only when the API uses a date primitive *and*
+    /// the `time` mapping is on, and takes the other two modules from their predicates whatever
+    /// the mapping says.
+    #[test]
+    fn runtime_features_gate_time_on_the_mapping_and_the_api_alike() {
+        let plain = api();
+        let mut dated = api();
+        insert(&mut dated, TypeKind::Primitive(Prim::DateTime));
+        for (case, api, mapping, time) in [
+            ("no date, mapping off", &plain, false, false),
+            ("no date, mapping on", &plain, true, false),
+            ("a date, mapping off", &dated, false, false),
+            ("a date, mapping on", &dated, true, true),
+        ] {
+            let features = api.runtime_features(mapping);
+            assert_eq!(features.time, time, "{case}");
+            assert!(!features.xml && !features.streams, "{case}");
+        }
+    }
+
     #[test]
     fn uses_streams_follows_the_table() {
         check(

@@ -304,6 +304,9 @@ pub(super) fn media_type_with_parameters(media: &str) -> Result<String, Paramete
         canonical.push_str("; ");
         canonical.push_str(&parameters[at..value_end]);
         at = ows(bytes, value_end);
+        // Mutation testing: `+=` to `*=` on the `;` arm is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: `at` then stays on the `;`, which the loop's head skips the same
+        // way before reading the next parameter.
         match bytes.get(at) {
             None => break,
             Some(b';') => at += 1,
@@ -443,3 +446,6 @@ fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
         .any(|binary| family.eq_ignore_ascii_case(binary))
         .then_some((MediaType::OctetStream, 9))
 }
+
+#[cfg(test)]
+mod tests;

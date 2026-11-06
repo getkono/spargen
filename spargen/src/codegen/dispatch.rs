@@ -379,6 +379,104 @@ fn response_media_for_spec(
 mod tests {
     use crate::ir::{MediaType, Response, Responses, StatusSpec, Ty, TypeId};
 
+    /// One operation per codec and shape: `getXml` is bearer-secured with an XML success body and
+    /// a single XML error body, `getText` the same in `text/plain`, and `getMany` a two-body JSON
+    /// success enum.
+    const CODECS: &str = r##"openapi: 3.1.0
+info: {title: T, version: '1'}
+components:
+  securitySchemes:
+    token: {type: http, scheme: bearer}
+  schemas:
+    Item: {type: object, properties: {name: {type: string}}}
+paths:
+  /xml:
+    get:
+      operationId: getXml
+      security: [{token: []}]
+      responses:
+        '200': {description: ok, content: {application/xml: {schema: {$ref: '#/components/schemas/Item'}}}}
+        '404': {description: missing, content: {application/xml: {schema: {$ref: '#/components/schemas/Item'}}}}
+  /text:
+    get:
+      operationId: getText
+      responses:
+        '200': {description: ok, content: {text/plain: {schema: {type: string}}}}
+        '500': {description: failed, content: {text/plain: {schema: {type: string}}}}
+  /many:
+    get:
+      operationId: getMany
+      responses:
+        '200': {description: ok, content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        '201': {description: created, content: {application/json: {schema: {type: integer}}}}
+"##;
+
+    /// The module generated from `spec`, with every run of whitespace removed so an assertion
+    /// reads the tokens rather than `prettyplease`'s line breaking.
+    fn generated(spec: &str) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path =
+            camino::Utf8PathBuf::from_path_buf(directory.path().join("openapi.yaml")).unwrap();
+        std::fs::write(&path, spec).unwrap();
+        let preview = crate::__private::preview(&crate::Spec::new(path));
+        let contents = preview
+            .contents
+            .unwrap_or_else(|| panic!("the spec generates: {:?}", preview.report.diagnostics));
+        contents.split_whitespace().collect()
+    }
+
+    /// The async method `name` in `generated`'s whitespace-free text, from its signature to the
+    /// doc comment of the `_url` method emitted after it.
+    fn method<'g>(generated: &'g str, name: &str) -> &'g str {
+        let start = generated
+            .find(&format!("pubasyncfn{name}("))
+            .unwrap_or_else(|| panic!("no async method `{name}`"));
+        let end = generated[start..]
+            .find(&format!("///TheURL`{name}`"))
+            .unwrap_or_else(|| panic!("no URL method after `{name}`"));
+        &generated[start..start + end]
+    }
+
+    /// Each body codec reaches the emitted dispatch: the success decode, the single-body error
+    /// classifier (whose status table lists the bodied error entries only), the by-status variant
+    /// decode and the success type, and the credentials a secured operation attaches.
+    #[test]
+    fn each_codec_and_shape_reaches_the_emitted_dispatch() {
+        let generated = generated(CODECS);
+        let xml = method(&generated, "get_xml");
+        for fragment in [
+            "->Result<support::ResponseValue<types::Item>,support::Error<GetXmlError>>",
+            "request=support::attach_auth(&self.core,request,&[&[support::AuthScheme{name:\"token\",\
+             kind:support::AuthKind::Bearer,},][..],],).await.map_err(support::Error::widen)?;",
+            "support::decode_success_xml::<types::Item>(&self.core,response).await\
+             .map_err(support::Error::widen)",
+            "Err(support::classify_error_xml::<GetXmlError,>(&self.core,response,\
+             &[support::StatusSpec::Exact(404u16)]).await,)",
+        ] {
+            assert!(xml.contains(fragment), "`{fragment}` in {xml}");
+        }
+
+        let text = method(&generated, "get_text");
+        for fragment in [
+            "support::decode_success_text::<types::",
+            "Err(support::classify_error_text::<GetTextError,>(&self.core,response,\
+             &[support::StatusSpec::Exact(500u16)]).await,)",
+        ] {
+            assert!(text.contains(fragment), "`{fragment}` in {text}");
+        }
+        assert!(!text.contains("attach_auth"), "{text}");
+
+        let many = method(&generated, "get_many");
+        for fragment in [
+            "->Result<support::ResponseValue<GetManyResponse>,support::Error<GetManyError>>",
+            "ifsupport::StatusSpec::Exact(200u16).matches(status){returnsupport::decode_success_with(\
+             &self.core,response,|body|{serde_json::from_slice::<Box<types::Item>>(body)\
+             .map_err(|error|error.to_string()).map(GetManyResponse::Status200)},).await",
+        ] {
+            assert!(many.contains(fragment), "`{fragment}` in {many}");
+        }
+    }
+
     /// Each IR status selector maps to the runtime selector that classifies the same statuses,
     /// spelled with the literal's own type, and to the response variant named for it.
     #[test]

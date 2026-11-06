@@ -100,7 +100,143 @@ fn from_token_bytes(bytes: &proc_macro2::Literal) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::Method;
+    use crate::diag::{JsonPointer, Provenance};
+    use crate::ir::{Api, Info, Method, Prim, Ty, TypeDef, TypeGraph, TypeId, TypeKind};
+    use crate::name::{Ident, Names};
+
+    use super::CodegenOptions;
+
+    /// An API with no operations whose types are `kinds`, in order, each named `T<index>`.
+    fn api_with(kinds: Vec<TypeKind>) -> (Api, Names, Vec<TypeId>) {
+        let mut types = TypeGraph::default();
+        let mut names = Names::default();
+        let ids = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let id = types.insert(TypeDef {
+                    name_hint: format!("T{index}"),
+                    kind,
+                    docs: Default::default(),
+                    provenance: Provenance::new(JsonPointer::root(), None),
+                    document: String::new(),
+                });
+                names.types.insert(id, Ident::new(format!("T{index}")));
+                id
+            })
+            .collect();
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: Vec::new(),
+            types,
+            security_schemes: Default::default(),
+        };
+        (api, names, ids)
+    }
+
+    fn ty(id: TypeId, nullable: bool, boxed: bool) -> Ty {
+        Ty {
+            id,
+            nullable,
+            boxed,
+        }
+    }
+
+    /// `ty_tokens` qualifies, boxes and wraps in `Option` as the `Ty` says, and `boxed_ty_tokens`
+    /// boxes whatever the `Ty` says, without boxing twice.
+    #[test]
+    fn a_type_is_named_qualified_boxed_and_optional_as_its_ty_says() {
+        let (_, names, ids) = api_with(vec![TypeKind::Primitive(Prim::String)]);
+        let id = ids[0];
+        for (ty, qualified, plain, boxed) in [
+            (ty(id, false, false), false, "T0", "Box < T0 >"),
+            (
+                ty(id, false, false),
+                true,
+                "types :: T0",
+                "Box < types :: T0 >",
+            ),
+            (ty(id, false, true), false, "Box < T0 >", "Box < T0 >"),
+            (
+                ty(id, true, false),
+                true,
+                "Option < types :: T0 >",
+                "Option < Box < types :: T0 > >",
+            ),
+            (
+                ty(id, true, true),
+                false,
+                "Option < Box < T0 > >",
+                "Option < Box < T0 > >",
+            ),
+        ] {
+            assert_eq!(
+                super::ty_tokens(ty, &names, qualified).to_string(),
+                plain,
+                "{ty:?}"
+            );
+            assert_eq!(
+                super::boxed_ty_tokens(ty, &names, qualified).to_string(),
+                boxed,
+                "{ty:?}"
+            );
+        }
+    }
+
+    /// Only a `Bytes` definition takes the raw byte codec; a type the graph does not hold does not.
+    #[test]
+    fn only_a_bytes_definition_is_a_bytes_body() {
+        let (api, _, ids) = api_with(vec![TypeKind::Bytes, TypeKind::Primitive(Prim::String)]);
+        assert!(super::is_bytes_ty(&api, ty(ids[0], false, false)));
+        assert!(!super::is_bytes_ty(&api, ty(ids[1], false, false)));
+        assert!(!super::is_bytes_ty(&api, ty(TypeId(99), false, false)));
+    }
+
+    /// The `uuid` and `time` mappings each switch only their own primitives, to the type they
+    /// name or back to `String`; every other primitive names itself under any mapping.
+    #[test]
+    fn prim_tokens_follow_the_uuid_and_time_mappings() {
+        for (feature_uuid, feature_time) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let options = CodegenOptions {
+                feature_uuid,
+                feature_time,
+                ..CodegenOptions::default()
+            };
+            let tokens = |prim| super::prim_tokens(prim, &options).to_string();
+            let case = format!("uuid {feature_uuid}, time {feature_time}");
+            assert_eq!(tokens(Prim::Bool), "bool", "{case}");
+            assert_eq!(tokens(Prim::String), "String", "{case}");
+            assert_eq!(tokens(Prim::I32), "i32", "{case}");
+            assert_eq!(tokens(Prim::I64), "i64", "{case}");
+            assert_eq!(tokens(Prim::F64), "f64", "{case}");
+            assert_eq!(
+                tokens(Prim::Uuid),
+                if feature_uuid {
+                    "uuid :: Uuid"
+                } else {
+                    "String"
+                },
+                "{case}"
+            );
+            assert_eq!(
+                tokens(Prim::DateTime),
+                if feature_time { "DateTime" } else { "String" },
+                "{case}"
+            );
+            assert_eq!(
+                tokens(Prim::Date),
+                if feature_time { "Date" } else { "String" },
+                "{case}"
+            );
+        }
+    }
 
     /// Each fixed method maps to its `reqwest::Method` constant; `QUERY`, which has none, and an
     /// `additionalOperations` token are built from their exact bytes, the error mapped through `?`
