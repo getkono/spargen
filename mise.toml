@@ -134,11 +134,11 @@ description = "Mutation testing over the runtime, ir/media.rs, the response part
 # `source/lock.rs`, `source/sha256.rs`, `oas31/lower/shape.rs`, `oas31/lower/defaults.rs`, `emit/`,
 # `codegen/docs.rs` and `surface/mod.rs`; and the helpers whose decisions are pure functions
 # their unit tests call: `runtime_contract/`, `cache.rs`, `ir/mod.rs`, `ir/invariant.rs`,
-# `oas31/media.rs`, `codegen/ty.rs`, `codegen/idents.rs` and `codegen/dispatch.rs`. Where one of
-# those files holds code only the process environment or a compiled fixture reaches,
-# `.cargo/mutants.toml` excludes it with its argument. The rest of `oas31/`, `codegen/` and
-# `surface/`, and `lib.rs`, stay out because their coverage lives in the integration suites, which
-# `--lib` does not run.
+# `oas31/media.rs`, `codegen/ty.rs`, `codegen/idents.rs` and `codegen/dispatch.rs`, less the
+# build-script environment readers in `cache.rs` and `runtime_contract/integration.rs`, which
+# `.cargo/mutants.toml` excludes with its argument. The rest of
+# `oas31/`, `codegen/` and `surface/`, and `lib.rs`, stay out because their coverage lives in the
+# integration suites, which `--lib` does not run.
 # - `--config` names `.cargo/mutants.toml` explicitly, so a missing file fails the run rather than
 #   dropping every exclusion.
 # - `--all-features` builds the `xml`, `blocking` and `time` modules: a mutant in code the build
