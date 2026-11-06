@@ -11,8 +11,8 @@ use super::*;
 // by transcribing one rule out of the metaschema into Rust. The property below is the general one:
 // every fixture is written inline, then mechanically split at one Reference-able position into
 // three twins — a whole-file `$ref`, a JSON Pointer into a file, and a two-hop chain through a
-// file that is itself a Reference — and all four must reach the same verdict under the same codes,
-// through both `generate` and `check`.
+// file that is itself a Reference — and all four must reach the same verdict under the same codes
+// (`check` is held to `generate`'s diagnostics by the harness).
 
 /// One inline document and the position to split it at.
 struct Placement {
@@ -334,7 +334,7 @@ fn distinct_codes(report: &Report) -> Vec<&'static str> {
 }
 
 /// An inline document and each of its `$ref`-split twins reach the same verdict under the same
-/// diagnostic codes, through both `generate` and `check` — and, where the document is valid, the
+/// diagnostic codes (`check` held to the same by the harness) — and, where the document is valid, the
 /// same generated client. The verdict alone let a two-hop chain lower its intermediate Reference
 /// Object as the target (#274): a Parameter lost its `in` and was rejected, while a Response,
 /// Request Body or Header lost its content and schema and generated a client without them.
@@ -342,18 +342,18 @@ fn distinct_codes(report: &Report) -> Vec<&'static str> {
 fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
     let mut divergent = Vec::new();
     for fixture in placement_fixtures() {
-        let (inline_generated, inline_checked, inline_client) =
+        let (inline, _, inline_client) =
             run_placement_with_client(&[("openapi.json", fixture.document.clone())]);
         assert_eq!(
-            inline_generated.outcome() == Outcome::Rejected,
+            inline.outcome() == Outcome::Rejected,
             fixture.rejects,
-            "{}: inline: {inline_generated:#?}",
+            "{}: inline: {inline:#?}",
             fixture.name
         );
         if fixture.rejects {
             assert!(
-                has_code(&inline_generated, Code::InvalidInput),
-                "{}: inline: {inline_generated:#?}",
+                has_code(&inline, Code::InvalidInput),
+                "{}: inline: {inline:#?}",
                 fixture.name
             );
         }
@@ -378,7 +378,7 @@ fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
                 );
             }
             files.push(("openapi.json", root));
-            let (generated, checked, client) = run_placement_with_client(&files);
+            let (split, _, client) = run_placement_with_client(&files);
             if !fixture.rejects && client_body(&client) != client_body(&inline_client) {
                 divergent.push(format!(
                     "{} through {label}: `generate` emitted a different client than inline\n\
@@ -386,23 +386,17 @@ fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
                     fixture.name,
                 ));
             }
-            for (entry, inline, split) in [
-                ("generate", &inline_generated, &generated),
-                ("check", &inline_checked, &checked),
-            ] {
-                if split.outcome() != inline.outcome()
-                    || distinct_codes(split) != distinct_codes(inline)
-                {
-                    divergent.push(format!(
-                        "{} through {label}: `{entry}` reached {:?} {:?}, inline {:?} {:?}\n\
-                         split: {split:#?}",
-                        fixture.name,
-                        split.outcome(),
-                        distinct_codes(split),
-                        inline.outcome(),
-                        distinct_codes(inline),
-                    ));
-                }
+            if split.outcome() != inline.outcome()
+                || distinct_codes(&split) != distinct_codes(&inline)
+            {
+                divergent.push(format!(
+                    "{} through {label}: reached {:?} {:?}, inline {:?} {:?}\nsplit: {split:#?}",
+                    fixture.name,
+                    split.outcome(),
+                    distinct_codes(&split),
+                    inline.outcome(),
+                    distinct_codes(&inline),
+                ));
             }
         }
     }
@@ -423,25 +417,22 @@ fn a_violation_behind_a_ref_is_sited_in_the_file_that_holds_it() {
         serde_json::json!({}),
     );
     let fragment = serde_json::json!({ "shared": { "item": { "description": "ok", "bogus": 1 } } });
-    let (generated, checked) =
-        run_placement(&[("openapi.json", root), ("fragment.json", fragment)]);
-    for report in [&generated, &checked] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let sited: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| diagnostic.code == Code::InvalidInput)
-            .collect();
-        assert_eq!(sited.len(), 1, "{report:#?}");
-        assert_eq!(sited[0].pointer.as_str(), "/shared/item", "{report:#?}");
-        assert!(
-            sited[0]
-                .message
-                .contains("reached through `$ref: ./fragment.json#/shared/item`")
-                && sited[0].message.contains("validated as `response`"),
-            "{report:#?}"
-        );
-    }
+    let (report, _) = run_placement(&[("openapi.json", root), ("fragment.json", fragment)]);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let sited: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::InvalidInput)
+        .collect();
+    assert_eq!(sited.len(), 1, "{report:#?}");
+    assert_eq!(sited[0].pointer.as_str(), "/shared/item", "{report:#?}");
+    assert!(
+        sited[0]
+            .message
+            .contains("reached through `$ref: ./fragment.json#/shared/item`")
+            && sited[0].message.contains("validated as `response`"),
+        "{report:#?}"
+    );
 }
 
 /// A Reference cycle across files (`r.json#/A` → `#/B` → `#/A`) terminates. Validation follows a
@@ -462,12 +453,10 @@ fn a_cross_file_reference_cycle_terminates() {
     std::thread::spawn(move || {
         let _ = sender.send(run_placement(&[("openapi.json", root), ("r.json", cycle)]));
     });
-    let (generated, checked) = receiver
+    let (report, _) = receiver
         .recv_timeout(std::time::Duration::from_secs(60))
         .expect("a cross-file Reference cycle did not terminate within 60 s");
-    for report in [&generated, &checked] {
-        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
-    }
+    assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 /// A Parameter, Request Body, Response or Header chain through the bundle is followed hop by hop
@@ -497,26 +486,20 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
             root
         };
 
-        let (generated, checked) = run_placement(&[
+        let (report, _) = run_placement(&[
             ("openapi.json", split("./c.json#/A")),
             (
                 "c.json",
                 serde_json::json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } }),
             ),
         ]);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{kind}/{entry}: {report:#?}"
-            );
-            assert!(
-                messages_for(report, Code::UnresolvedRef)
-                    .iter()
-                    .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
-                "{kind}/{entry}: a cross-file cycle must say it is a cycle: {report:#?}"
-            );
-        }
+        assert_eq!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+        assert!(
+            messages_for(&report, Code::UnresolvedRef)
+                .iter()
+                .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
+            "{kind}: a cross-file cycle must say it is a cycle: {report:#?}"
+        );
 
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
@@ -532,20 +515,13 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
         ] {
             std::fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         }
-        let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+        let report = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
         let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-        let checked = run_check(&Spec::new(dir.join("openapi.json")));
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{kind}/{entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::UnresolvedRef),
-                "{kind}/{entry}: two `./p.json`s in two directories are not a cycle: {report:#?}"
-            );
-        }
+        assert_ne!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{kind}: two `./p.json`s in two directories are not a cycle: {report:#?}"
+        );
         let (_, _, inline) = run_placement_with_client(&[("openapi.json", fixture.document)]);
         assert_eq!(
             client_body(&client),
@@ -601,19 +577,13 @@ fn e004_a_media_type_chain_is_followed_by_target_not_by_spelling() {
             ],
         ),
     ] {
-        let (generated, checked) = run_placement(&files);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}/{entry}: {report:#?}"
-            );
-            assert!(
-                messages_for(report, Code::UnresolvedRef)
-                    .contains(&"media type reference cycle cannot be resolved"),
-                "{label}/{entry}: a media type cycle must say it is a cycle: {report:#?}"
-            );
-        }
+        let (report, _) = run_placement(&files);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            messages_for(&report, Code::UnresolvedRef)
+                .contains(&"media type reference cycle cannot be resolved"),
+            "{label}: a media type cycle must say it is a cycle: {report:#?}"
+        );
     }
 
     // `#/components/mediaTypes/A` is written twice: in the root (naming the root's `A`, which
@@ -628,15 +598,13 @@ fn e004_a_media_type_chain_is_followed_by_target_not_by_spelling() {
         "B": { "$ref": "#/components/mediaTypes/A" },
         "A": { "schema": { "type": "integer" } },
     } } });
-    let (generated, checked, client) =
+    let (report, _, client) =
         run_placement_with_client(&[("openapi.json", root), ("other.json", other)]);
-    for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(report, Code::UnresolvedRef),
-            "{entry}: one spelling written in two files is not a cycle: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnresolvedRef),
+        "one spelling written in two files is not a cycle: {report:#?}"
+    );
     let (_, _, inline) = run_placement_with_client(&[(
         "openapi.json",
         with_content(json!({ "schema": { "type": "integer" } }), json!({})),
@@ -669,7 +637,7 @@ fn w011_a_documented_second_hop_reference_in_a_sub_file_is_reported_there() {
         let mut root = fixture.document.clone();
         *root.pointer_mut(split_at).unwrap() =
             serde_json::json!({ "$ref": "./hop.json", "summary": "first hop" });
-        let (generated, checked) = run_placement(&[
+        let (report, _) = run_placement(&[
             ("openapi.json", root),
             (
                 "hop.json",
@@ -677,42 +645,39 @@ fn w011_a_documented_second_hop_reference_in_a_sub_file_is_reported_there() {
             ),
             ("p.json", moved),
         ]);
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{split_at}/{entry}: {report:#?}"
-            );
-            let site = |target: &str| {
-                let wanted = format!("the `summary`/`description` on the reference to `{target}`");
-                let found: Vec<_> = report
-                    .diagnostics()
-                    .iter()
-                    .filter(|d| d.code == Code::DeclarationHasNoEffect)
-                    .filter(|d| d.message.starts_with(&wanted))
-                    .collect();
-                assert_eq!(
-                    found.len(),
-                    1,
-                    "{split_at}/{entry}: exactly one W011 for the hop to `{target}`: {report:#?}"
-                );
-                found[0].span.unwrap_or_else(|| {
-                    panic!("{split_at}/{entry}: the hop to `{target}` has no span: {report:#?}")
-                })
-            };
-            let first = site("./hop.json");
-            let second = site("./p.json");
-            assert_ne!(
-                first.file, second.file,
-                "{split_at}/{entry}: the second hop is written in `hop.json`, not the root: \
-                 {report:#?}"
-            );
-            // `hop.json` is pretty-printed: its Reference Object opens on line 1.
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{split_at}: {report:#?}"
+        );
+        let site = |target: &str| {
+            let wanted = format!("the `summary`/`description` on the reference to `{target}`");
+            let found: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .filter(|d| d.message.starts_with(&wanted))
+                .collect();
             assert_eq!(
-                second.start.line, 1,
-                "{split_at}/{entry}: the second hop's W011 points into `hop.json`: {report:#?}"
+                found.len(),
+                1,
+                "{split_at}: exactly one W011 for the hop to `{target}`: {report:#?}"
             );
-        }
+            found[0].span.unwrap_or_else(|| {
+                panic!("{split_at}: the hop to `{target}` has no span: {report:#?}")
+            })
+        };
+        let first = site("./hop.json");
+        let second = site("./p.json");
+        assert_ne!(
+            first.file, second.file,
+            "{split_at}: the second hop is written in `hop.json`, not the root: {report:#?}"
+        );
+        // `hop.json` is pretty-printed: its Reference Object opens on line 1.
+        assert_eq!(
+            second.start.line, 1,
+            "{split_at}: the second hop's W011 points into `hop.json`: {report:#?}"
+        );
     }
 }
 
@@ -764,20 +729,17 @@ components:
     ] {
         std::fs::write(&root, spec(&reference)).unwrap();
         let out = dir.join("client.rs");
-        let generated = run_generate(&build(root.clone(), out.clone()));
+        let report = run_generate(&build(root.clone(), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = run_check(&Spec::new(root.clone()));
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{reference}/{entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::DeclarationHasNoEffect),
-                "{reference}/{entry}: the root cannot shadow itself: {report:#?}"
-            );
-        }
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{reference}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{reference}: the root cannot shadow itself: {report:#?}"
+        );
         let nodes = code.matches("pub struct Node").count();
         assert_eq!(
             nodes, 1,
@@ -798,22 +760,21 @@ fn has_code_at(report: &Report, code: Code, pointer: &str) -> bool {
 /// reaches through a `$ref` into another file got no `W001` for its validation-only keywords, and
 /// a dangling reference under its `not` audited clean. The issue's reproducer: `check` printed
 /// `clean`. The audit now follows a reference it meets in a position lowering reads into the file
-/// it names, so the sub-file's schema gets the audit a root one does, through both entry points.
+/// it names, so the sub-file's schema gets the audit a root one does (`check` held to the same
+/// diagnostics by the harness).
 #[test]
 fn a_schema_in_a_referenced_file_gets_the_audit_a_root_schema_does() {
     let reproducer = "X:\n  type: object\n  maxProperties: 3\n  not: { $ref: '#/Missing' }\n";
-    let (generated, checked, _) = split("./lib.yaml#/X", reproducer);
-    for (entry, report) in [("generate", generated), ("check", checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            has_code_at(&report, Code::ValidationKeywordIgnored, "/X"),
-            "{entry}: lib.yaml's /X carries `maxProperties` and `not`, so W001: {report:#?}"
-        );
-        assert!(
-            has_code_at(&report, Code::UnresolvedRef, "/X/not"),
-            "{entry}: `#/Missing` names nothing in lib.yaml, so E004 at /X/not: {report:#?}"
-        );
-    }
+    let (report, _, _) = split("./lib.yaml#/X", reproducer);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code_at(&report, Code::ValidationKeywordIgnored, "/X"),
+        "lib.yaml's /X carries `maxProperties` and `not`, so W001: {report:#?}"
+    );
+    assert!(
+        has_code_at(&report, Code::UnresolvedRef, "/X/not"),
+        "`#/Missing` names nothing in lib.yaml, so E004 at /X/not: {report:#?}"
+    );
 
     // Without the dangling reference the same schema generates, still warned. A target reached
     // only through another sub-file schema's property — and a cycle back to the first — is
@@ -828,15 +789,13 @@ fn a_schema_in_a_referenced_file_gets_the_audit_a_root_schema_does() {
                    properties:\n    \
                    s: { type: string, pattern: '^a' }\n    \
                    back: { $ref: '#/X' }\n";
-    let (generated, checked, _) = split("./lib.yaml#/X", chained);
-    for (entry, report) in [("generate", generated), ("check", checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        for pointer in ["/X", "/Y/properties/s"] {
-            assert!(
-                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
-                "{entry}: W001 must sit at lib.yaml's {pointer}: {report:#?}"
-            );
-        }
+    let (report, _, _) = split("./lib.yaml#/X", chained);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for pointer in ["/X", "/Y/properties/s"] {
+        assert!(
+            has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+            "W001 must sit at lib.yaml's {pointer}: {report:#?}"
+        );
     }
 }
 
@@ -886,49 +845,42 @@ fn an_object_in_a_referenced_file_gets_the_audit_a_root_object_does() {
                            content:\n    \
                            application/json:\n      \
                            schema: { type: object, maxProperties: 2 }\n";
-    let (generated, checked, _) = generate_and_check_files(&[
+    let (report, _, _) = generate_and_check_files(&[
         ("openapi.yaml", ROOT),
         ("resp.yaml", RESP),
         ("objects.yaml", OBJECTS),
     ]);
-    for (entry, report) in [("generate", generated), ("check", checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        for pointer in [
-            "/content/application~1json/schema",
-            "/Param/schema",
-            "/Body/content/application~1json/schema",
-            "/Error/content/application~1json/schema",
-        ] {
-            assert!(
-                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
-                "{entry}: W001 must sit at the sub-file's {pointer}: {report:#?}"
-            );
-        }
-        // `/a` and `/b` both reach resp.yaml: its schema is audited once.
-        let resp_warnings = report
-            .diagnostics()
-            .iter()
-            .filter(|d| {
-                d.code == Code::ValidationKeywordIgnored
-                    && d.pointer.as_str() == "/content/application~1json/schema"
-            })
-            .count();
-        assert_eq!(resp_warnings, 1, "{entry}: {report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for pointer in [
+        "/content/application~1json/schema",
+        "/Param/schema",
+        "/Body/content/application~1json/schema",
+        "/Error/content/application~1json/schema",
+    ] {
+        assert!(
+            has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+            "W001 must sit at the sub-file's {pointer}: {report:#?}"
+        );
     }
+    // `/a` and `/b` both reach resp.yaml: its schema is audited once.
+    let resp_warnings = report
+        .diagnostics()
+        .iter()
+        .filter(|d| {
+            d.code == Code::ValidationKeywordIgnored
+                && d.pointer.as_str() == "/content/application~1json/schema"
+        })
+        .count();
+    assert_eq!(resp_warnings, 1, "{report:#?}");
 
     // A response chain that returns to itself is lowering's `E004`; the audit's walk terminates.
-    let (generated, checked, _) = generate_and_check_files(&[
+    let (report, _, _) = generate_and_check_files(&[
         ("openapi.yaml", ROOT),
         ("resp.yaml", "$ref: './resp.yaml'\n"),
         ("objects.yaml", OBJECTS),
     ]);
-    for (entry, report) in [("generate", generated), ("check", checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            has_code(&report, Code::UnresolvedRef),
-            "{entry}: {report:#?}"
-        );
-    }
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
 /// #495, for the OpenAPI 3.2 Media Type Object that is itself a Reference Object: one naming
@@ -966,23 +918,21 @@ fn a_media_type_in_a_referenced_file_gets_the_audit_a_root_one_does() {
                           type: string\n          \
                           contentMediaType: application/json\n          \
                           contentSchema: { type: object, properties: { id: { type: string } } }\n";
-    let (generated, checked, _) = generate_and_check_files(&[
+    let (report, _, _) = generate_and_check_files(&[
         ("openapi.yaml", ROOT),
         ("media.yaml", MEDIA),
         ("stream.yaml", STREAM),
     ]);
-    for (entry, report) in [("generate", generated), ("check", checked)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let w001: Vec<_> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::ValidationKeywordIgnored)
-            .map(|d| d.pointer.as_str())
-            .collect();
-        assert_eq!(
-            w001,
-            ["/schema"],
-            "{entry}: only media.yaml's pattern warns; the SSE annotations are consumed: {report:#?}"
-        );
-    }
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let w001: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::ValidationKeywordIgnored)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        w001,
+        ["/schema"],
+        "only media.yaml's pattern warns; the SSE annotations are consumed: {report:#?}"
+    );
 }

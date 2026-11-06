@@ -116,18 +116,16 @@ fn e008_names_an_integer_member_above_i64_max() {
         }"#,
     )
     .unwrap();
-    let (generated, checked) = run_placement(&[("openapi.json", document)]);
-    for report in [generated, checked] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::NonScalarEnum);
-        assert!(
-            !messages.is_empty()
-                && messages.iter().all(|m| {
-                    m.contains("18446744073709551615 exceeds i64::MAX") && !m.contains("object")
-                }),
-            "{messages:#?}"
-        );
-    }
+    let (report, _) = run_placement(&[("openapi.json", document)]);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::NonScalarEnum);
+    assert!(
+        !messages.is_empty()
+            && messages.iter().all(|m| {
+                m.contains("18446744073709551615 exceeds i64::MAX") && !m.contains("object")
+            }),
+        "{messages:#?}"
+    );
 }
 
 #[test]
@@ -145,17 +143,16 @@ components:
       type: integer
       enum: [1, 18446744073709551615]
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::NonScalarEnum);
-        assert!(
-            !messages.is_empty()
-                && messages.iter().all(|m| {
-                    m.contains("18446744073709551615 exceeds i64::MAX") && !m.contains("object")
-                }),
-            "{messages:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::NonScalarEnum);
+    assert!(
+        !messages.is_empty()
+            && messages.iter().all(|m| {
+                m.contains("18446744073709551615 exceeds i64::MAX") && !m.contains("object")
+            }),
+        "{messages:#?}"
+    );
 }
 
 /// `ty` with every `pub type` alias the generated `types` module declares expanded, recursively,
@@ -826,18 +823,17 @@ components:
       type: number
       enum: [1.5, 2.5]
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(&report, Code::NonScalarEnum), "{report:#?}");
-        // The message names the float, not object/array members, which this enum has none of.
-        let messages = messages_for(&report, Code::NonScalarEnum);
-        assert!(
-            messages
-                .iter()
-                .all(|m| m.contains("1.5 is a floating-point number") && !m.contains("object")),
-            "{messages:#?}"
-        );
-    }
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonScalarEnum), "{report:#?}");
+    // The message names the float, not object/array members, which this enum has none of.
+    let messages = messages_for(&report, Code::NonScalarEnum);
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.contains("1.5 is a floating-point number") && !m.contains("object")),
+        "{messages:#?}"
+    );
 
     // Strings, integers, and booleans stay supported.
     for (kind, values) in [
@@ -873,16 +869,14 @@ components:
       type: integer
       const: 1.0
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
-    }
+    let (report, written_as_floats) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
     // The members are the integers the spelled-as-integers schemas name: the same module, but for
     // the spelling.
     let integers = spec
         .replace("[1.0, 2]", "[1, 2]")
         .replace("const: 1.0", "const: 1");
-    let (_, written_as_floats) = generate_with_code(spec);
     let (_, written_as_integers) = generate_with_code(&integers);
     assert_eq!(
         module_body(&written_as_floats),
@@ -910,27 +904,26 @@ components:
         let rejected = format!(
             "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Level:\n      {schema}\n"
         );
-        for report in [generate(&rejected), check(&rejected)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
-            let messages = messages_for(&report, Code::NonScalarEnum);
-            assert!(
-                !messages.is_empty()
-                    && messages
-                        .iter()
-                        .all(|m| m.contains(named) && m.contains("floating-point number")),
-                "{case}: {messages:#?}"
-            );
-            // Only an integral float below 2^53 off an `integer` schema is told where it would
-            // be read as an integer.
-            let hinted = matches!(case, "number-typed" | "untyped");
-            assert_eq!(
-                messages
+        let report = generate(&rejected);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+        let messages = messages_for(&report, Code::NonScalarEnum);
+        assert!(
+            !messages.is_empty()
+                && messages
                     .iter()
-                    .all(|m| m.contains("only on a schema whose `type` names `integer`")),
-                hinted,
-                "{case}: {messages:#?}"
-            );
-        }
+                    .all(|m| m.contains(named) && m.contains("floating-point number")),
+            "{case}: {messages:#?}"
+        );
+        // Only an integral float below 2^53 off an `integer` schema is told where it would be
+        // read as an integer.
+        let hinted = matches!(case, "number-typed" | "untyped");
+        assert_eq!(
+            messages
+                .iter()
+                .all(|m| m.contains("only on a schema whose `type` names `integer`")),
+            hinted,
+            "{case}: {messages:#?}"
+        );
     }
 }
 
@@ -1101,7 +1094,9 @@ fn untyped_items_or_prefix_items_alone_lower_to_an_array() {
     for keyword in ["anyOf", "oneOf"] {
         let spec = with_schemas(
             "3.1.0",
-            &format!("    U:\n      {keyword}: [ {{ items: {{ type: string }} }}, {{ type: integer }} ]\n"),
+            &format!(
+                "    U:\n      {keyword}: [ {{ items: {{ type: string }} }}, {{ type: integer }} ]\n"
+            ),
         );
         let (report, code) = generate_with_code(&spec);
         assert_eq!(
