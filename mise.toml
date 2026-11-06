@@ -128,9 +128,9 @@ description = "Run the generation benchmarks (criterion). CI records these as a 
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.mutants]
-description = "Mutation testing over the runtime, ir/media.rs, the response partition, the name allocator, compat, diag and the small pure modules their unit tests pin (needs jq)"
+description = "Mutation testing over the runtime, ir/media.rs, the response partition, the name allocator, compat, diag and the small modules their unit tests pin (needs jq)"
 # CI's `mutants` job in `mutants.yml` runs these weekly. Beyond the runtime, `ir/` and the
-# subsystems above, the scope takes the pure modules whose in-module tests constrain them:
+# subsystems above, the scope takes the small modules whose in-module tests constrain them:
 # `source/lock.rs`, `source/sha256.rs`, `oas31/lower/shape.rs`, `oas31/lower/defaults.rs`, `emit/`,
 # `codegen/docs.rs` and `surface/mod.rs`. The rest of `oas31/`, `codegen/` and `surface/`, and
 # `lib.rs`, stay out because their coverage lives in the integration suites, which `--lib` does
