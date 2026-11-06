@@ -289,7 +289,7 @@ fn emit_type_def(
                 }
             }
         }
-        Emission::Union(union) => emit_union(id, ident, union, names, docs, deprecated),
+        Emission::Union(union) => emit_union(id, ident, union, types, names, docs, deprecated),
         // An array or tuple that reaches itself again through aliases alone cannot be an alias:
         // rustc expands an alias eagerly, so `pub type Node = Vec<Node>;` is a cycle (`E0391`). A
         // transparent newtype is nominal, which stops the expansion, and keeps the same wire form.

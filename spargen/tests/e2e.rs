@@ -666,6 +666,8 @@ mod mock_server;
 mod oas32;
 #[path = "e2e/open_narrowing.rs"]
 mod open_narrowing;
+#[path = "e2e/open_unions.rs"]
+mod open_unions;
 #[path = "e2e/roundtrip.rs"]
 mod roundtrip;
 #[path = "e2e/shapes.rs"]

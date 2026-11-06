@@ -252,6 +252,7 @@ fn lower_pass(
         member_orders: Vec::new(),
         depth: 0,
         open_narrowing: options.open_narrowing,
+        open_unions: options.open_unions,
         narrowing_opens: false,
         open_candidates: HashSet::new(),
         meet_locations: HashMap::new(),
@@ -621,6 +622,9 @@ struct LowerCtx<'a, 'doc> {
     /// The `open_narrowing` option: whether a string `enum`/`const` narrowing a plain `string`
     /// is lowered as an open set where [`Self::narrowing_opens`] allows it.
     open_narrowing: bool,
+    /// The `open_unions` option: whether a discriminated union with no `defaultMapping` is
+    /// lowered open ([`UnionStrategy::Discriminated::open`](crate::ir::UnionStrategy)).
+    open_unions: bool,
     /// Whether the schema being lowered right now is one `open_narrowing` applies to: set by
     /// [`Self::lower_chosen_response_body`] for a response body's own schema, and cleared by
     /// [`Self::closed_narrowing`] for every `$ref` target and every `oneOf`/`anyOf` lowered inside
@@ -709,4 +713,6 @@ impl LowerCtx<'_, '_> {
 pub(crate) struct LowerOptions {
     /// `Spec::open_narrowing`: lower a response body's own string narrowings as open sets.
     pub(crate) open_narrowing: bool,
+    /// `Spec::open_unions`: give a discriminated union a variant for a tag value it does not list.
+    pub(crate) open_unions: bool,
 }

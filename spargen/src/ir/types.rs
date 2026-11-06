@@ -102,6 +102,17 @@ pub(crate) struct Union {
     pub(crate) strategy: UnionStrategy,
 }
 
+impl Union {
+    /// Whether the union carries an `Unknown` variant beyond [`Self::variants`], for a tag value
+    /// it does not list ([`UnionStrategy::Discriminated`]'s `open`).
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(
+            self.strategy,
+            UnionStrategy::Discriminated { open: true, .. }
+        )
+    }
+}
+
 /// One variant of a [`Union`]: a name hint (allocated to a Rust variant identifier by `name`), the
 /// variant's payload type, and what selects it under the union's [`UnionStrategy`].
 #[derive(Debug, Clone)]
@@ -134,6 +145,11 @@ pub(crate) enum UnionStrategy {
         default_variant: Option<usize>,
         /// How the `untagged` variants are matched: the source applicator's semantics.
         mode: UnionMode,
+        /// Whether the union is open (`Spec::open_unions`): it carries one more variant, beyond
+        /// [`Union::variants`], holding a payload whose tag is a string no variant lists and no
+        /// `untagged` variant accepts, which a closed union refuses. Never set beside a
+        /// `default_variant`, which already takes such a payload; `check_invariants` holds that.
+        open: bool,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that

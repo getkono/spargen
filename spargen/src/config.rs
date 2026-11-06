@@ -46,6 +46,7 @@ pub struct Spec {
     pub(crate) batch_cap: usize,
     pub(crate) carve: bool,
     pub(crate) open_narrowing: bool,
+    pub(crate) open_unions: bool,
     /// Every config file applied through [`Spec::config_file`] (and so through
     /// [`Spec::discover_config_file`]), in the order applied. Generation reads them, so `build.rs`
     /// names each as a `cargo:rerun-if-changed` path and `generate_api!` tracks each.
@@ -54,7 +55,7 @@ pub struct Spec {
 
 impl Spec {
     /// A spec with defaults: `uuid` and `time` on, a 64 KiB error-body cap, a 100-diagnostic
-    /// batch, no omissions, no carving, no open narrowing.
+    /// batch, no omissions, no carving, no open narrowing, no open unions.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -65,6 +66,7 @@ impl Spec {
             batch_cap: DEFAULT_BATCH_CAP,
             carve: false,
             open_narrowing: false,
+            open_unions: false,
             config_files: Vec::new(),
         }
     }
@@ -111,6 +113,12 @@ impl Spec {
     /// [`open_narrowing`](Self::open_narrowing) set it.
     pub fn open_narrowing_enabled(&self) -> bool {
         self.open_narrowing
+    }
+
+    /// Whether a discriminated union decodes a tag value it does not list into its `Unknown`
+    /// variant, as [`open_unions`](Self::open_unions) set it.
+    pub fn open_unions_enabled(&self) -> bool {
+        self.open_unions
     }
 
     /// Every config file applied through [`config_file`](Self::config_file) or
@@ -201,6 +209,33 @@ impl Spec {
         self
     }
 
+    /// Give every discriminated union one more variant, `Unknown { tag, value }`, holding a
+    /// payload whose discriminator value the union does not list (default `false`).
+    ///
+    /// By default a discriminated union is closed: a tag value that selects none of its variants
+    /// is a decode failure (`Error::Decode`), the same as a malformed payload. An API that
+    /// documents "new kinds may be added; a client ignores kinds it does not know" needs the two
+    /// told apart. With this on, a payload whose tag is a string the union lists for no variant,
+    /// and that no untagged variant accepts, decodes as `Unknown`: `tag` is that string and
+    /// `value` the whole payload as it arrived. Serializing `Unknown` writes `value` back, with
+    /// `tag` inserted under the tag property when `value` does not already carry it. A missing or
+    /// non-string tag is still a decode failure.
+    ///
+    /// It applies to every union with a `discriminator`, in requests and responses alike, except
+    /// one with an OpenAPI 3.2 `defaultMapping`, whose fallback variant already takes every tag
+    /// value it does not list. Within the union the tag selects exactly one variant, and `Unknown`
+    /// only where it selects none. An open union that is itself a variant of an enclosing union
+    /// with no discriminator counts as a match there only when it decodes a payload as one of its
+    /// listed variants: a payload it takes only as `Unknown` goes to another variant that matches
+    /// it, as with this option off, and to the open union only when none does. An open union
+    /// reached deeper inside such a variant, such as through a property, is not held back that
+    /// way: it makes that variant accept more, so a `oneOf` payload another variant also matches
+    /// can fail to decode where it decoded with this option off.
+    pub fn open_unions(mut self, enabled: bool) -> Self {
+        self.open_unions = enabled;
+        self
+    }
+
     /// Where to write the generated module. The result is the input to [`generate`](crate::generate).
     pub fn build(self, output: impl Into<Utf8PathBuf>) -> Build {
         Build::new(self, output)
@@ -275,6 +310,9 @@ impl Spec {
         }
         if let Some(value) = file.open_narrowing {
             self.open_narrowing = value;
+        }
+        if let Some(value) = file.open_unions {
+            self.open_unions = value;
         }
         for (index, entry) in file.omit.iter().enumerate() {
             let rule = entry.to_rule().map_err(|message| {
@@ -394,6 +432,7 @@ struct FileConfig {
     batch_cap: Option<usize>,
     error_body_cap: Option<usize>,
     open_narrowing: Option<bool>,
+    open_unions: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
     features: Option<toml::Value>,
     #[serde(default)]
@@ -522,6 +561,7 @@ mod tests {
         assert_eq!(spec.batch_cap, 100);
         assert_eq!(spec.error_body_cap, 64 * 1024);
         assert!(!spec.open_narrowing);
+        assert!(!spec.open_unions);
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
@@ -536,6 +576,7 @@ mod tests {
             batch_cap = 7
             error_body_cap = 11
             open_narrowing = true
+            open_unions = true
             "#,
         )
         .unwrap();
@@ -545,6 +586,7 @@ mod tests {
         assert_eq!(spec.batch_cap, 7);
         assert_eq!(spec.error_body_cap, 11);
         assert!(spec.open_narrowing);
+        assert!(spec.open_unions);
     }
 
     #[test]

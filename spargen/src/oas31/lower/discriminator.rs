@@ -245,6 +245,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tag_field: tag_field.to_owned(),
                 default_variant,
                 mode,
+                // `open_unions` opens a union whose unlisted tags have nowhere else to go: a
+                // `defaultMapping` variant already takes them.
+                open: self.open_unions && default_variant.is_none(),
             },
             variants: tags
                 .into_iter()
