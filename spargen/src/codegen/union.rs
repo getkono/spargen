@@ -13,8 +13,9 @@ use super::ty::boxed_ty_tokens;
 /// Emit the enum for union definition `id`, one boxed payload variant per union variant, with the
 /// `Deserialize` / `Serialize` impls of its strategy: by discriminator (a unique JSON category for
 /// a non-object variant, then the tag, then a trial of the variants no tag selects, then the
-/// `defaultMapping` variant), by a statically disjoint feature, or by trying each variant's
-/// schema. `docs` and `deprecated` are the definition's own attributes.
+/// `defaultMapping` variant, or for an open union the `Unknown` variant), by a statically disjoint
+/// feature, or by trying each variant's schema. `docs` and `deprecated` are the definition's own
+/// attributes.
 pub(super) fn emit_union(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
@@ -36,8 +37,10 @@ pub(super) fn emit_union(
             tag_field,
             default_variant,
             mode,
+            open,
         } => {
             let decl = union_enum_decl(id, ident, union, names, &docs, &deprecated);
+            let unknown = open.then(|| open_variant_ident(names, id));
             let category_arms = union.variants.iter().filter_map(|variant| {
                 let category = discriminated_dispatch(variant).category?;
                 let variant_ident = union_variant_ident(names, id, variant);
@@ -77,6 +80,13 @@ pub(super) fn emit_union(
                     ),
                 }
             });
+            // An open union writes an unknown payload back as it arrived, its own tag kept; the
+            // tag is inserted only into a value constructed without it.
+            let unknown_ser_arm = unknown.map(|unknown| {
+                quote! {
+                    #ident::#unknown { tag, value } => (value.clone(), Some(tag.as_str())),
+                }
+            });
             let missing_tag = format!(
                 "missing discriminator field `{tag_field}` for union {}",
                 ident.as_str()
@@ -96,9 +106,12 @@ pub(super) fn emit_union(
                 Some(fallback) => fallback.clone(),
                 None => quote! { Err(serde::de::Error::custom(#missing_tag)) },
             };
-            let unknown_tag_arm = match &fallback {
-                Some(fallback) => fallback.clone(),
-                None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
+            // `open_unions`: an unrecognized tag is kept, with the payload, in `Unknown`.
+            // Lowering never opens a union that has a fallback.
+            let unknown_tag_arm = match (&fallback, unknown) {
+                (Some(fallback), _) => fallback.clone(),
+                (None, Some(unknown)) => quote! { Ok(#ident::#unknown { tag, value }) },
+                (None, None) => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
             };
             // Variants no tag selects are tried by their own schemas — with the source
             // applicator's semantics, as `Trial` tries them — before the absent or
@@ -164,6 +177,7 @@ pub(super) fn emit_union(
                     {
                         let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
                             #(#ser_arms)*
+                            #unknown_ser_arm
                         };
                         if let Some(tag) = tag {
                             let serde_json::Value::Object(map) = &mut value else {
@@ -357,8 +371,8 @@ fn discriminated_dispatch(variant: &UnionVariant) -> Discriminated<'_> {
 }
 
 /// The union enum's declaration, `docs` and `deprecated` first, one variant per
-/// [`union_variant_defs`] entry. Every strategy declares the same enum and differs only in the
-/// serde impls beside it.
+/// [`union_variant_defs`] entry, then, for an open union, the `Unknown { tag, value }` variant.
+/// Every strategy declares the same enum and differs only in the serde impls beside it.
 fn union_enum_decl(
     id: crate::ir::TypeId,
     ident: &crate::name::Ident,
@@ -368,14 +382,47 @@ fn union_enum_decl(
     deprecated: &Option<TokenStream>,
 ) -> TokenStream {
     let variant_defs = union_variant_defs(id, union, names);
+    let unknown = match &union.strategy {
+        UnionStrategy::Discriminated {
+            tag_field,
+            open: true,
+            ..
+        } => {
+            let unknown = open_variant_ident(names, id);
+            let doc = format!(
+                "A payload whose `{tag_field}` names a kind this description does not list. \
+                 Decoding produces it only for a value no other variant takes."
+            );
+            let tag_doc = format!("The `{tag_field}` value the payload carries.");
+            Some(quote! {
+                #[doc = #doc]
+                #unknown {
+                    #[doc = #tag_doc]
+                    tag: String,
+                    /// The whole payload, as it arrived.
+                    value: serde_json::Value,
+                },
+            })
+        }
+        _ => None,
+    };
     quote! {
         #docs
         #deprecated
         #[derive(Debug, Clone)]
         pub enum #ident {
             #(#variant_defs)*
+            #unknown
         }
     }
+}
+
+/// The identifier `name` allocated for open union `id`'s `Unknown` variant.
+fn open_variant_ident(names: &Names, id: crate::ir::TypeId) -> &crate::name::Ident {
+    names
+        .open_variants
+        .get(&id)
+        .expect("open union variant name allocated")
 }
 
 /// The expression decoding the buffered `value` into `variant_ident`'s payload, as the

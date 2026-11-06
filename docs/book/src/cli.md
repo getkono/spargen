@@ -49,7 +49,7 @@ Options:
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, the switch pairs
 `--carve`/`--no-carve`, `--uuid`/`--no-uuid`, `--time`/`--no-time` and
-`--open-narrowing`/`--no-open-narrowing`, `--error-body-cap`, `--batch-cap`, and the repeatable
+`--open-narrowing`/`--no-open-narrowing`, `--open-unions`/`--no-open-unions`, `--error-body-cap`, `--batch-cap`, and the repeatable
 `--omit-path`, `--omit-operation`, `--omit-component`, `--omit-pointer`. The group mirrors the
 setter list on `spargen::Spec` and the keys of [`spargen.toml`](#spargentoml-reference). `lock`
 fetches every remote `$ref` the spec reaches whatever the omit rules and switches say, so of the
@@ -79,13 +79,16 @@ carve = false           # default false; auto-carve unsupported constructs
 batch_cap = 100         # default 100; diagnostics collected before the report is truncated
 error_body_cap = 65536  # default 64 KiB
 open_narrowing = false  # default false; open a response body's string `enum`/`const` narrowings
+open_unions = false     # default false; give a discriminated union an `Unknown { tag, value }` variant
 ```
 
 `error_body_cap` sets the generated client's `ClientConfig::max_error_body`, whose emitted doc
 ([source](https://github.com/getkono/spargen/blob/master/support-runtime/src/client.rs)) is the
 one statement of what it bounds on each target and which paths it does not cap. `carve` is
 described under [auto-carve](./compatibility.md#auto-carve), `open_narrowing` under
-[problem details](./runtime.md#problem-details), and the `[[omit]]` rules the file may also
+[problem details](./runtime.md#problem-details), `open_unions` on `Spec::open_unions` (a
+discriminator value no variant lists decodes into the `Unknown` variant instead of failing; a
+union with a 3.2 `defaultMapping` keeps its fallback), and the `[[omit]]` rules the file may also
 carry under [`spargen.toml` and the analysis CLI](./compatibility.md#spargentoml-and-the-analysis-cli).
 An unknown key is a configuration error (exit status `3`).
 

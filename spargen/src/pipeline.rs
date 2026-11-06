@@ -260,6 +260,7 @@ fn lower_bundle(
     // exactly the frontend diagnostics `generate` would, just without emitting code.
     let options = oas31::LowerOptions {
         open_narrowing: spec.open_narrowing,
+        open_unions: spec.open_unions,
     };
     let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
     ir::check_invariants(&api, diags);

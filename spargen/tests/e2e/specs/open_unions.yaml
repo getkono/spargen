@@ -1,0 +1,87 @@
+openapi: 3.1.0
+info: { title: Events, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: getEvent
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerEvent" }
+  /notices:
+    get:
+      operationId: getNotice
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notice" }
+  /shapes:
+    post:
+      operationId: postShape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Shape" }
+      responses:
+        "204": { description: ok }
+components:
+  schemas:
+    # The shape from #1233: a discriminated union whose description promises new kinds.
+    ServerEvent:
+      description: New kinds may be added within v1; a client ignores kinds it does not know.
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - $ref: "#/components/schemas/Stop"
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+          stop: "#/components/schemas/Stop"
+    Tick:
+      type: object
+      required: [kind, n]
+      properties:
+        kind: { type: string }
+        n: { type: integer }
+    Stop:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+    # An inline member no tag selects is tried before an unlisted tag reaches `Unknown`.
+    Notice:
+      oneOf:
+        - $ref: "#/components/schemas/Tick"
+        - type: object
+          required: [kind, note]
+          properties:
+            kind: { type: string }
+            note: { type: string }
+      discriminator:
+        propertyName: kind
+        mapping:
+          tick: "#/components/schemas/Tick"
+    # A member named `Unknown` keeps that name; the open variant takes the next one. Used in a
+    # request body, which an open union applies to as well.
+    Shape:
+      oneOf:
+        - $ref: "#/components/schemas/Circle"
+        - $ref: "#/components/schemas/Unknown"
+      discriminator:
+        propertyName: shape
+    Circle:
+      type: object
+      required: [shape, r]
+      properties:
+        shape: { type: string }
+        r: { type: number }
+    Unknown:
+      type: object
+      required: [shape]
+      properties:
+        shape: { type: string }

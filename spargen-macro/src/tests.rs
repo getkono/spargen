@@ -75,7 +75,7 @@ fn a_non_utf8_location_is_an_error_not_a_lossy_path() {
 
 /// Every argument the keyed form accepts, each set away from its default.
 const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, no_time, carve, open_narrowing,
-               error_body_cap = 4096, batch_cap = 7,
+               open_unions, error_body_cap = 4096, batch_cap = 7,
                omit {
                    operations { post "/legacy"; }
                    paths { "/internal/**"; }
@@ -104,6 +104,7 @@ fn parses_every_build_configuration_control() {
     assert_eq!(args.time, Some(false));
     assert_eq!(args.carve, Some(true));
     assert_eq!(args.open_narrowing, Some(true));
+    assert_eq!(args.open_unions, Some(true));
     assert_eq!(args.error_body_cap, Some(4096));
     assert_eq!(args.batch_cap, Some(7));
     assert_eq!(args.omit.rules, every_omit_rule());
@@ -118,6 +119,7 @@ fn a_bare_spec_path_sets_no_control() {
     assert_eq!(args.time, None);
     assert_eq!(args.carve, None);
     assert_eq!(args.open_narrowing, None);
+    assert_eq!(args.open_unions, None);
     assert_eq!(args.error_body_cap, None);
     assert_eq!(args.batch_cap, None);
     assert_eq!(args.omit.rules, Vec::new());
@@ -132,6 +134,7 @@ fn every_argument_maps_onto_its_spec_field() {
         .time(false)
         .carve(true)
         .open_narrowing(true)
+        .open_unions(true)
         .error_body_cap(4096)
         .batch_cap(7);
     for rule in every_omit_rule() {
@@ -149,6 +152,7 @@ fn an_absent_argument_keeps_the_config_files_value() {
         .time(false)
         .carve(true)
         .open_narrowing(true)
+        .open_unions(true)
         .error_body_cap(1024)
         .batch_cap(3)
         .omit_rule(OmitRule::path("/from-file"));
@@ -175,46 +179,56 @@ fn each_switch_overrides_the_config_file_either_way() {
         .uuid(true)
         .time(true)
         .carve(true)
-        .open_narrowing(true);
+        .open_narrowing(true)
+        .open_unions(true);
     let off = Spec::new("openapi.yaml")
         .uuid(false)
         .time(false)
         .carve(false)
-        .open_narrowing(false);
+        .open_narrowing(false)
+        .open_unions(false);
 
     let turn_off = args(
-        r#""openapi.yaml", uuid = false, time = false, carve = false, open_narrowing = false"#,
+        r#""openapi.yaml", uuid = false, time = false, carve = false, open_narrowing = false,
+           open_unions = false"#,
     );
     assert_eq!(config(&turn_off, on.clone()), off);
-    let turn_on =
-        args(r#""openapi.yaml", uuid = true, time = true, carve = true, open_narrowing = true"#);
+    let turn_on = args(
+        r#""openapi.yaml", uuid = true, time = true, carve = true, open_narrowing = true,
+           open_unions = true"#,
+    );
     assert_eq!(config(&turn_on, off.clone()), on);
-    let bare = args(r#""openapi.yaml", uuid, time, carve, open_narrowing"#);
+    let bare = args(r#""openapi.yaml", uuid, time, carve, open_narrowing, open_unions"#);
     assert_eq!(config(&bare, off.clone()), on);
     let negated = args(r#""openapi.yaml", no_uuid, no_time"#);
     assert_eq!(config(&negated, on.clone()), on.uuid(false).time(false));
 }
 
-/// Each switch sets its own `Spec` field: `uuid` and `time`, and `carve` and
-/// `open_narrowing`, are given opposite values over a base holding the inverse of each, so a
-/// switch wired to another's setting changes the result.
+/// Each switch sets its own `Spec` field: `uuid` and `time`, `carve` and `open_narrowing`, and
+/// `open_narrowing` and `open_unions`, are given opposite values over a base holding the inverse of
+/// each, so a switch wired to another's setting changes the result.
 #[test]
 fn each_switch_reaches_its_own_field_when_the_values_differ() {
     let base = Spec::new("openapi.yaml")
         .uuid(true)
         .time(false)
         .carve(false)
-        .open_narrowing(true);
+        .open_narrowing(true)
+        .open_unions(false);
     let expected = Spec::new("openapi.yaml")
         .uuid(false)
         .time(true)
         .carve(true)
-        .open_narrowing(false);
+        .open_narrowing(false)
+        .open_unions(true);
 
-    let valued =
-        args(r#""openapi.yaml", uuid = false, time = true, carve = true, open_narrowing = false"#);
+    let valued = args(
+        r#""openapi.yaml", uuid = false, time = true, carve = true, open_narrowing = false,
+           open_unions = true"#,
+    );
     assert_eq!(config(&valued, base.clone()), expected);
-    let spelled = args(r#""openapi.yaml", no_uuid, time, carve, open_narrowing = false"#);
+    let spelled =
+        args(r#""openapi.yaml", no_uuid, time, carve, open_narrowing = false, open_unions"#);
     assert_eq!(config(&spelled, base), expected);
 }
 
@@ -519,7 +533,7 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (
             r#""a.yaml", uuids"#,
             "unknown argument `uuids`; expected a spec path or one of: uuid, no_uuid, time, \
-                 no_time, carve, open_narrowing, error_body_cap, batch_cap, omit",
+                 no_time, carve, open_narrowing, open_unions, error_body_cap, batch_cap, omit",
         ),
         (r#""a.yaml", uuid = 1"#, "expected boolean literal"),
         (r#""a.yaml", carve = "yes""#, "expected boolean literal"),
@@ -543,6 +557,10 @@ fn every_argument_parse_error_names_what_was_wrong() {
         (
             r#""a.yaml", open_narrowing = true, open_narrowing"#,
             "`open_narrowing` given more than once",
+        ),
+        (
+            r#""a.yaml", open_unions, open_unions = false"#,
+            "`open_unions` given more than once",
         ),
         (r#""a.yaml" no_uuid"#, "expected `,`"),
         (

@@ -205,9 +205,14 @@ pub(super) fn retain_strategy(strategy: &UnionStrategy, retained: &[usize]) -> U
             tag_field,
             default_variant,
             mode,
+            open,
         } => UnionStrategy::Discriminated {
             tag_field: tag_field.clone(),
             mode: *mode,
+            // An open union stays open: a dropped variant's tags become unlisted and reach
+            // `Unknown` like any other. A closed one whose fallback was dropped stays closed, as
+            // `discriminated_strategy` left it.
+            open: *open,
             // The fallback variant's index moves with the retained set; if the fallback itself
             // was dropped, the union simply has no fallback any more.
             default_variant: default_variant

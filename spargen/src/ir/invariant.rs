@@ -1,6 +1,6 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
+use super::{AdditionalProps, Api, MediaType, Ty, TypeKind, UnionStrategy};
 
 /// The prefix of every message [`check_invariants`] emits. The fuzz harness
 /// (`tests/fuzz_frontend.rs`) declares the same literal to recognise a report that carries one,
@@ -110,6 +110,22 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                 }
             }
             TypeKind::Union(union) => {
+                // The emitter routes an unlisted tag to the `defaultMapping` variant or to the
+                // open union's `Unknown`, so a union claiming both has two answers for it.
+                if let UnionStrategy::Discriminated {
+                    default_variant: Some(_),
+                    open: true,
+                    ..
+                } = union.strategy
+                {
+                    Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                        .message(format!(
+                            "{INVARIANT_FAILURE}: union `{}` is open and has a `defaultMapping` \
+                             variant, two destinations for a tag it does not list",
+                            def.name_hint
+                        ))
+                        .emit(diags);
+                }
                 for variant in &union.variants {
                     check_ty(
                         api,
@@ -507,6 +523,7 @@ mod tests {
                 tag_field: "kind".to_owned(),
                 default_variant: None,
                 mode: UnionMode::OneOf,
+                open: false,
             },
             UnionStrategy::Disjoint,
             UnionStrategy::Trial {
@@ -559,6 +576,50 @@ mod tests {
             format!(
                 "{INVARIANT_FAILURE}: variant `Square` of union `Shape` carries a dispatch of \
                  another strategy than its union's"
+            )
+        );
+    }
+
+    /// An open union routes a tag it does not list to `Unknown`, and a `defaultMapping` union to
+    /// its fallback variant; lowering opens only a union without a fallback, so one claiming both
+    /// is caught rather than emitted with one of the two silently winning.
+    #[test]
+    fn an_open_union_with_a_default_variant_is_caught() {
+        let open_with_default = |default_variant| {
+            let mut api = api_with_header_ty(ty(0));
+            api.types.insert(def(
+                "Event",
+                TypeKind::Union(Union {
+                    variants: vec![UnionVariant {
+                        name_hint: "Tick".to_owned(),
+                        ty: ty(0),
+                        dispatch: VariantDispatch::Discriminated {
+                            tags: vec!["tick".to_owned()],
+                            category: None,
+                            untagged: None,
+                        },
+                    }],
+                    strategy: UnionStrategy::Discriminated {
+                        tag_field: "kind".to_owned(),
+                        default_variant,
+                        mode: UnionMode::OneOf,
+                        open: true,
+                    },
+                }),
+            ));
+            api
+        };
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&open_with_default(None), &mut diags);
+        assert!(
+            diags.items().is_empty(),
+            "an open union with no fallback is valid: {diags:#?}"
+        );
+        assert_eq!(
+            only_failure(&open_with_default(Some(0))),
+            format!(
+                "{INVARIANT_FAILURE}: union `Event` is open and has a `defaultMapping` variant, \
+                 two destinations for a tag it does not list"
             )
         );
     }

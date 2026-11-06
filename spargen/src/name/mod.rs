@@ -43,9 +43,11 @@ pub(crate) struct Names {
     pub(crate) struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
-    /// The variant holding any unlisted string, per open string enum. Allocated in the enum's
-    /// variant scope after every listed value, so a listed value keeps the name it has in the
-    /// closed enum, and one spelled `other` pushes this one to a disambiguated name instead.
+    /// The variant holding any unlisted string, per open string enum, and the one holding any
+    /// unlisted discriminator value, per open union. Allocated in the type's variant scope after
+    /// every listed variant, so a listed variant keeps the name it has in the closed type, and one
+    /// spelled `other` (`unknown` for a union) pushes this one to a disambiguated name instead. A
+    /// type id is either an enum or a union, so the two never collide.
     pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
@@ -552,6 +554,12 @@ pub(crate) fn allocate(api: &Api) -> Names {
                             IdentRole::Variant,
                             &def.provenance.pointer,
                         ),
+                    );
+                }
+                if union.is_open() {
+                    names.open_variants.insert(
+                        id,
+                        scope.alloc("Unknown", IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
             }

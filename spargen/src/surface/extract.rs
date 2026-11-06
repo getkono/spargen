@@ -141,6 +141,14 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                         .to_owned();
                     variants.insert(variant_name, canon_ty(variant.ty, api, names));
                 }
+                // An open union's `Unknown` variant is surface too: turning `open_unions` on adds
+                // a variant every exhaustive `match` must name.
+                if let Some(unknown) = names.open_variants.get(&id) {
+                    variants.insert(
+                        unknown.as_str().to_owned(),
+                        "{ tag: String, value: serde_json::Value }".to_owned(),
+                    );
+                }
                 TypeSurface::Union(variants)
             }
             // A cycle-member array or tuple is a nominal newtype whose wrapped type is the public

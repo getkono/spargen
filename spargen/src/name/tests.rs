@@ -956,10 +956,16 @@ proptest::proptest! {
                     assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
                 }
                 TypeKind::Union(union) => {
-                    let variants = union
+                    let variants: Vec<&Ident> = union
                         .variants
                         .iter()
-                        .map(|variant| &names.variants[&(id, variant.name_hint.clone())]);
+                        .map(|variant| &names.variants[&(id, variant.name_hint.clone())])
+                        .chain(names.open_variants.get(&id))
+                        .collect();
+                    prop_assert_eq!(
+                        variants.len(),
+                        union.variants.len() + usize::from(union.is_open())
+                    );
                     assert_scope(&format!("variants of {}", def.name_hint), variants, &[])?;
                 }
                 // `synthetic_api` builds no reservation, and `allocate` refuses one.
