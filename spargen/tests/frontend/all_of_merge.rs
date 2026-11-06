@@ -333,32 +333,32 @@ fn e013_an_all_of_member_that_is_false() {
         ),
     ] {
         let spec = with_schemas("3.1.0", schemas);
-        for report in [generate(&spec), check(&spec)] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{place}: {report:#?}");
-            assert_eq!(
-                messages_for(&report, Code::AllOfIrreconcilable),
-                ["an `allOf` member is `false`"],
-                "{place}: {report:#?}"
-            );
-            let diagnostic = report
-                .diagnostics()
-                .iter()
-                .find(|d| d.code == Code::AllOfIrreconcilable)
-                .expect("the E013 asserted above");
-            assert_eq!(diagnostic.pointer.as_str(), pointer, "{place}: {report:#?}");
-            let span = diagnostic.span.expect("the `false` entry has a span");
-            assert_eq!(
-                &spec[span.start.offset..span.end.offset],
-                "false",
-                "{place}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{place}: {report:#?}");
+        assert_eq!(
+            messages_for(&report, Code::AllOfIrreconcilable),
+            ["an `allOf` member is `false`"],
+            "{place}: {report:#?}"
+        );
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::AllOfIrreconcilable)
+            .expect("the E013 asserted above");
+        assert_eq!(diagnostic.pointer.as_str(), pointer, "{place}: {report:#?}");
+        let span = diagnostic.span.expect("the `false` entry has a span");
+        assert_eq!(
+            &spec[span.start.offset..span.end.offset],
+            "false",
+            "{place}: {report:#?}"
+        );
     }
 }
 
 /// Lay out a root document whose `Wrap` component is `allOf: [member]`, beside a `lib.yaml`
-/// sub-file, and run both entry points. Returns `(generate, check, generated source)`.
-fn all_of_member_layout(member: &str) -> (Report, Report, String) {
+/// sub-file, and generate it ([`run_generate`] holds `check` to parity). Returns
+/// `(generate, generated source)`.
+fn all_of_member_layout(member: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     std::fs::write(
@@ -396,8 +396,7 @@ fn all_of_member_layout(member: &str) -> (Report, Report, String) {
     let out = dir.join("client.rs");
     let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
-    (generated, checked, code)
+    (generated, code)
 }
 
 /// Issue #185: an `allOf` member that is a `$ref` with shape-bearing siblings used to contribute
@@ -414,17 +413,15 @@ fn all_of_member_layout(member: &str) -> (Report, Report, String) {
 fn an_all_of_member_ref_intersects_its_shape_bearing_siblings() {
     for target in ["#/components/schemas/Leaf", "./lib.yaml#/Leaf"] {
         // The dropped-property case: the member adds a required field its target lacks.
-        let (generated, checked, code) = all_of_member_layout(&format!(
+        let (generated, code) = all_of_member_layout(&format!(
             "{{ $ref: '{target}', type: object, properties: {{ dropped: {{ type: integer }} }}, \
              required: [dropped] }}"
         ));
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{target} via {entry}: {report:#?}"
-            );
-        }
+        assert_ne!(
+            generated.outcome(),
+            Outcome::Rejected,
+            "{target}: {generated:#?}"
+        );
         assert_eq!(
             declared_fields(&code, "Wrap"),
             vec!["a", "dropped"],
@@ -447,36 +444,33 @@ fn an_all_of_member_ref_intersects_its_shape_bearing_siblings() {
             "properties: { a: { type: integer } }, required: [a]",
             "type: string",
         ] {
-            let (generated, checked, _) =
-                all_of_member_layout(&format!("{{ $ref: '{target}', {siblings} }}"));
-            for (entry, report) in [("generate", &generated), ("check", &checked)] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{target} + `{siblings}` via {entry} must be rejected: {report:#?}"
-                );
-                let pointers: Vec<&str> = report
-                    .diagnostics()
-                    .iter()
-                    .filter(|d| d.code == Code::AllOfIrreconcilable)
-                    .map(|d| d.pointer.as_str())
-                    .collect();
-                assert_eq!(
-                    pointers,
-                    vec!["/components/schemas/Wrap"],
-                    "{target} + `{siblings}` via {entry}: {report:#?}"
-                );
-            }
+            let (report, _) = all_of_member_layout(&format!("{{ $ref: '{target}', {siblings} }}"));
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} + `{siblings}` must be rejected: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec!["/components/schemas/Wrap"],
+                "{target} + `{siblings}`: {report:#?}"
+            );
         }
 
         // An optional contradiction empties only the property, not the object. The one-member
         // spelling must type it exactly as the two-member spelling of the same conjunction does
         // (`allOf: [{$ref}, {properties}]`), and never as the target's `String`.
-        let (generated, _, one_member) = all_of_member_layout(&format!(
+        let (generated, one_member) = all_of_member_layout(&format!(
             "{{ $ref: '{target}', properties: {{ a: {{ type: integer }} }} }}"
         ));
         assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
-        let (split_report, _, two_members) = all_of_member_layout(&format!(
+        let (split_report, two_members) = all_of_member_layout(&format!(
             "{{ $ref: '{target}' }}\n        - {{ properties: {{ a: {{ type: integer }} }} }}"
         ));
         assert_ne!(
@@ -613,15 +607,14 @@ fn a_required_only_field_takes_its_type_from_every_side_of_a_composition() {
          additionalProperties: false }}, {{ type: object, additionalProperties: {{ type: integer \
          }}, required: [a] }}] }}\n"
     );
-    for report in [generate(&spec), check(&spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        let messages = messages_for(&report, Code::AllOfIrreconcilable);
-        assert_eq!(messages.len(), 1, "{report:#?}");
-        assert!(
-            messages[0].contains("property `a` is required but no `allOf` member declares it"),
-            "{messages:?}"
-        );
-    }
+    let report = generate(&spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("property `a` is required but no `allOf` member declares it"),
+        "{messages:?}"
+    );
 }
 
 /// `E013`'s explain is what `spargen explain E013` prints, and this change REWROTE it: the code was
@@ -772,31 +765,26 @@ fn an_all_of_merge_rejected_inside_its_member_loop_reports_no_default_it_read() 
         ),
     ] {
         let spec = base.replace("B0", b0).replace("M2BODY", m2);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{label}, {entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains(message)),
-                "{label}, {entry}: {report:#?}"
-            );
-            let reported: Vec<&str> = report
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{label}: {report:#?}\n{spec}"
+        );
+        assert!(
+            report
                 .diagnostics()
                 .iter()
-                .filter(|d| d.code == Code::SchemaDefaultNotApplied)
-                .map(|d| d.pointer.as_str())
-                .collect();
-            assert_eq!(
-                reported,
-                Vec::<&str>::new(),
-                "{label}, {entry}: {report:#?}"
-            );
-        }
+                .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains(message)),
+            "{label}: {report:#?}"
+        );
+        let reported: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(reported, Vec::<&str>::new(), "{label}: {report:#?}");
     }
 }
 
@@ -900,23 +888,17 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
     ];
     for (media, three, two, count) in cases {
         let (three, two) = (spec(media, &three), spec(media, &two));
-        for (entry, run) in [
-            ("generate", generate as fn(&str) -> Report),
-            ("check", check),
-        ] {
-            let (with_superseded, without) = (run(&three), run(&two));
-            assert_ne!(
-                with_superseded.outcome(),
-                Outcome::Rejected,
-                "{entry}: {with_superseded:#?}"
-            );
-            assert_eq!(
-                reported(&with_superseded),
-                reported(&without),
-                "{entry}: the superseded meet must report nothing the two-member spelling does \
-                 not:\n{three}"
-            );
-            assert_eq!(reported(&without).len(), count, "{entry}: {without:#?}");
-        }
+        let (with_superseded, without) = (generate(&three), generate(&two));
+        assert_ne!(
+            with_superseded.outcome(),
+            Outcome::Rejected,
+            "{with_superseded:#?}"
+        );
+        assert_eq!(
+            reported(&with_superseded),
+            reported(&without),
+            "the superseded meet must report nothing the two-member spelling does not:\n{three}"
+        );
+        assert_eq!(reported(&without).len(), count, "{without:#?}");
     }
 }

@@ -50,17 +50,14 @@ fn e011_an_ill_typed_schema_keyword_is_rejected_at_the_keyword() {
         ("type: object\n      maxProperties: '2'", "/maxProperties"),
     ] {
         let spec = single_component_document(&format!("      {body}"));
-        let generated = generate(&spec);
-        let checked = check(&spec);
+        let report = generate(&spec);
         let expected = format!("{U}{at}");
-        for report in [&generated, &checked] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
-            assert_eq!(
-                invalid_input_pointers(report),
-                [expected.as_str()],
-                "{body}: {report:#?}"
-            );
-        }
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert_eq!(
+            invalid_input_pointers(&report),
+            [expected.as_str()],
+            "{body}: {report:#?}"
+        );
     }
 }
 
@@ -114,17 +111,14 @@ fn e011_an_ill_typed_value_keyword_is_rejected_at_the_keyword() {
         ("type: string\n      $schema: 5", "/$schema"),
     ] {
         let spec = single_component_document(&format!("      {body}"));
-        let generated = generate(&spec);
-        let checked = check(&spec);
+        let report = generate(&spec);
         let expected = format!("{U}{at}");
-        for report in [&generated, &checked] {
-            assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
-            assert_eq!(
-                invalid_input_pointers(report),
-                [expected.as_str()],
-                "{body}: {report:#?}"
-            );
-        }
+        assert_eq!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert_eq!(
+            invalid_input_pointers(&report),
+            [expected.as_str()],
+            "{body}: {report:#?}"
+        );
     }
 }
 
@@ -148,14 +142,16 @@ fn an_openapi_3_0_boolean_exclusive_bound_is_warned_as_an_unenforced_validation_
         "type: number\n      exclusiveMaximum: false",
     ] {
         let spec = single_component_document(&format!("      {body}"));
-        for report in [&generate(&spec), &check(&spec)] {
-            assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
-            assert!(!has_code(report, Code::InvalidInput), "{body}: {report:#?}");
-            assert!(
-                has_code(report, Code::ValidationKeywordIgnored),
-                "{body}: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{body}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::InvalidInput),
+            "{body}: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::ValidationKeywordIgnored),
+            "{body}: {report:#?}"
+        );
     }
 }
 
@@ -170,10 +166,9 @@ fn well_typed_value_keywords_generate_cleanly() {
          l: { type: array, items: { type: string }, uniqueItems: true }\n      \
          patternProperties: {}\n      $defs: {}\n      dependentSchemas: {}",
     );
-    for report in [&generate(&spec), &check(&spec)] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
-    }
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
 #[test]

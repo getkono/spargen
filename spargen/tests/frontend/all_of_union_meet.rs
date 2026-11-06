@@ -695,20 +695,19 @@ fn a_union_beside_all_of_that_contradicts_it_is_rejected() {
     ];
     for (what, schemas, pointer) in cases {
         let spec = with_schemas("3.1.0", schemas);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}\n{spec}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
-                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+            "{what}: E013 must sit at `{pointer}`: {report:#?}"
+        );
     }
 }
 
@@ -1050,13 +1049,6 @@ fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
             types.contains("pub struct Pet {"),
             "{what}: the meet keeps only the object branch:\n{types}"
         );
-        let checked = check(&spec);
-        let checked_messages: Vec<&str> = checked
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect();
-        assert_eq!(checked_messages, expected, "{what}: {checked:#?}");
     }
 }
 
@@ -1072,24 +1064,16 @@ fn an_untyped_all_of_member_beside_a_union_is_reported_as_a_ref_sibling_is() {
         "    Pet:\n      allOf: [ { required: [kind] } ]\n      \
          oneOf: [ { type: string }, { type: integer } ]\n",
     );
-    for (entry, report) in [
-        ("generate", generate(&unreached)),
-        ("check", check(&unreached)),
-    ] {
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "via {entry}: {report:#?}"
-        );
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| d.code == Code::DeclarationHasNoEffect
-                    && d.pointer.as_str() == "/components/schemas/Pet/allOf/0"),
-            "via {entry}: W011 must sit at the member: {report:#?}"
-        );
-    }
+    let report = generate(&unreached);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::DeclarationHasNoEffect
+                && d.pointer.as_str() == "/components/schemas/Pet/allOf/0"),
+        "W011 must sit at the member: {report:#?}"
+    );
 
     let rejected = [
         (
@@ -1108,20 +1092,15 @@ fn an_untyped_all_of_member_beside_a_union_is_reported_as_a_ref_sibling_is() {
     ];
     for (what, schemas, pointer) in rejected {
         let spec = with_schemas("3.1.0", schemas);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{what} via {entry}: {report:#?}"
-            );
-            assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
-                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
-            );
-        }
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+            "{what}: E013 must sit at `{pointer}`: {report:#?}"
+        );
     }
 }
 
@@ -1446,21 +1425,18 @@ fn an_untyped_all_of_member_merges_the_union_branches_it_refines_alike() {
                 ),
             );
             let (report, code) = generate_with_code(&spec);
-            for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
-                assert_ne!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{spelling}, {branches} via {entry}: {report:#?}"
-                );
-                assert!(
-                    report.diagnostics().iter().any(|d| {
-                        d.code == Code::ValidationKeywordIgnored
-                            && d.pointer.as_str() == "/components/schemas/Pick"
-                    }),
-                    "{spelling}, {branches} via {entry}: the merge must be reported at `Pick`: \
-                     {report:#?}"
-                );
-            }
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}, {branches}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Pick"
+                }),
+                "{spelling}, {branches}: the merge must be reported at `Pick`: {report:#?}"
+            );
             let types = types_module(&code);
             match variants {
                 None => assert!(
