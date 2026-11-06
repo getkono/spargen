@@ -789,6 +789,52 @@ components:
     }
 }
 
+/// A `oneOf` beside a multi-category `type` array alone, whose first branch closes a cycle the
+/// array admits and is kept unmet, before a branch the meet narrows to `null` and a typed one.
+/// The null branch is dropped and hoisted to the property's `Option`, and the types its meet
+/// inserted are elided by its own member position: the kept-unmet branch once recorded no meet
+/// range, so the dropped branch read the typed branch's range and its own `null` was left behind
+/// (#1226). Lowering asserts, in the debug build these tests run, that it records one range per
+/// member; the leftover itself never reached the output, which the final reachability pass
+/// withholds (#924).
+#[test]
+fn a_kept_unmet_cycle_branch_leaves_the_met_into_null_drop_aligned_with_its_members() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    S2:
+      type: object
+      properties:
+        a:
+          type: [object, string, 'null']
+          oneOf:
+            - { $ref: '#/components/schemas/S2' }
+            - { items: { type: integer } }
+            - { type: string, enum: [x, y] }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert!(report.diagnostics().is_empty(), "{entry}: {report:#?}");
+    }
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub a: Option<S2a>"),
+        "the dropped null branch must make `S2.a` optional: {types}"
+    );
+    assert!(
+        types.contains("S2(Box<S2>),") && types.contains("S2aVariant2(Box<S2aVariant2>),"),
+        "the cycle-closing and string branches must stay the union's variants: {types}"
+    );
+    assert!(
+        !types.contains("Variant1"),
+        "no type may be emitted for the branch met into `null`: {types}"
+    );
+}
+
 /// The same merge where the union is a component's whole body and its one member closes a cycle
 /// through another component (`A = B | B`, `B.x -> A`) is a nullable alias for `B`, as the
 /// one-member spelling `A = B` is: the reference to `A` taken while `B` is open is `B` itself,
