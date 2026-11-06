@@ -442,9 +442,10 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// so peak memory depends on the cap (plus one transport chunk, and the retained copy `cap_body`
 /// makes) rather than on whatever the server chose to send; `reqwest` imposes no response size
 /// limit of its own. Abandoning the body forgoes reuse of that connection; a deployment that would
-/// rather keep it raises the cap. A body the backend delivers whole (reqwest's `fetch` backend
-/// on `wasm32` without the `stream` feature) arrives as one chunk, so there only *retention* is
-/// bounded, not peak memory.
+/// rather keep it raises the cap. A body the backend delivers whole arrives as one chunk, so there
+/// only *retention* is bounded, not peak memory. `ReqwestBackend` delivers every `fetch` body on
+/// `wasm32` whole, including an error body of a streaming operation and of a reconnect, because
+/// only `EventStream` reads a body chunk by chunk there.
 async fn read_capped<E>(cap: usize, mut body: HttpBody) -> Result<(Bytes, bool), Error<E>> {
     // Pre-size to the cap, but do not honour an enormous configured cap up front — the point is to
     // avoid large speculative allocations.

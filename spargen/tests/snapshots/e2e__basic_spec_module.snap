@@ -390,8 +390,8 @@ mod support {
             ///
             /// - Bodies read as errors are capped, and on native targets the cap bounds *reading* too —
             ///   an over-cap body is abandoned partway, which forgoes reuse of that connection. On
-            ///   `wasm32`, `ReqwestBackend` delivers the `fetch` body whole unless the API has a streaming
-            ///   response, so there only retention is guaranteed to be bounded.
+            ///   `wasm32`, `ReqwestBackend` delivers every `fetch` body whole, an error body of a
+            ///   streaming operation included, so there only retention is guaranteed to be bounded.
             /// - A success body that fails to decode is capped on retention only. Deserialization needs
             ///   the whole body, so it is always read whole.
             /// - [`Error::Decode`] reports truncation through its `truncated` field. [`Error::Api`] and
@@ -971,9 +971,10 @@ mod support {
         /// so peak memory depends on the cap (plus one transport chunk, and the retained copy `cap_body`
         /// makes) rather than on whatever the server chose to send; `reqwest` imposes no response size
         /// limit of its own. Abandoning the body forgoes reuse of that connection; a deployment that would
-        /// rather keep it raises the cap. A body the backend delivers whole (reqwest's `fetch` backend
-        /// on `wasm32` without the `stream` feature) arrives as one chunk, so there only *retention* is
-        /// bounded, not peak memory.
+        /// rather keep it raises the cap. A body the backend delivers whole arrives as one chunk, so there
+        /// only *retention* is bounded, not peak memory. `ReqwestBackend` delivers every `fetch` body on
+        /// `wasm32` whole, including an error body of a streaming operation and of a reconnect, because
+        /// only `EventStream` reads a body chunk by chunk there.
         async fn read_capped<E>(
             cap: usize,
             mut body: HttpBody,
