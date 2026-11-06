@@ -266,6 +266,7 @@ fn lower_pass(
         variant_meets: Vec::new(),
         deferred_map_values: Vec::new(),
         pinned_tag_fields: Vec::new(),
+        reserved_types: HashSet::new(),
     };
 
     for opening in first {
@@ -699,6 +700,12 @@ struct LowerCtx<'a, 'doc> {
     /// pin and excludes the branch a conflicting tag constraint rules out;
     /// [`Self::drop_pinned_tag_fields`] removes it once every meet is made.
     pinned_tag_fields: Vec<(TypeId, String)>,
+    /// Every type a finished reservation's body lowered, its root included: the ids from its
+    /// reserved root to the last insert of its body ([`Self::lower_into_reservation`]). These are
+    /// a declared schema's own types, whatever their name, so
+    /// [`Self::name_pinned_variants`] renames none of them (#1245). A popped id leaves the set
+    /// ([`Self::pop_last_type`]), so the insert that reuses it starts unowned.
+    reserved_types: HashSet<TypeId>,
 }
 
 impl LowerCtx<'_, '_> {

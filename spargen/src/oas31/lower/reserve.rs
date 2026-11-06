@@ -306,6 +306,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             append_text(&mut def.docs.description, note);
         }
         self.graph.fill(root_id, def);
+        self.reserved_types
+            .extend((root_id.0..self.graph_mark()).map(TypeId));
         if let Some(members) = variant_members {
             self.union_variant_members.insert(root_id, members);
         }
