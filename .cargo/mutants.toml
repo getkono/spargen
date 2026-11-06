@@ -64,6 +64,12 @@ exclude_re = [
   #   equals `a & c`, so their xor is clear there.
   '^spargen/src/source/sha256\.rs:133:27: replace \^ with \| in compress$',
   '^spargen/src/source/sha256\.rs:133:37: replace \^ with \| in compress$',
+  # `spargen/src/oas31/media.rs`, `media_type_with_parameters`'s `at += 1` on the `;` that ends a
+  # parameter, replaced by `*=`: `at` then stays on that `;`, and the loop's head, which skips
+  # optional whitespace and then each `;` it finds, steps over it the same way before reading the
+  # next parameter, so the canonical form and every fault are unchanged. Anchored on line and
+  # column like the entries above: the loop head's own `at += 1` is tested and stays in the run.
+  '^spargen/src/oas31/media\.rs:312:30: replace \+= with \*= in media_type_with_parameters$',
   # The build-script environment readers: `spargen/src/cache.rs`, `cache_dir` (`OUT_DIR`), and
   # `spargen/src/runtime_contract/integration.rs`, `under_build_script` (`OUT_DIR` and
   # `CARGO_CFG_TARGET_ARCH`), `build_script_manifest` and `manifest_from_env`
