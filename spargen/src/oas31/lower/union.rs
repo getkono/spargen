@@ -906,7 +906,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          its own and cannot be given a generated type",
                     );
                 }
-                // Nothing names whatever the members' own lowerings or meets inserted.
+                // Nothing names whatever the members' own lowerings or meets inserted: the type of
+                // a branch the sibling excludes, and the `null` a branch's meet narrowed it to.
+                // These two calls keep `TypeGraph::emitted` exact for the elisions lowering runs
+                // after this one, which read it for their roots
+                // ([`Self::elide_unused_union_lowering`]). The generated output is the same
+                // without them, because `elide_unreachable` withholds every type nothing reaches
+                // once lowering ends (#924), so an output fixture holds the types they elide out
+                // of the module but does not pin these calls (#1190):
+                // `a_one_of_repeating_a_cycle_closing_ref_drops_the_branches_its_sibling_excludes`
+                // in `tests/frontend/recursion_reservations.rs`.
                 self.elide_unreached(
                     meet_inserts.into_iter().flatten().map(TypeId),
                     &HashSet::new(),
