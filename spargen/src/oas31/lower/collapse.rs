@@ -35,17 +35,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let structural =
             structural && !matches!(union.strategy, UnionStrategy::Discriminated { .. });
-        let first = union.variants.first()?;
+        let (first, rest) = union.variants.split_first()?;
         let nullable = union
             .variants
             .iter()
             .filter(|variant| variant.ty.nullable)
             .count();
-        let groups = group_alike(&union.variants, |kept, variant| {
-            same_ty(non_nullable(variant.ty), non_nullable(kept.ty))
-                || (structural && self.same_type_apart_from_null(variant.ty, kept.ty))
-        });
-        (union.variants.len() > 1 && groups.len() == 1).then_some((first.ty, nullable))
+        (!rest.is_empty()
+            && rest.iter().all(|variant| {
+                same_ty(non_nullable(variant.ty), non_nullable(first.ty))
+                    || (structural && self.same_type_apart_from_null(variant.ty, first.ty))
+            }))
+        .then_some((first.ty, nullable))
     }
 
     /// Whether two `oneOf` variants decode the same values — one Rust type, or two of one
