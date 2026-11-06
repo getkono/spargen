@@ -112,6 +112,8 @@ fn compress(state: &mut [u32; 8], chunk: &[u8; 64]) {
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *state;
     for i in 0..64 {
         let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        // Mutation testing: `^` to `|` here is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: `e & f` and `!e & g` share no set bit, so their xor is their or.
         let ch = (e & f) ^ ((!e) & g);
         let t1 = hh
             .wrapping_add(s1)
@@ -119,6 +121,10 @@ fn compress(state: &mut [u32; 8], chunk: &[u8; 64]) {
             .wrapping_add(K[i])
             .wrapping_add(w[i]);
         let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        // Mutation testing: the second `^` to `|` is an equivalent mutant, declared in
+        // `.cargo/mutants.toml`: the two differ only where `b & c` and `(a & b) ^ (a & c)` are
+        // both set, and wherever `b` and `c` are both set `a & b` equals `a & c`, so their xor is
+        // clear.
         let maj = (a & b) ^ (a & c) ^ (b & c);
         let t2 = s0.wrapping_add(maj);
         hh = g;
