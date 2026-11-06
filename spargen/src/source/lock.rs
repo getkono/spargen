@@ -466,6 +466,16 @@ mod tests {
         assert!(err.0.contains("unsupported version"), "{err}");
     }
 
+    /// A written string escapes exactly its quotes and backslashes, so a quote followed by a `#`
+    /// stays inside the value rather than closing it before a comment.
+    #[cfg(feature = "remote-fetch")]
+    #[test]
+    fn a_written_string_escapes_its_quotes_and_backslashes() {
+        assert_eq!(toml_string("a\"#b\\c"), "\"a\\\"#b\\\\c\"");
+        let line = format!("path = {}", toml_string("a\"#b"));
+        assert_eq!(strip_comment(&line), line);
+    }
+
     /// A parse failure displays as its message, verbatim: the text `generate` and `lock` report.
     #[test]
     fn a_lock_error_displays_its_message() {
