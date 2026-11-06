@@ -128,9 +128,13 @@ description = "Run the generation benchmarks (criterion). CI records these as a 
 run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.mutants]
-description = "Mutation testing over the runtime, ir/media.rs, the response partition, the name allocator, compat and diag (needs jq)"
-# CI's `mutants` job in `mutants.yml` runs these weekly. `oas31/lower/`, `surface/` and `lib.rs`
-# stay out because their coverage lives in the integration suites, which `--lib` does not run.
+description = "Mutation testing over the runtime, ir/media.rs, the response partition, the name allocator, compat, diag and the small pure modules their unit tests pin (needs jq)"
+# CI's `mutants` job in `mutants.yml` runs these weekly. Beyond the runtime, `ir/` and the
+# subsystems above, the scope takes the pure modules whose in-module tests constrain them:
+# `source/lock.rs`, `source/sha256.rs`, `oas31/lower/shape.rs`, `oas31/lower/defaults.rs`, `emit/`,
+# `codegen/docs.rs` and `surface/mod.rs`. The rest of `oas31/`, `codegen/` and `surface/`, and
+# `lib.rs`, stay out because their coverage lives in the integration suites, which `--lib` does
+# not run.
 # - `--config` names `.cargo/mutants.toml` explicitly, so a missing file fails the run rather than
 #   dropping every exclusion.
 # - `--all-features` builds the `xml`, `blocking` and `time` modules: a mutant in code the build
@@ -141,7 +145,7 @@ description = "Mutation testing over the runtime, ir/media.rs, the response part
 #   timeout before it checks for a missed mutant, so a run with any timeout exits 3 however many it
 #   missed (#881). The `jq` line therefore fails the gate on any missed mutant.
 run = [
-  "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' --file 'spargen/src/compat/**' --file 'spargen/src/diag/**' -- --lib || test $? -eq 3",
+  "cargo mutants --config .cargo/mutants.toml --workspace --all-features --file 'support-runtime/src/**' --file spargen/src/ir/media.rs --file spargen/src/ir/responses.rs --file 'spargen/src/name/**' --file 'spargen/src/compat/**' --file 'spargen/src/diag/**' --file spargen/src/source/lock.rs --file spargen/src/source/sha256.rs --file spargen/src/oas31/lower/shape.rs --file spargen/src/oas31/lower/defaults.rs --file 'spargen/src/emit/**' --file spargen/src/codegen/docs.rs --file spargen/src/surface/mod.rs -- --lib || test $? -eq 3",
   "jq -e '.missed == 0' mutants.out/outcomes.json",
 ]
 
