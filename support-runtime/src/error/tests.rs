@@ -1154,6 +1154,7 @@ fn a_decode_failure_on_an_error_status_reads_the_raw_problem() {
             status: Some(403),
             detail: Some("Your balance is 30.".to_owned()),
             instance: Some("/account/12345/msgs/abc".to_owned()),
+            extensions: serde_json::Map::from_iter([("balance".to_owned(), 30.into())]),
         })
     );
     let undocumented = Error::<ApiBody>::UnexpectedStatus {
@@ -1207,6 +1208,7 @@ fn problem_members_are_read_only_with_their_rfc_types() {
             status: None,
             detail: None,
             instance: Some("/i".to_owned()),
+            extensions: serde_json::Map::new(),
         }
     );
     assert_eq!(mixed.problem_type_or_blank(), "about:blank");
@@ -1228,6 +1230,27 @@ fn problem_members_are_read_only_with_their_rfc_types() {
     ] {
         assert!(super::ProblemDetails::from_json(body).is_none());
     }
+}
+
+/// Every member but the five standard names is an extension, kept as its JSON, nested values
+/// included; a standard name is never an extension, even when its type keeps it out of its field.
+#[test]
+fn extension_members_are_every_member_but_the_standard_five() {
+    let read = super::ProblemDetails::from_json(
+        br#"{"type":"t","title":7,"status":"400","detail":"d","instance":null,
+             "errors":[{"pointer":"/name","detail":"required"}],"retry":true,"Type":"x"}"#,
+    )
+    .expect("an object body");
+    assert_eq!(
+        serde_json::Value::Object(read.extensions),
+        serde_json::json!({
+            "errors": [{"pointer": "/name", "detail": "required"}],
+            "retry": true,
+            "Type": "x",
+        })
+    );
+    let bare = super::ProblemDetails::from_json(br#"{"title":"t"}"#).expect("an object body");
+    assert!(bare.extensions.is_empty());
 }
 
 /// `of` reads a typed value through its serialization, so it agrees with `from_json` over the
