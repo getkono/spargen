@@ -9,7 +9,7 @@ use crate::ir::{
 use crate::oas31::{JsonType, RefOr, Schema, SchemaOr, ValidationKeywords};
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
-use super::all_of::MetUnionMember;
+use super::all_of::{union_branches, MetUnionMember};
 use super::defaults::exact_integer;
 use super::meet::value_category;
 use super::nullability::{union_branch_admits_null, NullAdmission};
@@ -234,11 +234,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A branch of the union sibling the target excludes is reported as the inline sibling
         // spelling reports it (#671).
         if has_union_sibling && intersection.is_ok() {
-            let mut union = schema.clone();
-            union.reference = None;
             let met = MetUnionMember {
                 union: sibling.id,
-                schema: union,
+                branches: union_branches(schema),
                 conjunct: self.union_sibling_null_admission(schema),
                 conjunct_is_null: self.is_exact_null(referenced),
             };

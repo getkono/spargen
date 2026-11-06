@@ -1,6 +1,7 @@
 //! `allOf` lowering and a `$ref` with sibling keywords: the entry points, and meeting an
 //! `allOf` or `$ref` with a union beside or inside it.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -20,15 +21,40 @@ use super::{LowerCtx, MetUnion, Refiner};
 pub(super) struct MetUnionMember {
     /// The type the union lowered to.
     pub(super) union: crate::ir::TypeId,
-    /// The union's schema: the member itself, or a `$ref` member's target body.
-    pub(super) schema: Schema,
+    /// The union's real branches ([`union_branches`]), each at its real-member position.
+    pub(super) branches: Vec<SchemaOr>,
     /// What the members the union is met with hold `null` to ([`LowerCtx::null_admission`]).
     pub(super) conjunct: NullAdmission,
     /// Whether those members meet in the exact null type, which keeps no branch's non-null values.
     pub(super) conjunct_is_null: bool,
 }
 
+/// The real branches of `union`, its `oneOf` and `anyOf` members that are not null-only
+/// ([`member_is_null_only`]), in document order, so each one's position is its real-member
+/// position.
+pub(super) fn union_branches(union: &Schema) -> Vec<SchemaOr> {
+    union
+        .one_of
+        .iter()
+        .chain(&union.any_of)
+        .filter(|branch| !member_is_null_only(branch))
+        .cloned()
+        .collect()
+}
+
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
+    /// The union `member` is, inline or behind a `$ref`: the member itself where it writes a
+    /// `oneOf`/`anyOf` of its own, and otherwise the body its `$ref` names
+    /// ([`Self::ref_target_body`]) where that writes one. `None` where neither does.
+    fn union_body<'s>(&'s self, member: &'s Schema) -> Option<Cow<'s, Schema>> {
+        if schema_has_union(member) {
+            return Some(Cow::Borrowed(member));
+        }
+        let reference = member.reference.as_deref()?;
+        let target = self.ref_target_body(reference, &member.provenance)?;
+        schema_has_union(&target).then_some(target)
+    }
+
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
     /// `properties`/`required`/`additionalProperties`) into a single typed [`TypeKind`].
     ///
@@ -217,16 +243,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         contributions: Vec<Contribution>,
         union_members: &[(usize, &'s Schema)],
     ) -> (Vec<Contribution>, Vec<(usize, &'s Schema)>) {
-        let is_union = |member: &Schema| {
-            schema_has_union(member)
-                || member.reference.as_deref().is_some_and(|reference| {
-                    self.ref_target_body(reference, &member.provenance)
-                        .is_some_and(|target| schema_has_union(&target))
-                })
-        };
         let unions: HashSet<usize> = union_members
             .iter()
-            .filter(|(_, member)| is_union(member))
+            .filter(|(_, member)| self.union_body(member).is_some())
             .map(|(slot, _)| *slot)
             .collect();
         let mut order: Vec<usize> = (0..contributions.len()).collect();
@@ -277,12 +296,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     return false;
                 };
                 let lowered_union = matches!(self.kind_of(ty.id), Some(TypeKind::Union(_)));
-                lowered_union
-                    && (schema_has_union(member)
-                        || member.reference.as_deref().is_some_and(|reference| {
-                            self.ref_target_body(reference, &member.provenance)
-                                .is_some_and(|target| schema_has_union(&target))
-                        }))
+                lowered_union && self.union_body(member).is_some()
             })
             .count();
         gathered + met_beside >= 2
@@ -329,20 +343,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(Contribution::Scalar(ty)) = contributions.get(slot) else {
                     return None;
                 };
-                let union = if schema_has_union(member) {
-                    member.clone()
-                } else {
-                    let reference = member.reference.as_deref()?;
-                    let target = self.ref_target_body(reference, &member.provenance)?;
-                    schema_has_union(&target).then(|| target.into_owned())?
-                };
+                let branches = union_branches(&*self.union_body(member)?);
                 let conjunct_is_null = contributions.iter().enumerate().any(|(index, other)| {
                     index != slot
                         && matches!(other, Contribution::Scalar(other) if self.is_exact_null(*other))
                 });
                 Some(MetUnionMember {
                     union: ty.id,
-                    schema: union,
+                    branches,
                     conjunct: self.null_admission_without(schema, &member.provenance),
                     conjunct_is_null,
                 })
@@ -382,13 +390,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(TypeKind::Reserved) => continue,
                 _ => continue,
             };
-            let branches: Vec<&SchemaOr> = met
-                .schema
-                .one_of
-                .iter()
-                .chain(&met.schema.any_of)
-                .filter(|branch| !member_is_null_only(branch))
-                .collect();
+            let branches = &met.branches;
             let meets = &self.variant_meets[meets_from..];
             let mut excluded: Vec<usize> = Vec::new();
             for (variant, variant_members) in members.iter().enumerate() {
@@ -1303,7 +1305,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let met_union = MetUnionMember {
             union: lowered.id,
-            schema: union.clone(),
+            branches: union_branches(union),
             conjunct,
             conjunct_is_null: composed.is_some_and(|composed| self.is_exact_null(composed)),
         };
