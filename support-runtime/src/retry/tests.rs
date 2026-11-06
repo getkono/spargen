@@ -2,13 +2,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::{Method, Request};
+use reqwest::Method;
 
 use crate::tests::{
-    poll_ready, poll_to_completion, refused_at_execute, request, PendingOnce, Reply,
-    RetryTransient, SequenceBackend,
+    poll_ready, poll_to_completion, refused_at_execute, seam_request as request, Chunk, Chunks,
+    PendingOnce, Reply, RetryTransient, SequenceBackend,
 };
-use crate::transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+use crate::transport::{
+    request_from_reqwest, try_clone_request, ExecuteFuture, HttpBackend, ReqwestBackend,
+};
+use crate::HttpBody;
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
 
 use super::{
     days_from_civil, exponential_backoff, parse_http_date, parse_retry_after, year_of_day,
@@ -110,17 +116,16 @@ fn does_not_retry_non_transient_outcome() {
 
 #[test]
 fn non_cloneable_request_is_executed_exactly_once() {
-    // Wrapping a reusable body in `Body::wrap` produces a one-shot streaming body, so
-    // `try_clone` returns `None`. Even against a policy that would retry forever, such a request
-    // must be executed exactly once (a consumed stream cannot be safely replayed).
-    let streaming_body = reqwest::Body::wrap(reqwest::Body::from("payload"));
-    let request = reqwest::Client::new()
-        .request(Method::POST, "https://example.com/op")
-        .body(streaming_body)
-        .build()
+    // An adopted streaming body is one-shot, so the request does not clone. Even against a
+    // policy that would retry forever, such a request must be executed exactly once (a consumed
+    // stream cannot be safely replayed).
+    let request = http::Request::builder()
+        .method(Method::POST)
+        .uri("https://example.com/op")
+        .body(HttpBody::wrap(Chunks::new([Chunk::data("payload")])))
         .expect("build streaming request");
     assert!(
-        request.try_clone().is_none(),
+        try_clone_request(&request).is_none(),
         "a wrapped streaming body must be non-cloneable for this test to be meaningful"
     );
 
@@ -221,8 +226,9 @@ impl HttpBackend for CountingBackend {
 #[test]
 fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
     for (client, request) in refused_at_execute() {
-        let url = request.url().to_string();
-        let probe = request.try_clone().expect("a bodyless request clones");
+        let request = request_from_reqwest(request).expect("a valid URI");
+        let url = request.uri().to_string();
+        let probe = try_clone_request(&request).expect("a bodyless request clones");
         let inner = Arc::new(CountingBackend {
             inner: ReqwestBackend::new(client),
             calls: AtomicU32::new(0),
@@ -328,7 +334,8 @@ fn request_with(method: Method, key: Option<&str>) -> Request {
         Some(key) => builder.header("Idempotency-Key", key),
         None => builder,
     };
-    builder.body("payload").build().expect("build request")
+    request_from_reqwest(builder.body("payload").build().expect("build request"))
+        .expect("a valid URI")
 }
 
 /// The fixture for the bug: a `POST` that drew a `503` may already have been applied, so the
@@ -431,12 +438,12 @@ fn at(seconds: i64) -> std::time::SystemTime {
 }
 
 /// A response carrying `Retry-After` `values`, one header line each.
-fn response_with_retry_after(values: &[&str]) -> reqwest::Response {
+fn response_with_retry_after(values: &[&str]) -> crate::tests::Response {
     let mut builder = http::Response::builder().status(503);
     for value in values {
         builder = builder.header("retry-after", *value);
     }
-    reqwest::Response::from(builder.body(String::new()).expect("valid response"))
+    crate::tests::from_http(builder.body(String::new()).expect("valid response"))
 }
 
 /// The three HTTP-date forms RFC 9110 §5.6.7 obliges a recipient to accept all name the same
@@ -552,7 +559,7 @@ fn retry_after_reads_the_single_header_of_a_response() {
     assert_eq!(RetryOutcome::new(&sent, Ok(&bare)).retry_after(now), None);
     let twice = response_with_retry_after(&["5", "6"]);
     assert_eq!(RetryOutcome::new(&sent, Ok(&twice)).retry_after(now), None);
-    let unreadable = reqwest::Response::from(
+    let unreadable = crate::tests::from_http(
         http::Response::builder()
             .header(
                 "retry-after",

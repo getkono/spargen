@@ -15,10 +15,11 @@
 //! ## Request replay and cloneability
 //!
 //! A retry re-sends the *same* request, which means it must be cloned before each attempt.
-//! [`reqwest::Request::try_clone`] returns `None` when the body is a one-shot stream that cannot be
+//! [`HttpBody::try_clone`] returns `None` when the body is a one-shot stream that cannot be
 //! rewound. Such a request is executed **exactly once** and its outcome returned unretried — silently
 //! replaying half a consumed stream would send a corrupt body. Requests with an in-memory (or empty)
-//! body clone freely and retry normally.
+//! body clone freely and retry normally; the clone carries the request's method, URI, version,
+//! headers and extensions too.
 //!
 //! ## Idempotency
 //!
@@ -75,12 +76,17 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::RETRY_AFTER;
-use reqwest::{Method, Request, Response, StatusCode};
+use reqwest::{Method, StatusCode};
 
 use crate::error::is_transient_status;
-use crate::transport::{ExecuteFuture, HttpBackend};
+use crate::transport::{try_clone_request, ExecuteFuture, HttpBackend};
 use crate::wasm::BoxFuture;
-use crate::{MaybeSend, MaybeSync, TransportError};
+use crate::{HttpBody, MaybeSend, MaybeSync, TransportError};
+
+/// A request as the transport seam carries it.
+type Request = http::Request<HttpBody>;
+/// A response as the transport seam carries it.
+type Response = http::Response<HttpBody>;
 
 /// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
 ///
@@ -88,7 +94,7 @@ use crate::{MaybeSend, MaybeSync, TransportError};
 pub type RetryWait<'a> = BoxFuture<'a, ()>;
 
 /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
-/// whether to retry: the [`Request`] that was sent, and either the raw [`Response`] the inner
+/// whether to retry: the [`http::Request`] that was sent, and either the raw [`http::Response`] the inner
 /// backend returned (any status — success or error) or the [`TransportError`] it failed with (DNS,
 /// connect, timeout, …).
 ///
@@ -151,10 +157,11 @@ impl<'a> RetryOutcome<'a> {
     /// Whether the outcome is worth retrying by the runtime's default classifier: the request
     /// [is idempotent](Self::is_idempotent), and the failure is one [`crate::Error::is_transient`]
     /// calls transient for the error this outcome becomes. A `429` or `5xx` response is transient.
-    /// A transport failure is classified as [`crate::Error::from_reqwest`] classifies it, so a
-    /// timeout or a failed connection is transient, and a redirect-policy, protocol, or
-    /// request-kind failure ([`crate::RequestError::Other`]) is not; on `wasm32` a failed
-    /// connection is request-kind too. A `POST` or `PATCH` without an `Idempotency-Key` is never
+    /// A transport failure is transient when the class its [`TransportError`] carries is: a
+    /// timeout, a failed connection, or an interrupted body is, and a redirect-policy, protocol,
+    /// or request-kind failure ([`crate::RequestError::Other`]) is not. [`crate::ReqwestBackend`]
+    /// classifies as [`crate::Error::from_reqwest`] documents, so on `wasm32` a failed connection
+    /// is request-kind there. A `POST` or `PATCH` without an `Idempotency-Key` is never
     /// transient here, since the server may already have applied it. Policies are free to ignore
     /// this and key on [`Self::status`] / [`Self::transport_error`] directly.
     pub fn is_transient(&self) -> bool {
@@ -271,7 +278,7 @@ impl HttpBackend for RetryBackend {
                 // Clone the request for THIS attempt, keeping the original available for a retry. A
                 // one-shot streaming body cannot be replayed (`try_clone` is `None`): execute the
                 // original exactly once and return, never retrying a body we cannot resend intact.
-                let Some(replay) = request.try_clone() else {
+                let Some(replay) = try_clone_request(&request) else {
                     return self.inner.execute(request).await;
                 };
                 let result = self.inner.execute(replay).await;

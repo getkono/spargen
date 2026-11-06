@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 
 use crate::{AuthError, ResponseValue, TransportError};
 
-use super::{Error, RequestError, ReqwestClass, TimeoutKind};
+use super::{Error, RequestError, TimeoutKind, TransportClass};
 
 #[test]
 fn request_message_source_displays_the_message() {
@@ -353,14 +353,14 @@ fn every_variant_lists_each_variant_exactly_once() {
 fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
     [
         Error::request_message("bad path segment"),
-        Error::Transport(TransportError::new(reqwest_error())),
+        Error::Transport(TransportError::from_reqwest(reqwest_error())),
         Error::Timeout(TimeoutKind::Total),
         // The field is private, but these tests live in the defining module.
         Error::Protocol(super::ProtocolError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::Redirect(super::RedirectError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::Api(ResponseValue::new(
             StatusCode::BAD_REQUEST,
@@ -379,7 +379,7 @@ fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
             body: Bytes::from_static(b"{}"),
             truncated: false,
         },
-        Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
         },
@@ -419,36 +419,82 @@ fn from_reqwest_classifies_a_refused_request_as_request_construction() {
 
 /// `TransportError::is_transient` is what `RetryOutcome::is_transient` answers for a transport
 /// failure of an idempotent request, and it is decided on a borrow, apart from the variant
-/// `from_reqwest` builds. Pair every class with that variant so the two cannot disagree: reqwest
-/// exposes no constructor for the other kinds, so the variant is built around a stand-in source,
-/// which neither the class nor `Error::is_transient` reads.
+/// `from_transport` builds. Pair every class with that variant so the two cannot disagree, and
+/// every public constructor with the variant its documentation names.
 #[test]
-fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
-    for class in [
-        ReqwestClass::Timeout(TimeoutKind::Connect),
-        ReqwestClass::Timeout(TimeoutKind::Total),
-        ReqwestClass::Redirect,
-        ReqwestClass::Protocol,
-        ReqwestClass::Transport,
-        ReqwestClass::Request,
-    ] {
+fn every_transport_class_is_transient_exactly_when_its_variant_is() {
+    let source = || std::io::Error::other("stand-in cause");
+    let constructed = [
+        (
+            TransportClass::Timeout(TimeoutKind::Connect),
+            TransportError::timeout(TimeoutKind::Connect, source()),
+        ),
+        (
+            TransportClass::Timeout(TimeoutKind::Total),
+            TransportError::timeout(TimeoutKind::Total, source()),
+        ),
+        (TransportClass::Redirect, TransportError::redirect(source())),
+        (TransportClass::Protocol, TransportError::protocol(source())),
+        (
+            TransportClass::Connection,
+            TransportError::connection(source()),
+        ),
+        (TransportClass::Request, TransportError::request(source())),
+        (
+            TransportClass::Interrupted,
+            TransportError::interrupted(source()),
+        ),
+    ];
+    for (class, transport) in constructed {
         // Exhaustive, so a class added without a row here does not compile.
-        match class {
-            ReqwestClass::Timeout(_)
-            | ReqwestClass::Redirect
-            | ReqwestClass::Protocol
-            | ReqwestClass::Transport
-            | ReqwestClass::Request => {}
+        let expected = |error: &Error<ApiBody>| match class {
+            TransportClass::Timeout(kind) => {
+                matches!(error, Error::Timeout(found) if *found == kind)
+            }
+            TransportClass::Redirect => matches!(error, Error::Redirect(_)),
+            TransportClass::Protocol => matches!(error, Error::Protocol(_)),
+            TransportClass::Connection => matches!(error, Error::Transport(_)),
+            TransportClass::Request => {
+                matches!(error, Error::RequestConstruction(RequestError::Other(_)))
+            }
+            TransportClass::Interrupted => matches!(error, Error::InterruptedBody(_)),
+        };
+        assert_eq!(transport.class, class);
+        let transient = transport.is_transient();
+        assert_eq!(class.is_transient(), transient, "{class:?}");
+        let error = Error::<ApiBody>::from_transport(transport);
+        assert!(expected(&error), "{class:?}: {error:?}");
+        assert_eq!(error.is_transient(), transient, "{class:?}");
+        // Every class but a timeout keeps the cause, reachable as its own type.
+        let mut cause = std::error::Error::source(&error);
+        let mut kept = false;
+        while let Some(current) = cause {
+            kept |= current.is::<std::io::Error>();
+            cause = current.source();
         }
-        let error = Error::<ApiBody>::from_class(class, reqwest_error());
-        assert_eq!(class.is_transient(), error.is_transient(), "{class:?}");
+        assert_eq!(
+            kept,
+            !matches!(class, TransportClass::Timeout(_)),
+            "{class:?}"
+        );
     }
     // The borrowed classification is the one `from_reqwest` applies to the same error.
-    let transport = TransportError::new(reqwest_error());
+    let transport = TransportError::from_reqwest(reqwest_error());
     assert_eq!(
         transport.is_transient(),
         Error::<ApiBody>::from_reqwest(reqwest_error()).is_transient()
     );
+}
+
+/// A body source's failure keeps the class a `TransportError` names, and any other error is an
+/// interruption.
+#[test]
+fn a_body_source_failure_keeps_its_class_or_is_an_interruption() {
+    let classed = TransportError::from_body_source(Box::new(TransportError::protocol("bad")));
+    assert_eq!(classed.class, TransportClass::Protocol);
+    let other = TransportError::from_body_source(Box::new(std::fmt::Error));
+    assert_eq!(other.class, TransportClass::Interrupted);
+    assert!(std::error::Error::source(&other).is_some_and(|c| c.is::<std::fmt::Error>()));
 }
 
 /// A body stream that answers its first poll with `error`.
@@ -468,27 +514,38 @@ impl futures_core::Stream for FailingBody {
     }
 }
 
-/// The error reqwest reports when reading a body fails with an I/O error of `kind`.
-fn failed_body_read(kind: std::io::ErrorKind) -> reqwest::Error {
+/// What reading a body through `ReqwestBackend`'s adapter fails with when its stream fails with
+/// an I/O error of `kind`.
+fn failed_body_read(kind: std::io::ErrorKind) -> TransportError {
     body_read_failing_with(Box::new(std::io::Error::new(kind, "body read failed")))
 }
 
-/// The error reqwest reports when reading a body fails with `error`.
-fn body_read_failing_with(error: BoxError) -> reqwest::Error {
+/// What reading a body through `ReqwestBackend`'s adapter fails with when its stream fails with
+/// `error`.
+fn body_read_failing_with(error: BoxError) -> TransportError {
     let body = reqwest::Body::wrap_stream(FailingBody(Some(error)));
-    crate::tests::poll_ready(crate::tests::response(200, body).bytes())
+    crate::tests::poll_ready(crate::tests::response(200, body).into_body().collect())
         .expect_err("the body fails to read")
 }
 
+/// The reqwest error a failed body read through the adapter carries as its cause.
+fn reqwest_cause(failure: &TransportError) -> &reqwest::Error {
+    std::error::Error::source(failure)
+        .and_then(|cause| cause.downcast_ref::<reqwest::Error>())
+        .expect("reqwest's error is the cause")
+}
+
 /// With no I/O error anywhere in its source chain, a failed body read is an interruption exactly
-/// when a body-kind reqwest error is in that chain. reqwest's streaming `Body` wraps whatever its
-/// stream failed with as a body-kind error, and `bytes()` wraps that as decode-kind, so a stream
-/// failing with a non-I/O error gives a decode-kind error over a body-kind one over that error.
+/// when a body-kind reqwest error is in the chain under reqwest's own wrapper. reqwest's
+/// streaming `Body` wraps whatever its stream failed with as a body-kind error, and reading the
+/// response body wraps that once more, so a stream failing with a non-I/O error gives reqwest's
+/// wrapper over a body-kind error over that error.
 #[test]
 fn a_failed_body_read_with_no_io_error_is_interrupted_by_a_body_kind_cause() {
-    let source = body_read_failing_with(Box::new(std::fmt::Error));
-    assert!(source.is_decode() && !source.is_body() && !source.is_timeout());
-    let mut chain = std::error::Error::source(&source);
+    let failure = body_read_failing_with(Box::new(std::fmt::Error));
+    let source = reqwest_cause(&failure);
+    assert!(!source.is_timeout());
+    let mut chain = std::error::Error::source(source);
     let (mut io, mut body_kind) = (false, false);
     while let Some(cause) = chain {
         io |= cause.is::<std::io::Error>();
@@ -498,15 +555,14 @@ fn a_failed_body_read_with_no_io_error_is_interrupted_by_a_body_kind_cause() {
         chain = cause.source();
     }
     assert!(!io && body_kind, "{source:?}");
-    let error = Error::<ApiBody>::from_body_read(source);
+    let error = Error::<ApiBody>::from_transport(failure);
     assert!(matches!(error, Error::InterruptedBody(_)), "{error:?}");
     assert!(error.is_transient());
 }
 
-/// `from_body_read` reads the I/O error under a failed body read: a connection that gave out is
-/// a transient `InterruptedBody`, and corrupt or malformed bytes (what a decompressor or a
-/// chunked decoder reports) stay the permanent `Protocol` that `from_reqwest` gives every
-/// decode-kind error, which it still does for each of them.
+/// `from_reqwest_body` reads the I/O error under a failed body read: a connection that gave out
+/// is a transient `InterruptedBody`, corrupt or malformed bytes (what a decompressor or a chunked
+/// decoder reports) the permanent `Protocol`, and a timed-out read a `Total` timeout.
 #[test]
 fn a_failed_body_read_is_interrupted_exactly_when_the_connection_gave_out() {
     use std::io::ErrorKind;
@@ -520,12 +576,12 @@ fn a_failed_body_read_is_interrupted_exactly_when_the_connection_gave_out() {
         (ErrorKind::InvalidInput, false),
         (ErrorKind::Other, false),
     ] {
-        let source = failed_body_read(kind);
+        let failure = failed_body_read(kind);
         assert!(
-            source.is_decode() && !source.is_timeout(),
-            "{kind:?}: {source:?}"
+            !reqwest_cause(&failure).is_timeout(),
+            "{kind:?}: {failure:?}"
         );
-        let error = Error::<ApiBody>::from_body_read(source);
+        let error = Error::<ApiBody>::from_transport(failure);
         if interrupted {
             assert!(
                 matches!(error, Error::InterruptedBody(_)),
@@ -535,45 +591,43 @@ fn a_failed_body_read_is_interrupted_exactly_when_the_connection_gave_out() {
             assert!(matches!(error, Error::Protocol(_)), "{kind:?}: {error:?}");
         }
         assert_eq!(error.is_transient(), interrupted, "{kind:?}");
-        let classified = Error::<ApiBody>::from_reqwest(failed_body_read(kind));
-        assert!(matches!(classified, Error::Protocol(_)), "{kind:?}");
     }
+    let timed_out = Error::<ApiBody>::from_transport(failed_body_read(ErrorKind::TimedOut));
+    assert!(
+        matches!(timed_out, Error::Timeout(TimeoutKind::Total)),
+        "{timed_out:?}"
+    );
 }
 
-/// An error that is neither body- nor decode-kind is classified as `from_reqwest` classifies it.
+/// A failed body read with neither an I/O error nor a body-kind error under reqwest's wrapper is
+/// a protocol failure, whatever kind the wrapper itself is.
 #[test]
-fn from_body_read_defers_any_other_kind_to_from_reqwest() {
-    let error = Error::<ApiBody>::from_body_read(reqwest_error());
-    assert!(
-        matches!(error, Error::RequestConstruction(RequestError::Other(_))),
-        "{error:?}"
-    );
+fn a_body_read_error_with_no_evidence_of_interruption_is_a_protocol_failure() {
+    let error =
+        Error::<ApiBody>::from_transport(TransportError::from_reqwest_body(reqwest_error()));
+    assert!(matches!(error, Error::Protocol(_)), "{error:?}");
 }
 
 /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
 /// above is the one permanent class, so a transient source is needed beside it. A connect
 /// failure needs a socket and a reactor, which only the `blocking` feature's test below runs;
-/// reqwest's status-kind error needs neither, and it reaches the same `Transport` class a failed
-/// connection does, by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the
-/// default classifier therefore retries it.
+/// reqwest's status-kind error needs neither, and it reaches the same connection class a failed
+/// connection does, by the fall-through `TransportClass::of` ends in. A retry policy keying on
+/// the default classifier therefore retries it.
 #[test]
 fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() {
     let status_error = || {
-        reqwest::Response::from(
-            http::Response::builder()
-                .status(503)
-                .body(String::new())
-                .expect("valid synthetic response"),
-        )
-        .error_for_status()
-        .expect_err("a 503 is an error status")
+        crate::tests::reqwest_response(503, String::new())
+            .error_for_status()
+            .expect_err("a 503 is an error status")
     };
     let source = status_error();
     assert!(source.is_status() && !source.is_connect(), "{source}");
-    assert_eq!(ReqwestClass::of(&source), ReqwestClass::Transport);
-    let transport = TransportError::new(source);
+    assert_eq!(TransportClass::of(&source), TransportClass::Connection);
+    let transport = TransportError::from_reqwest(source);
     assert!(transport.is_transient());
-    assert!(crate::RetryOutcome::new(&crate::tests::request(), Err(&transport)).is_transient());
+    let request = crate::tests::seam_request();
+    assert!(crate::RetryOutcome::new(&request, Err(&transport)).is_transient());
     let error = Error::<ApiBody>::from_reqwest(status_error());
     assert!(matches!(error, Error::Transport(_)), "{error}");
     assert!(error.is_transient());
@@ -594,15 +648,16 @@ fn a_refused_connection_is_a_transient_transport_error() {
     let runtime = crate::BlockingRuntime::new().expect("current-thread runtime builds");
     let core = crate::tests::core();
     let request = || core.http().get(&url).build().unwrap();
+    let seam_request = || crate::transport::request_from_reqwest(request()).unwrap();
 
     let failure = runtime
         .block_on(crate::HttpBackend::execute(
             core.backend().as_ref(),
-            request(),
+            seam_request(),
         ))
         .expect_err("nothing listens on a released port");
     assert!(failure.is_transient(), "{failure}");
-    assert!(crate::RetryOutcome::new(&request(), Err(&failure)).is_transient());
+    assert!(crate::RetryOutcome::new(&seam_request(), Err(&failure)).is_transient());
 
     let error = runtime
         .block_on(crate::send(&core, request()))
@@ -676,13 +731,13 @@ fn status_is_present_exactly_on_the_three_status_variants() {
 fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants() {
     let narrow: Vec<Error<std::convert::Infallible>> = vec![
         Error::request_message("bad path segment"),
-        Error::Transport(TransportError::new(reqwest_error())),
+        Error::Transport(TransportError::from_reqwest(reqwest_error())),
         Error::Timeout(TimeoutKind::Connect),
         Error::Protocol(super::ProtocolError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::Redirect(super::RedirectError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::UnexpectedStatus {
             status: StatusCode::IM_A_TEAPOT,
@@ -696,7 +751,7 @@ fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants(
             body: Bytes::from_static(b"{}"),
             truncated: true,
         },
-        Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
         },
@@ -850,13 +905,13 @@ fn widen_preserves_every_reachable_variant() {
             scheme: "token",
             source: AuthError::new("x"),
         }),
-        Error::Transport(TransportError::new(reqwest_error())),
+        Error::Transport(TransportError::from_reqwest(reqwest_error())),
         Error::Timeout(TimeoutKind::Connect),
         Error::Protocol(super::ProtocolError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::Redirect(super::RedirectError {
-            source: reqwest_error(),
+            source: Box::new(reqwest_error()),
         }),
         Error::UnexpectedStatus {
             status: StatusCode::IM_A_TEAPOT,
@@ -870,7 +925,7 @@ fn widen_preserves_every_reachable_variant() {
             body: Bytes::from_static(b"{}"),
             truncated: true,
         },
-        Error::InterruptedBody(TransportError::new(reqwest_error())),
+        Error::InterruptedBody(TransportError::interrupted(reqwest_error())),
         Error::PaginationCycle {
             url: reqwest::Url::parse("https://x/items?page=1").unwrap(),
         },

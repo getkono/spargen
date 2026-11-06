@@ -1868,6 +1868,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "http",
+ "http-body",
  "proptest",
  "quick-xml",
  "reqwest",

@@ -7,11 +7,13 @@
 
 use std::convert::Infallible;
 
-use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::{ClientCore, Error, ResponseValue, StatusSpec};
+use crate::{ClientCore, Error, HttpBody, ResponseValue, StatusSpec};
+
+/// A response as the transport seam carries it.
+type Response = http::Response<HttpBody>;
 
 /// Serialize a request body to an XML string. A serialization failure is a request-construction
 /// error (taxonomy #1) — the value has no XML representation — never a panic. The `@name` serde

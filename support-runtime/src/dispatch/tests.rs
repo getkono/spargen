@@ -359,7 +359,7 @@ use super::{
 use crate::{Error, ResponseValue};
 
 /// An in-memory response with a borrowed textual body.
-fn json_response(status: u16, body: &str) -> reqwest::Response {
+fn json_response(status: u16, body: &str) -> crate::tests::Response {
     response(status, body.to_owned())
 }
 
@@ -431,8 +431,8 @@ fn textual_error_codec_keeps_documented_status_semantics() {
 fn every_decode_helper_keeps_the_response_status_and_headers() {
     use reqwest::StatusCode;
 
-    fn response(status: u16, retry_after: &'static str, body: &str) -> reqwest::Response {
-        reqwest::Response::from(
+    fn response(status: u16, retry_after: &'static str, body: &str) -> crate::tests::Response {
+        crate::tests::from_http(
             http::Response::builder()
                 .status(status)
                 .header("retry-after", retry_after)
@@ -558,7 +558,7 @@ enum SuccessEnum {
 /// `a_multi_success_operation_caps_the_body_it_keeps_in_an_error`).
 fn dispatch_success_with(
     core: &ClientCore,
-    response: reqwest::Response,
+    response: crate::tests::Response,
 ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
     let status = response.status();
     if StatusSpec::Exact(200).matches(status) {
@@ -579,7 +579,7 @@ fn dispatch_success_with(
 }
 
 fn dispatch_success(
-    response: reqwest::Response,
+    response: crate::tests::Response,
 ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
     dispatch_success_with(&core(), response)
 }
@@ -655,7 +655,7 @@ enum ApiError {
 /// `dispatch_success`, it pins the runtime primitives (`classify_with`, `unexpected_status`,
 /// `StatusSpec::matches`), not the emitter; the emitted classification is driven over HTTP in
 /// `spargen/tests/e2e.rs` (`error_dispatch_takes_the_exact_arm_before_an_overlapping_range`).
-fn dispatch_error(response: reqwest::Response) -> Error<ApiError> {
+fn dispatch_error(response: crate::tests::Response) -> Error<ApiError> {
     let core = core();
     let status = response.status();
     if StatusSpec::Exact(409).matches(status) {
@@ -864,13 +864,13 @@ fn a_zero_cap_retains_nothing() {
 }
 
 /// A body that arrives in part and then fails to read: one chunk, then a dropped connection.
-fn interrupted(status: u16) -> reqwest::Response {
+fn interrupted(status: u16) -> crate::tests::Response {
     Chunks::new([Chunk::data("{\"partial\":"), Chunk::Fail]).into_response(status)
 }
 
 /// Assert `error` is an interrupted body carrying no status, rather than a response class built
-/// from the bytes that did arrive. reqwest reports a body that fails while `bytes` or `chunk`
-/// reads it as a decode-kind error; the connection dropping under it is the transient
+/// from the bytes that did arrive. reqwest reports a body that fails while it is read as an
+/// error of its own wrapping the cause; the connection dropping under it is the transient
 /// `InterruptedBody` the stream reports for the same failure (#1141), not `Protocol`.
 fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
     let Error::InterruptedBody(transport) = error else {
@@ -879,7 +879,7 @@ fn assert_failed_read<E: std::fmt::Debug>(error: &Error<E>, reader: &str) {
     let source = std::error::Error::source(transport)
         .and_then(|source| source.downcast_ref::<reqwest::Error>())
         .unwrap_or_else(|| panic!("{reader}: an interrupted body wraps its reqwest error"));
-    assert!(source.is_decode(), "{reader}: {source:?}");
+    assert!(source.is_body() && !source.is_timeout(), "{reader}: {source:?}");
     assert!(error.is_transient(), "{reader}");
     assert_eq!(error.status(), None, "{reader}");
 }
