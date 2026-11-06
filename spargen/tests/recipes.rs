@@ -184,7 +184,7 @@ fn utoipa_document_generates_cleanly() {
     );
     assert_eq!(
         field(&text, "PetWithMeta", "created_at").ty,
-        "PetWithMetaMember1createdAt"
+        "PetWithMetaMember1CreatedAt"
     );
     // The `discriminator`ed union: one variant per mapped member, dispatched on `event_type` by
     // the mapping's values.
