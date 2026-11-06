@@ -92,6 +92,9 @@ pub(crate) enum TypeKind {
 
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to
 /// `serde_json::Value`: it is emitted with content-inspecting custom `Deserialize`/`Serialize`.
+/// The one opt-in exception is an open union ([`UnionStrategy::Discriminated`]'s `open`), whose
+/// extra explicit `Unknown { tag, value }` variant holds a payload no listed variant claims as a
+/// `serde_json::Value`; every listed variant stays typed.
 /// Dispatch uses discriminator tags / unique JSON categories, statically disjoint features, or
 /// typed trial matching with the source applicator's exact semantics.
 #[derive(Debug, Clone)]
